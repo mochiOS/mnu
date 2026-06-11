@@ -242,7 +242,13 @@ fn exec_internal(
     if let Some(alias) = crate::task::process::driver_alias_for_path(path) {
         process_name = alias;
     }
-    let loaded = crate::kmod::fs::read_all(path).or_else(|| crate::init::fs::read(path));
+    let loaded = if process_name == "core.service" {
+        crate::init::fs::read_initfs(path)
+    } else {
+        crate::init::fs::read_rootfs(path)
+            .or_else(|| crate::kmod::fs::read_all(path))
+            .or_else(|| crate::init::fs::read(path))
+    };
     if let Some(data) = loaded {
         exec_with_data(&data, &process_name, path, args, None, initial_caps)
     } else {

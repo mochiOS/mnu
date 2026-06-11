@@ -1,10 +1,6 @@
 #![no_std]
 
-extern crate alloc;
-
-use alloc::string::String;
-
-/// kernel 側 policy に渡す launch contract の userland 側テスト用表現
+/// kernel 側 policy に渡す launch contract の userland 側表現
 ///
 /// ここでは manifest のパースは扱わず、固定のデータ形だけを検証する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +13,7 @@ pub enum ManifestRole {
     Unknown,
 }
 
-/// install source の userland 側テスト用表現
+/// install source の userland 側表現
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallSource {
     Initfs,
@@ -33,8 +29,8 @@ pub enum InstallSource {
 /// kernel の `LaunchSpec` に対応する最小 contract
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchContract {
-    pub package_id: String,
-    pub publisher_id: String,
+    pub package_id: &'static str,
+    pub publisher_id: &'static str,
     pub signature_trusted: bool,
     pub manifest_role: ManifestRole,
     pub file_digest: [u8; 32],
@@ -43,16 +39,16 @@ pub struct LaunchContract {
 
 impl LaunchContract {
     pub fn new(
-        package_id: &str,
-        publisher_id: &str,
+        package_id: &'static str,
+        publisher_id: &'static str,
         signature_trusted: bool,
         manifest_role: ManifestRole,
         file_digest: [u8; 32],
         install_source: InstallSource,
     ) -> Self {
         Self {
-            package_id: String::from(package_id),
-            publisher_id: String::from(publisher_id),
+            package_id,
+            publisher_id,
             signature_trusted,
             manifest_role,
             file_digest,
@@ -66,45 +62,40 @@ impl LaunchContract {
     }
 }
 
-#[cfg(test)]
-extern crate std;
+pub fn test_launch_contract_keeps_all_required_fields() -> bool {
+    let digest = [0xAB; 32];
+    let contract = LaunchContract::new(
+        "core.service",
+        "mnu",
+        true,
+        ManifestRole::CoreService,
+        digest,
+        InstallSource::Initfs,
+    );
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    contract.package_id == "core.service"
+        && contract.publisher_id == "mnu"
+        && contract.signature_trusted
+        && contract.manifest_role == ManifestRole::CoreService
+        && contract.file_digest == digest
+        && contract.install_source == InstallSource::Initfs
+        && contract.is_well_formed()
+}
 
-    #[test]
-    fn launch_contract_keeps_all_required_fields() {
-        let digest = [0xAB; 32];
-        let contract = LaunchContract::new(
-            "core.service",
-            "mnu",
-            true,
-            ManifestRole::CoreService,
-            digest,
-            InstallSource::Initfs,
-        );
+pub fn test_launch_contract_rejects_empty_identity_fields() -> bool {
+    let contract = LaunchContract::new(
+        "",
+        "",
+        false,
+        ManifestRole::Unknown,
+        [0; 32],
+        InstallSource::Unknown,
+    );
 
-        assert_eq!(contract.package_id, "core.service");
-        assert_eq!(contract.publisher_id, "mnu");
-        assert!(contract.signature_trusted);
-        assert_eq!(contract.manifest_role, ManifestRole::CoreService);
-        assert_eq!(contract.file_digest, digest);
-        assert_eq!(contract.install_source, InstallSource::Initfs);
-        assert!(contract.is_well_formed());
-    }
+    !contract.is_well_formed()
+}
 
-    #[test]
-    fn launch_contract_rejects_empty_identity_fields() {
-        let contract = LaunchContract::new(
-            "",
-            "",
-            false,
-            ManifestRole::Unknown,
-            [0; 32],
-            InstallSource::Unknown,
-        );
-
-        assert!(!contract.is_well_formed());
-    }
+pub fn run_self_test() -> bool {
+    test_launch_contract_keeps_all_required_fields()
+        && test_launch_contract_rejects_empty_identity_fields()
 }

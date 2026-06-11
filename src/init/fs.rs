@@ -152,6 +152,20 @@ pub fn read(name: &str) -> Option<Vec<u8>> {
     read_path_in(ext2_image(), name)
 }
 
+/// initfs からだけファイルを取得する
+pub fn read_initfs(name: &str) -> Option<Vec<u8>> {
+    read_path_in(ext2_image(), name)
+}
+
+/// rootfs からだけファイルを取得する
+pub fn read_rootfs(name: &str) -> Option<Vec<u8>> {
+    if rootfs_image().is_empty() {
+        None
+    } else {
+        read_path_in(rootfs_image(), name)
+    }
+}
+
 /// ファイル一覧を取得（root直下）
 ///
 /// ## Returns
