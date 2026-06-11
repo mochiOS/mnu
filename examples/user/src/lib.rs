@@ -1,5 +1,7 @@
 #![no_std]
 
+use core::arch::asm;
+
 /// kernel 側 policy に渡す launch contract の userland 側表現
 ///
 /// ここでは manifest のパースは扱わず、固定のデータ形だけを検証する。
@@ -62,6 +64,123 @@ impl LaunchContract {
     }
 }
 
+const SYS_WRITE: u64 = mnu_abi::SyscallNumber::Write as u64;
+const SYS_EXIT: u64 = mnu_abi::SyscallNumber::Exit as u64;
+const SYS_GETPID: u64 = mnu_abi::SyscallNumber::GetPid as u64;
+const SYS_GETTID: u64 = mnu_abi::SyscallNumber::GetTid as u64;
+const SYS_YIELD: u64 = mnu_abi::SyscallNumber::Yield as u64;
+const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
+const SYS_GET_TICKS: u64 = mnu_abi::SyscallNumber::GetTicks as u64;
+const SYS_LIST_PROCESSES: u64 = mnu_abi::SyscallNumber::ListProcesses as u64;
+const STDOUT_FD: u64 = 1;
+
+#[inline(always)]
+unsafe fn syscall0(n: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") n => ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+#[inline(always)]
+unsafe fn syscall1(n: u64, a0: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") n => ret,
+            in("rdi") a0,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+#[inline(always)]
+unsafe fn syscall2(n: u64, a0: u64, a1: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") n => ret,
+            in("rdi") a0,
+            in("rsi") a1,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+#[inline(always)]
+unsafe fn syscall3(n: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") n => ret,
+            in("rdi") a0,
+            in("rsi") a1,
+            in("rdx") a2,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+pub fn write_str(s: &str) {
+    unsafe {
+        let _ = syscall3(SYS_WRITE, STDOUT_FD, s.as_ptr() as u64, s.len() as u64);
+    }
+}
+
+pub fn exit(code: u64) -> ! {
+    unsafe {
+        let _ = syscall1(SYS_EXIT, code);
+    }
+    loop {
+        unsafe {
+            asm!("pause", options(nomem, nostack, preserves_flags));
+        }
+    }
+}
+
+pub fn getpid() -> u64 {
+    unsafe { syscall0(SYS_GETPID) }
+}
+
+pub fn gettid() -> u64 {
+    unsafe { syscall0(SYS_GETTID) }
+}
+
+pub fn yield_now() -> u64 {
+    unsafe { syscall0(SYS_YIELD) }
+}
+
+pub fn sleep(milliseconds: u64) -> u64 {
+    unsafe { syscall1(SYS_SLEEP, milliseconds) }
+}
+
+pub fn get_ticks() -> u64 {
+    unsafe { syscall0(SYS_GET_TICKS) }
+}
+
+pub fn list_processes(buf: &mut [u8]) -> u64 {
+    unsafe { syscall2(SYS_LIST_PROCESSES, buf.as_mut_ptr() as u64, buf.len() as u64) }
+}
+
 pub fn test_launch_contract_keeps_all_required_fields() -> bool {
     let digest = [0xAB; 32];
     let contract = LaunchContract::new(
@@ -95,7 +214,116 @@ pub fn test_launch_contract_rejects_empty_identity_fields() -> bool {
     !contract.is_well_formed()
 }
 
+fn bytes_eq(lhs: &[u8], rhs: &[u8]) -> bool {
+    if lhs.len() != rhs.len() {
+        return false;
+    }
+    let mut i = 0usize;
+    while i < lhs.len() {
+        let l = unsafe { core::ptr::read_volatile(lhs.as_ptr().add(i)) };
+        let r = unsafe { core::ptr::read_volatile(rhs.as_ptr().add(i)) };
+        if l != r {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+pub fn test_syscall_getpid_and_gettid_are_nonzero() -> bool {
+    let pid = getpid();
+    let tid = gettid();
+    pid != 0 && tid != 0
+}
+
+pub fn test_syscall_yield_and_sleep_zero_return_success() -> bool {
+    let before = get_ticks();
+    let yield_ret = yield_now();
+    let sleep_ret = sleep(0);
+    let after = get_ticks();
+
+    yield_ret == 0 && sleep_ret == 0 && after >= before
+}
+
+fn process_record_matches_name(record: &[u8], expected_name: &[u8]) -> bool {
+    if record.len() != 88 {
+        return false;
+    }
+
+    let pid = u64::from_ne_bytes([
+        record[0], record[1], record[2], record[3], record[4], record[5], record[6], record[7],
+    ]);
+    let tid = u64::from_ne_bytes([
+        record[8], record[9], record[10], record[11], record[12], record[13], record[14],
+        record[15],
+    ]);
+    let name = &record[32..88];
+
+    if pid == 0 || tid == 0 || expected_name.len() > name.len() {
+        return false;
+    }
+
+    if !bytes_eq(&name[..expected_name.len()], expected_name) {
+        return false;
+    }
+
+    name[expected_name.len()..]
+        .iter()
+        .copied()
+        .all(|b| b == 0)
+}
+
+pub fn test_syscall_list_processes_includes_core_service() -> bool {
+    let mut buf = [0u8; 2048];
+    let count = list_processes(&mut buf);
+    if count == 0 {
+        return false;
+    }
+
+    let record_size = 88usize;
+    let max_records = core::cmp::min(count as usize, buf.len() / record_size);
+    for idx in 0..max_records {
+        let start = idx * record_size;
+        let end = start + record_size;
+        if process_record_matches_name(&buf[start..end], b"core.service") {
+            return true;
+        }
+    }
+
+    false
+}
+
+pub fn test_syscall_list_processes_contains_at_least_one_valid_record() -> bool {
+    let mut buf = [0u8; 2048];
+    let count = list_processes(&mut buf);
+    if count == 0 {
+        return false;
+    }
+
+    let record_size = 88usize;
+    let max_records = core::cmp::min(count as usize, buf.len() / record_size);
+    if max_records == 0 {
+        return false;
+    }
+
+    let first = &buf[..record_size];
+    let pid = u64::from_ne_bytes([
+        first[0], first[1], first[2], first[3], first[4], first[5], first[6], first[7],
+    ]);
+    let tid = u64::from_ne_bytes([
+        first[8], first[9], first[10], first[11], first[12], first[13], first[14], first[15],
+    ]);
+    let state = u64::from_ne_bytes([
+        first[16], first[17], first[18], first[19], first[20], first[21], first[22], first[23],
+    ]);
+    pid != 0 && tid != 0 && state <= 4
+}
+
 pub fn run_self_test() -> bool {
     test_launch_contract_keeps_all_required_fields()
         && test_launch_contract_rejects_empty_identity_fields()
+        && test_syscall_getpid_and_gettid_are_nonzero()
+        && test_syscall_yield_and_sleep_zero_return_success()
+        && test_syscall_list_processes_contains_at_least_one_valid_record()
+        && test_syscall_list_processes_includes_core_service()
 }

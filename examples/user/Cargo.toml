@@ -7,6 +7,7 @@ edition = "2024"
 path = "src/lib.rs"
 
 [dependencies]
+mnu-abi = { path = "../../crates/abi" }
 
 [[bin]]
 name = "user"
