@@ -1,6 +1,11 @@
+---
+title: タイマー
+permalink: /docs/interrupts/timer/
+---
+
 # タイマー
 
-[`src/interrupt/timer.rs`](../../src/interrupt/timer.rs) は、PIT を使った時間管理を担います。
+`src/interrupt/timer.rs` は、PIT を使った時間管理を担います。
 
 ## 何をしているか
 
@@ -16,6 +21,6 @@
 
 ## 関連ファイル
 
-- [`src/interrupt/timer.rs`](../../src/interrupt/timer.rs)
-- [`src/syscall/time.rs`](../../src/syscall/time.rs)
-- [`src/task/scheduler.rs`](../../src/task/scheduler.rs)
+- `src/interrupt/timer.rs`
+- `src/syscall/time.rs`
+- `src/task/scheduler.rs`

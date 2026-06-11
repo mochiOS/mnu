@@ -1,3 +1,8 @@
+---
+title: thread
+permalink: /docs/tasks/thread/
+---
+
 # thread
 
 thread は、CPU で実際に走る単位です。
@@ -19,5 +24,5 @@ process が「箱」なら、thread は「中で動く一本の流れ」です�
 
 ## 関連ファイル
 
-- [`src/task/thread.rs`](../../src/task/thread.rs)
-- [`src/task/context.rs`](../../src/task/context.rs)
+- `src/task/thread.rs`
+- `src/task/context.rs`

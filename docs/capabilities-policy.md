@@ -1,3 +1,8 @@
+---
+title: capability とポリシー
+permalink: /docs/capabilities-policy/
+---
+
 # capability とポリシー
 
 このカーネルでは、権限を capability で細かく分けます。
@@ -23,7 +28,7 @@ capability は「何ができるか」を表します。
 
 ## ポリシー
 
-[`src/policy/mod.rs`](../src/policy/mod.rs) は、どの process をどの privilege で起動するかを決めます。
+`src/policy/mod.rs` は、どの process をどの privilege で起動するかを決めます。
 
 ここでは、プロセス名、起動パス、親 process、service manager などを見ます。
 
@@ -33,6 +38,6 @@ capability は「何ができるか」を表します。
 
 ## 関連ファイル
 
-- [`src/capability/mod.rs`](../src/capability/mod.rs)
-- [`src/policy/mod.rs`](../src/policy/mod.rs)
-- [`src/syscall/block.rs`](../src/syscall/block.rs)
+- `src/capability/mod.rs`
+- `src/policy/mod.rs`
+- `src/syscall/block.rs`

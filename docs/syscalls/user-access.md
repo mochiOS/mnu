@@ -1,3 +1,8 @@
+---
+title: 安全なユーザーアクセス
+permalink: /docs/syscalls/user-access/
+---
+
 # 安全なユーザーアクセス
 
 ユーザー空間のポインタは、そのままでは信用できません。
@@ -16,5 +21,5 @@
 
 ## 関連ファイル
 
-- [`src/syscall/mod.rs`](../../src/syscall/mod.rs)
-- [`src/mem/paging.rs`](../../src/mem/paging.rs)
+- `src/syscall/mod.rs`
+- `src/mem/paging.rs`

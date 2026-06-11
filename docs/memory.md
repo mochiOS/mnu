@@ -1,3 +1,8 @@
+---
+title: メモリ
+permalink: /docs/memory/
+---
+
 # メモリ
 
 このカーネルのメモリ管理は、3 層で見ると理解しやすいです。
@@ -15,16 +20,16 @@
 
 ## 見るべきページ
 
-- [ページング](./memory/paging.md)
-- [ヒープ](./memory/heap.md)
-- [GDT と TSS](./memory/gdt-tss.md)
+- [ページング](/docs/memory/paging/)
+- [ヒープ](/docs/memory/heap/)
+- [GDT と TSS](/docs/memory/gdt-tss/)
 
 ## 関連ファイル
 
-- [`src/mem/mod.rs`](../src/mem/mod.rs)
-- [`src/mem/frame.rs`](../src/mem/frame.rs)
-- [`src/mem/paging.rs`](../src/mem/paging.rs)
-- [`src/mem/allocator.rs`](../src/mem/allocator.rs)
-- [`src/mem/gdt.rs`](../src/mem/gdt.rs)
-- [`src/mem/tss.rs`](../src/mem/tss.rs)
-- [`src/mem/user.rs`](../src/mem/user.rs)
+- `src/mem/mod.rs`
+- `src/mem/frame.rs`
+- `src/mem/paging.rs`
+- `src/mem/allocator.rs`
+- `src/mem/gdt.rs`
+- `src/mem/tss.rs`
+- `src/mem/user.rs`

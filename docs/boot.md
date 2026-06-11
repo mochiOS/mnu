@@ -1,3 +1,8 @@
+---
+title: 起動
+permalink: /docs/boot/
+---
+
 # 起動
 
 起動の役割は、カーネルが動くための前提をそろえることです。
@@ -5,9 +10,9 @@
 ## 流れ
 
 1. ブートローダーがカーネルを呼ぶ
-2. [`src/entry.rs`](../src/entry.rs) が `BootInfo` を整える
-3. [`src/kernel.rs`](../src/kernel.rs) がカーネル本体へ入る
-4. [`src/init/mod.rs`](../src/init/mod.rs) が各初期化を順番に実行する
+2. `src/entry.rs` が `BootInfo` を整える
+3. `src/kernel.rs` がカーネル本体へ入る
+4. `src/init/mod.rs` が各初期化を順番に実行する
 5. `core.service` を起動する
 6. カーネルはスケジューラへ引き継ぐ
 
@@ -39,6 +44,6 @@
 
 ## 関連ファイル
 
-- [`src/init/mod.rs`](../src/init/mod.rs)
-- [`src/init/fs.rs`](../src/init/fs.rs)
-- [`src/result.rs`](../src/result.rs)
+- `src/init/mod.rs`
+- `src/init/fs.rs`
+- `src/result.rs`

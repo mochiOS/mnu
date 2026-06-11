@@ -1,3 +1,8 @@
+---
+title: IDT
+permalink: /docs/interrupts/idt/
+---
+
 # IDT
 
 IDT は、割り込み番号と処理関数を対応づける表です。
@@ -22,5 +27,5 @@ IDT は、割り込み番号と処理関数を対応づける表です。
 
 ## 関連ファイル
 
-- [`src/interrupt/idt.rs`](../../src/interrupt/idt.rs)
-- [`src/mem/gdt.rs`](../../src/mem/gdt.rs)
+- `src/interrupt/idt.rs`
+- `src/mem/gdt.rs`

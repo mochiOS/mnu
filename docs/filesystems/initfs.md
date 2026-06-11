@@ -1,3 +1,8 @@
+---
+title: initfs と rootfs
+permalink: /docs/filesystems/initfs/
+---
+
 # initfs と rootfs
 
 initfs は、起動時にメモリへ置かれた read-only filesystem です。
@@ -16,4 +21,4 @@ rootfs は、より永続的な土台として使われます。
 
 ## 関連ファイル
 
-- [`src/init/fs.rs`](../../src/init/fs.rs)
+- `src/init/fs.rs`

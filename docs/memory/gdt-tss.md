@@ -1,3 +1,8 @@
+---
+title: GDT と TSS
+permalink: /docs/memory/gdt-tss/
+---
+
 # GDT と TSS
 
 GDT と TSS は、x86_64 カーネルの土台です。
@@ -29,5 +34,5 @@ TSS は、特に次で重要です。
 
 ## 関連ファイル
 
-- [`src/mem/gdt.rs`](../../src/mem/gdt.rs)
-- [`src/mem/tss.rs`](../../src/mem/tss.rs)
+- `src/mem/gdt.rs`
+- `src/mem/tss.rs`

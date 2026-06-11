@@ -1,12 +1,17 @@
+---
+title: syscall 入口
+permalink: /docs/interrupts/syscall/
+---
+
 # syscall 入口
 
 syscall は、ユーザー空間からカーネルへ入る速い入口です。
 
 ## 構成
 
-- [`src/interrupt/syscall.rs`](../../src/interrupt/syscall.rs) が MSR を設定する
-- [`src/syscall/syscall_entry.rs`](../../src/syscall/syscall_entry.rs) が実際の入口アセンブリを持つ
-- [`src/syscall/mod.rs`](../../src/syscall/mod.rs) が振り分けを行う
+- `src/interrupt/syscall.rs` が MSR を設定する
+- `src/syscall/syscall_entry.rs` が実際の入口アセンブリを持つ
+- `src/syscall/mod.rs` が振り分けを行う
 
 ## 入口でやること
 

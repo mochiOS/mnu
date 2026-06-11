@@ -1,10 +1,15 @@
+---
+title: ヒープ
+permalink: /docs/memory/heap/
+---
+
 # ヒープ
 
 カーネルヒープは、通常の動的確保に使われます。
 
 ## 実装の考え方
 
-[`src/mem/allocator.rs`](../../src/mem/allocator.rs) では、`LockedHeap` をベースにしつつ、解放済みブロックを一時退避させています。
+`src/mem/allocator.rs` では、`LockedHeap` をベースにしつつ、解放済みブロックを一時退避させています。
 
 これは、単なる確保器ではなく、破損の兆候を拾いやすくするための仕組みです。
 
@@ -22,5 +27,5 @@
 
 ## 関連ファイル
 
-- [`src/mem/allocator.rs`](../../src/mem/allocator.rs)
-- [`src/mem/mod.rs`](../../src/mem/mod.rs)
+- `src/mem/allocator.rs`
+- `src/mem/mod.rs`

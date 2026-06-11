@@ -1,3 +1,8 @@
+---
+title: time と signal
+permalink: /docs/syscalls/time-signal/
+---
+
 # time と signal
 
 ## time
@@ -26,5 +31,5 @@ signal は「後で処理してほしい通知」、sleep は「指定時刻ま�
 
 ## 関連ファイル
 
-- [`src/syscall/time.rs`](../../src/syscall/time.rs)
-- [`src/syscall/signal.rs`](../../src/syscall/signal.rs)
+- `src/syscall/time.rs`
+- `src/syscall/signal.rs`

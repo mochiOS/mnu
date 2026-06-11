@@ -1,3 +1,8 @@
+---
+title: fs
+permalink: /docs/syscalls/fs/
+---
+
 # fs
 
 fs 系 syscall は、ファイルを開く、読む、書く、閉じる、一覧する、といった基本操作を担当します。
@@ -18,6 +23,6 @@ fs 系 syscall は、ファイルを開く、読む、書く、閉じる、一�
 
 ## 関連ファイル
 
-- [`src/syscall/fs.rs`](../../src/syscall/fs.rs)
-- [`src/init/fs.rs`](../../src/init/fs.rs)
-- [`src/task/fd_table.rs`](../../src/task/fd_table.rs)
+- `src/syscall/fs.rs`
+- `src/init/fs.rs`
+- `src/task/fd_table.rs`

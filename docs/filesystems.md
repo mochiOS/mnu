@@ -1,3 +1,8 @@
+---
+title: ファイルシステム
+permalink: /docs/filesystems/
+---
+
 # ファイルシステム
 
 このカーネルは、複数の層でファイルを扱います。
@@ -9,11 +14,11 @@
 
 ## まず読むページ
 
-- [initfs と rootfs](./filesystems/initfs.md)
-- [kmod](./filesystems/kmod.md)
+- [initfs と rootfs](/docs/filesystems/initfs/)
+- [kmod](/docs/filesystems/kmod/)
 
 ## 関連ファイル
 
-- [`src/init/fs.rs`](../src/init/fs.rs)
-- [`src/syscall/fs.rs`](../src/syscall/fs.rs)
-- [`src/kmod/mod.rs`](../src/kmod/mod.rs)
+- `src/init/fs.rs`
+- `src/syscall/fs.rs`
+- `src/kmod/mod.rs`

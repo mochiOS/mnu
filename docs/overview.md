@@ -1,3 +1,8 @@
+---
+title: 全体像
+permalink: /docs/overview/
+---
+
 # 全体像
 
 `mnu` は、x86_64 向けの `no_std` カーネルです。
@@ -34,6 +39,6 @@
 
 ## 最初に読むとよいページ
 
-- [起動](./boot.md)
-- [メモリ](./memory.md)
-- [タスク](./tasks.md)
+- [起動](/docs/boot/)
+- [メモリ](/docs/memory/)
+- [タスク](/docs/tasks/)

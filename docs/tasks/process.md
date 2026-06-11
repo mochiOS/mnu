@@ -1,3 +1,8 @@
+---
+title: process
+permalink: /docs/tasks/process/
+---
+
 # process
 
 process は、メモリ空間と資源をまとめる単位です。
@@ -24,6 +29,6 @@ process は「何を実行しているか」だけでなく、「どの権限で
 
 ## 関連ファイル
 
-- [`src/task/process.rs`](../../src/task/process.rs)
-- [`src/task/fd_table.rs`](../../src/task/fd_table.rs)
-- [`src/task/signal.rs`](../../src/task/signal.rs)
+- `src/task/process.rs`
+- `src/task/fd_table.rs`
+- `src/task/signal.rs`

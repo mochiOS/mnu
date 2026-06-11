@@ -1,3 +1,8 @@
+---
+title: scheduler
+permalink: /docs/tasks/scheduler/
+---
+
 # scheduler
 
 scheduler は、次にどの thread を動かすかを決めます。
@@ -20,5 +25,5 @@ context switch を触るときは、`TSS.RSP0` と syscall 用の kernel RSP も
 
 ## 関連ファイル
 
-- [`src/task/scheduler.rs`](../../src/task/scheduler.rs)
-- [`src/task/context.rs`](../../src/task/context.rs)
+- `src/task/scheduler.rs`
+- `src/task/context.rs`

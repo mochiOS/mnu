@@ -1,3 +1,8 @@
+---
+title: kmod
+permalink: /docs/filesystems/kmod/
+---
+
 # kmod
 
 `kmod` は、カーネルモジュール `cext` を読み込む仕組みです。
@@ -17,5 +22,5 @@
 
 ## 関連ファイル
 
-- [`src/kmod/mod.rs`](../../src/kmod/mod.rs)
-- [`src/kmod/registry.rs`](../../src/kmod/registry.rs)
+- `src/kmod/mod.rs`
+- `src/kmod/registry.rs`

@@ -1,3 +1,8 @@
+---
+title: タスク
+permalink: /docs/tasks/
+---
+
 # タスク
 
 このカーネルでは、実行単位を `process` と `thread` に分けています。
@@ -7,15 +12,15 @@
 
 ## まず読むページ
 
-- [process](./tasks/process.md)
-- [thread](./tasks/thread.md)
-- [scheduler](./tasks/scheduler.md)
+- [process](/docs/tasks/process/)
+- [thread](/docs/tasks/thread/)
+- [scheduler](/docs/tasks/scheduler/)
 
 ## 関連ファイル
 
-- [`src/task/mod.rs`](../src/task/mod.rs)
-- [`src/task/process.rs`](../src/task/process.rs)
-- [`src/task/thread.rs`](../src/task/thread.rs)
-- [`src/task/context.rs`](../src/task/context.rs)
-- [`src/task/scheduler.rs`](../src/task/scheduler.rs)
-- [`src/task/usermode.rs`](../src/task/usermode.rs)
+- `src/task/mod.rs`
+- `src/task/process.rs`
+- `src/task/thread.rs`
+- `src/task/context.rs`
+- `src/task/scheduler.rs`
+- `src/task/usermode.rs`

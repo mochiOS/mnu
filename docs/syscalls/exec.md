@@ -1,3 +1,8 @@
+---
+title: exec
+permalink: /docs/syscalls/exec/
+---
+
 # exec
 
 `exec` は、新しいプログラムを起動するための中核機能です。
@@ -19,6 +24,6 @@
 
 ## 関連ファイル
 
-- [`src/syscall/exec.rs`](../../src/syscall/exec.rs)
-- [`src/policy/mod.rs`](../../src/policy/mod.rs)
-- [`src/task/usermode.rs`](../../src/task/usermode.rs)
+- `src/syscall/exec.rs`
+- `src/policy/mod.rs`
+- `src/task/usermode.rs`
