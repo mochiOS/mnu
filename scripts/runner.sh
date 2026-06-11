@@ -3,13 +3,15 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="${ROOT_DIR}/target/uefi"
-ESP_DIR="${TARGET_DIR}/esp"
-ESP_IMG="${TARGET_DIR}/esp.img"
-INITFS_STAGE="${TARGET_DIR}/initfs-root"
-ROOTFS_STAGE="${TARGET_DIR}/rootfs-root"
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
-OVMF_VARS="${OVMF_VARS:-${TARGET_DIR}/OVMF_VARS_4M.fd}"
+RUN_ID="$(date +%s)-$$"
+RUN_DIR="${TARGET_DIR}/run-${RUN_ID}"
+ESP_DIR="${RUN_DIR}/esp"
+ESP_IMG="${RUN_DIR}/esp.img"
+INITFS_STAGE="${RUN_DIR}/initfs-root"
+ROOTFS_STAGE="${RUN_DIR}/rootfs-root"
+OVMF_VARS="${OVMF_VARS:-${RUN_DIR}/OVMF_VARS_4M.fd}"
 
 mkdir -p "${TARGET_DIR}" "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}" "${ROOTFS_STAGE}/config"
 

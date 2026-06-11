@@ -1,5 +1,6 @@
 //! プロセス管理関連のシステムコール
 
+use alloc::vec::Vec;
 use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
@@ -167,17 +168,13 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         return 0;
     }
 
-    let mut written = 0usize;
-    let mut out_buf = [0u8; RECORD_SIZE];
-
+    let mut records: Vec<[u8; RECORD_SIZE]> = Vec::new();
     crate::task::for_each_process(|proc| {
-        if written >= max_entries {
+        if records.len() >= max_entries {
             return;
         }
-        // clear buffer
-        for b in out_buf.iter_mut() {
-            *b = 0;
-        }
+
+        let mut out_buf = [0u8; RECORD_SIZE];
         // tid and pid: use process id for both (no separate thread id here)
         let pid_u = proc.id().as_u64();
         out_buf[0..8].copy_from_slice(&pid_u.to_ne_bytes());
@@ -196,16 +193,17 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         let name_bytes = name.as_bytes();
         let copy_len = core::cmp::min(64, name_bytes.len());
         out_buf[32..32 + copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        records.push(out_buf);
+    });
 
-        // copy to user
+    let mut written = 0usize;
+    while written < records.len() {
         let dest_ptr = buf_ptr + (written * RECORD_SIZE) as u64;
-        if let Err(_) = super::copy_to_user(dest_ptr, &out_buf) {
-            // stop on error
-            written = written; // no-op
-            return;
+        if let Err(_) = super::copy_to_user(dest_ptr, &records[written]) {
+            break;
         }
         written += 1;
-    });
+    }
 
     written as u64
 }
