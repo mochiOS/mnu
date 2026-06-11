@@ -84,7 +84,7 @@ fn kernel_main() -> ! {
     if manager_pid != 0
         && task::with_process(task::ProcessId::from_u64(manager_pid), |_| ()).is_some()
     {
-        crate::syscall::exec::register_service_manager_pid(manager_pid);
+        crate::policy::register_service_manager_pid(manager_pid);
     } else {
         crate::warn!(
             "Failed to register core.service as service manager (ret={:#x})",

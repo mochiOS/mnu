@@ -49,6 +49,9 @@ pub mod mem;
 /// ELF周り
 pub mod elf;
 
+/// 起動ポリシー、manifest、署名検証の境界
+pub mod policy;
+
 /// パニックハンドラ
 pub mod panic;
 

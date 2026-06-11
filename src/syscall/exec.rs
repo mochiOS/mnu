@@ -1,4 +1,9 @@
 use crate::elf::loader as elf_loader;
+use crate::policy::{
+    caller_can_grant_capabilities_on_exec, caller_can_launch_service, claim_service_manager_pid,
+    release_service_manager_pid, resolve_exec_foreground, resolve_exec_priority,
+    resolve_exec_privilege,
+};
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
@@ -6,9 +11,6 @@ use alloc::vec::Vec;
 use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-/// `.service` 実行を許可するサービスマネージャープロセスID
-/// 0 は未登録。
-static SERVICE_MANAGER_PID: AtomicU64 = AtomicU64::new(0);
 const EM_X86_64: u16 = 0x3E;
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -37,11 +39,6 @@ impl Drop for UserPageTableGuard {
             let _ = crate::mem::paging::destroy_user_page_table(table_phys);
         }
     }
-}
-
-/// サービスマネージャーPIDを登録する（IDベース認可）
-pub fn register_service_manager_pid(pid: u64) {
-    SERVICE_MANAGER_PID.store(pid, Ordering::SeqCst);
 }
 
 #[inline]
@@ -83,93 +80,6 @@ fn aslr_offset_pages(seed: u64, max_pages: u64) -> u64 {
     } else {
         aslr_mix64(seed) % max_pages
     }
-}
-
-fn caller_can_launch_service() -> bool {
-    let caller = crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()));
-    let Some(caller_pid) = caller else {
-        // カーネルコンテキストからの起動は許可
-        return true;
-    };
-
-    if crate::task::with_process(caller_pid, |p| {
-        p.privilege() == crate::task::PrivilegeLevel::Core
-    })
-    .unwrap_or(false)
-    {
-        return true;
-    }
-
-    let manager_pid_raw = SERVICE_MANAGER_PID.load(Ordering::SeqCst);
-    if manager_pid_raw == 0 || caller_pid.as_u64() != manager_pid_raw {
-        return false;
-    }
-    let manager_pid = crate::task::ProcessId::from_u64(manager_pid_raw);
-    crate::task::with_process(manager_pid, |p| {
-        let state = p.state();
-        let alive = state != crate::task::ProcessState::Zombie
-            && state != crate::task::ProcessState::Terminated;
-        let privileged = matches!(
-            p.privilege(),
-            crate::task::PrivilegeLevel::Service | crate::task::PrivilegeLevel::Core
-        );
-        alive && privileged
-    })
-    .unwrap_or(false)
-}
-
-fn caller_is_service_or_core() -> bool {
-    crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-        .and_then(|pid| crate::task::with_process(pid, |p| p.privilege()))
-        .is_some_and(|lvl| {
-            matches!(
-                lvl,
-                crate::task::PrivilegeLevel::Core | crate::task::PrivilegeLevel::Service
-            )
-        })
-}
-
-fn caller_can_grant_capabilities_on_exec() -> bool {
-    let caller_pid = crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()));
-    let Some(caller_pid) = caller_pid else {
-        // カーネルコンテキストは許可
-        return true;
-    };
-
-    // Core 権限は許可
-    if crate::task::with_process(caller_pid, |p| {
-        p.privilege() == crate::task::PrivilegeLevel::Core
-    })
-    .unwrap_or(false)
-    {
-        return true;
-    }
-
-    // Service 権限でも、信頼済みの実行パスに限定する。
-    // 「名前」だけで判定すると、ユーザープロセスが同名バイナリを用意して自己昇格できるため、
-    // ここは必ず「カーネルが管理する exec_path」を参照して絞り込む。
-    //
-    // 許可する主体:
-    // - service manager として登録された core.service
-    // - /system/services/process.service（アプリ起動経路）
-    let manager_pid_raw = SERVICE_MANAGER_PID.load(Ordering::SeqCst);
-    if manager_pid_raw != 0 && caller_pid.as_u64() == manager_pid_raw {
-        return true;
-    }
-
-    crate::task::with_process(caller_pid, |p| {
-        if p.privilege() != crate::task::PrivilegeLevel::Service {
-            return false;
-        }
-        matches!(
-            p.exe_path(),
-            "/system/services/process.service" | "system/services/process.service"
-        )
-    })
-    .unwrap_or(false)
 }
 
 fn read_nul_args_from_user(
@@ -380,135 +290,6 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     }
 
     crate::syscall::types::ENOENT
-}
-
-// TODO: マニフェストに含む情報として
-//  - package_id
-//  - publisher_id
-//  - signature_trusted
-//  - manifest role
-//  - file digest
-//  - install source
-// を追加する
-#[inline]
-fn resolve_exec_privilege(process_name: &str, exec_path: &str) -> crate::task::PrivilegeLevel {
-    // .service は従来通り Service 権限で実行。
-    // bin/drivers 配下は Service/Core 呼び出し元からの起動時に Service 権限を付与する。
-    // Kagami / ViewKit / Binder / Dock はデスクトップ描画のため Service 権限を付与する。
-    let is_driver_path =
-        exec_path.starts_with("bin/drivers/") || exec_path.starts_with("/bin/drivers/");
-    let is_kagami_viewkit_path = matches!(
-        exec_path,
-        "/applications/Kagami.app/entry.elf"
-            | "/applications/ViewKit.app/entry.elf"
-            | "/applications/Binder.app/entry.elf"
-            | "/applications/Dock.app/entry.elf"
-            | "applications/Kagami.app/entry.elf"
-            | "applications/ViewKit.app/entry.elf"
-            | "applications/Binder.app/entry.elf"
-            | "applications/Dock.app/entry.elf"
-    );
-    if process_name.ends_with(".service")
-        || is_kagami_viewkit_path
-        || (is_driver_path && caller_is_service_or_core())
-    {
-        crate::task::PrivilegeLevel::Service
-    } else {
-        crate::task::PrivilegeLevel::User
-    }
-}
-
-fn resolve_exec_priority(
-    process_name: &str,
-    exec_path: &str,
-    parent_pid: Option<crate::task::ProcessId>,
-) -> u8 {
-    let is_service_path =
-        exec_path.starts_with("/system/services/") || exec_path.starts_with("system/services/");
-    let is_driver_path =
-        exec_path.starts_with("/bin/drivers/") || exec_path.starts_with("bin/drivers/");
-    let is_application_path =
-        exec_path.starts_with("/applications/") || exec_path.starts_with("applications/");
-    let is_regular_bin_path = exec_path.starts_with("/bin/") || exec_path.starts_with("bin/");
-
-    if is_application_path {
-        return 0;
-    }
-    if is_regular_bin_path && !is_driver_path {
-        return 2;
-    }
-
-    if process_name == "shell.service" {
-        return 4;
-    }
-    if process_name == "window.service" || process_name == "process.service" {
-        return 8;
-    }
-    if process_name == "capability.service" || process_name == "device.service" {
-        return 12;
-    }
-    if process_name == "core.service" || process_name == "net.service" {
-        return 24;
-    }
-    if process_name == "driver.service" {
-        return 96;
-    }
-    if process_name == "disk.service" || is_driver_path {
-        return 160;
-    }
-    if is_service_path {
-        return 64;
-    }
-
-    if let Some(parent) = parent_pid {
-        let parent_name = crate::task::with_process(parent, |process| {
-            let mut name = alloc::string::String::new();
-            name.push_str(process.name());
-            name
-        });
-        if let Some(parent_name) = parent_name {
-            if parent_name == "shell.service" || parent_name == "process.service" {
-                return 0;
-            }
-            if parent_name == "window.service" {
-                return 2;
-            }
-        }
-    }
-
-    8
-}
-
-fn resolve_exec_foreground(
-    process_name: &str,
-    exec_path: &str,
-    privilege: crate::task::PrivilegeLevel,
-    parent_pid: Option<crate::task::ProcessId>,
-) -> bool {
-    if privilege != crate::task::PrivilegeLevel::User {
-        return false;
-    }
-
-    let is_application_path =
-        exec_path.starts_with("/applications/") || exec_path.starts_with("applications/");
-    let is_regular_bin_path = (exec_path.starts_with("/bin/") || exec_path.starts_with("bin/"))
-        && !exec_path.starts_with("/bin/drivers/")
-        && !exec_path.starts_with("bin/drivers/");
-
-    if is_application_path || is_regular_bin_path {
-        return true;
-    }
-
-    let Some(parent) = parent_pid else {
-        return false;
-    };
-    crate::task::with_process(parent, |process| {
-        process.name() == "shell.service"
-            || process.name() == "process.service"
-            || process.name() == "window.service"
-            || process.is_foreground()
-    })
-    .unwrap_or(false)
 }
 
 fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u64> {
@@ -1149,22 +930,13 @@ fn exec_with_data(
         };
         let pid = proc.id();
         let is_core_service = process_name.ends_with("core.service");
-        if is_core_service
-            && SERVICE_MANAGER_PID
-                .compare_exchange(0, pid.as_u64(), Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        {
+        if is_core_service && !claim_service_manager_pid(pid.as_u64()) {
             crate::warn!("core.service is already running, rejecting duplicate launch");
             return crate::syscall::types::EINVAL;
         }
         if crate::task::add_process(proc).is_none() {
             if is_core_service {
-                let _ = SERVICE_MANAGER_PID.compare_exchange(
-                    pid.as_u64(),
-                    0,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                );
+                let _ = release_service_manager_pid(pid.as_u64());
             }
             return crate::syscall::types::EINVAL;
         }
@@ -1177,12 +949,7 @@ fn exec_with_data(
                 crate::warn!("Failed to allocate kernel stack for thread");
                 let _ = crate::task::remove_process(pid);
                 if is_core_service {
-                    let _ = SERVICE_MANAGER_PID.compare_exchange(
-                        pid.as_u64(),
-                        0,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    );
+                    let _ = release_service_manager_pid(pid.as_u64());
                 }
                 let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
                 return crate::syscall::types::ENOMEM;
@@ -1215,12 +982,7 @@ fn exec_with_data(
             crate::warn!("Failed to add thread");
             let _ = crate::task::remove_process(pid);
             if is_core_service {
-                let _ = SERVICE_MANAGER_PID.compare_exchange(
-                    pid.as_u64(),
-                    0,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                );
+                let _ = release_service_manager_pid(pid.as_u64());
             }
             let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
             return crate::syscall::types::EINVAL;
