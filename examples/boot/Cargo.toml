@@ -1,0 +1,19 @@
+[package]
+name = "boot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[[bin]]
+name = "boot"
+path = "src/main.rs"
+test = false
+bench = false
+harness = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
