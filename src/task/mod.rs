@@ -3,7 +3,6 @@
 //! マルチタスク機能を提供（プロセスとスレッドの管理）
 
 pub mod context;
-mod elf;
 pub mod fd_table;
 pub mod ids;
 pub mod process;

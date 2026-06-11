@@ -293,7 +293,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 }
 
 fn load_elf_symbol(elf: &[u8], symbol_name: &str) -> Option<u64> {
-    let eh = crate::elf::loader::parse_elf_header(elf)?;
+    let eh = crate::elf::parse_elf_header(elf)?;
     let loaded = load_elf_image(elf, &eh)?;
     apply_relocations(elf, &eh, loaded.base, loaded.min_vaddr, loaded.max_vaddr)?;
     find_symbol_runtime_addr(elf, &eh, symbol_name, loaded.base, loaded.min_vaddr)
@@ -328,7 +328,7 @@ fn alloc_module_base(span: u64) -> Option<u64> {
     }
 }
 
-fn load_elf_image(elf: &[u8], eh: &crate::elf::loader::Elf64Ehdr) -> Option<LoadedElf> {
+fn load_elf_image(elf: &[u8], eh: &crate::elf::Elf64Ehdr) -> Option<LoadedElf> {
     let phoff = eh.e_phoff as usize;
     let phentsize = eh.e_phentsize as usize;
     let phnum = eh.e_phnum as usize;
@@ -341,7 +341,7 @@ fn load_elf_image(elf: &[u8], eh: &crate::elf::loader::Elf64Ehdr) -> Option<Load
 
     for i in 0..phnum {
         let off = phoff.checked_add(i.checked_mul(phentsize)?)?;
-        let ph = crate::elf::loader::parse_phdr(elf, off)?;
+        let ph = crate::elf::parse_phdr(elf, off)?;
         if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
             continue;
         }
@@ -365,7 +365,7 @@ fn load_elf_image(elf: &[u8], eh: &crate::elf::loader::Elf64Ehdr) -> Option<Load
 
     for i in 0..phnum {
         let off = phoff.checked_add(i.checked_mul(phentsize)?)?;
-        let ph = crate::elf::loader::parse_phdr(elf, off)?;
+        let ph = crate::elf::parse_phdr(elf, off)?;
         if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
             continue;
         }
@@ -404,7 +404,7 @@ fn load_elf_image(elf: &[u8], eh: &crate::elf::loader::Elf64Ehdr) -> Option<Load
 
 fn apply_relocations(
     elf: &[u8],
-    eh: &crate::elf::loader::Elf64Ehdr,
+    eh: &crate::elf::Elf64Ehdr,
     base: u64,
     min_vaddr: u64,
     max_vaddr: u64,
@@ -468,7 +468,7 @@ fn apply_relocations(
 
 fn find_symbol_runtime_addr(
     elf: &[u8],
-    eh: &crate::elf::loader::Elf64Ehdr,
+    eh: &crate::elf::Elf64Ehdr,
     symbol_name: &str,
     base: u64,
     min_vaddr: u64,

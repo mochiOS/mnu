@@ -1,4 +1,3 @@
-use crate::elf::loader as elf_loader;
 use crate::policy::{
     caller_can_grant_capabilities_on_exec, caller_can_launch_service, claim_service_manager_pid,
     release_service_manager_pid, resolve_exec_foreground, resolve_exec_priority,
@@ -455,7 +454,7 @@ fn exec_with_data(
 
         // MED-27修正: エントリポイントが0の場合はELFが無効として拒否する
         // 以前はentry=0のままプロセスを作成し、仮想アドレス0にジャンプしていた
-        let mut entry = match elf_loader::entry_point(data) {
+        let mut entry = match crate::elf::entry_point(data) {
             Some(e) if e != 0 => e,
             _ => {
                 crate::warn!("exec: ELF entry point is 0 or missing, rejecting");
@@ -484,7 +483,7 @@ fn exec_with_data(
         let mut phdr_vaddr: u64 = 0;
         let mut phentsize: u64 = 0;
         let mut phnum: u64 = 0;
-        if let Some(eh) = elf_loader::parse_elf_header(data) {
+        if let Some(eh) = crate::elf::parse_elf_header(data) {
             if eh.e_machine != EM_X86_64 {
                 crate::warn!("ELF e_machine {:#x} is not x86-64, rejecting", eh.e_machine);
                 return crate::syscall::types::EINVAL;
@@ -498,10 +497,10 @@ fn exec_with_data(
                 crate::warn!("ELF phentsize is 0, rejecting");
                 return crate::syscall::types::EINVAL;
             }
-            let phnum = eh.e_phnum as usize;
+            let phnum: usize = eh.e_phnum as usize;
             let mut load_base: u64 = 0;
             let mut load_base_set = false;
-            for i in 0..phnum {
+            for i in 0usize..phnum {
                 // オーバーフロー安全な乗算と加算 (MED-08)
                 let off_hdr = match i.checked_mul(phentsz).and_then(|x| phoff.checked_add(x)) {
                     Some(o) if o < data.len() => o,
@@ -510,8 +509,8 @@ fn exec_with_data(
                         return crate::syscall::types::EINVAL;
                     }
                 };
-                if let Some(ph) = elf_loader::parse_phdr(data, off_hdr) {
-                    if ph.p_type == elf_loader::PT_LOAD {
+                if let Some(ph) = crate::elf::parse_phdr(data, off_hdr) {
+                    if ph.p_type == crate::elf::PT_LOAD {
                         let vaddr = ph.p_vaddr;
                         let memsz = ph.p_memsz;
                         let filesz = ph.p_filesz;
@@ -588,7 +587,7 @@ fn exec_with_data(
         let needs_sinit = exec_path.ends_with(".service");
         let mut sinit_addr: Option<u64> = None;
         if needs_sinit {
-            if let Some(eh_sym) = elf_loader::parse_elf_header(data) {
+            if let Some(eh_sym) = crate::elf::parse_elf_header(data) {
                 let shoff = eh_sym.e_shoff as usize;
                 let shentsz = eh_sym.e_shentsize as usize;
                 let shnum = eh_sym.e_shnum as usize;
@@ -1104,7 +1103,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     let data: &[u8] = &data_vec;
 
     // ELF エントリポイントとセグメントを解析
-    let entry = match crate::elf::loader::entry_point(data) {
+    let entry = match crate::elf::entry_point(data) {
         Some(e) => e,
         None => return EINVAL,
     };
@@ -1121,7 +1120,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     let mut phdr_vaddr: u64 = 0;
     let mut phentsize: u64 = 0;
     let mut phnum: u64 = 0;
-    if let Some(eh) = crate::elf::loader::parse_elf_header(data) {
+    if let Some(eh) = crate::elf::parse_elf_header(data) {
         // ELFアーキテクチャ検証 (MED-07)
         if eh.e_machine != EM_X86_64 {
             crate::warn!("execve: ELF e_machine {:#x} is not x86-64", eh.e_machine);
@@ -1144,8 +1143,8 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
                 Some(o) if o < data.len() => o,
                 _ => return EINVAL,
             };
-            if let Some(ph) = crate::elf::loader::parse_phdr(data, off_hdr) {
-                if ph.p_type == crate::elf::loader::PT_LOAD {
+            if let Some(ph) = crate::elf::parse_phdr(data, off_hdr) {
+                if ph.p_type == crate::elf::PT_LOAD {
                     // ELFセグメントのvaddrがユーザー空間内であることを検証 (CRIT-05)
                     if ph.p_vaddr >= USER_SPACE_END_EXECVE {
                         crate::warn!(
