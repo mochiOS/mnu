@@ -79,6 +79,7 @@ QEMU_ARGS=(
     -cpu qemu64
     -serial stdio
     -display none
+    -monitor none
     -no-reboot
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
     -drive "if=pflash,format=raw,file=${OVMF_VARS}"
@@ -93,13 +94,31 @@ SERIAL_LOG="${TARGET_DIR}/serial.log"
 rm -f "${SERIAL_LOG}"
 
 echo "[run] qemu + userland self-test"
-qemu-system-x86_64 "${QEMU_ARGS[@]}" >"${SERIAL_LOG}" 2>&1 &
-QEMU_PID=$!
 
+coproc QEMU_PROC {
+    qemu-system-x86_64 "${QEMU_ARGS[@]}" 2>&1
+}
+
+QEMU_PID="${QEMU_PROC_PID}"
 PASS_FOUND=0
+
+cleanup() {
+    kill "${QEMU_PID}" 2>/dev/null || true
+    wait "${QEMU_PID}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 for _ in $(seq 1 600); do
-    if grep -q "USERLAND SELF-TEST PASS" "${SERIAL_LOG}"; then
-        PASS_FOUND=1
+    while IFS= read -r -t 0.01 line <&"${QEMU_PROC[0]}"; do
+        printf '%s\n' "$line"
+
+        if [[ "$line" == *"USERLAND SELF-TEST PASS"* ]]; then
+            PASS_FOUND=1
+            break
+        fi
+    done
+
+    if [[ "${PASS_FOUND}" -eq 1 ]]; then
         break
     fi
 
@@ -110,17 +129,13 @@ for _ in $(seq 1 600); do
     sleep 0.1
 done
 
-if [[ "${PASS_FOUND}" -eq 1 ]]; then
-    kill "${QEMU_PID}" 2>/dev/null || true
-    wait "${QEMU_PID}" 2>/dev/null || true
-else
-    if kill -0 "${QEMU_PID}" 2>/dev/null; then
-        kill "${QEMU_PID}" 2>/dev/null || true
-        wait "${QEMU_PID}" 2>/dev/null || true
-    fi
+if [[ "${PASS_FOUND}" -ne 1 ]]; then
     echo "userland self-test did not report PASS" >&2
-    tail -n 20 "${SERIAL_LOG}" >&2 || true
     exit 1
 fi
+
+kill "${QEMU_PID}" 2>/dev/null || true
+wait "${QEMU_PID}" 2>/dev/null || true
+trap - EXIT
 
 echo "[run] userland self-test passed"
