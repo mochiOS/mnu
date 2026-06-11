@@ -68,9 +68,13 @@ const SYS_WRITE: u64 = mnu_abi::SyscallNumber::Write as u64;
 const SYS_EXIT: u64 = mnu_abi::SyscallNumber::Exit as u64;
 const SYS_GETPID: u64 = mnu_abi::SyscallNumber::GetPid as u64;
 const SYS_GETTID: u64 = mnu_abi::SyscallNumber::GetTid as u64;
+const SYS_EXEC: u64 = mnu_abi::SyscallNumber::Exec as u64;
+const SYS_EXEC_WITH_CAPS: u64 = mnu_abi::SyscallNumber::ExecWithCapabilities as u64;
+const SYS_WAIT: u64 = mnu_abi::SyscallNumber::Wait as u64;
 const SYS_YIELD: u64 = mnu_abi::SyscallNumber::Yield as u64;
 const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
 const SYS_GET_TICKS: u64 = mnu_abi::SyscallNumber::GetTicks as u64;
+const SYS_CHECK_THREAD_CAPABILITY: u64 = mnu_abi::SyscallNumber::CheckThreadCapability as u64;
 const SYS_LIST_PROCESSES: u64 = mnu_abi::SyscallNumber::ListProcesses as u64;
 const STDOUT_FD: u64 = 1;
 
@@ -140,6 +144,25 @@ unsafe fn syscall3(n: u64, a0: u64, a1: u64, a2: u64) -> u64 {
     ret
 }
 
+#[inline(always)]
+unsafe fn syscall4(n: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") n => ret,
+            in("rdi") a0,
+            in("rsi") a1,
+            in("rdx") a2,
+            in("r10") a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
 pub fn write_str(s: &str) {
     unsafe {
         let _ = syscall3(SYS_WRITE, STDOUT_FD, s.as_ptr() as u64, s.len() as u64);
@@ -178,7 +201,82 @@ pub fn get_ticks() -> u64 {
 }
 
 pub fn list_processes(buf: &mut [u8]) -> u64 {
-    unsafe { syscall2(SYS_LIST_PROCESSES, buf.as_mut_ptr() as u64, buf.len() as u64) }
+    unsafe {
+        syscall2(
+            SYS_LIST_PROCESSES,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    }
+}
+
+pub fn has_capability(cap_name: &str) -> bool {
+    let tid = gettid();
+    if tid == 0 {
+        return false;
+    }
+    unsafe {
+        syscall3(
+            SYS_CHECK_THREAD_CAPABILITY,
+            tid,
+            cap_name.as_ptr() as u64,
+            cap_name.len() as u64,
+        ) == 1
+    }
+}
+
+fn encode_nul_list<const N: usize>(dst: &mut [u8; N], items: &[&str]) -> usize {
+    let mut offset = 0usize;
+    for item in items {
+        let bytes = item.as_bytes();
+        if offset + bytes.len() + 1 > dst.len() {
+            break;
+        }
+        dst[offset..offset + bytes.len()].copy_from_slice(bytes);
+        offset += bytes.len();
+        dst[offset] = 0;
+        offset += 1;
+    }
+    offset
+}
+
+pub fn exec_with_caps(path: &str, args: &[&str], caps: &[&str]) -> u64 {
+    let mut path_buf = [0u8; 128];
+    let path_bytes = path.as_bytes();
+    if path_bytes.len() + 1 > path_buf.len() {
+        return mnu_abi::EINVAL as u64;
+    }
+    path_buf[..path_bytes.len()].copy_from_slice(path_bytes);
+    path_buf[path_bytes.len()] = 0;
+
+    let mut args_buf = [0u8; 512];
+    let args_len = encode_nul_list(&mut args_buf, args);
+    let mut caps_buf = [0u8; 512];
+    let caps_len = encode_nul_list(&mut caps_buf, caps);
+
+    unsafe {
+        syscall4(
+            SYS_EXEC_WITH_CAPS,
+            path_buf.as_ptr() as u64,
+            if args_len == 0 {
+                0
+            } else {
+                args_buf.as_ptr() as u64
+            },
+            if caps_len == 0 {
+                0
+            } else {
+                caps_buf.as_ptr() as u64
+            },
+            caps_len as u64,
+        )
+    }
+}
+
+pub fn wait_for_child(pid: u64) -> (u64, u32) {
+    let mut status: u32 = 0;
+    let ret = unsafe { syscall3(SYS_WAIT, pid, core::ptr::addr_of_mut!(status) as u64, 0) };
+    (ret, status)
 }
 
 pub fn test_launch_contract_keeps_all_required_fields() -> bool {
@@ -267,10 +365,7 @@ fn process_record_matches_name(record: &[u8], expected_name: &[u8]) -> bool {
         return false;
     }
 
-    name[expected_name.len()..]
-        .iter()
-        .copied()
-        .all(|b| b == 0)
+    name[expected_name.len()..].iter().copied().all(|b| b == 0)
 }
 
 pub fn test_syscall_list_processes_includes_core_service() -> bool {
@@ -319,11 +414,48 @@ pub fn test_syscall_list_processes_contains_at_least_one_valid_record() -> bool 
     pid != 0 && tid != 0 && state <= 4
 }
 
+fn run_restricted_probe() -> bool {
+    let exec_denied = unsafe { syscall1(SYS_EXEC, 0) } == mnu_abi::EPERM as u64;
+    let mut buf = [0u8; 256];
+    let list_denied = list_processes(&mut buf) == mnu_abi::EPERM as u64;
+    let ticks_denied = get_ticks() == mnu_abi::EPERM as u64;
+    let self_ok = getpid() != 0 && gettid() != 0;
+
+    exec_denied && list_denied && ticks_denied && self_ok
+}
+
+fn test_allowed_capabilities_on_core_service() -> bool {
+    has_capability("process.spawn")
+        && has_capability("process.inspect")
+        && has_capability("system.time.read")
+        && has_capability("ipc.client")
+}
+
+fn test_spawn_restricted_child() -> bool {
+    let child_pid = exec_with_caps("captest.bin", &[], &[]);
+    if child_pid == 0 || child_pid == mnu_abi::EPERM as u64 || child_pid == mnu_abi::EINVAL as u64 {
+        return false;
+    }
+
+    let (waited_pid, status) = wait_for_child(child_pid);
+    waited_pid == child_pid && status == 0
+}
+
+pub fn run_restricted_self_test() -> bool {
+    run_restricted_probe()
+}
+
 pub fn run_self_test() -> bool {
+    if !has_capability("process.spawn") {
+        return run_restricted_self_test();
+    }
+
     test_launch_contract_keeps_all_required_fields()
         && test_launch_contract_rejects_empty_identity_fields()
         && test_syscall_getpid_and_gettid_are_nonzero()
         && test_syscall_yield_and_sleep_zero_return_success()
         && test_syscall_list_processes_contains_at_least_one_valid_record()
         && test_syscall_list_processes_includes_core_service()
+        && test_allowed_capabilities_on_core_service()
+        && test_spawn_restricted_child()
 }

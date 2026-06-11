@@ -1,9 +1,21 @@
 //! プロセス管理関連のシステムコール
 
-use alloc::vec::Vec;
-use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS, SUCCESS};
+use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS, EPERM, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
+use alloc::vec::Vec;
+
+fn caller_has_process_inspect_capability() -> bool {
+    crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::ProcessInspect,
+    ]) || crate::syscall::security::caller_is_core_or_service()
+}
+
+fn caller_has_process_spawn_capability() -> bool {
+    crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::ProcessSpawn,
+    ]) || crate::syscall::security::caller_is_core_or_service()
+}
 
 /// ユーザー空間の上限アドレス (x86-64 canonical hole 下側)
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
@@ -157,6 +169,10 @@ pub fn exit(exit_code: u64) -> ! {
 /// arg0 = user buffer ptr, arg1 = buffer length in bytes.
 pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
     use crate::task::ProcessState;
+
+    if !caller_has_process_inspect_capability() {
+        return EPERM;
+    }
 
     const RECORD_SIZE: usize = 88;
     if buf_ptr == 0 {
@@ -360,6 +376,10 @@ pub fn brk(addr: u64) -> u64 {
 ///
 /// プロセスを複製する
 pub fn fork() -> u64 {
+    if !caller_has_process_spawn_capability() {
+        return crate::syscall::EPERM;
+    }
+
     let parent_tid = match current_thread_id() {
         Some(tid) => tid,
         None => return ENOSYS,
@@ -992,14 +1012,12 @@ pub fn find_process_by_name(name_ptr: u64, len: u64) -> u64 {
     // 名前解決で任意サービスのスレッドIDが分かると、そのまま IPC を送れてしまう。
     // 「サービスへ接続する」操作として `ipc.client` を要求する。
     // ただしサービス自身が READY 通知などで名前解決を行うため、`ipc.server` も許可する。
-    let caller_tid = match task::current_thread_id() {
-        Some(t) => t.as_u64(),
-        None => return 0,
-    };
-    if !crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::IpcClient,
-        crate::capability::Capability::IpcServer,
-    ]) {
+    if !caller_has_process_inspect_capability()
+        && !crate::syscall::security::caller_has_any_capability(&[
+            crate::capability::Capability::IpcClient,
+            crate::capability::Capability::IpcServer,
+        ])
+    {
         return 0;
     }
 

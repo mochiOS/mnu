@@ -1,10 +1,10 @@
 //! ファイルシステム関連のシステムコール
 
-use alloc::collections::BTreeMap;
 use super::types::{
     EACCES, EBADF, EEXIST, EFAULT, EINVAL, EIO, ENOENT, ENOSYS, ENOTDIR, ESRCH, SUCCESS,
 };
 use crate::task::fd_table::{FdTable, FileHandle, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS};
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
@@ -248,7 +248,11 @@ fn special_dir_entries(path: &str) -> Option<Vec<String>> {
 fn filter_hidden_root_entries(mut entries: Vec<String>) -> Option<Vec<String>> {
     let hidden = ["dev", "run"];
     entries.retain(|entry| !hidden.iter().any(|name| name == entry));
-    if entries.is_empty() { None } else { Some(entries) }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
 }
 
 #[inline]
@@ -291,7 +295,11 @@ fn special_file_requires_read_cap(path: &str) -> bool {
 fn special_path_blocks_mutation(path: &str) -> bool {
     matches!(
         special_file_kind(path),
-        Some(SpecialFileKind::RuntimeDir | SpecialFileKind::WaylandSocket | SpecialFileKind::AuditLog)
+        Some(
+            SpecialFileKind::RuntimeDir
+                | SpecialFileKind::WaylandSocket
+                | SpecialFileKind::AuditLog
+        )
     )
 }
 
@@ -707,7 +715,11 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
                     fh.fs_path
                         .as_deref()
                         .and_then(shm_entry_name)
-                        .and_then(|name| with_shm_namespace(|map| map.get(name).map(|entry| entry.data.len() as i64)))
+                        .and_then(|name| {
+                            with_shm_namespace(|map| {
+                                map.get(name).map(|entry| entry.data.len() as i64)
+                            })
+                        })
                         .unwrap_or(0)
                 } else if handle_special_kind(fh) == Some(SpecialFileKind::AuditLog) {
                     crate::audit::file_size() as i64
@@ -725,7 +737,9 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
             fh.fs_path
                 .as_deref()
                 .and_then(shm_entry_name)
-                .and_then(|name| with_shm_namespace(|map| map.get(name).map(|entry| entry.data.len())))
+                .and_then(|name| {
+                    with_shm_namespace(|map| map.get(name).map(|entry| entry.data.len()))
+                })
                 .unwrap_or(0)
         } else if handle_special_kind(fh) == Some(SpecialFileKind::AuditLog) {
             crate::audit::file_size()
@@ -810,7 +824,11 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
             let size = if special_kind == Some(SpecialFileKind::AuditLog) {
                 crate::audit::file_size() as u64
             } else if let Some(name) = shm_name {
-                with_shm_namespace(|map| map.get(name).map(|entry| entry.data.len() as u64).unwrap_or(0))
+                with_shm_namespace(|map| {
+                    map.get(name)
+                        .map(|entry| entry.data.len() as u64)
+                        .unwrap_or(0)
+                })
             } else {
                 fh.data.len() as u64
             };
@@ -1064,7 +1082,10 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         let fh = t.get_mut(idx)?;
         if let Some(name) = handle_is_shm(fh) {
             let (data, next_pos) = with_shm_namespace(|map| {
-                let data = map.get(name).map(|entry| entry.data.clone()).unwrap_or_default();
+                let data = map
+                    .get(name)
+                    .map(|entry| entry.data.clone())
+                    .unwrap_or_default();
                 let start = fh.pos.min(data.len());
                 let end = core::cmp::min(start.saturating_add(len as usize), data.len());
                 (data[start..end].to_vec(), end)
@@ -1378,7 +1399,8 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
     let res = with_fd_table_mut(pid, |t| {
         let fh = t.get_mut(idx).ok_or(EBADF)?;
         if let Some(name) = handle_is_shm(fh) {
-            let exists = with_shm_namespace(|map| map.get(name).is_some_and(|entry| !entry.removed));
+            let exists =
+                with_shm_namespace(|map| map.get(name).is_some_and(|entry| !entry.removed));
             if !exists {
                 return Err(ENOENT);
             }

@@ -74,12 +74,9 @@ fn kernel_main() -> ! {
     // core.serviceのみ起動（他のサービスはcore.serviceが管理）
     info!("Starting core.service");
     let mut caps = crate::capability::CapabilitySet::empty();
-    caps.insert(crate::capability::Capability::IpcServer);
-    caps.insert(crate::capability::Capability::IpcClient);
-    caps.insert(crate::capability::Capability::ProcessSpawn);
-    caps.insert(crate::capability::Capability::ServiceControl);
-    caps.insert(crate::capability::Capability::SystemInfoRead);
-    caps.insert(crate::capability::Capability::FsReadAll);
+    for cap in crate::capability::Capability::kernel_enforced_capabilities() {
+        caps.insert(*cap);
+    }
     let manager_pid = exec_kernel_with_name_and_caps("core.service", "core.service", caps);
     if manager_pid != 0
         && task::with_process(task::ProcessId::from_u64(manager_pid), |_| ()).is_some()
@@ -123,22 +120,22 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo) -> ! {
         halt_forever();
     };
     crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
-    crate::info!(
+    info!(
         "Secondary CPU entering kernel: boot_info={:#x} handoff={:#x}",
         boot_info as *const BootInfo as u64,
         boot_info.smp_handoff_addr
     );
     crate::mem::gdt::init();
-    crate::info!("Secondary CPU GDT/TSS initialized");
+    info!("Secondary CPU GDT/TSS initialized");
     crate::interrupt::init_idt();
-    crate::info!("Secondary CPU IDT initialized");
+    info!("Secondary CPU IDT initialized");
     crate::cpu::init();
-    crate::info!("Secondary CPU CPU features initialized");
+    info!("Secondary CPU CPU features initialized");
     crate::syscall::syscall_entry::init_syscall_current_cpu();
-    crate::info!("Secondary CPU syscall state initialized");
+    info!("Secondary CPU syscall state initialized");
     if let Some(handoff) = crate::smp::handoff() {
         let before = handoff.ap_count.fetch_add(1, Ordering::SeqCst);
-        crate::info!(
+        info!(
             "Secondary CPU online: ap_count {} -> {}",
             before,
             before + 1
@@ -151,19 +148,13 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo) -> ! {
             halt_forever();
         }
     };
-    crate::info!(
+    info!(
         "Secondary CPU switching to idle thread {:?} (slot={})",
-        idle_thread_id,
-        idle_thread_slot
+        idle_thread_id, idle_thread_slot
     );
     task::set_thread_state(idle_thread_id, task::ThreadState::Running);
     unsafe {
-        crate::task::context::switch_to_thread_with_slots(
-            None,
-            None,
-            idle_thread_id,
-            idle_thread_slot,
-        );
+        task::context::switch_to_thread_with_slots(None, None, idle_thread_id, idle_thread_slot);
     }
     crate::warn!("Secondary CPU idle thread switch returned unexpectedly");
     halt_forever();

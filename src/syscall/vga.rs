@@ -1,6 +1,12 @@
 //! フレームバッファ関連のシステムコール
 
-use super::types::{EFAULT, EINVAL, ENOMEM, SUCCESS};
+use super::types::{EFAULT, EINVAL, ENOMEM, EPERM, SUCCESS};
+use crate::capability::Capability;
+
+fn caller_has_display_capture_capability() -> bool {
+    crate::syscall::security::caller_has_any_capability(&[Capability::DisplayCapture])
+        || crate::syscall::security::caller_is_core_or_service()
+}
 
 /// ユーザー空間に返すフレームバッファ情報構造体のレイアウト
 ///
@@ -49,6 +55,10 @@ pub fn get_framebuffer_info(info_ptr: u64) -> u64 {
 /// # Returns
 /// マップされた仮想アドレス、または失敗時はエラーコード
 pub fn map_framebuffer() -> u64 {
+    if !caller_has_display_capture_capability() {
+        return EPERM;
+    }
+
     let fb_info = match crate::util::vga::get_info() {
         Some(i) => i,
         None => return EINVAL,

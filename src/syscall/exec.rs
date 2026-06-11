@@ -1,3 +1,4 @@
+use crate::capability::{Capability, CapabilitySet};
 use crate::policy::{
     caller_can_grant_capabilities_on_exec, caller_can_launch_service, claim_service_manager_pid,
     release_service_manager_pid, resolve_exec_foreground, resolve_exec_priority,
@@ -142,9 +143,43 @@ fn read_nul_caps_from_user(caps_ptr: u64, caps_total_len: u64) -> Result<Vec<Str
     Ok(out)
 }
 
+fn caller_has_process_spawn_capability() -> bool {
+    crate::syscall::security::caller_has_any_capability(&[Capability::ProcessSpawn])
+        || crate::syscall::security::caller_is_core_or_service()
+}
+
+fn current_process_capabilities() -> Option<CapabilitySet> {
+    let pid = crate::syscall::security::current_process_id()?;
+    crate::task::with_process(pid, |proc| proc.capabilities().clone())
+}
+
+fn validate_requested_exec_capabilities(caps: &CapabilitySet) -> Result<(), u64> {
+    use crate::syscall::types::{EINVAL, EPERM};
+
+    for cap in caps.iter() {
+        if !cap.is_kernel_enforced() {
+            return Err(EINVAL);
+        }
+    }
+
+    let Some(caller_caps) = current_process_capabilities() else {
+        return Ok(());
+    };
+
+    if caps.is_subset_of(&caller_caps) {
+        Ok(())
+    } else {
+        Err(EPERM)
+    }
+}
+
 /// カーネル内から実行可能ファイルを読み込み実行するシステムコール
 /// args_ptr: ヌル区切り引数文字列へのポインタ（"arg1\0arg2\0\0"形式）、0 なら引数なし
 pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
+    if !caller_has_process_spawn_capability() {
+        return crate::syscall::types::EPERM;
+    }
+
     let mut provided_path: Option<String> = None;
     if path_ptr != 0 {
         let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
@@ -185,11 +220,18 @@ pub fn exec_with_capabilities_syscall(
     if !caller_can_grant_capabilities_on_exec() {
         return EPERM;
     }
+    if !caller_has_process_spawn_capability() {
+        return EPERM;
+    }
 
     let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
         Ok(s) => s,
         Err(_) => return EINVAL,
     };
+
+    if path.ends_with(".service") && !caller_can_launch_service() {
+        return EPERM;
+    }
 
     // 引数は通常 exec と同じ形式
     let extra_args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
@@ -209,6 +251,10 @@ pub fn exec_with_capabilities_syscall(
             return EINVAL;
         };
         caps.insert(cap);
+    }
+
+    if let Err(errno) = validate_requested_exec_capabilities(&caps) {
+        return errno;
     }
 
     // capability はプロセス生成時に設定する必要がある。
@@ -275,6 +321,10 @@ fn derive_process_name(path: &str) -> String {
 
 /// Exec by streaming image with zero-copy frame transfer when possible.
 pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
+    if !caller_has_process_spawn_capability() {
+        return crate::syscall::types::EPERM;
+    }
+
     let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
         Ok(s) => s,
         Err(_) => return crate::syscall::types::EINVAL,
@@ -1088,6 +1138,9 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     if path_ptr == 0 {
         return EINVAL;
     }
+    if !caller_has_process_spawn_capability() {
+        return EPERM;
+    }
 
     let path_owned = match crate::syscall::read_user_cstring(path_ptr, 256) {
         Ok(s) => s,
@@ -1353,8 +1406,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
 pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
-    // core/service のみ許可
-    if !caller_can_launch_service() {
+    if !caller_has_process_spawn_capability() {
         return EPERM;
     }
 
@@ -1391,7 +1443,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
 pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
-    if !caller_can_launch_service() {
+    if !caller_has_process_spawn_capability() {
         return EPERM;
     }
     if buf_ptr == 0 || buf_len == 0 || buf_len > 32 * 1024 * 1024 || path_ptr == 0 {
@@ -1405,6 +1457,9 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         Ok(s) => s,
         Err(_) => return EINVAL,
     };
+    if path.ends_with(".service") && !caller_can_launch_service() {
+        return EPERM;
+    }
     let process_name = path.rsplit('/').next().unwrap_or(path.as_str());
 
     let mut owned = alloc::vec![0u8; buf_len as usize];
@@ -1437,7 +1492,7 @@ pub fn exec_from_buffer_named_args_syscall(
 ) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
-    if !caller_can_launch_service() {
+    if !caller_has_process_spawn_capability() {
         return EPERM;
     }
     if buf_ptr == 0 || buf_len == 0 || buf_len > 32 * 1024 * 1024 || path_ptr == 0 {
@@ -1451,6 +1506,9 @@ pub fn exec_from_buffer_named_args_syscall(
         Ok(s) => s,
         Err(_) => return EINVAL,
     };
+    if path.ends_with(".service") && !caller_can_launch_service() {
+        return EPERM;
+    }
     let process_name = path.rsplit('/').next().unwrap_or(path.as_str());
 
     let args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
@@ -1484,7 +1542,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
 ) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
-    if !caller_can_launch_service() {
+    if !caller_has_process_spawn_capability() {
         return EPERM;
     }
     if buf_ptr == 0 || buf_len == 0 || buf_len > 32 * 1024 * 1024 || path_ptr == 0 {
@@ -1498,6 +1556,9 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         Ok(s) => s,
         Err(_) => return EINVAL,
     };
+    if path.ends_with(".service") && !caller_can_launch_service() {
+        return EPERM;
+    }
     let process_name = path.rsplit('/').next().unwrap_or(path.as_str());
 
     let args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {

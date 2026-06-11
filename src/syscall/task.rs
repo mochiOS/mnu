@@ -31,6 +31,13 @@ pub fn get_thread_id() -> u64 {
 /// # 戻り値
 /// 0=Core, 1=Service, 2=User, またはエラー (#22: ディスクサービスの特権検証に使用)
 pub fn get_thread_privilege(tid_val: u64) -> u64 {
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::ProcessInspect,
+    ]) && !crate::syscall::security::caller_is_core_or_service()
+    {
+        return crate::syscall::EPERM;
+    }
+
     // スレッドIDに対応するプロセスIDを探す
     let mut found_pid: Option<crate::task::ProcessId> = None;
     crate::task::for_each_thread(|t| {
@@ -57,6 +64,12 @@ pub fn get_thread_id_by_name(name_ptr: u64, name_len: u64) -> u64 {
     const MAX_NAME_LEN: usize = 64;
     if name_ptr == 0 {
         return crate::syscall::EINVAL;
+    }
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::ProcessInspect,
+    ]) && !crate::syscall::security::caller_is_core_or_service()
+    {
+        return crate::syscall::EPERM;
     }
     let name_len = name_len as usize;
     if name_len == 0 || name_len > MAX_NAME_LEN {

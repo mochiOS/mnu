@@ -339,6 +339,107 @@ impl Capability {
         };
         Some(cap)
     }
+
+    /// カーネルが最終的に強制する capability かどうか
+    ///
+    /// 現行の設計では、ここに列挙される capability はすべてカーネルが
+    /// 付与・検証の最終責任を持つ。
+    pub fn is_kernel_enforced(&self) -> bool {
+        Self::kernel_enforced_capabilities().contains(self)
+    }
+
+    /// カーネルが強制対象として扱う capability 一覧
+    pub fn kernel_enforced_capabilities() -> &'static [Capability] {
+        use Capability::*;
+        const KERNEL_ENFORCED: &[Capability] = &[
+            FsReadUserDocuments,
+            FsWriteUserDocuments,
+            FsReadUserDownloads,
+            FsWriteUserDownloads,
+            FsReadUserDesktop,
+            FsWriteUserDesktop,
+            FsReadUserPictures,
+            FsWriteUserPictures,
+            FsReadUserMusic,
+            FsWriteUserMusic,
+            FsReadUserVideos,
+            FsWriteUserVideos,
+            FsReadUser,
+            FsWriteUser,
+            FsReadTmp,
+            FsWriteTmp,
+            FsReadRemovable,
+            FsWriteRemovable,
+            FsReadAll,
+            FsWriteAll,
+            NetConnect,
+            NetListen,
+            NetRaw,
+            IpcClient,
+            IpcServer,
+            ProcessSpawn,
+            ProcessInspect,
+            ProcessKill,
+            WindowCreate,
+            WindowOverlay,
+            WindowCapture,
+            DisplayRead,
+            DisplayCapture,
+            InputKeyboard,
+            InputKeyboardGlobal,
+            InputPointer,
+            InputPointerGlobal,
+            InputGamepad,
+            AudioPlayback,
+            AudioRecord,
+            ClipboardRead,
+            ClipboardWrite,
+            NotificationSend,
+            CameraAccess,
+            MicrophoneAccess,
+            LocationAccess,
+            BluetoothAccess,
+            UsbAccess,
+            SerialAccess,
+            PowerShutdown,
+            PowerReboot,
+            PowerSuspend,
+            SystemTimeRead,
+            SystemTimeSet,
+            SystemInfoRead,
+            SystemLogsRead,
+            PackageInstall,
+            PackageRemove,
+            PackageUpdate,
+            ServiceRegister,
+            ServiceControl,
+            VmCreate,
+            VmControl,
+            KernelModuleLoad,
+            KernelDebug,
+            DeviceGpu,
+            DeviceAudio,
+            DeviceInput,
+            DeviceStorage,
+            DeviceNet,
+            AccountSelfRead,
+            AccountSelfModify,
+            AccountOtherRead,
+            AccountOtherModify,
+            SettingsRead,
+            SettingsWrite,
+            Unsandboxed,
+            DeveloperDebug,
+            DeveloperProfile,
+            DeveloperTracing,
+        ];
+        KERNEL_ENFORCED
+    }
+
+    /// 将来の拡張のための全 capability 一覧
+    pub fn all_capabilities() -> &'static [Capability] {
+        Self::kernel_enforced_capabilities()
+    }
 }
 
 /// `parent` が `child` を含意するか（階層継承）
@@ -433,6 +534,21 @@ impl CapabilitySet {
         self.caps.insert(cap);
     }
 
+    /// capability の個数を返す
+    pub fn len(&self) -> usize {
+        self.caps.len()
+    }
+
+    /// 空集合かどうか
+    pub fn is_empty(&self) -> bool {
+        self.caps.is_empty()
+    }
+
+    /// capability の反復子を返す
+    pub fn iter(&self) -> impl Iterator<Item = Capability> + '_ {
+        self.caps.iter().copied()
+    }
+
     /// 完全一致で含まれるか
     pub fn contains_exact(&self, cap: Capability) -> bool {
         self.caps.contains(&cap)
@@ -463,5 +579,10 @@ impl CapabilitySet {
             set.insert(cap);
         }
         Ok(set)
+    }
+
+    /// この集合が `other` に含まれるか（階層継承を考慮）
+    pub fn is_subset_of(&self, other: &CapabilitySet) -> bool {
+        self.iter().all(|cap| other.implies(cap))
     }
 }

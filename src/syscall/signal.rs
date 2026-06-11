@@ -6,7 +6,7 @@
 use super::types::{EINVAL, EPERM, ESRCH, SUCCESS};
 use crate::task::{
     current_thread_id, default_action, thread_to_process_id, with_process, with_process_mut,
-    DefaultAction, PrivilegeLevel, ProcessId, SigAction, SIGCHLD, SIGKILL, SIG_DFL, SIG_IGN,
+    DefaultAction, ProcessId, SigAction, SIGCHLD, SIGKILL, SIG_DFL, SIG_IGN,
 };
 
 // ---- rt_sigprocmask の how 引数 ----
@@ -162,12 +162,12 @@ pub fn kill(pid_raw: u64, sig_raw: u64) -> u64 {
     if sig == 0 {
         if target_pid_raw > 0 {
             let target = ProcessId::from_u64(target_pid_raw as u64);
+            if current_pid() != Some(target) && !caller_has_process_kill_capability() {
+                return EPERM;
+            }
             let exists = with_process(target, |_| ()).is_some();
             if !exists {
                 return ESRCH;
-            }
-            if !caller_can_signal_target(target) {
-                return EPERM;
             }
             return SUCCESS;
         } else if target_pid_raw == -1 {
@@ -183,11 +183,11 @@ pub fn kill(pid_raw: u64, sig_raw: u64) -> u64 {
 
     if target_pid_raw > 0 {
         let target = ProcessId::from_u64(target_pid_raw as u64);
+        if current_pid() != Some(target) && !caller_has_process_kill_capability() {
+            return EPERM;
+        }
         if with_process(target, |_| ()).is_none() {
             return ESRCH;
-        }
-        if !caller_can_signal_target(target) {
-            return EPERM;
         }
         deliver_signal_to_pid(target, sig)
     } else if target_pid_raw == -1 {
@@ -226,13 +226,15 @@ pub fn tkill(tid_raw: u64, sig_raw: u64) -> u64 {
     if sig > 64 {
         return EINVAL;
     }
+    if current_thread_id().map(|tid| tid.as_u64()) != Some(tid_raw)
+        && !caller_has_process_kill_capability()
+    {
+        return EPERM;
+    }
     let target_pid = match thread_to_process_id(tid_raw) {
         Some(pid) => pid,
         None => return ESRCH,
     };
-    if !caller_can_signal_target(target_pid) {
-        return EPERM;
-    }
     if sig == 0 {
         return SUCCESS;
     }
@@ -250,15 +252,17 @@ pub fn tgkill(tgid_raw: u64, tid_raw: u64, sig_raw: u64) -> u64 {
     if sig > 64 {
         return EINVAL;
     }
+    let self_target = current_thread_id().map(|tid| tid.as_u64()) == Some(tid_raw)
+        && current_pid().map(|pid| pid.as_u64()) == Some(tgid_raw);
+    if !self_target && !caller_has_process_kill_capability() {
+        return EPERM;
+    }
     let target_pid = match thread_to_process_id(tid_raw) {
         Some(pid) => pid,
         None => return ESRCH,
     };
     if tgid_raw != 0 && target_pid.as_u64() != tgid_raw {
         return ESRCH;
-    }
-    if !caller_can_signal_target(target_pid) {
-        return EPERM;
     }
     if sig == 0 {
         return SUCCESS;
@@ -513,24 +517,14 @@ fn current_pid() -> Option<ProcessId> {
     crate::task::with_thread(tid, |t| t.process_id())
 }
 
-fn current_privilege() -> Option<PrivilegeLevel> {
-    let pid = current_pid()?;
-    with_process(pid, |p| p.privilege())
-}
-
-fn caller_can_signal_target(target: ProcessId) -> bool {
-    let caller = match current_pid() {
-        Some(pid) => pid,
-        None => return false,
-    };
-    if caller == target {
-        return true;
-    }
-    matches!(current_privilege(), Some(PrivilegeLevel::Core))
+fn caller_has_process_kill_capability() -> bool {
+    crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::ProcessKill,
+    ]) || crate::syscall::security::caller_is_core_or_service()
 }
 
 fn caller_can_broadcast_signal() -> bool {
-    matches!(current_privilege(), Some(PrivilegeLevel::Core))
+    caller_has_process_kill_capability()
 }
 
 /// 指定プロセスの最初のスレッドを起床させる

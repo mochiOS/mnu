@@ -1,20 +1,9 @@
+use crate::capability::Capability;
 use crate::syscall::{EINVAL, ENODATA, EPERM, SUCCESS};
 
-/// マウス入力注入 API を呼び出せるか確認する
-///
-/// Service または Core 権限のみ許可する。
-fn caller_has_mouse_inject_privilege() -> bool {
-    crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-        .and_then(|pid| {
-            crate::task::with_process(pid, |p| {
-                matches!(
-                    p.privilege(),
-                    crate::task::PrivilegeLevel::Core | crate::task::PrivilegeLevel::Service
-                )
-            })
-        })
-        .unwrap_or(false)
+fn caller_has_mouse_capability(cap: Capability) -> bool {
+    crate::syscall::security::caller_has_any_capability(&[cap])
+        || crate::syscall::security::caller_is_core_or_service()
 }
 
 /// PS/2 マウスパケットを 1 つ読み取る（非ブロッキング）
@@ -22,6 +11,9 @@ fn caller_has_mouse_inject_privilege() -> bool {
 /// 返り値は `b0 | (b1 << 8) | (b2 << 16)` 形式。
 /// キューが空なら ENODATA。
 pub fn read_packet() -> Result<u64, u64> {
+    if !caller_has_mouse_capability(Capability::InputPointer) {
+        return Err(EPERM);
+    }
     match crate::util::ps2mouse::pop_packet() {
         Some(packet) => Ok(packet as u64),
         None => Err(ENODATA),
@@ -33,6 +25,9 @@ pub fn read_packet() -> Result<u64, u64> {
 /// データが到着するまで waiter 登録してスレッドをスリープし、
 /// IRQ12 での wake により再開する。
 pub fn read_packet_blocking() -> Result<u64, u64> {
+    if !caller_has_mouse_capability(Capability::InputPointer) {
+        return Err(EPERM);
+    }
     if let Some(packet) = crate::util::ps2mouse::pop_packet() {
         return Ok(packet as u64);
     }
@@ -71,7 +66,7 @@ pub fn read_packet_blocking() -> Result<u64, u64> {
 /// `packet` は `b0 | (b1 << 8) | (b2 << 16)` 形式。
 /// 互換のため `wheel` を含む 4 バイト (`b3<<24`) も受理する。
 pub fn inject_packet(packet: u64) -> u64 {
-    if !caller_has_mouse_inject_privilege() {
+    if !caller_has_mouse_capability(Capability::InputPointerGlobal) {
         return EPERM;
     }
     if packet > 0xFFFF_FFFF {

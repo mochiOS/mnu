@@ -236,7 +236,16 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::GetTid as u64 => process::gettid(),
         x if x == SyscallNumber::Futex as u64 => process::futex(arg0, arg1 as u32, arg2, arg3),
         x if x == SyscallNumber::ArchPrctl as u64 => process::arch_prctl(arg0, arg1),
-        x if x == SyscallNumber::ClockGettime as u64 => time::clock_gettime(arg0, arg1),
+        x if x == SyscallNumber::ClockGettime as u64 => {
+            if crate::syscall::security::caller_has_any_capability(&[
+                crate::capability::Capability::SystemTimeRead,
+            ]) || crate::syscall::security::caller_is_core_or_service()
+            {
+                time::clock_gettime(arg0, arg1)
+            } else {
+                EPERM
+            }
+        }
         x if x == SyscallNumber::Getcwd as u64 => fs::getcwd(arg0, arg1),
         x if x == SyscallNumber::Truncate as u64 => fs::truncate(arg0, arg1),
         x if x == SyscallNumber::Ftruncate as u64 => fs::ftruncate(arg0, arg1),
@@ -246,7 +255,16 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
             task::yield_now();
             SUCCESS
         }
-        x if x == SyscallNumber::GetTicks as u64 => time::get_ticks(),
+        x if x == SyscallNumber::GetTicks as u64 => {
+            if crate::syscall::security::caller_has_any_capability(&[
+                crate::capability::Capability::SystemTimeRead,
+            ]) || crate::syscall::security::caller_is_core_or_service()
+            {
+                time::get_ticks()
+            } else {
+                EPERM
+            }
+        }
         x if x == SyscallNumber::IpcSend as u64 => ipc::send(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcRecv as u64 => ipc::recv(arg0, arg1),
         x if x == SyscallNumber::IpcRecvWait as u64 => ipc::recv_blocking(arg0, arg1),
@@ -264,7 +282,16 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Chdir as u64 => fs::chdir(arg0),
         x if x == SyscallNumber::KeyboardRead as u64 => keyboard::read_char(),
         x if x == SyscallNumber::KeyboardReadTap as u64 => keyboard::read_char_tap(),
-        x if x == SyscallNumber::KeyboardReadWait as u64 => keyboard::read_char_blocking() as u64,
+        x if x == SyscallNumber::KeyboardReadWait as u64 => {
+            if crate::syscall::security::caller_has_any_capability(&[
+                crate::capability::Capability::InputKeyboard,
+            ]) || crate::syscall::security::caller_is_core_or_service()
+            {
+                keyboard::read_char_blocking() as u64
+            } else {
+                EPERM
+            }
+        }
         x if x == SyscallNumber::MouseRead as u64 => {
             if arg0 == 0 {
                 match mouse::read_packet() {
