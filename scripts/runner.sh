@@ -16,7 +16,7 @@ OVMF_VARS="${OVMF_VARS:-${RUN_DIR}/OVMF_VARS_4M.fd}"
 mkdir -p "${TARGET_DIR}" "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}" "${ROOTFS_STAGE}/config"
 
 echo "[build] kernel"
-RUSTC_BOOTSTRAP=1 cargo build --locked --release --features kernel-bin --manifest-path "${ROOT_DIR}/Cargo.toml"
+RUSTC_BOOTSTRAP=1 cargo build --locked --release --target x86_64-unknown-none --features kernel-bin --manifest-path "${ROOT_DIR}/Cargo.toml"
 
 echo "[build] userland"
 RUSTFLAGS="-C link-arg=--image-base=0x10000" \

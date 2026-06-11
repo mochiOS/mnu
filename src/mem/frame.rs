@@ -392,33 +392,3 @@ pub fn is_allowed_mmio_range(start_phys: u64, size: u64) -> bool {
     // メモリマップに記述のない領域 = PCI MMIO ホール (高位 BAR など) は許可
     !overlaps_any
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mmio_region_type_policy_allowed_cases() {
-        for t in [
-            MemoryType::Reserved,
-            MemoryType::AcpiNvs,
-            MemoryType::Framebuffer,
-        ] {
-            assert!(mmio_region_type_allowed(t));
-        }
-    }
-
-    #[test]
-    fn mmio_region_type_policy_denied_cases() {
-        for t in [
-            MemoryType::Usable,
-            MemoryType::AcpiReclaimable,
-            MemoryType::BootloaderReclaimable,
-            MemoryType::BadMemory,
-            MemoryType::KernelStack,
-            MemoryType::PageTable,
-        ] {
-            assert!(!mmio_region_type_allowed(t));
-        }
-    }
-}

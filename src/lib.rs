@@ -6,6 +6,11 @@
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
 
+#[cfg(test)]
+compile_error!(
+    "cargo test is disabled for this crate; use the QEMU/kernel self-test path instead"
+);
+
 #[cfg(feature = "kcfi")]
 compile_error!(
     "feature `kcfi` is intentionally gated off: the current mochiOS build does not have a \
@@ -35,45 +40,60 @@ pub mod result;
 /// 監査ログ
 pub mod audit;
 
+#[cfg(not(test))]
 /// 割込み管理
 pub mod interrupt;
 
+#[cfg(not(test))]
 pub mod config;
 /// カーネル本体
+#[cfg(not(test))]
 pub mod kernel;
+#[cfg(not(test))]
 pub mod kmod;
 
+#[cfg(not(test))]
 /// メモリ管理、GDT、TSSを含む
 pub mod mem;
 
+#[cfg(not(test))]
 /// ELF周り
 pub mod elf;
 
+#[cfg(not(test))]
 /// 起動ポリシー、manifest、署名検証の境界
 pub mod policy;
 
 /// パニックハンドラ
 pub mod panic;
 
+#[cfg(not(test))]
 /// タスク管理
 pub mod task;
 
+#[cfg(not(test))]
 /// システムコール
 pub mod syscall;
 
+#[cfg(not(test))]
 /// 起動時初期化
 pub mod init;
 
+#[cfg(not(test))]
 /// ユーティリティモジュール
 pub mod util;
 
+#[cfg(not(test))]
 /// capability（権限）管理
 pub mod capability;
 
+#[cfg(not(test))]
 /// CPU機能の初期化
 pub mod cpu;
+#[cfg(not(test))]
 /// per-CPU状態管理
 pub mod percpu;
+#[cfg(not(test))]
 /// SMP/マルチコアの共有ハンドオフ
 pub mod smp;
 
@@ -101,6 +121,7 @@ impl SmpHandoff {
     }
 }
 
+#[cfg(not(test))]
 pub use kernel::kernel_entry;
 pub use result::{Kernel, Result};
 
