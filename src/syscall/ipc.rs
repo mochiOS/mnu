@@ -8,6 +8,87 @@ const MAILBOX_CAP: usize = 64;
 const MAX_MSG_SIZE: usize = 4128; // FsResponse(4112) / DiskBulkResponse(2064) を収容
 const MAX_EXT_PAGES: usize = 128;
 
+/// endpoint ベース IPC への移行用ハンドル
+///
+/// 既存の thread-ID ベースの mailbox を直接露出せず、世代番号付きの endpoint を
+/// 受け渡すための薄いラッパとして使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpcEndpoint {
+    pub thread_id: u64,
+    pub slot: u16,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointRights(u8);
+
+impl EndpointRights {
+    pub const SEND: Self = Self(0x1);
+    pub const RECV: Self = Self(0x2);
+    pub const CREATE: Self = Self(0x4);
+    pub const MANAGE: Self = Self(0x8);
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+pub fn endpoint_for_thread(thread_id: u64) -> Option<IpcEndpoint> {
+    let (slot, generation) = crate::task::thread_slot_index_and_generation_by_u64(thread_id)?;
+    Some(IpcEndpoint {
+        thread_id,
+        slot: slot as u16,
+        generation,
+    })
+}
+
+pub fn endpoint_is_valid(endpoint: IpcEndpoint) -> bool {
+    match crate::task::thread_slot_index_and_generation_by_u64(endpoint.thread_id) {
+        Some((slot, generation)) => slot as u16 == endpoint.slot && generation == endpoint.generation,
+        None => false,
+    }
+}
+
+pub fn endpoint_rights_for_process(_process_id: u64) -> EndpointRights {
+    // 既存の権限モデルを壊さずに移行できるよう、現時点では呼び出し元側が
+    // capability に基づいて解釈する前提のプレースホルダにしておく。
+    EndpointRights::SEND.union(EndpointRights::RECV)
+}
+
+pub fn send_to_endpoint(endpoint: IpcEndpoint, buf_ptr: u64, len: u64) -> u64 {
+    if !endpoint_is_valid(endpoint) {
+        return EINVAL;
+    }
+    send(endpoint.thread_id, buf_ptr, len)
+}
+
+pub fn send_pages_to_endpoint(
+    endpoint: IpcEndpoint,
+    map_start: u64,
+    total: u64,
+    pages: &[u64],
+) -> bool {
+    if !endpoint_is_valid(endpoint) {
+        return false;
+    }
+    send_pages_from_kernel(endpoint.thread_id, map_start, total, pages)
+}
+
+pub fn send_map_header_to_endpoint(endpoint: IpcEndpoint, map_start: u64, total: u64) -> bool {
+    if !endpoint_is_valid(endpoint) {
+        return false;
+    }
+    send_map_header_from_kernel(endpoint.thread_id, map_start, total)
+}
+
 #[inline]
 fn ipc_mailbox_cap() -> usize {
     crate::config::kernel().ipc.mailbox_cap.min(MAILBOX_CAP)

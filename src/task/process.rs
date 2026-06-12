@@ -10,6 +10,34 @@ use super::fd_table::FdTable;
 use super::ids::{PrivilegeLevel, ProcessId, ProcessState};
 use super::signal::SignalState;
 
+/// プロセス単位の resource limit
+#[derive(Clone, Copy, Debug)]
+pub struct ResourceLimits {
+    pub max_threads: usize,
+    pub max_fds: usize,
+    pub max_ipc_queue: usize,
+    pub max_ipc_bytes: usize,
+    pub max_mapped_pages: usize,
+    pub max_mmio_ranges: usize,
+    pub max_irq_binds: usize,
+    pub max_cext_instances: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_threads: 64,
+            max_fds: super::fd_table::PROCESS_MAX_FDS,
+            max_ipc_queue: crate::config::kernel().ipc.mailbox_cap,
+            max_ipc_bytes: crate::config::kernel().ipc.max_msg_size,
+            max_mapped_pages: 4096,
+            max_mmio_ranges: 16,
+            max_irq_binds: 8,
+            max_cext_instances: 8,
+        }
+    }
+}
+
 /// プロセス構造体
 ///
 /// メモリ空間とリソースを管理する実行単位。
@@ -32,7 +60,7 @@ pub struct Process {
     /// プロセスに付与された capability（カーネルが保持）
     ///
     /// ユーザープロセスが自分で capability を増やせると sandbox を回避できるため、
-    /// 変更は信頼済みの起動経路（init/core/process.service 等）からのみ行う。
+    /// 変更は信頼済みの起動経路からのみ行う。
     capabilities: CapabilitySet,
     /// 親プロセスID（存在する場合）
     parent_id: Option<ProcessId>,
@@ -65,6 +93,8 @@ pub struct Process {
     signal_state: alloc::boxed::Box<SignalState>,
     /// プロセスごとのファイルディスクリプタテーブル — ヒープに置いてスタック消費を抑える
     fd_table: alloc::boxed::Box<FdTable>,
+    /// プロセスごとの resource limit
+    resource_limits: ResourceLimits,
 }
 
 impl Process {
@@ -119,6 +149,7 @@ impl Process {
             sid: 0,
             signal_state: alloc::boxed::Box::new(SignalState::new()),
             fd_table: FdTable::new_boxed(),
+            resource_limits: ResourceLimits::default(),
         }
     }
 
@@ -280,6 +311,14 @@ impl Process {
     /// FD テーブルへの可変アクセス
     pub fn fd_table_mut(&mut self) -> &mut FdTable {
         &mut self.fd_table
+    }
+
+    pub fn resource_limits(&self) -> ResourceLimits {
+        self.resource_limits
+    }
+
+    pub fn set_resource_limits(&mut self, limits: ResourceLimits) {
+        self.resource_limits = limits;
     }
 
     /// fork 用: FD テーブルをクローンして新しい Box を返す

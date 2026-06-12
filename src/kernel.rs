@@ -71,20 +71,25 @@ fn kernel_main() -> ! {
 
     crate::smp::start_secondary_cpus();
 
-    // core.serviceのみ起動（他のサービスはcore.serviceが管理）
-    info!("Starting core.service");
+    // 最小のサービス管理プロセスを起動する。
+    info!("Starting service manager");
     let mut caps = crate::capability::CapabilitySet::empty();
     for cap in crate::capability::Capability::kernel_enforced_capabilities() {
         caps.insert(*cap);
     }
-    let manager_pid = exec_kernel_with_name_and_caps("core.service", "core.service", caps);
+    let boot_launch = crate::policy::service_manager_launch();
+    let manager_pid = exec_kernel_with_name_and_caps(
+        boot_launch.process_name,
+        boot_launch.exec_path,
+        caps,
+    );
     if manager_pid != 0
         && task::with_process(task::ProcessId::from_u64(manager_pid), |_| ()).is_some()
     {
         crate::policy::register_service_manager_pid(manager_pid);
     } else {
         crate::warn!(
-            "Failed to register core.service as service manager (ret={:#x})",
+            "Failed to register service manager (ret={:#x})",
             manager_pid
         );
     }

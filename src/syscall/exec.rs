@@ -206,7 +206,7 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
 /// exec 時に capability を付与して起動する
 ///
 /// この syscall は「プロセスの capability を外部から設定できる経路」になるため、
-/// 呼び出し元は信頼済みの起動経路（core.service / process.service など）に限定する。
+/// 呼び出し元は信頼済みの起動経路に限定する。
 ///
 /// `caps_ptr` は NUL 区切りの capability 名列（例: `b"fs.read.user\\0window.create\\0"`）を指す。
 pub fn exec_with_capabilities_syscall(
@@ -288,8 +288,11 @@ fn exec_internal(
     if let Some(alias) = crate::task::process::driver_alias_for_path(path) {
         process_name = alias;
     }
-    let loaded = if process_name == "core.service" {
+    let loaded = if process_name.ends_with(".service") {
         crate::init::fs::read_initfs(path)
+            .or_else(|| crate::init::fs::read_rootfs(path))
+            .or_else(|| crate::kmod::fs::read_all(path))
+            .or_else(|| crate::init::fs::read(path))
     } else {
         crate::init::fs::read_rootfs(path)
             .or_else(|| crate::kmod::fs::read_all(path))
@@ -984,13 +987,15 @@ fn exec_with_data(
             Err(errno) => return errno,
         };
         let pid = proc.id();
-        let is_core_service = process_name.ends_with("core.service");
-        if is_core_service && !claim_service_manager_pid(pid.as_u64()) {
-            crate::warn!("core.service is already running, rejecting duplicate launch");
+        if privilege == crate::task::PrivilegeLevel::Service
+            && parent_pid.is_none()
+            && !claim_service_manager_pid(pid.as_u64())
+        {
+            crate::warn!("service manager is already running, rejecting duplicate launch");
             return crate::syscall::types::EINVAL;
         }
         if crate::task::add_process(proc).is_none() {
-            if is_core_service {
+            if privilege == crate::task::PrivilegeLevel::Service && parent_pid.is_none() {
                 let _ = release_service_manager_pid(pid.as_u64());
             }
             return crate::syscall::types::EINVAL;
@@ -1003,7 +1008,7 @@ fn exec_with_data(
             None => {
                 crate::warn!("Failed to allocate kernel stack for thread");
                 let _ = crate::task::remove_process(pid);
-                if is_core_service {
+                if privilege == crate::task::PrivilegeLevel::Service && parent_pid.is_none() {
                     let _ = release_service_manager_pid(pid.as_u64());
                 }
                 let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
@@ -1036,7 +1041,7 @@ fn exec_with_data(
         if add_res.is_none() {
             crate::warn!("Failed to add thread");
             let _ = crate::task::remove_process(pid);
-            if is_core_service {
+            if privilege == crate::task::PrivilegeLevel::Service && parent_pid.is_none() {
                 let _ = release_service_manager_pid(pid.as_u64());
             }
             let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);

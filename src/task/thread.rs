@@ -778,6 +778,23 @@ impl ThreadQueue {
             return None;
         }
 
+        if let Some(limits) = crate::task::with_process(thread.process_id(), |p| p.resource_limits())
+        {
+            let current_threads = self
+                .threads
+                .iter()
+                .filter_map(|slot| slot.as_ref())
+                .filter(|t| t.process_id() == thread.process_id())
+                .count();
+            if current_threads >= limits.max_threads {
+                crate::audit::log(
+                    crate::audit::AuditEventKind::Fault,
+                    "thread limit exceeded",
+                );
+                return None;
+            }
+        }
+
         let id = thread.id();
         let is_ready = thread.state() == ThreadState::Ready;
 

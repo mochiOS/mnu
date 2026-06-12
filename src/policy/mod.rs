@@ -54,6 +54,39 @@ pub struct LaunchPolicy {
     pub foreground: bool,
 }
 
+/// 起動に必要な最小メタデータ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootLaunch {
+    pub process_name: &'static str,
+    pub exec_path: &'static str,
+    pub manifest_role: ManifestRole,
+}
+
+pub fn service_manager_launch() -> BootLaunch {
+    BootLaunch {
+        process_name: "service-manager",
+        exec_path: "system/services/service-manager.service",
+        manifest_role: ManifestRole::CoreService,
+    }
+}
+
+#[inline]
+fn role_is_service_like(role: ManifestRole) -> bool {
+    matches!(role, ManifestRole::CoreService | ManifestRole::Service | ManifestRole::Driver)
+}
+
+#[inline]
+fn role_priority(role: ManifestRole) -> u8 {
+    match role {
+        ManifestRole::Application => 0,
+        ManifestRole::Tool => 2,
+        ManifestRole::Service => 64,
+        ManifestRole::CoreService => 24,
+        ManifestRole::Driver => 160,
+        ManifestRole::Unknown => 8,
+    }
+}
+
 /// サービスマネージャーPIDを登録する（IDベース認可）
 pub fn register_service_manager_pid(pid: u64) {
     SERVICE_MANAGER_PID.store(pid, Ordering::SeqCst);
@@ -143,12 +176,39 @@ pub fn caller_can_grant_capabilities_on_exec() -> bool {
         if p.privilege() != PrivilegeLevel::Service {
             return false;
         }
-        matches!(
-            p.exe_path(),
-            "/system/services/process.service" | "system/services/process.service"
-        )
+        !p.exe_path().is_empty()
     })
     .unwrap_or(false)
+}
+
+/// manifest role を privilege に落とす
+#[inline]
+pub fn resolve_launch_privilege(role: ManifestRole, _install_source: InstallSource) -> PrivilegeLevel {
+    if role_is_service_like(role) {
+        PrivilegeLevel::Service
+    } else {
+        PrivilegeLevel::User
+    }
+}
+
+/// manifest role を priority に落とす
+#[inline]
+pub fn resolve_launch_priority(
+    role: ManifestRole,
+    _install_source: InstallSource,
+    _parent_pid: Option<ProcessId>,
+) -> u8 {
+    role_priority(role)
+}
+
+/// manifest role を foreground 判定に落とす
+#[inline]
+pub fn resolve_launch_foreground(
+    role: ManifestRole,
+    privilege: PrivilegeLevel,
+    _parent_pid: Option<ProcessId>,
+) -> bool {
+    privilege == PrivilegeLevel::User && matches!(role, ManifestRole::Application | ManifestRole::Tool)
 }
 
 /// 呼び出し元が Service/Core か
@@ -161,21 +221,12 @@ pub fn caller_is_service_or_core_process() -> bool {
 pub fn resolve_exec_privilege(process_name: &str, exec_path: &str) -> PrivilegeLevel {
     let is_driver_path =
         exec_path.starts_with("bin/drivers/") || exec_path.starts_with("/bin/drivers/");
-    let is_kagami_viewkit_path = matches!(
-        exec_path,
-        "/applications/Kagami.app/entry.elf"
-            | "/applications/ViewKit.app/entry.elf"
-            | "/applications/Binder.app/entry.elf"
-            | "/applications/Dock.app/entry.elf"
-            | "applications/Kagami.app/entry.elf"
-            | "applications/ViewKit.app/entry.elf"
-            | "applications/Binder.app/entry.elf"
-            | "applications/Dock.app/entry.elf"
-    );
-    if process_name.ends_with(".service")
-        || is_kagami_viewkit_path
-        || (is_driver_path && caller_is_service_or_core())
-    {
+    let role = if process_name.ends_with(".service") || is_driver_path {
+        ManifestRole::Service
+    } else {
+        ManifestRole::Application
+    };
+    if role_is_service_like(role) {
         PrivilegeLevel::Service
     } else {
         PrivilegeLevel::User
@@ -189,8 +240,6 @@ pub fn resolve_exec_priority(
     exec_path: &str,
     parent_pid: Option<ProcessId>,
 ) -> u8 {
-    let is_service_path =
-        exec_path.starts_with("/system/services/") || exec_path.starts_with("system/services/");
     let is_driver_path =
         exec_path.starts_with("/bin/drivers/") || exec_path.starts_with("bin/drivers/");
     let is_application_path =
@@ -203,26 +252,10 @@ pub fn resolve_exec_priority(
     if is_regular_bin_path && !is_driver_path {
         return 2;
     }
-
-    if process_name == "shell.service" {
-        return 4;
-    }
-    if process_name == "window.service" || process_name == "process.service" {
-        return 8;
-    }
-    if process_name == "capability.service" || process_name == "device.service" {
-        return 12;
-    }
-    if process_name == "core.service" || process_name == "net.service" {
-        return 24;
-    }
-    if process_name == "driver.service" {
-        return 96;
-    }
-    if process_name == "disk.service" || is_driver_path {
+    if is_driver_path {
         return 160;
     }
-    if is_service_path {
+    if process_name.ends_with(".service") {
         return 64;
     }
 
@@ -232,13 +265,8 @@ pub fn resolve_exec_priority(
             name.push_str(process.name());
             name
         });
-        if let Some(parent_name) = parent_name {
-            if parent_name == "shell.service" || parent_name == "process.service" {
-                return 0;
-            }
-            if parent_name == "window.service" {
-                return 2;
-            }
+        if parent_name.is_some() {
+            return 8;
         }
     }
 
@@ -271,10 +299,7 @@ pub fn resolve_exec_foreground(
         return false;
     };
     crate::task::with_process(parent, |process| {
-        process.name() == "shell.service"
-            || process.name() == "process.service"
-            || process.name() == "window.service"
-            || process.is_foreground()
+        process.is_foreground()
     })
     .unwrap_or(false)
 }

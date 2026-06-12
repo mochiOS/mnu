@@ -88,6 +88,10 @@ pub mod util;
 pub mod capability;
 
 #[cfg(not(test))]
+/// cext 境界
+pub mod cext;
+
+#[cfg(not(test))]
 /// CPU機能の初期化
 pub mod cpu;
 #[cfg(not(test))]

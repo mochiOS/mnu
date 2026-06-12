@@ -1,7 +1,7 @@
 //! PS/2 キーボードドライバ (カーネル側)
 //!
 //! IRQ1 割り込みハンドラからスキャンコードを受け取りFIFOに蓄積する。
-//! 変換ロジックはユーザー空間 (shell.service) が担当する。
+//! 変換ロジックはユーザー空間の service が担当する。
 
 use super::fifo::Fifo;
 use core::sync::atomic::{AtomicU64, Ordering};

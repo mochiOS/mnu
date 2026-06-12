@@ -153,7 +153,6 @@ enum SpecialFileKind {
     Zero,
     Null,
     AuditLog,
-    WaylandSocket,
     RuntimeDir,
 }
 
@@ -165,7 +164,6 @@ fn special_file_kind(path: &str) -> Option<SpecialFileKind> {
         "/dev/null" => Some(SpecialFileKind::Null),
         "/log/audit.log" | "/var/log/audit.log" => Some(SpecialFileKind::AuditLog),
         "/run" | "/run/user" | "/run/user/0" => Some(SpecialFileKind::RuntimeDir),
-        "/run/user/0/wayland-0" => Some(SpecialFileKind::WaylandSocket),
         _ => None,
     }
 }
@@ -222,7 +220,6 @@ fn special_file_metadata(path: &str) -> Option<(u16, u64)> {
     match special_file_kind(path)? {
         SpecialFileKind::Zero | SpecialFileKind::Null => Some((0x2000 | 0o666, 0)),
         SpecialFileKind::AuditLog => Some((0x8000 | 0o444, crate::audit::file_size() as u64)),
-        SpecialFileKind::WaylandSocket => Some((0xC000 | 0o660, 0)),
         SpecialFileKind::RuntimeDir => Some((0x4000 | 0o755, 0)),
     }
 }
@@ -239,7 +236,6 @@ fn special_dir_entries(path: &str) -> Option<Vec<String>> {
         })),
         "/run" => Some(vec!["user".to_string()]),
         "/run/user" => Some(vec!["0".to_string()]),
-        "/run/user/0" => Some(vec!["wayland-0".to_string()]),
         _ => None,
     }
 }
@@ -275,7 +271,6 @@ fn merge_special_dir_entries(mut entries: Vec<String>, path: &str) -> Option<Vec
 fn special_dir_entry_dtype(path: &str, name: &str) -> Option<u8> {
     match (path, name) {
         ("/run", "user") | ("/run/user", "0") => Some(4),
-        ("/run/user/0", "wayland-0") => Some(12),
         ("/dev/shm", _) => Some(8),
         _ => None,
     }
@@ -295,18 +290,14 @@ fn special_file_requires_read_cap(path: &str) -> bool {
 fn special_path_blocks_mutation(path: &str) -> bool {
     matches!(
         special_file_kind(path),
-        Some(
-            SpecialFileKind::RuntimeDir
-                | SpecialFileKind::WaylandSocket
-                | SpecialFileKind::AuditLog
-        )
+        Some(SpecialFileKind::RuntimeDir | SpecialFileKind::AuditLog)
     )
 }
 
 #[inline]
 fn special_file_allows_open(path: &str, flags: u64) -> bool {
     match special_file_kind(path) {
-        Some(SpecialFileKind::RuntimeDir) | Some(SpecialFileKind::WaylandSocket) => {
+        Some(SpecialFileKind::RuntimeDir) => {
             !has_write_intent(flags) && (flags & O_CREAT) == 0 && (flags & O_TRUNC) == 0
         }
         Some(SpecialFileKind::AuditLog) => !has_write_intent(flags),
@@ -1095,15 +1086,15 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         }
         if handle_is_special(fh) {
             let to_read = match handle_special_kind(fh) {
-                Some(SpecialFileKind::Null) => 0usize,
-                Some(SpecialFileKind::Zero) => core::cmp::min(len as usize, len as usize),
-                Some(SpecialFileKind::AuditLog) => {
-                    let available = crate::audit::file_size().saturating_sub(fh.pos);
-                    core::cmp::min(available, len as usize)
-                }
-                Some(SpecialFileKind::WaylandSocket) | Some(SpecialFileKind::RuntimeDir) => 0usize,
-                None => 0usize,
-            };
+            Some(SpecialFileKind::Null) => 0usize,
+            Some(SpecialFileKind::Zero) => core::cmp::min(len as usize, len as usize),
+            Some(SpecialFileKind::AuditLog) => {
+                let available = crate::audit::file_size().saturating_sub(fh.pos);
+                core::cmp::min(available, len as usize)
+            }
+            Some(SpecialFileKind::RuntimeDir) => 0usize,
+            None => 0usize,
+        };
             if to_read == 0 {
                 return Some(Vec::new());
             }
@@ -1217,7 +1208,7 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if is_special
         && matches!(
             special_kind,
-            Some(SpecialFileKind::WaylandSocket | SpecialFileKind::RuntimeDir)
+            Some(SpecialFileKind::RuntimeDir)
         )
     {
         return EACCES;

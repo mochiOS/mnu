@@ -9,6 +9,325 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 
+/// kernel が直接強制する低レベル権限
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum KernelCapability {
+    ProcessKill,
+    ProcessSpawn,
+    IpcEndpointCreate,
+    IpcEndpointSend,
+    IpcEndpointRecv,
+    VmMap,
+    VmUnmap,
+    MmioMap,
+    IrqBind,
+    CextLoad,
+    CextStop,
+    DeviceClaim,
+    KernelDebug,
+}
+
+/// kernel が権限を結びつける対象オブジェクト
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum KernelObjectRef {
+    Process(u64),
+    Thread(u64),
+    IpcEndpoint(u64),
+    VmObject(u64),
+    MmioRegion { base: u64, size: u64 },
+    IrqLine(u32),
+    CextInstance(u64),
+    DeviceHandle(u64),
+}
+
+/// kernel capability と対象オブジェクトの組
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct KernelAuthority {
+    pub capability: KernelCapability,
+    pub object: KernelObjectRef,
+}
+
+impl KernelAuthority {
+    pub const fn new(capability: KernelCapability, object: KernelObjectRef) -> Self {
+        Self { capability, object }
+    }
+}
+
+impl KernelCapability {
+    pub fn as_str(&self) -> &'static str {
+        use KernelCapability::*;
+        match self {
+            ProcessKill => "process.kill",
+            ProcessSpawn => "process.spawn",
+            IpcEndpointCreate => "ipc.endpoint.create",
+            IpcEndpointSend => "ipc.endpoint.send",
+            IpcEndpointRecv => "ipc.endpoint.recv",
+            VmMap => "vm.map",
+            VmUnmap => "vm.unmap",
+            MmioMap => "mmio.map",
+            IrqBind => "irq.bind",
+            CextLoad => "cext.load",
+            CextStop => "cext.stop",
+            DeviceClaim => "device.claim",
+            KernelDebug => "kernel.debug",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        use KernelCapability::*;
+        match s {
+            "process.kill" => Some(ProcessKill),
+            "process.spawn" => Some(ProcessSpawn),
+            "ipc.endpoint.create" => Some(IpcEndpointCreate),
+            "ipc.endpoint.send" => Some(IpcEndpointSend),
+            "ipc.endpoint.recv" => Some(IpcEndpointRecv),
+            "vm.map" => Some(VmMap),
+            "vm.unmap" => Some(VmUnmap),
+            "mmio.map" => Some(MmioMap),
+            "irq.bind" => Some(IrqBind),
+            "cext.load" => Some(CextLoad),
+            "cext.stop" => Some(CextStop),
+            "device.claim" => Some(DeviceClaim),
+            "kernel.debug" => Some(KernelDebug),
+            _ => None,
+        }
+    }
+}
+
+/// service や application が解釈する高水準権限
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum UserCapability {
+    FsReadUserDocuments,
+    FsWriteUserDocuments,
+    FsReadUserDownloads,
+    FsWriteUserDownloads,
+    FsReadUserDesktop,
+    FsWriteUserDesktop,
+    FsReadUserPictures,
+    FsWriteUserPictures,
+    FsReadUserMusic,
+    FsWriteUserMusic,
+    FsReadUserVideos,
+    FsWriteUserVideos,
+    FsReadUser,
+    FsWriteUser,
+    FsReadTmp,
+    FsWriteTmp,
+    FsReadRemovable,
+    FsWriteRemovable,
+    FsReadAll,
+    FsWriteAll,
+    NetConnect,
+    NetListen,
+    NetRaw,
+    WindowCreate,
+    WindowOverlay,
+    WindowCapture,
+    DisplayRead,
+    DisplayCapture,
+    InputKeyboard,
+    InputKeyboardGlobal,
+    InputPointer,
+    InputPointerGlobal,
+    InputGamepad,
+    AudioPlayback,
+    AudioRecord,
+    ClipboardRead,
+    ClipboardWrite,
+    NotificationSend,
+    CameraAccess,
+    MicrophoneAccess,
+    LocationAccess,
+    BluetoothAccess,
+    UsbAccess,
+    SerialAccess,
+    PowerShutdown,
+    PowerReboot,
+    PowerSuspend,
+    SystemTimeRead,
+    SystemTimeSet,
+    SystemInfoRead,
+    SystemLogsRead,
+    PackageInstall,
+    PackageRemove,
+    PackageUpdate,
+    ServiceRegister,
+    ServiceControl,
+    VmCreate,
+    VmControl,
+    KernelModuleLoad,
+    AccountSelfRead,
+    AccountSelfModify,
+    AccountOtherRead,
+    AccountOtherModify,
+    SettingsRead,
+    SettingsWrite,
+    Unsandboxed,
+    DeveloperDebug,
+    DeveloperProfile,
+    DeveloperTracing,
+}
+
+impl UserCapability {
+    pub fn as_str(&self) -> &'static str {
+        use UserCapability::*;
+        match self {
+            FsReadUserDocuments => "fs.read.user.documents",
+            FsWriteUserDocuments => "fs.write.user.documents",
+            FsReadUserDownloads => "fs.read.user.downloads",
+            FsWriteUserDownloads => "fs.write.user.downloads",
+            FsReadUserDesktop => "fs.read.user.desktop",
+            FsWriteUserDesktop => "fs.write.user.desktop",
+            FsReadUserPictures => "fs.read.user.pictures",
+            FsWriteUserPictures => "fs.write.user.pictures",
+            FsReadUserMusic => "fs.read.user.music",
+            FsWriteUserMusic => "fs.write.user.music",
+            FsReadUserVideos => "fs.read.user.videos",
+            FsWriteUserVideos => "fs.write.user.videos",
+            FsReadUser => "fs.read.user",
+            FsWriteUser => "fs.write.user",
+            FsReadTmp => "fs.read.tmp",
+            FsWriteTmp => "fs.write.tmp",
+            FsReadRemovable => "fs.read.removable",
+            FsWriteRemovable => "fs.write.removable",
+            FsReadAll => "fs.read.all",
+            FsWriteAll => "fs.write.all",
+            NetConnect => "net.connect",
+            NetListen => "net.listen",
+            NetRaw => "net.raw",
+            WindowCreate => "window.create",
+            WindowOverlay => "window.overlay",
+            WindowCapture => "window.capture",
+            DisplayRead => "display.read",
+            DisplayCapture => "display.capture",
+            InputKeyboard => "input.keyboard",
+            InputKeyboardGlobal => "input.keyboard.global",
+            InputPointer => "input.pointer",
+            InputPointerGlobal => "input.pointer.global",
+            InputGamepad => "input.gamepad",
+            AudioPlayback => "audio.playback",
+            AudioRecord => "audio.record",
+            ClipboardRead => "clipboard.read",
+            ClipboardWrite => "clipboard.write",
+            NotificationSend => "notification.send",
+            CameraAccess => "camera.access",
+            MicrophoneAccess => "microphone.access",
+            LocationAccess => "location.access",
+            BluetoothAccess => "bluetooth.access",
+            UsbAccess => "usb.access",
+            SerialAccess => "serial.access",
+            PowerShutdown => "power.shutdown",
+            PowerReboot => "power.reboot",
+            PowerSuspend => "power.suspend",
+            SystemTimeRead => "system.time.read",
+            SystemTimeSet => "system.time.set",
+            SystemInfoRead => "system.info.read",
+            SystemLogsRead => "system.logs.read",
+            PackageInstall => "package.install",
+            PackageRemove => "package.remove",
+            PackageUpdate => "package.update",
+            ServiceRegister => "service.register",
+            ServiceControl => "service.control",
+            VmCreate => "vm.create",
+            VmControl => "vm.control",
+            KernelModuleLoad => "kernel.module.load",
+            AccountSelfRead => "account.self.read",
+            AccountSelfModify => "account.self.modify",
+            AccountOtherRead => "account.other.read",
+            AccountOtherModify => "account.other.modify",
+            SettingsRead => "settings.read",
+            SettingsWrite => "settings.write",
+            Unsandboxed => "unsandboxed",
+            DeveloperDebug => "developer.debug",
+            DeveloperProfile => "developer.profile",
+            DeveloperTracing => "developer.tracing",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        use UserCapability::*;
+        match s {
+            "fs.read.user.documents" => Some(FsReadUserDocuments),
+            "fs.write.user.documents" => Some(FsWriteUserDocuments),
+            "fs.read.user.downloads" => Some(FsReadUserDownloads),
+            "fs.write.user.downloads" => Some(FsWriteUserDownloads),
+            "fs.read.user.desktop" => Some(FsReadUserDesktop),
+            "fs.write.user.desktop" => Some(FsWriteUserDesktop),
+            "fs.read.user.pictures" => Some(FsReadUserPictures),
+            "fs.write.user.pictures" => Some(FsWriteUserPictures),
+            "fs.read.user.music" => Some(FsReadUserMusic),
+            "fs.write.user.music" => Some(FsWriteUserMusic),
+            "fs.read.user.videos" => Some(FsReadUserVideos),
+            "fs.write.user.videos" => Some(FsWriteUserVideos),
+            "fs.read.user" => Some(FsReadUser),
+            "fs.write.user" => Some(FsWriteUser),
+            "fs.read.tmp" => Some(FsReadTmp),
+            "fs.write.tmp" => Some(FsWriteTmp),
+            "fs.read.removable" => Some(FsReadRemovable),
+            "fs.write.removable" => Some(FsWriteRemovable),
+            "fs.read.all" => Some(FsReadAll),
+            "fs.write.all" => Some(FsWriteAll),
+            "net.connect" => Some(NetConnect),
+            "net.listen" => Some(NetListen),
+            "net.raw" => Some(NetRaw),
+            "window.create" => Some(WindowCreate),
+            "window.overlay" => Some(WindowOverlay),
+            "window.capture" => Some(WindowCapture),
+            "display.read" => Some(DisplayRead),
+            "display.capture" => Some(DisplayCapture),
+            "input.keyboard" => Some(InputKeyboard),
+            "input.keyboard.global" => Some(InputKeyboardGlobal),
+            "input.pointer" => Some(InputPointer),
+            "input.pointer.global" => Some(InputPointerGlobal),
+            "input.gamepad" => Some(InputGamepad),
+            "audio.playback" => Some(AudioPlayback),
+            "audio.record" => Some(AudioRecord),
+            "clipboard.read" => Some(ClipboardRead),
+            "clipboard.write" => Some(ClipboardWrite),
+            "notification.send" => Some(NotificationSend),
+            "camera.access" => Some(CameraAccess),
+            "microphone.access" => Some(MicrophoneAccess),
+            "location.access" => Some(LocationAccess),
+            "bluetooth.access" => Some(BluetoothAccess),
+            "usb.access" => Some(UsbAccess),
+            "serial.access" => Some(SerialAccess),
+            "power.shutdown" => Some(PowerShutdown),
+            "power.reboot" => Some(PowerReboot),
+            "power.suspend" => Some(PowerSuspend),
+            "system.time.read" => Some(SystemTimeRead),
+            "system.time.set" => Some(SystemTimeSet),
+            "system.info.read" => Some(SystemInfoRead),
+            "system.logs.read" => Some(SystemLogsRead),
+            "package.install" => Some(PackageInstall),
+            "package.remove" => Some(PackageRemove),
+            "package.update" => Some(PackageUpdate),
+            "service.register" => Some(ServiceRegister),
+            "service.control" => Some(ServiceControl),
+            "vm.create" => Some(VmCreate),
+            "vm.control" => Some(VmControl),
+            "kernel.module.load" => Some(KernelModuleLoad),
+            "account.self.read" => Some(AccountSelfRead),
+            "account.self.modify" => Some(AccountSelfModify),
+            "account.other.read" => Some(AccountOtherRead),
+            "account.other.modify" => Some(AccountOtherModify),
+            "settings.read" => Some(SettingsRead),
+            "settings.write" => Some(SettingsWrite),
+            "unsandboxed" => Some(Unsandboxed),
+            "developer.debug" => Some(DeveloperDebug),
+            "developer.profile" => Some(DeveloperProfile),
+            "developer.tracing" => Some(DeveloperTracing),
+            _ => None,
+        }
+    }
+}
+
+/// capability の種別
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CapabilityKind {
+    Kernel,
+    User,
+}
+
 /// capability（権限）
 ///
 /// 文字列名は `Capability::as_str()` / `Capability::from_str()` で相互変換する。
@@ -338,6 +657,104 @@ impl Capability {
             _ => return None,
         };
         Some(cap)
+    }
+
+    pub fn kind(&self) -> CapabilityKind {
+        if self.to_kernel_capability().is_some() {
+            CapabilityKind::Kernel
+        } else {
+            CapabilityKind::User
+        }
+    }
+
+    pub fn to_kernel_capability(&self) -> Option<KernelCapability> {
+        use Capability::*;
+        Some(match self {
+            ProcessKill => KernelCapability::ProcessKill,
+            ProcessSpawn => KernelCapability::ProcessSpawn,
+            IpcClient => KernelCapability::IpcEndpointSend,
+            IpcServer => KernelCapability::IpcEndpointRecv,
+            VmCreate | VmControl => KernelCapability::VmMap,
+            KernelModuleLoad => KernelCapability::CextLoad,
+            KernelDebug => KernelCapability::KernelDebug,
+            _ => return None,
+        })
+    }
+
+    pub fn to_user_capability(&self) -> Option<UserCapability> {
+        use Capability::*;
+        Some(match self {
+            FsReadUserDocuments => UserCapability::FsReadUserDocuments,
+            FsWriteUserDocuments => UserCapability::FsWriteUserDocuments,
+            FsReadUserDownloads => UserCapability::FsReadUserDownloads,
+            FsWriteUserDownloads => UserCapability::FsWriteUserDownloads,
+            FsReadUserDesktop => UserCapability::FsReadUserDesktop,
+            FsWriteUserDesktop => UserCapability::FsWriteUserDesktop,
+            FsReadUserPictures => UserCapability::FsReadUserPictures,
+            FsWriteUserPictures => UserCapability::FsWriteUserPictures,
+            FsReadUserMusic => UserCapability::FsReadUserMusic,
+            FsWriteUserMusic => UserCapability::FsWriteUserMusic,
+            FsReadUserVideos => UserCapability::FsReadUserVideos,
+            FsWriteUserVideos => UserCapability::FsWriteUserVideos,
+            FsReadUser => UserCapability::FsReadUser,
+            FsWriteUser => UserCapability::FsWriteUser,
+            FsReadTmp => UserCapability::FsReadTmp,
+            FsWriteTmp => UserCapability::FsWriteTmp,
+            FsReadRemovable => UserCapability::FsReadRemovable,
+            FsWriteRemovable => UserCapability::FsWriteRemovable,
+            FsReadAll => UserCapability::FsReadAll,
+            FsWriteAll => UserCapability::FsWriteAll,
+            NetConnect => UserCapability::NetConnect,
+            NetListen => UserCapability::NetListen,
+            NetRaw => UserCapability::NetRaw,
+            WindowCreate => UserCapability::WindowCreate,
+            WindowOverlay => UserCapability::WindowOverlay,
+            WindowCapture => UserCapability::WindowCapture,
+            DisplayRead => UserCapability::DisplayRead,
+            DisplayCapture => UserCapability::DisplayCapture,
+            InputKeyboard => UserCapability::InputKeyboard,
+            InputKeyboardGlobal => UserCapability::InputKeyboardGlobal,
+            InputPointer => UserCapability::InputPointer,
+            InputPointerGlobal => UserCapability::InputPointerGlobal,
+            InputGamepad => UserCapability::InputGamepad,
+            AudioPlayback => UserCapability::AudioPlayback,
+            AudioRecord => UserCapability::AudioRecord,
+            ClipboardRead => UserCapability::ClipboardRead,
+            ClipboardWrite => UserCapability::ClipboardWrite,
+            NotificationSend => UserCapability::NotificationSend,
+            CameraAccess => UserCapability::CameraAccess,
+            MicrophoneAccess => UserCapability::MicrophoneAccess,
+            LocationAccess => UserCapability::LocationAccess,
+            BluetoothAccess => UserCapability::BluetoothAccess,
+            UsbAccess => UserCapability::UsbAccess,
+            SerialAccess => UserCapability::SerialAccess,
+            PowerShutdown => UserCapability::PowerShutdown,
+            PowerReboot => UserCapability::PowerReboot,
+            PowerSuspend => UserCapability::PowerSuspend,
+            SystemTimeRead => UserCapability::SystemTimeRead,
+            SystemTimeSet => UserCapability::SystemTimeSet,
+            SystemInfoRead => UserCapability::SystemInfoRead,
+            SystemLogsRead => UserCapability::SystemLogsRead,
+            PackageInstall => UserCapability::PackageInstall,
+            PackageRemove => UserCapability::PackageRemove,
+            PackageUpdate => UserCapability::PackageUpdate,
+            ServiceRegister => UserCapability::ServiceRegister,
+            ServiceControl => UserCapability::ServiceControl,
+            VmCreate => UserCapability::VmCreate,
+            VmControl => UserCapability::VmControl,
+            KernelModuleLoad => UserCapability::KernelModuleLoad,
+            AccountSelfRead => UserCapability::AccountSelfRead,
+            AccountSelfModify => UserCapability::AccountSelfModify,
+            AccountOtherRead => UserCapability::AccountOtherRead,
+            AccountOtherModify => UserCapability::AccountOtherModify,
+            SettingsRead => UserCapability::SettingsRead,
+            SettingsWrite => UserCapability::SettingsWrite,
+            Unsandboxed => UserCapability::Unsandboxed,
+            DeveloperDebug => UserCapability::DeveloperDebug,
+            DeveloperProfile => UserCapability::DeveloperProfile,
+            DeveloperTracing => UserCapability::DeveloperTracing,
+            _ => return None,
+        })
     }
 
     /// カーネルが最終的に強制する capability かどうか

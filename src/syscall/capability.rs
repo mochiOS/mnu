@@ -3,7 +3,7 @@
 //! カーネルはプロセスに紐づく `CapabilitySet` を保持し、各サービスが caller を検査できるように
 //! 最低限の照会 API を提供する。
 //!
-//! policy 判定（危険度分類、ユーザー許可 UI、manifest 解析など）は capability.service 側へ寄せる。
+//! policy 判定（危険度分類、ユーザー許可 UI、manifest 解析など）は service 側へ寄せる。
 
 extern crate alloc;
 
