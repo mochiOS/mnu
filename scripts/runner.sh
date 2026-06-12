@@ -27,6 +27,7 @@ cargo build --locked --release --target x86_64-unknown-uefi --manifest-path "${R
 
 KERNEL_BIN="${ROOT_DIR}/target/x86_64-unknown-none/release/kernel"
 USER_BIN="${ROOT_DIR}/examples/user/target/x86_64-unknown-none/release/user"
+CAPTEST_BIN="${ROOT_DIR}/examples/user/target/x86_64-unknown-none/release/captest"
 BOOT_BIN="$(find "${ROOT_DIR}/examples/boot/target/x86_64-unknown-uefi/release" -maxdepth 1 -type f \( -name 'boot' -o -name 'boot.efi' \) | head -n 1)"
 
 if [[ ! -f "${KERNEL_BIN}" ]]; then
@@ -35,6 +36,10 @@ if [[ ! -f "${KERNEL_BIN}" ]]; then
 fi
 if [[ ! -f "${USER_BIN}" ]]; then
     echo "user binary not found: ${USER_BIN}" >&2
+    exit 1
+fi
+if [[ ! -f "${CAPTEST_BIN}" ]]; then
+    echo "captest binary not found: ${CAPTEST_BIN}" >&2
     exit 1
 fi
 if [[ -z "${BOOT_BIN}" || ! -f "${BOOT_BIN}" ]]; then
@@ -48,7 +53,7 @@ mkdir -p "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}" "${ROOTFS_STAGE}/config"
 install -m 0644 "${KERNEL_BIN}" "${ESP_DIR}/kernel"
 install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/core.service"
-install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/captest.bin"
+install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/captest.bin"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/hello.bin"
 install -m 0644 "${ROOT_DIR}/examples/fs/hello.txt" "${ROOTFS_STAGE}/hello.txt"
 install -m 0644 "${ROOT_DIR}/examples/fs/config/kernel.conf" "${ROOTFS_STAGE}/config/kernel.conf"
