@@ -22,9 +22,3 @@ path = "src/captest_main.rs"
 test = false
 bench = false
 harness = false
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"

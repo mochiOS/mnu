@@ -199,6 +199,14 @@ impl BitmapFrameAllocator {
                     .map(|f| PhysFrame::containing_address(PhysAddr::new(f * 4096)))
             })
     }
+
+    fn align_up(value: u64, align: u64) -> u64 {
+        if align == 0 {
+            return value;
+        }
+        let mask = align - 1;
+        value.saturating_add(mask) & !mask
+    }
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
@@ -243,33 +251,25 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
         }
 
         // バンプアロケータから新規割り当て
-        let mut f = self.next_frame as u64;
-        let max_frame = self
-            .memory_map
-            .iter()
-            .map(|r| (r.start + r.len) / 4096)
-            .max()
-            .unwrap_or(0);
-
-        while f <= max_frame {
-            let phys_addr = f * 4096;
-            let mut usable = false;
-
-            for r in self.memory_map.iter() {
-                if r.region_type != MemoryType::Usable {
-                    continue;
-                }
-                if phys_addr >= r.start && phys_addr < r.start + r.len {
-                    usable = true;
-                    break;
-                }
+        let min_phys = (self.next_frame as u64).saturating_mul(4096);
+        for region in self.memory_map.iter() {
+            if region.region_type != MemoryType::Usable || region.len < 4096 {
+                continue;
             }
 
-            if usable {
-                self.next_frame = (f + 1) as usize;
-                return Some(PhysFrame::containing_address(PhysAddr::new(phys_addr)));
+            let region_start = Self::align_up(region.start, 4096);
+            let region_end = region.start.saturating_add(region.len) & !0xfffu64;
+            if region_end <= region_start {
+                continue;
             }
-            f += 1;
+
+            let phys_addr = core::cmp::max(region_start, min_phys);
+            if phys_addr >= region_end {
+                continue;
+            }
+
+            self.next_frame = (phys_addr / 4096 + 1) as usize;
+            return Some(PhysFrame::containing_address(PhysAddr::new(phys_addr)));
         }
         None
     }

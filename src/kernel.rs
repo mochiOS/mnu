@@ -79,8 +79,8 @@ fn kernel_main() -> ! {
     }
     let boot_launch = crate::policy::service_manager_launch();
     let manager_pid = exec_kernel_with_name_and_caps(
-        boot_launch.process_name,
         boot_launch.exec_path,
+        boot_launch.process_name,
         caps,
     );
     if manager_pid != 0

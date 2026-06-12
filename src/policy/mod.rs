@@ -64,8 +64,8 @@ pub struct BootLaunch {
 
 pub fn service_manager_launch() -> BootLaunch {
     BootLaunch {
-        process_name: "service-manager",
-        exec_path: "system/services/service-manager.service",
+        process_name: "core.service",
+        exec_path: "core.service",
         manifest_role: ManifestRole::CoreService,
     }
 }

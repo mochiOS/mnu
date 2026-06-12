@@ -13,7 +13,7 @@ To build the mnu kernel, you will need to have the following dependencies instal
 once you have the dependencies installed, you can build the kernel by running the following command in the root directory of the project:
 
 ```bash
-RUSTC_BOOTSTRAP=1 cargo build --locked --release --target x86_64-unknown-none --features kernel-bin
+cargo build
 ```
 
 ## Running

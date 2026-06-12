@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="${ROOT_DIR}/target/uefi"
+KERNEL_TARGET_NAME="x86_64-unknown-none"
+USER_TARGET_NAME="x86_64-unknown-none"
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 RUN_ID="$(date +%s)-$$"
@@ -16,18 +18,18 @@ OVMF_VARS="${OVMF_VARS:-${RUN_DIR}/OVMF_VARS_4M.fd}"
 mkdir -p "${TARGET_DIR}" "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}" "${ROOTFS_STAGE}/config"
 
 echo "[build] kernel"
-RUSTC_BOOTSTRAP=1 cargo build --locked --release --target x86_64-unknown-none --features kernel-bin --manifest-path "${ROOT_DIR}/Cargo.toml"
+cargo build --locked --release --target "${KERNEL_TARGET_NAME}" --features kernel-bin --manifest-path "${ROOT_DIR}/Cargo.toml"
 
 echo "[build] userland"
-RUSTFLAGS="-C link-arg=--image-base=0x10000" \
-    cargo build --locked --release --target x86_64-unknown-none --manifest-path "${ROOT_DIR}/examples/user/Cargo.toml"
+env RUSTFLAGS="-C link-arg=--image-base=0x10000" \
+    cargo build --locked --release --target "${USER_TARGET_NAME}" --manifest-path "${ROOT_DIR}/examples/user/Cargo.toml"
 
 echo "[build] bootloader"
 cargo build --locked --release --target x86_64-unknown-uefi --manifest-path "${ROOT_DIR}/examples/boot/Cargo.toml"
 
-KERNEL_BIN="${ROOT_DIR}/target/x86_64-unknown-none/release/kernel"
-USER_BIN="${ROOT_DIR}/examples/user/target/x86_64-unknown-none/release/user"
-CAPTEST_BIN="${ROOT_DIR}/examples/user/target/x86_64-unknown-none/release/captest"
+KERNEL_BIN="${ROOT_DIR}/target/${KERNEL_TARGET_NAME}/release/kernel"
+USER_BIN="${ROOT_DIR}/examples/user/target/${USER_TARGET_NAME}/release/user"
+CAPTEST_BIN="${ROOT_DIR}/examples/user/target/${USER_TARGET_NAME}/release/captest"
 BOOT_BIN="$(find "${ROOT_DIR}/examples/boot/target/x86_64-unknown-uefi/release" -maxdepth 1 -type f \( -name 'boot' -o -name 'boot.efi' \) | head -n 1)"
 
 if [[ ! -f "${KERNEL_BIN}" ]]; then
@@ -101,12 +103,10 @@ rm -f "${SERIAL_LOG}"
 
 echo "[run] qemu + userland self-test"
 
-coproc QEMU_PROC {
-    qemu-system-x86_64 "${QEMU_ARGS[@]}" 2>&1
-}
-
-QEMU_PID="${QEMU_PROC_PID}"
+qemu-system-x86_64 "${QEMU_ARGS[@]}" >"${SERIAL_LOG}" 2>&1 &
+QEMU_PID=$!
 PASS_FOUND=0
+NEXT_LINE=1
 
 cleanup() {
     kill "${QEMU_PID}" 2>/dev/null || true
@@ -115,14 +115,16 @@ cleanup() {
 trap cleanup EXIT
 
 for _ in $(seq 1 600); do
-    while IFS= read -r -t 0.01 line <&"${QEMU_PROC[0]}"; do
+    while IFS= read -r line; do
         printf '%s\n' "$line"
 
         if [[ "$line" == *"USERLAND SELF-TEST PASS"* ]]; then
             PASS_FOUND=1
             break
         fi
-    done
+    done < <(sed -n "${NEXT_LINE},\$p" "${SERIAL_LOG}")
+
+    NEXT_LINE=$(($(wc -l < "${SERIAL_LOG}") + 1))
 
     if [[ "${PASS_FOUND}" -eq 1 ]]; then
         break

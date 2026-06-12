@@ -27,24 +27,24 @@ pub static KERNEL_L4_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::A
 /// x86-64 canonical ユーザー空間上限
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 
-#[cfg(target_os = "uefi")]
+#[cfg(any(target_os = "uefi", target_os = "none"))]
 #[used]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text$A")]
 static __MOCHIOS_TEXT_START_MARKER: u8 = 0;
-#[cfg(target_os = "uefi")]
+#[cfg(any(target_os = "uefi", target_os = "none"))]
 #[used]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text$Z")]
 static __MOCHIOS_TEXT_END_MARKER: u8 = 0;
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(not(any(target_os = "uefi", target_os = "none")))]
 unsafe extern "C" {
     static __text_start: u8;
     static __text_end: u8;
 }
 
-#[cfg(target_os = "uefi")]
+#[cfg(any(target_os = "uefi", target_os = "none"))]
 fn kernel_text_range() -> (u64, u64) {
     (
         core::ptr::addr_of!(__MOCHIOS_TEXT_START_MARKER) as u64,
@@ -52,7 +52,7 @@ fn kernel_text_range() -> (u64, u64) {
     )
 }
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(not(any(target_os = "uefi", target_os = "none")))]
 fn kernel_text_range() -> (u64, u64) {
     unsafe {
         (
