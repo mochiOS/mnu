@@ -96,23 +96,23 @@ pub fn restore_page_table(previous_cr3: u64) {
         crate::mem::paging::switch_page_table(previous_cr3);
     }
 }
-
-/// KPTI: 現在スレッドがユーザー権限なら、そのプロセスのユーザーCR3へ切り替える
-pub fn switch_to_current_thread_user_page_table() {
-    let slot = match crate::task::current_thread_slot() {
-        Some(s) => s,
-        None => return,
-    };
-    let pid = match crate::task::with_thread_at_slot(slot, |t| t.process_id()) {
-        Some(p) => p,
-        None => return,
-    };
-    let is_core = crate::task::with_process(pid, |p| p.privilege())
-        .is_some_and(|lvl| lvl == crate::task::PrivilegeLevel::Core);
-    if is_core {
-        return;
+pub fn current_thread_user_page_table() -> Option<u64> {
+    if let Some(slot) = crate::task::current_thread_slot() {
+        if let Some(pid) = crate::task::with_thread_at_slot(slot, |t| t.process_id()) {
+            if let Some(pt) = crate::task::with_process(pid, |p| p.page_table()).flatten() {
+                return Some(pt);
+            }
+        }
     }
-    if let Some(user_pt) = crate::task::with_process(pid, |p| p.page_table()).flatten() {
+
+    let tid = crate::task::current_thread_id()?;
+    let pid = crate::task::with_thread(tid, |t| t.process_id())?;
+
+    crate::task::with_process(pid, |p| p.page_table()).flatten()
+}
+
+pub fn switch_to_current_thread_user_page_table() {
+    if let Some(user_pt) = current_thread_user_page_table() {
         crate::mem::paging::switch_page_table(user_pt);
     }
 }
@@ -279,7 +279,6 @@ pub unsafe extern "C" fn syscall_entry() {
         "pop r11",
         "pop rcx",
 
-        // CVE-2012-0217 緩和策: SYSRETQ 前にユーザー RIP/RSP の正規アドレスチェック
         // Intel CPU では SYSRETQ 実行時にRCX/RSPが非正規アドレス（bit 63:47 が不一致）だと
         // Ring 0 で #GP が発生し、攻撃者が制御フローを握る恐れがある (CVE-2012-0217)
         // ユーザー空間の正規アドレス: bit 63:47 = 0b000...0 (0x0000_7FFF_FFFF_FFFF 以下)
@@ -292,21 +291,37 @@ pub unsafe extern "C" fn syscall_entry() {
         "test rdx, rdx",
         "jnz 2f",
 
-        // ユーザーデータセグメントを再設定（後で rdx は復元される）
+        // ユーザーデータセグメントを再設定
         "mov dx, 0x1b",
         "mov ds, dx",
         "mov es, dx",
 
-        // Linux syscall ABI に合わせて volatile 引数レジスタも復元
+        // sysretq直前に戻すゆーざーCR3を取得する
+        "push rcx",
+        "push r11",
+        "call {user_cr3_fn}",
+        // [rsp + 0]  = saved r11
+        // [rsp + 8]  = saved rcx
+        // [rsp + 16] = saved r9
+        // [rsp + 24] = saved r8
+        // [rsp + 32] = saved r10
+        "mov [rsp + 32], rax",
+        "pop r11",
+        "pop rcx",
+
+        // Linux syscall ABIに合わせて引数レジスタも復元
         "pop r9",
         "pop r8",
         "pop r10",
         "pop rdx",
         "pop rsi",
         "pop rdi",
-        "pop rax",              // syscall 戻り値
+        "pop rax",
 
-        // ユーザー RSP に切り替えて SYSRETQ
+        "test r10, r10",
+        "jz 2f",
+        "mov cr3, r10",
+
         "mov rsp, qword ptr gs:[{user_rsp_tmp_off}]",
         "swapgs",
         "sysretq",
@@ -322,6 +337,7 @@ pub unsafe extern "C" fn syscall_entry() {
         fs_base_fn = sym current_thread_fs_base_for_sysret,
         dispatch   = sym super::syscall_dispatch_sysv,
         kill_fn    = sym kill_non_canonical_rsp,
+        user_cr3_fn = sym super::syscall_user_cr3_for_sysret,
     );
 }
 
@@ -339,7 +355,7 @@ extern "sysv64" fn current_thread_fs_base_for_sysret() -> u64 {
     unsafe { crate::cpu::read_fs_base() }
 }
 
-/// CVE-2012-0217 緩和策: 非正規RIP/RSPを持つプロセスを終了させる
+/// 非正規RIP/RSPを持つプロセスを終了させる
 unsafe extern "C" fn kill_non_canonical_rsp() -> ! {
     crate::warn!("CVE-2012-0217: non-canonical user RIP/RSP detected, killing process");
     crate::task::exit_current_task(u64::MAX)

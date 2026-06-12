@@ -204,6 +204,8 @@ pub fn write_user_u16(ptr: u64, value: u16) -> Result<(), u64> {
 pub use types::*;
 
 use x86_64::structures::idt::InterruptStackFrame;
+use crate::info;
+use crate::syscall::syscall_entry::switch_to_current_thread_user_page_table;
 
 /// システムコールのディスパッチ
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
@@ -581,10 +583,13 @@ extern "C" fn syscall_handler_rust(
     arg4: u64,
 ) -> u64 {
     crate::percpu::install_current_cpu_gs_base();
+
     let current_tid = crate::task::current_thread_id();
     let current_slot = crate::task::current_thread_slot();
-    let prev_cr3 = syscall_entry::switch_to_kernel_page_table();
+
+    let _prev_cr3 = syscall_entry::switch_to_kernel_page_table();
     crate::cpu::reassert_runtime_hardening();
+
     if let Some(slot) = current_slot {
         crate::task::with_thread_at_slot_mut(slot, |t| t.set_in_syscall(true));
     } else if let Some(tid) = current_tid {
@@ -598,8 +603,17 @@ extern "C" fn syscall_handler_rust(
     } else if let Some(tid) = current_tid {
         crate::task::with_thread_mut(tid, |t| t.set_in_syscall(false));
     }
-    syscall_entry::restore_page_table(prev_cr3);
+
     ret
+}
+
+#[no_mangle]
+pub extern "sysv64" fn syscall_user_cr3_for_sysret() -> u64 {
+    let cr3 = syscall_entry::current_thread_user_page_table()
+        .unwrap_or(0);
+
+    info!("syscall called. Now it's time to work... ;-;: {:#x}", cr3);
+    0
 }
 
 /// SYSCALL 命令エントリから呼ばれる system V ABI ディスパッチ関数

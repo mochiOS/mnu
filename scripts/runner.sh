@@ -20,9 +20,20 @@ mkdir -p "${TARGET_DIR}" "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}" "${ROOTFS_STAGE
 echo "[build] kernel"
 cargo build --locked --release --target "${KERNEL_TARGET_NAME}" --features kernel-bin --manifest-path "${ROOT_DIR}/Cargo.toml"
 
+USER_TARGET_DIR="${TARGET_DIR}/user-build"
+
 echo "[build] userland"
-env RUSTFLAGS="-C link-arg=--image-base=0x10000" \
-    cargo build --locked --release --target "${USER_TARGET_NAME}" --manifest-path "${ROOT_DIR}/examples/user/Cargo.toml"
+env RUSTFLAGS="-C relocation-model=static -C link-arg=-T${ROOT_DIR}/examples/user/linker.ld -C link-arg=-no-pie" \
+    cargo build --locked --release \
+    --target "${USER_TARGET_NAME}" \
+    --manifest-path "${ROOT_DIR}/examples/user/Cargo.toml"
+
+USER_BIN="${ROOT_DIR}/target/${USER_TARGET_NAME}/release/user"
+CAPTEST_BIN="${ROOT_DIR}/target/${USER_TARGET_NAME}/release/captest"
+
+echo "[debug] user binary:"
+stat "${USER_BIN}"
+readelf -h "${USER_BIN}" || true
 
 echo "[build] bootloader"
 cargo build --locked --release --target x86_64-unknown-uefi --manifest-path "${ROOT_DIR}/examples/boot/Cargo.toml"

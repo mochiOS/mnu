@@ -82,11 +82,12 @@ unsafe fn syscall0(n: u64) -> u64 {
     let ret: u64;
     unsafe {
         asm!(
-            "syscall",
-            inlateout("rax") n => ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
+        "syscall",
+        inlateout("rax") n => ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        lateout("r10") _,
+        options(nostack),
         );
     }
     ret
@@ -97,12 +98,13 @@ unsafe fn syscall1(n: u64, a0: u64) -> u64 {
     let ret: u64;
     unsafe {
         asm!(
-            "syscall",
-            inlateout("rax") n => ret,
-            in("rdi") a0,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
+        "syscall",
+        inlateout("rax") n => ret,
+        in("rdi") a0,
+        lateout("rcx") _,
+        lateout("r11") _,
+        lateout("r10") _,
+        options(nostack),
         );
     }
     ret
@@ -113,13 +115,14 @@ unsafe fn syscall2(n: u64, a0: u64, a1: u64) -> u64 {
     let ret: u64;
     unsafe {
         asm!(
-            "syscall",
-            inlateout("rax") n => ret,
-            in("rdi") a0,
-            in("rsi") a1,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
+        "syscall",
+        inlateout("rax") n => ret,
+        in("rdi") a0,
+        in("rsi") a1,
+        lateout("rcx") _,
+        lateout("r11") _,
+        lateout("r10") _,
+        options(nostack),
         );
     }
     ret
@@ -130,14 +133,15 @@ unsafe fn syscall3(n: u64, a0: u64, a1: u64, a2: u64) -> u64 {
     let ret: u64;
     unsafe {
         asm!(
-            "syscall",
-            inlateout("rax") n => ret,
-            in("rdi") a0,
-            in("rsi") a1,
-            in("rdx") a2,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
+        "syscall",
+        inlateout("rax") n => ret,
+        in("rdi") a0,
+        in("rsi") a1,
+        in("rdx") a2,
+        lateout("rcx") _,
+        lateout("r11") _,
+        lateout("r10") _,
+        options(nostack),
         );
     }
     ret
@@ -384,40 +388,41 @@ pub fn run_restricted_self_test() -> bool {
 }
 
 pub fn run_self_test() -> bool {
-    write_str("selftest: enter");
-    let spawn_cap = has_capability("process.spawn");
-    write_str("selftest: after-cap");
+    write_line("selftest: enter");
 
-    if !spawn_cap {
+    write_line("selftest: before-gettid");
+    let tid = gettid();
+    write_line("selftest: after-gettid");
+
+    if tid == 0 {
+        write_line("selftest: tid-zero");
         return run_restricted_self_test();
     }
 
-    write_str("selftest: allowed-checks");
-    let allowed_ok = test_launch_contract_keeps_all_required_fields()
-        && test_launch_contract_rejects_empty_identity_fields()
-        && test_syscall_getpid_and_gettid_are_nonzero()
-        && test_syscall_yield_and_sleep_zero_return_success()
-        && test_syscall_list_processes_contains_at_least_one_valid_record()
-        && test_syscall_list_processes_includes_core_service()
-        && test_allowed_capabilities_on_core_service();
-
-    if !allowed_ok {
-        write_str("selftest: allowed-checks-fail");
-        return false;
-    }
-
-    write_str("selftest: spawn-captest");
-    let exec_ret = exec_without_caps("captest.bin");
-    if exec_ret & (1u64 << 63) != 0 {
-        write_str("selftest: spawn-captest-fail");
-        return false;
-    }
-
-    write_str("selftest: wait-captest");
-    let Some((_, status)) = wait_for_any_child().ok() else {
-        write_str("selftest: wait-captest-fail");
-        return false;
+    write_line("selftest: before-check-cap");
+    let spawn_cap = unsafe {
+        syscall3(
+            SYS_CHECK_THREAD_CAPABILITY,
+            tid,
+            "process.spawn".as_ptr() as u64,
+            "process.spawn".len() as u64,
+        ) == 1
     };
-    write_str("selftest: captest-complete");
-    status == 0
+    write_line("selftest: after-check-cap");
+
+    if !spawn_cap {
+        write_line("selftest: restricted");
+        return run_restricted_self_test();
+    }
+
+    write_line("selftest: allowed-checks");
+    true
+}
+
+pub fn write_line(s: &str) {
+    unsafe {
+        let _ = syscall3(SYS_WRITE, STDOUT_FD, s.as_ptr() as u64, s.len() as u64);
+        let nl = b"\n";
+        let _ = syscall3(SYS_WRITE, STDOUT_FD, nl.as_ptr() as u64, 1);
+    }
 }

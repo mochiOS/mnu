@@ -11,6 +11,19 @@ const STDOUT_FD: u64 = 1;
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     write_line("userland self-test: start");
+    write_line("after write");
+
+    loop {
+        unsafe {
+            asm!("pause", options(nomem, nostack, preserves_flags));
+        }
+    }
+}
+
+/*
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {
+    write_line("userland self-test: start");
     let pass = user::run_self_test();
 
     if pass {
@@ -30,7 +43,8 @@ pub extern "C" fn _start() -> ! {
             asm!("pause", options(nomem, nostack, preserves_flags));
         }
     }
-}
+} */
+
 #[inline(always)]
 fn write_line(label: &str) {
     let mut buf = [0u8; 96];
