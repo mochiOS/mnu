@@ -10,8 +10,16 @@ const STDOUT_FD: u64 = 1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    write_line("userland self-test: start");
-    write_line("after write");
+    write_line("raw syscall write: start");
+    let pass = user::run_self_test();
+
+    if pass {
+        write_line("USERLAND SELF-TEST PASS");
+        unsafe { let _ = syscall1(SYS_EXIT, 0); }
+    } else {
+        write_line("USERLAND SELF-TEST FAIL");
+        unsafe { let _ = syscall1(SYS_EXIT, 1); }
+    }
 
     loop {
         unsafe {
@@ -19,31 +27,6 @@ pub extern "C" fn _start() -> ! {
         }
     }
 }
-
-/*
-#[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
-    write_line("userland self-test: start");
-    let pass = user::run_self_test();
-
-    if pass {
-        write_line("USERLAND SELF-TEST PASS");
-        unsafe {
-            let _ = syscall1(SYS_EXIT, 0);
-        }
-    } else {
-        write_line("USERLAND SELF-TEST FAIL");
-        unsafe {
-            let _ = syscall1(SYS_EXIT, 1);
-        }
-    }
-
-    loop {
-        unsafe {
-            asm!("pause", options(nomem, nostack, preserves_flags));
-        }
-    }
-} */
 
 #[inline(always)]
 fn write_line(label: &str) {

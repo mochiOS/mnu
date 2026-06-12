@@ -609,11 +609,8 @@ extern "C" fn syscall_handler_rust(
 
 #[no_mangle]
 pub extern "sysv64" fn syscall_user_cr3_for_sysret() -> u64 {
-    let cr3 = syscall_entry::current_thread_user_page_table()
-        .unwrap_or(0);
-
-    info!("syscall called. Now it's time to work... ;-;: {:#x}", cr3);
-    0
+    syscall_entry::current_thread_user_page_table()
+        .unwrap_or(0)
 }
 
 /// SYSCALL 命令エントリから呼ばれる system V ABI ディスパッチ関数

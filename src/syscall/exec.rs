@@ -288,21 +288,56 @@ fn exec_internal(
     if let Some(alias) = crate::task::process::driver_alias_for_path(path) {
         process_name = alias;
     }
-    let loaded = if process_name.ends_with(".service") {
-        crate::init::fs::read_initfs(path)
-            .or_else(|| crate::init::fs::read_rootfs(path))
-            .or_else(|| crate::kmod::fs::read_all(path))
-            .or_else(|| crate::init::fs::read(path))
-    } else {
-        crate::init::fs::read_rootfs(path)
-            .or_else(|| crate::kmod::fs::read_all(path))
-            .or_else(|| crate::init::fs::read(path))
-    };
-    if let Some(data) = loaded {
+    let loaded = load_exec_image(path, process_name.ends_with(".service"));
+    if let Some((data, source)) = loaded {
+        let fingerprint = fingerprint_exec_bytes(&data);
+        crate::info!(
+            "exec: loaded '{}' from {} ({} bytes)",
+            path,
+            source,
+            data.len()
+        );
+        if path == "core.service" || process_name == "core.service" {
+            crate::info!("core.service fingerprint: {}", fingerprint);
+        } else {
+            crate::info!("exec fingerprint: {} ({})", fingerprint, path);
+        }
         exec_with_data(&data, &process_name, path, args, None, initial_caps)
     } else {
         crate::warn!("exec: file not found: {}", path);
         crate::syscall::types::ENOENT
+    }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+fn fingerprint_exec_bytes(data: &[u8]) -> &'static str {
+    if contains_bytes(data, b"raw syscall write: start") {
+        "RAW SYSCALL BUILD"
+    } else if contains_bytes(data, b"userland self-test: start") {
+        "OLD SELFTEST BUILD"
+    } else {
+        "UNKNOWN BUILD"
+    }
+}
+
+fn load_exec_image(path: &str, is_service: bool) -> Option<(Vec<u8>, &'static str)> {
+    if is_service {
+        crate::init::fs::read_initfs(path)
+            .map(|data| (data, "initfs"))
+            .or_else(|| crate::init::fs::read_rootfs(path).map(|data| (data, "rootfs")))
+            .or_else(|| crate::kmod::fs::read_all(path).map(|data| (data, "kmod")))
+            .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
+    } else {
+        crate::init::fs::read_rootfs(path)
+            .map(|data| (data, "rootfs"))
+            .or_else(|| crate::kmod::fs::read_all(path).map(|data| (data, "kmod")))
+            .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
     }
 }
 

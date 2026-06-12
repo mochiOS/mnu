@@ -3,10 +3,16 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="${ROOT_DIR}/target/uefi"
+
 KERNEL_TARGET_NAME="x86_64-unknown-none"
 USER_TARGET_NAME="x86_64-unknown-none"
+
+USER_BUILD_DIR="${TARGET_DIR}/user-build"
+BOOT_BUILD_DIR="${TARGET_DIR}/boot-build"
+
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+
 RUN_ID="$(date +%s)-$$"
 RUN_DIR="${TARGET_DIR}/run-${RUN_ID}"
 ESP_DIR="${RUN_DIR}/esp"
@@ -15,49 +21,98 @@ INITFS_STAGE="${RUN_DIR}/initfs-root"
 ROOTFS_STAGE="${RUN_DIR}/rootfs-root"
 OVMF_VARS="${OVMF_VARS:-${RUN_DIR}/OVMF_VARS_4M.fd}"
 
+SERIAL_LOG="${TARGET_DIR}/serial.log"
+
+die() {
+    echo "fatal: $*" >&2
+    exit 1
+}
+
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+need_file() {
+    [[ -f "$1" ]] || die "required file not found: $1"
+}
+
+need_cmd cargo
+need_cmd qemu-system-x86_64
+need_cmd mke2fs
+need_cmd mkfs.fat
+need_cmd mmd
+need_cmd mcopy
+need_cmd readelf
+need_cmd strings
+need_cmd stat
+need_cmd tee
+need_cmd sed
+need_cmd wc
+
+need_file "${OVMF_CODE}"
+need_file "${OVMF_VARS_TEMPLATE}"
+need_file "${ROOT_DIR}/Cargo.toml"
+need_file "${ROOT_DIR}/examples/user/Cargo.toml"
+need_file "${ROOT_DIR}/examples/user/linker.ld"
+need_file "${ROOT_DIR}/examples/boot/Cargo.toml"
+need_file "${ROOT_DIR}/examples/fs/hello.txt"
+need_file "${ROOT_DIR}/examples/fs/config/kernel.conf"
+
 mkdir -p "${TARGET_DIR}" "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}" "${ROOTFS_STAGE}/config"
 
 echo "[build] kernel"
-cargo build --locked --release --target "${KERNEL_TARGET_NAME}" --features kernel-bin --manifest-path "${ROOT_DIR}/Cargo.toml"
-
-USER_TARGET_DIR="${TARGET_DIR}/user-build"
+cargo build \
+    --locked \
+    --release \
+    --target "${KERNEL_TARGET_NAME}" \
+    --features kernel-bin \
+    --manifest-path "${ROOT_DIR}/Cargo.toml"
 
 echo "[build] userland"
 env RUSTFLAGS="-C relocation-model=static -C link-arg=-T${ROOT_DIR}/examples/user/linker.ld -C link-arg=-no-pie" \
-    cargo build --locked --release \
+    cargo build \
+    --locked \
+    --release \
     --target "${USER_TARGET_NAME}" \
+    --target-dir "${USER_BUILD_DIR}" \
     --manifest-path "${ROOT_DIR}/examples/user/Cargo.toml"
 
-USER_BIN="${ROOT_DIR}/target/${USER_TARGET_NAME}/release/user"
-CAPTEST_BIN="${ROOT_DIR}/target/${USER_TARGET_NAME}/release/captest"
+USER_BIN="${USER_BUILD_DIR}/${USER_TARGET_NAME}/release/user"
+CAPTEST_BIN="${USER_BUILD_DIR}/${USER_TARGET_NAME}/release/captest"
 
-echo "[debug] user binary:"
+need_file "${USER_BIN}"
+need_file "${CAPTEST_BIN}"
+
+echo "[check] user binary used for initfs: ${USER_BIN}"
 stat "${USER_BIN}"
-readelf -h "${USER_BIN}" || true
+
+echo "[check] ELF header"
+readelf -h "${USER_BIN}" | grep -E 'Type:|Entry point address:' || true
+
+echo "[check] selftest marker"
+strings "${USER_BIN}" | grep -n 'selftest: enter' || true
 
 echo "[build] bootloader"
-cargo build --locked --release --target x86_64-unknown-uefi --manifest-path "${ROOT_DIR}/examples/boot/Cargo.toml"
+cargo build \
+    --locked \
+    --release \
+    --target x86_64-unknown-uefi \
+    --target-dir "${BOOT_BUILD_DIR}" \
+    --manifest-path "${ROOT_DIR}/examples/boot/Cargo.toml"
 
 KERNEL_BIN="${ROOT_DIR}/target/${KERNEL_TARGET_NAME}/release/kernel"
-USER_BIN="${ROOT_DIR}/examples/user/target/${USER_TARGET_NAME}/release/user"
-CAPTEST_BIN="${ROOT_DIR}/examples/user/target/${USER_TARGET_NAME}/release/captest"
-BOOT_BIN="$(find "${ROOT_DIR}/examples/boot/target/x86_64-unknown-uefi/release" -maxdepth 1 -type f \( -name 'boot' -o -name 'boot.efi' \) | head -n 1)"
+BOOT_BIN="$(
+    find "${BOOT_BUILD_DIR}/x86_64-unknown-uefi/release" \
+        -maxdepth 1 \
+        -type f \
+        \( -name 'boot' -o -name 'boot.efi' \) \
+        | head -n 1
+)"
 
-if [[ ! -f "${KERNEL_BIN}" ]]; then
-    echo "kernel binary not found: ${KERNEL_BIN}" >&2
-    exit 1
-fi
-if [[ ! -f "${USER_BIN}" ]]; then
-    echo "user binary not found: ${USER_BIN}" >&2
-    exit 1
-fi
-if [[ ! -f "${CAPTEST_BIN}" ]]; then
-    echo "captest binary not found: ${CAPTEST_BIN}" >&2
-    exit 1
-fi
+need_file "${KERNEL_BIN}"
+
 if [[ -z "${BOOT_BIN}" || ! -f "${BOOT_BIN}" ]]; then
-    echo "bootloader binary not found" >&2
-    exit 1
+    die "bootloader binary not found"
 fi
 
 rm -rf "${ESP_DIR}" "${INITFS_STAGE}" "${ROOTFS_STAGE}"
@@ -65,23 +120,33 @@ mkdir -p "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}" "${ROOTFS_STAGE}/config"
 
 install -m 0644 "${KERNEL_BIN}" "${ESP_DIR}/kernel"
 install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
+
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/core.service"
 install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/captest.bin"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/hello.bin"
+
 install -m 0644 "${ROOT_DIR}/examples/fs/hello.txt" "${ROOTFS_STAGE}/hello.txt"
 install -m 0644 "${ROOT_DIR}/examples/fs/config/kernel.conf" "${ROOTFS_STAGE}/config/kernel.conf"
 
+echo "[build] initfs"
 truncate -s 16M "${TARGET_DIR}/initfs.img"
-truncate -s 16M "${TARGET_DIR}/rootfs.img"
 mke2fs -q -t ext2 -b 1024 -d "${INITFS_STAGE}" -F "${TARGET_DIR}/initfs.img"
+
+echo "[build] rootfs"
+truncate -s 16M "${TARGET_DIR}/rootfs.img"
 mke2fs -q -t ext2 -b 1024 -d "${ROOTFS_STAGE}" -F "${TARGET_DIR}/rootfs.img"
 
 install -m 0644 "${TARGET_DIR}/initfs.img" "${ESP_DIR}/initfs.img"
 install -m 0644 "${TARGET_DIR}/rootfs.img" "${ESP_DIR}/rootfs.img"
 
+echo "[build] ESP"
+rm -f "${ESP_IMG}"
 truncate -s 64M "${ESP_IMG}"
 mkfs.fat -F 32 -n EFI "${ESP_IMG}"
-MTOOLS_SKIP_CHECK=1 mmd -i "${ESP_IMG}" ::/EFI ::/EFI/BOOT
+
+MTOOLS_SKIP_CHECK=1 mmd -i "${ESP_IMG}" ::/EFI
+MTOOLS_SKIP_CHECK=1 mmd -i "${ESP_IMG}" ::/EFI/BOOT
+
 MTOOLS_SKIP_CHECK=1 mcopy -i "${ESP_IMG}" "${ESP_DIR}/kernel" ::/kernel
 MTOOLS_SKIP_CHECK=1 mcopy -i "${ESP_IMG}" "${ESP_DIR}/initfs.img" ::/initfs
 MTOOLS_SKIP_CHECK=1 mcopy -i "${ESP_IMG}" "${ESP_DIR}/rootfs.img" ::/rootfs
@@ -90,6 +155,9 @@ MTOOLS_SKIP_CHECK=1 mcopy -i "${ESP_IMG}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI" ::/E
 if [[ ! -f "${OVMF_VARS}" ]]; then
     cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS}"
 fi
+
+rm -f "${SERIAL_LOG}"
+: > "${SERIAL_LOG}"
 
 QEMU_ARGS=(
     -machine q35
@@ -109,33 +177,40 @@ if [[ "${DEBUG:-0}" != "0" ]]; then
     QEMU_ARGS+=(-s -S)
 fi
 
-SERIAL_LOG="${TARGET_DIR}/serial.log"
-rm -f "${SERIAL_LOG}"
-
-echo "[run] qemu + userland self-test"
-
-qemu-system-x86_64 "${QEMU_ARGS[@]}" >"${SERIAL_LOG}" 2>&1 &
+echo "[run] qemu"
+qemu-system-x86_64 "${QEMU_ARGS[@]}" > >(tee -a "${SERIAL_LOG}") 2>&1 &
 QEMU_PID=$!
-PASS_FOUND=0
-NEXT_LINE=1
 
 cleanup() {
-    kill "${QEMU_PID}" 2>/dev/null || true
-    wait "${QEMU_PID}" 2>/dev/null || true
+    if [[ -n "${QEMU_PID:-}" ]]; then
+        kill "${QEMU_PID}" 2>/dev/null || true
+        wait "${QEMU_PID}" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
+PASS_FOUND=0
+NEXT_LINE=1
+
 for _ in $(seq 1 600); do
     while IFS= read -r line; do
-        printf '%s\n' "$line"
-
         if [[ "$line" == *"USERLAND SELF-TEST PASS"* ]]; then
             PASS_FOUND=1
             break
         fi
+
+        if [[ "$line" == *"USERLAND SELF-TEST FAIL"* ]]; then
+            echo "fatal: userland self-test reported FAIL" >&2
+            exit 1
+        fi
+
+        if [[ "$line" == *"PAGE FAULT"* || "$line" == *"Faulting user context:"* ]]; then
+            echo "fatal: userland fault observed during validation" >&2
+            exit 1
+        fi
     done < <(sed -n "${NEXT_LINE},\$p" "${SERIAL_LOG}")
 
-    NEXT_LINE=$(($(wc -l < "${SERIAL_LOG}") + 1))
+    NEXT_LINE="$(($(wc -l < "${SERIAL_LOG}") + 1))"
 
     if [[ "${PASS_FOUND}" -eq 1 ]]; then
         break
@@ -149,7 +224,8 @@ for _ in $(seq 1 600); do
 done
 
 if [[ "${PASS_FOUND}" -ne 1 ]]; then
-    echo "userland self-test did not report PASS" >&2
+    echo "fatal: userland self-test did not report PASS" >&2
+    echo "serial log: ${SERIAL_LOG}" >&2
     exit 1
 fi
 
