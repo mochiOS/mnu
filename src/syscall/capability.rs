@@ -129,7 +129,41 @@ pub fn drop_capability(_cap_ptr: u64, _cap_len: u64) -> u64 {
 }
 
 pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
-    ENOSYS
+    let current = match current_process() {
+        Some(pid) => pid,
+        None => return ENOSYS,
+    };
+    let cap = match read_cap_from_user(_cap_ptr, _cap_len) {
+        Ok(cap) => cap,
+        Err(e) => return e,
+    };
+    if !crate::task::process::process_has_capability(current, cap) {
+        return EACCES;
+    }
+
+    let dest_process = match resolve_destination_process(_dest) {
+        Some(pid) => pid,
+        None => return EINVAL,
+    };
+    if dest_process == current {
+        return SUCCESS;
+    }
+
+    if !crate::task::with_process_mut(current, |proc| proc.capabilities_mut().remove(cap))
+        .unwrap_or(false)
+    {
+        return EACCES;
+    }
+
+    if crate::task::with_process_mut(dest_process, |proc| {
+        proc.capabilities_mut().insert(cap);
+    })
+    .is_none()
+    {
+        return ENOSYS;
+    }
+
+    SUCCESS
 }
 
 pub fn restrict_capability(_cap_ptr: u64, _cap_len: u64, _restriction_ptr: u64, _restriction_len: u64) -> u64 {
@@ -162,6 +196,16 @@ pub fn restrict_capability(_cap_ptr: u64, _cap_len: u64, _restriction_ptr: u64, 
 
 fn current_process() -> Option<crate::task::ProcessId> {
     crate::task::current_thread_id().and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
+}
+
+fn resolve_destination_process(dest: u64) -> Option<crate::task::ProcessId> {
+    if let Some(pid) = crate::task::thread_to_process_id(dest) {
+        return Some(pid);
+    }
+    if let Some(thread_id) = crate::syscall::ipc::resolve_endpoint_handle(dest) {
+        return crate::task::thread_to_process_id(thread_id);
+    }
+    None
 }
 
 fn read_cap_from_user(cap_ptr: u64, cap_len: u64) -> Result<Capability, u64> {

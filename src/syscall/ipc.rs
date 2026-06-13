@@ -93,7 +93,7 @@ fn allocate_endpoint(owner_thread_id: u64) -> Option<u64> {
     None
 }
 
-fn resolve_endpoint_handle(handle: u64) -> Option<u64> {
+pub(crate) fn resolve_endpoint_handle(handle: u64) -> Option<u64> {
     if let Some((slot, slot_u16, generation)) = decode_endpoint_handle(handle) {
         let endpoints = ENDPOINTS.lock();
         if let Some(entry) = endpoints.get(slot) {

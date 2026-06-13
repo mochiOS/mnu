@@ -749,6 +749,50 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
     }
 }
 
+/// memory_share システムコール
+///
+/// 現時点では安全な基本実装として、引数検証のみ行って成功を返す。
+/// 将来的には IPC / shared memory の実体へ接続する。
+pub fn memory_share(addr: u64, length: u64, flags: u64) -> u64 {
+    let _ = flags;
+    if addr == 0 || length == 0 {
+        return EINVAL;
+    }
+    let share_len = match page_align_up(length) {
+        Some(v) if v > 0 => v,
+        _ => return EINVAL,
+    };
+    if !is_user_range(addr, share_len) {
+        return EINVAL;
+    }
+    if !super::validate_user_ptr(addr, share_len) {
+        return EFAULT;
+    }
+    SUCCESS
+}
+
+/// memory_sync システムコール
+///
+/// 現時点では安全な基本実装として、引数検証のみ行って成功を返す。
+/// 将来的には shared memory / mmap / FS-backed page の同期入口として拡張する。
+pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
+    let _ = flags;
+    if addr == 0 || length == 0 {
+        return EINVAL;
+    }
+    let sync_len = match page_align_up(length) {
+        Some(v) if v > 0 => v,
+        _ => return EINVAL,
+    };
+    if !is_user_range(addr, sync_len) {
+        return EINVAL;
+    }
+    if !super::validate_user_ptr(addr, sync_len) {
+        return EFAULT;
+    }
+    SUCCESS
+}
+
 /// Futexシステムコール
 ///
 /// FUTEX_WAIT / FUTEX_WAKE の待機キュー方式を実装する。
