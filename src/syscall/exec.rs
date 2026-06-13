@@ -289,40 +289,18 @@ fn exec_internal(
         process_name = alias;
     }
     let loaded = load_exec_image(path, process_name.ends_with(".service"));
+
     if let Some((data, source)) = loaded {
-        let fingerprint = fingerprint_exec_bytes(&data);
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",
             path,
             source,
             data.len()
         );
-        if path == "core.service" || process_name == "core.service" {
-            crate::info!("core.service fingerprint: {}", fingerprint);
-        } else {
-            crate::info!("exec fingerprint: {} ({})", fingerprint, path);
-        }
         exec_with_data(&data, &process_name, path, args, None, initial_caps)
     } else {
         crate::warn!("exec: file not found: {}", path);
         crate::syscall::types::ENOENT
-    }
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    haystack.windows(needle.len()).any(|window| window == needle)
-}
-
-fn fingerprint_exec_bytes(data: &[u8]) -> &'static str {
-    if contains_bytes(data, b"raw syscall write: start") {
-        "RAW SYSCALL BUILD"
-    } else if contains_bytes(data, b"userland self-test: start") {
-        "OLD SELFTEST BUILD"
-    } else {
-        "UNKNOWN BUILD"
     }
 }
 
