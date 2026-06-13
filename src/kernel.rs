@@ -81,8 +81,9 @@ fn kernel_main() -> ! {
     let manager_pid = exec_kernel_with_name_and_caps(
         boot_launch.exec_path,
         boot_launch.process_name,
-        caps,
+        caps.clone(),
     );
+    crate::info!("service manager pid = {:#x}", manager_pid);
     if manager_pid != 0
         && task::with_process(task::ProcessId::from_u64(manager_pid), |_| ()).is_some()
     {

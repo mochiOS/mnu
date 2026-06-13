@@ -2,6 +2,7 @@
 #![no_main]
 
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const SHORT_PING: &[u8] = b"ping-message";
 const SHORT_PONG: &[u8] = b"pong-message";
@@ -10,10 +11,9 @@ const STACK_SIZE: u64 = 0x8000;
 const PAGE_SIZE: u64 = 0x1000;
 const FAST_MSG_MAX: usize = 48;
 const ROUNDS: usize = 1;
-const FS_BENCH_BYTES: usize = 4 * 1024 * 1024;
-const FS_BENCH_ROUNDS: usize = 2;
-const FS_BENCH_WRITE_ROUNDS: usize = 8;
-const FS_BENCH_WRITE_CHUNK: usize = 4000;
+const FS_BENCH_READ_BYTES: usize = 8 * 1024 * 1024;
+const FS_BENCH_WRITE_BYTES: usize = 32 * 1024 * 1024;
+const FS_BENCH_CHUNKS: &[usize] = &[64 * 1024, 256 * 1024, 1024 * 1024];
 const TICKS_PER_SECOND: u64 = 500;
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
@@ -32,15 +32,17 @@ const STAGE_CAP: &[u8] = b"stage: capability\n";
 const STAGE_THREAD: &[u8] = b"stage: thread\n";
 const STAGE_SPAWN: &[u8] = b"stage: process_spawn\n";
 const STAGE_FS_BENCH: &[u8] = b"stage: fs bench\n";
-const FS_MMAP_READ_LINE: &[u8] = b"fs.cext mmap/read: ";
-const FS_WRITE_LINE: &[u8] = b"fs.cext write: ";
 const FS_BYTES_LINE: &[u8] = b" bytes, ";
-const FS_TICKS_LINE: &[u8] = b" ticks, ";
-const FS_MIB_LINE: &[u8] = b" MiB/s\n";
+const FS_TICK_HZ_LINE: &[u8] = b" tick_hz=";
+const FS_ELAPSED_MS_LINE: &[u8] = b" elapsed_ms=";
+const FS_SHARED_READ_PREFIX: &[u8] = b"fs.shared read[";
+const FS_SHARED_WRITE_PREFIX: &[u8] = b"fs.shared write[";
+const FS_LABEL_SUFFIX: &[u8] = b"]: ";
 const EVENT_SIGNAL_A_FAIL: &[u8] = b"event: signal a failed\n";
 const EVENT_WAIT_A_FAIL: &[u8] = b"event: wait a failed\n";
 const EVENT_SIGNAL_B_FAIL: &[u8] = b"event: signal b failed\n";
 const EVENT_POLL_FAIL: &[u8] = b"event: poll failed\n";
+static THREAD_TEST_DONE: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn is_error(ret: u64) -> bool {
@@ -71,11 +73,34 @@ fn write_decimal(fd: u64, mut value: u64) {
     let _ = user::write(fd, buf[idx..].as_ptr() as u64, (buf.len() - idx) as u64);
 }
 
-extern "C" fn short_lived_thread(_arg: u64) {
-    let _ = user::thread_exit(0);
-    loop {
-        let _ = user::yield_now();
-    }
+fn write_literal(fd: u64, bytes: &[u8]) {
+    let _ = user::write(fd, bytes.as_ptr() as u64, bytes.len() as u64);
+}
+
+fn write_bench_line(
+    kind: &[u8],
+    chunk_label: &[u8],
+    bytes: u64,
+    ticks: u64,
+    tick_hz: u64,
+    elapsed_ms: u64,
+    mib_s: u64,
+) {
+    write_literal(1, kind);
+    write_literal(1, chunk_label);
+    write_literal(1, FS_LABEL_SUFFIX);
+    write_literal(1, b"bytes=");
+    write_decimal(1, bytes);
+    write_literal(1, FS_BYTES_LINE);
+    write_literal(1, b"ticks=");
+    write_decimal(1, ticks);
+    write_literal(1, FS_TICK_HZ_LINE);
+    write_decimal(1, tick_hz);
+    write_literal(1, FS_ELAPSED_MS_LINE);
+    write_decimal(1, elapsed_ms);
+    write_literal(1, b" MiB/s=");
+    write_decimal(1, mib_s);
+    write_literal(1, b"\n");
 }
 
 fn run_memory_tests() -> bool {
@@ -242,91 +267,122 @@ fn run_process_spawn_test() -> bool {
 }
 
 fn run_fs_benchmark() -> u64 {
-    let bench_size = FS_BENCH_BYTES as u64;
+    let connected = user::fs_service::ensure_connected();
+    if connected == 0 {
+        return 72;
+    }
+
+    let window_ptr = user::fs_service::window_base();
+    let window_cap = user::fs_service::window_cap();
+    if window_ptr == 0 || window_cap == 0 {
+        return 73;
+    }
+
     let path = "/bench/huge.bin";
-    let mut read_buf = [0u8; 4096];
-    let write_buf = [0xA5u8; FS_BENCH_WRITE_CHUNK];
-
-    if user::fs_service::ensure_started() == 0 {
-        return 71;
-    }
-
-    let mut read_ticks = 0u64;
-    for _ in 0..FS_BENCH_ROUNDS {
-        let read_start = user::time_now();
-        let mut offset = 0u64;
-        let mut checksum = 0u64;
-        while offset < bench_size {
-            let to_read = core::cmp::min(read_buf.len() as u64, bench_size - offset) as usize;
-            match user::fs_service::read(path, offset, &mut read_buf[..to_read]) {
-                Ok(n) if n > 0 => {
-                    for byte in &read_buf[..n] {
-                        checksum = checksum.wrapping_add(*byte as u64);
-                    }
-                    offset += n as u64;
-                }
-                Ok(_) => break,
-                Err(_) => return 72,
-            }
+    for &chunk in FS_BENCH_CHUNKS {
+        if chunk > window_cap {
+            return 74;
         }
-        let _ = checksum;
-        read_ticks = read_ticks.saturating_add(user::time_now().saturating_sub(read_start));
-    }
-
-    let mut write_ticks = 0u64;
-    let mut written = 0u64;
-    for _ in 0..FS_BENCH_WRITE_ROUNDS {
-        let write_start = user::time_now();
-        let mut offset = 0u64;
-        while offset < bench_size {
-            let to_write = core::cmp::min(write_buf.len() as u64, bench_size - offset) as usize;
-            match user::fs_service::write(path, offset, &write_buf[..to_write]) {
-                Ok(n) if n > 0 => offset += n as u64,
-                Ok(_) => break,
-                Err(_) => return 74,
-            }
+        let read_code = run_fs_chunk_benchmark(path, chunk, FS_BENCH_READ_BYTES, true);
+        if read_code != 0 {
+            return read_code;
         }
-        written = bench_size;
-        write_ticks = write_ticks.saturating_add(user::time_now().saturating_sub(write_start));
+        let write_code = run_fs_chunk_benchmark(path, chunk, FS_BENCH_WRITE_BYTES, false);
+        if write_code != 0 {
+            return write_code;
+        }
     }
-
-    if written != bench_size {
-        return 75;
-    }
-
-    let total_bytes = bench_size.saturating_mul(FS_BENCH_ROUNDS as u64);
-    let _ = user::write(1, FS_MMAP_READ_LINE.as_ptr() as u64, FS_MMAP_READ_LINE.len() as u64);
-    write_decimal(1, total_bytes);
-    let _ = user::write(1, FS_BYTES_LINE.as_ptr() as u64, FS_BYTES_LINE.len() as u64);
-    write_decimal(1, read_ticks);
-    let _ = user::write(1, FS_TICKS_LINE.as_ptr() as u64, FS_TICKS_LINE.len() as u64);
-    let read_mib_s = if read_ticks == 0 {
-        0
-    } else {
-        (total_bytes.saturating_mul(TICKS_PER_SECOND) / read_ticks / BYTES_PER_MIB) as u64
-    };
-    write_decimal(1, read_mib_s);
-    let _ = user::write(1, FS_MIB_LINE.as_ptr() as u64, FS_MIB_LINE.len() as u64);
-
-    let total_write_bytes = bench_size.saturating_mul(FS_BENCH_WRITE_ROUNDS as u64);
-    let write_mib_s = if write_ticks == 0 {
-        0
-    } else {
-        (total_write_bytes.saturating_mul(TICKS_PER_SECOND) / write_ticks / BYTES_PER_MIB) as u64
-    };
-
-    let _ = user::write(1, FS_WRITE_LINE.as_ptr() as u64, FS_WRITE_LINE.len() as u64);
-    write_decimal(1, total_write_bytes);
-    let _ = user::write(1, FS_BYTES_LINE.as_ptr() as u64, FS_BYTES_LINE.len() as u64);
-    write_decimal(1, write_ticks);
-    let _ = user::write(1, FS_TICKS_LINE.as_ptr() as u64, FS_TICKS_LINE.len() as u64);
-    write_decimal(1, write_mib_s);
-    let _ = user::write(1, FS_MIB_LINE.as_ptr() as u64, FS_MIB_LINE.len() as u64);
 
     0
 }
 
+fn run_fs_chunk_benchmark(path: &str, chunk: usize, total_bytes: usize, read_mode: bool) -> u64 {
+    let window_ptr = user::fs_service::window_base();
+    let window_cap = user::fs_service::window_cap();
+    if window_ptr == 0 || window_cap < chunk {
+        return 74;
+    }
+
+    let chunk_label = match chunk {
+        65536 => b"64KiB" as &[u8],
+        262144 => b"256KiB" as &[u8],
+        1048576 => b"1MiB" as &[u8],
+        _ => b"chunk" as &[u8],
+    };
+
+    let mut ticks = 0u64;
+    let start = user::time_now();
+    let mut offset = 0u64;
+    let total = total_bytes as u64;
+    let chunk_u64 = chunk as u64;
+    while offset < total {
+        let io_len = core::cmp::min(chunk_u64, total - offset) as usize;
+        let io_start = user::time_now();
+        if read_mode {
+            match user::fs_service::read_into_window(path, offset, 0, io_len) {
+                Ok(n) if n > 0 => {
+                    let buf = unsafe { core::slice::from_raw_parts(window_ptr as *const u8, n) };
+                    let mut checksum = 0u64;
+                    for byte in buf {
+                        checksum = checksum.wrapping_add(*byte as u64);
+                    }
+                    let _ = checksum;
+                    offset += n as u64;
+                }
+                Ok(_) => break,
+                Err(_) => return 75,
+            }
+        } else {
+            if let Some(window) = user::fs_service::window_slice_mut(0, io_len) {
+                for (i, byte) in window.iter_mut().enumerate() {
+                    *byte = 0xA5u8.wrapping_add(i as u8);
+                }
+            } else {
+                return 74;
+            }
+            match user::fs_service::write_from_window(path, offset, 0, io_len) {
+                Ok(n) if n > 0 => offset += n as u64,
+                Ok(_) => break,
+                Err(_) => return 76,
+            }
+        }
+        ticks = ticks.saturating_add(user::time_now().saturating_sub(io_start));
+    }
+
+    let elapsed_ms = if ticks == 0 {
+        user::time_now().saturating_sub(start).saturating_mul(1000) / TICKS_PER_SECOND
+    } else {
+        ticks.saturating_mul(1000) / TICKS_PER_SECOND
+    };
+    let mib_s = if ticks == 0 {
+        0
+    } else {
+        (total.saturating_mul(TICKS_PER_SECOND) / ticks / BYTES_PER_MIB) as u64
+    };
+    let prefix = if read_mode {
+        FS_SHARED_READ_PREFIX
+    } else {
+        FS_SHARED_WRITE_PREFIX
+    };
+    write_bench_line(
+        prefix,
+        chunk_label,
+        total as u64,
+        ticks,
+        TICKS_PER_SECOND,
+        elapsed_ms,
+        mib_s,
+    );
+    0
+}
+
+extern "C" fn runnable_thread_entry(_arg: u64) {
+    THREAD_TEST_DONE.store(true, Ordering::Release);
+    let _ = user::thread_exit(0);
+}
+
 fn run_thread_test() -> bool {
+    THREAD_TEST_DONE.store(false, Ordering::Release);
     let stack_bytes = STACK_SIZE + PAGE_SIZE;
     let stack_base = user::memory_map(0, stack_bytes, 3, MAP_ANONYMOUS_PRIVATE, 0);
     if stack_base == 0 || is_error(stack_base) {
@@ -334,19 +390,28 @@ fn run_thread_test() -> bool {
     }
     let stack_top = ((stack_base + stack_bytes) & !0xFu64).saturating_sub(24);
     let tid = user::thread_create(
-        short_lived_thread as *const () as u64,
+        runnable_thread_entry as *const () as u64,
         stack_top,
         0,
     );
-    expect_success(tid)
+    if tid == 0 || is_error(tid) {
+        let _ = user::memory_unmap(stack_base, stack_bytes);
+        return false;
+    }
+    for _ in 0..256 {
+        if THREAD_TEST_DONE.load(Ordering::Acquire) {
+            let _ = user::memory_unmap(stack_base, stack_bytes);
+            return true;
+        }
+        let _ = user::yield_now();
+    }
+    let _ = user::memory_unmap(stack_base, stack_bytes);
+    false
 }
 
 fn run_all_tests() -> u64 {
     if !user::run_self_test() {
         return 1;
-    }
-    if user::fs_service::ensure_started() == 0 {
-        return 71;
     }
     let _ = user::write(1, STAGE_SPAWN.as_ptr() as u64, STAGE_SPAWN.len() as u64);
     if !run_process_spawn_test() {

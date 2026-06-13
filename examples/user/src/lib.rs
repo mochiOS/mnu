@@ -36,6 +36,9 @@ pub const SYS_TIME_NOW: u64 = mnu_abi::SyscallNumber::TimeNow as u64;
 pub const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
 pub const SYS_CHECK_GRAVITY_EXIST: u64 = mnu_abi::SyscallNumber::CheckGravityExist as u64;
 pub const SYS_WRITE: u64 = mnu_abi::SyscallNumber::Write as u64;
+pub const SYS_SERVICE_SPAWN: u64 = mnu_abi::SyscallNumber::ServiceSpawn as u64;
+pub const SYS_ALLOC_SHARED_PAGES: u64 = mnu_abi::SyscallNumber::AllocSharedPages as u64;
+pub const SYS_IPC_SEND_PAGES: u64 = mnu_abi::SyscallNumber::IpcSendPages as u64;
 
 #[inline(always)]
 unsafe fn syscall0(n: u64) -> u64 {
@@ -104,6 +107,25 @@ unsafe fn syscall3(n: u64, a0: u64, a1: u64, a2: u64) -> u64 {
 }
 
 #[inline(always)]
+unsafe fn syscall4(n: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") n => ret,
+            in("rdi") a0,
+            in("rsi") a1,
+            in("rdx") a2,
+            in("r10") a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+#[inline(always)]
 unsafe fn syscall5(n: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     let ret: u64;
     unsafe {
@@ -134,6 +156,10 @@ pub fn process_exit(code: u64) -> ! {
 
 pub fn process_spawn(_flags: u64, _reserved: u64) -> u64 {
     unsafe { syscall2(SYS_PROCESS_SPAWN, _flags, _reserved) }
+}
+
+pub fn service_spawn(path_ptr: u64) -> u64 {
+    unsafe { syscall1(SYS_SERVICE_SPAWN, path_ptr) }
 }
 
 pub fn process_wait(pid: u64, status_ptr: u64, options: u64) -> u64 {
@@ -185,6 +211,19 @@ pub fn check_gravity_exist() -> u64 {
 
 pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     unsafe { syscall3(SYS_WRITE, fd, buf_ptr, len) }
+}
+
+pub fn alloc_shared_pages(
+    page_count: u64,
+    phys_addrs_out: u64,
+    phys_addrs_len: u64,
+    virt_addr_hint: u64,
+) -> u64 {
+    unsafe { syscall4(SYS_ALLOC_SHARED_PAGES, page_count, phys_addrs_out, phys_addrs_len, virt_addr_hint) }
+}
+
+pub fn ipc_send_pages(endpoint: u64, phys_pages_ptr: u64, page_count: u64, map_start: u64) -> u64 {
+    unsafe { syscall4(SYS_IPC_SEND_PAGES, endpoint, phys_pages_ptr, page_count, map_start) }
 }
 
 pub fn ipc_create(flags: u64) -> u64 {

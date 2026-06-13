@@ -301,6 +301,11 @@ impl Process {
         self.service_id.as_deref()
     }
 
+    /// サービスIDを設定する（カーネル内部用）
+    pub(crate) fn set_service_id<S: Into<String>>(&mut self, service_id: S) {
+        self.service_id = Some(service_id.into());
+    }
+
     /// capability 集合を取得（読み取り専用）
     pub fn capabilities(&self) -> &CapabilitySet {
         &self.capabilities

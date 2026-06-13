@@ -36,6 +36,9 @@ pub enum SyscallNumber {
     Sleep = 29,
     CheckGravityExist = 30,
     Write = 31,
+    ServiceSpawn = 32,
+    AllocSharedPages = 33,
+    IpcSendPages = 34,
 }
 
 /// 成功

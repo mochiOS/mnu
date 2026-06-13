@@ -513,6 +513,70 @@ pub fn spawn(flags: u64, reserved: u64) -> u64 {
     fork()
 }
 
+/// サービスプロセスを起動する
+///
+/// `path_ptr` は NUL 終端のサービス名（例: `fs.service`）を指す。
+/// 戻り値は起動したサービスの main thread ID。
+pub fn service_spawn(path_ptr: u64) -> u64 {
+    if !caller_has_process_spawn_capability() {
+        return crate::syscall::EPERM;
+    }
+    if path_ptr == 0 {
+        return EINVAL;
+    }
+
+    let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
+        Ok(s) => s,
+        Err(_) => return EINVAL,
+    };
+    if !path.ends_with(".service") {
+        return EINVAL;
+    }
+
+    crate::info!("service_spawn: launching {}", path);
+    match crate::elf::spawn_service(&path, &path) {
+        Ok((pid, thread_id)) => {
+            crate::info!(
+                "service_spawn: launched {} pid={:?} tid={:?}",
+                path,
+                pid,
+                thread_id
+            );
+            crate::info!("fs.service started pid={:?} tid={:?}", pid, thread_id);
+            if let Some(current_tid) = crate::task::current_thread_id() {
+                let current_slot = crate::task::current_thread_slot();
+                let next_slot = crate::task::thread_slot_index(thread_id);
+                crate::info!(
+                    "service_spawn: switching from {:?} slot={:?} to {:?} slot={:?}",
+                    current_tid,
+                    current_slot,
+                    thread_id,
+                    next_slot
+                );
+                if let Some(current_slot) = current_slot {
+                    let _ = crate::task::set_thread_state_at_slot(
+                        current_slot,
+                        crate::task::ThreadState::Ready,
+                    );
+                } else {
+                    let _ = crate::task::set_thread_state(
+                        current_tid,
+                        crate::task::ThreadState::Ready,
+                    );
+                }
+                if let Some(next_slot) = next_slot {
+                    let _ = crate::task::set_thread_state_at_slot(next_slot, crate::task::ThreadState::Running);
+                } else {
+                    let _ = crate::task::set_thread_state(thread_id, crate::task::ThreadState::Running);
+                }
+                crate::task::yield_now();
+            }
+            thread_id.as_u64()
+        }
+        Err(_) => ENOSYS,
+    }
+}
+
 /// Sleepシステムコール
 ///
 /// 指定されたミリ秒数の間スリープする
