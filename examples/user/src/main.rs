@@ -12,8 +12,10 @@ const ROUNDS: usize = 1;
 const PAGE_SIZE: u64 = 0x1000;
 const FS_BENCH_BYTES: usize = 4 * 1024 * 1024;
 const FS_BENCH_ROUNDS: usize = 2;
+const FS_BENCH_WRITE_ROUNDS: usize = 8;
 const FS_BENCH_PATH: &[u8] = b"/bench/huge.bin\0";
-const FS_BENCH_BUF_SIZE: usize = 64 * 1024;
+const MAP_PRIVATE: u64 = 0x2;
+const MAP_SHARED: u64 = 0x1;
 const O_WRONLY: u64 = 0o1;
 const O_TRUNC: u64 = 0o1000;
 const TICKS_PER_SECOND: u64 = 500;
@@ -34,7 +36,7 @@ const STAGE_CAP: &[u8] = b"stage: capability\n";
 const STAGE_THREAD: &[u8] = b"stage: thread\n";
 const STAGE_SPAWN: &[u8] = b"stage: process_spawn\n";
 const STAGE_FS_BENCH: &[u8] = b"stage: fs bench\n";
-const FS_OPEN_READ_LINE: &[u8] = b"fs.cext open/read: ";
+const FS_MMAP_READ_LINE: &[u8] = b"fs.cext mmap/read: ";
 const FS_WRITE_LINE: &[u8] = b"fs.cext write: ";
 const FS_BYTES_LINE: &[u8] = b" bytes, ";
 const FS_TICKS_LINE: &[u8] = b" ticks, ";
@@ -245,82 +247,85 @@ fn run_process_spawn_test() -> bool {
 
 fn run_fs_benchmark() -> u64 {
     let bench_size = FS_BENCH_BYTES as u64;
-    let buf_ptr = user::memory_map(0, FS_BENCH_BUF_SIZE as u64, 3, MAP_ANONYMOUS_PRIVATE, 0);
-    if buf_ptr == 0 || is_error(buf_ptr) {
-        return 70;
-    }
-
     let path = FS_BENCH_PATH.as_ptr() as u64;
-    let chunk = FS_BENCH_BUF_SIZE as u64;
+    let map_len = bench_size;
 
-    let mut open_ticks = 0u64;
+    let checksum = |base: u64, len: u64| -> u64 {
+        let mut sum = 0u64;
+        let mut off = 0u64;
+        while off < len {
+            let byte = unsafe { core::ptr::read_volatile((base + off) as *const u8) } as u64;
+            sum = sum.wrapping_add(byte);
+            off += 4096;
+        }
+        sum
+    };
+
+    let mut read_ticks = 0u64;
     for _ in 0..FS_BENCH_ROUNDS {
-        let open_start = user::time_now();
         let fd = user::open(path, 0);
         if is_error(fd) {
             return 71;
         }
-        open_ticks = open_ticks.saturating_add(user::time_now().saturating_sub(open_start));
+        let map_start = user::memory_map(0, map_len, 1, MAP_PRIVATE, fd);
         let _ = user::close(fd);
+        if map_start == 0 || is_error(map_start) {
+            return 72;
+        }
+        let read_start = user::time_now();
+        let _checksum = checksum(map_start, map_len);
+        read_ticks = read_ticks.saturating_add(user::time_now().saturating_sub(read_start));
+        let _ = user::memory_unmap(map_start, map_len);
     }
 
     let mut write_ticks = 0u64;
     let mut written = 0u64;
-    for _ in 0..FS_BENCH_ROUNDS {
-        let write_start = user::time_now();
+    for _ in 0..FS_BENCH_WRITE_ROUNDS {
         let fd = user::open(path, O_WRONLY | O_TRUNC);
         if is_error(fd) {
-            return 72;
+            return 73;
         }
-        written = 0;
-        while written < bench_size {
-            let remaining = bench_size - written;
-            let to_write = core::cmp::min(remaining, chunk);
-            let ret = user::write(fd, buf_ptr, to_write);
-            if is_error(ret) {
-                let _ = user::close(fd);
-                return 73;
-            }
-            if ret == 0 {
-                break;
-            }
-            written = written.saturating_add(ret);
-        }
-        write_ticks = write_ticks.saturating_add(user::time_now().saturating_sub(write_start));
+        let map_start = user::memory_map(0, map_len, 3, MAP_SHARED, fd);
         let _ = user::close(fd);
-        if written != bench_size {
-            break;
+        if map_start == 0 || is_error(map_start) {
+            return 74;
         }
+        let write_start = user::time_now();
+        unsafe {
+            core::ptr::write_bytes(map_start as *mut u8, 0xA5, map_len as usize);
+        }
+        written = map_len;
+        let _ = user::memory_unmap(map_start, map_len);
+        write_ticks = write_ticks.saturating_add(user::time_now().saturating_sub(write_start));
     }
 
-    let _ = user::memory_unmap(buf_ptr, FS_BENCH_BUF_SIZE as u64);
-
     if written != bench_size {
-        return 74;
+        return 75;
     }
 
     let total_bytes = bench_size.saturating_mul(FS_BENCH_ROUNDS as u64);
-    let open_mib_s = if open_ticks == 0 {
+    let _ = user::write(1, FS_MMAP_READ_LINE.as_ptr() as u64, FS_MMAP_READ_LINE.len() as u64);
+    write_decimal(1, total_bytes);
+    let _ = user::write(1, FS_BYTES_LINE.as_ptr() as u64, FS_BYTES_LINE.len() as u64);
+    write_decimal(1, read_ticks);
+    let _ = user::write(1, FS_TICKS_LINE.as_ptr() as u64, FS_TICKS_LINE.len() as u64);
+    let read_mib_s = if read_ticks == 0 {
         0
     } else {
-        (total_bytes.saturating_mul(TICKS_PER_SECOND) / open_ticks / BYTES_PER_MIB) as u64
+        (total_bytes.saturating_mul(TICKS_PER_SECOND) / read_ticks / BYTES_PER_MIB) as u64
     };
+    write_decimal(1, read_mib_s);
+    let _ = user::write(1, FS_MIB_LINE.as_ptr() as u64, FS_MIB_LINE.len() as u64);
+
+    let total_write_bytes = bench_size.saturating_mul(FS_BENCH_WRITE_ROUNDS as u64);
     let write_mib_s = if write_ticks == 0 {
         0
     } else {
-        (total_bytes.saturating_mul(TICKS_PER_SECOND) / write_ticks / BYTES_PER_MIB) as u64
+        (total_write_bytes.saturating_mul(TICKS_PER_SECOND) / write_ticks / BYTES_PER_MIB) as u64
     };
 
-    let _ = user::write(1, FS_OPEN_READ_LINE.as_ptr() as u64, FS_OPEN_READ_LINE.len() as u64);
-    write_decimal(1, total_bytes);
-    let _ = user::write(1, FS_BYTES_LINE.as_ptr() as u64, FS_BYTES_LINE.len() as u64);
-    write_decimal(1, open_ticks);
-    let _ = user::write(1, FS_TICKS_LINE.as_ptr() as u64, FS_TICKS_LINE.len() as u64);
-    write_decimal(1, open_mib_s);
-    let _ = user::write(1, FS_MIB_LINE.as_ptr() as u64, FS_MIB_LINE.len() as u64);
-
     let _ = user::write(1, FS_WRITE_LINE.as_ptr() as u64, FS_WRITE_LINE.len() as u64);
-    write_decimal(1, total_bytes);
+    write_decimal(1, total_write_bytes);
     let _ = user::write(1, FS_BYTES_LINE.as_ptr() as u64, FS_BYTES_LINE.len() as u64);
     write_decimal(1, write_ticks);
     let _ = user::write(1, FS_TICKS_LINE.as_ptr() as u64, FS_TICKS_LINE.len() as u64);

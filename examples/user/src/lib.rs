@@ -164,6 +164,21 @@ pub fn time_now() -> u64 {
     unsafe { syscall0(SYS_TIME_NOW) }
 }
 
+pub fn rdtsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        asm!(
+            "lfence",
+            "rdtsc",
+            out("eax") lo,
+            out("edx") hi,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    ((hi as u64) << 32) | lo as u64
+}
+
 pub fn sleep(milliseconds: u64) -> u64 {
     unsafe { syscall1(SYS_SLEEP, milliseconds) }
 }

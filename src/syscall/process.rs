@@ -3,6 +3,7 @@
 use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS, EPERM, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
+use alloc::vec;
 use alloc::vec::Vec;
 
 fn caller_has_process_inspect_capability() -> bool {
@@ -398,6 +399,7 @@ pub fn fork() -> u64 {
         heap_end,
         stack_bottom,
         stack_top,
+        parent_mmap_regions,
     ) = match crate::task::with_process(parent_pid, |p| {
         (
             p.privilege(),
@@ -408,6 +410,7 @@ pub fn fork() -> u64 {
             p.heap_end(),
             p.stack_bottom(),
             p.stack_top(),
+            p.clone_mmap_regions_for_fork(),
         )
     }) {
         Some(v) => v,
@@ -452,6 +455,7 @@ pub fn fork() -> u64 {
     child_proc.set_heap_end(heap_end);
     child_proc.set_stack_bottom(stack_bottom);
     child_proc.set_stack_top(stack_top);
+    child_proc.set_mmap_regions(parent_mmap_regions);
     crate::debug!(
         "[STACK_INIT] FORK child: stack_bottom={:#x}, stack_top={:#x}",
         stack_bottom,
@@ -590,9 +594,114 @@ pub fn wait(_pid: u64, status_ptr: u64, options: u64) -> u64 {
     }
 }
 
+/// page fault を契機に file-backed mmap を 1 ページだけ解決する。
+pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool) -> bool {
+    let tid = match current_thread_id() {
+        Some(t) => t,
+        None => return false,
+    };
+    let pid = match crate::task::with_thread(tid, |t| t.process_id()) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let page_addr = fault_addr & !4095;
+    crate::debug!(
+        "[MMAP_FAULT] addr={:#x} page={:#x} write={}",
+        fault_addr,
+        page_addr,
+        is_write
+    );
+    let result = crate::task::with_process_mut(pid, |process| {
+        let pt_phys = match process.page_table() {
+            Some(p) => p,
+            None => return Err(EINVAL),
+        };
+        let region = match process.find_mmap_region_mut(fault_addr) {
+            Some(region) => region,
+            None => {
+                crate::debug!("[MMAP_FAULT] no region for {:#x}", fault_addr);
+                return Err(EINVAL);
+            }
+        };
+        crate::debug!(
+            "[MMAP_FAULT] region start={:#x} len={:#x} writable={} shared={}",
+            region.start(),
+            region.len(),
+            region.is_writable(),
+            region.is_shared()
+        );
+        if is_write && !region.is_writable() {
+            crate::debug!("[MMAP_FAULT] write fault on read-only mapping");
+            return Err(EPERM);
+        }
+        let page_off = match page_addr.checked_sub(region.start()) {
+            Some(v) => v as usize,
+            None => return Err(EINVAL),
+        };
+
+        let maybe_phys = crate::mem::paging::virt_to_phys_in_table(pt_phys, page_addr);
+        if let Some(phys) = maybe_phys {
+            if !is_write {
+                crate::debug!("[MMAP_FAULT] page already mapped {:#x}", page_addr);
+                return Err(EINVAL);
+            }
+            let frame = match x86_64::structures::paging::PhysFrame::from_start_address(
+                x86_64::PhysAddr::new(phys),
+            ) {
+                Ok(frame) => frame,
+                Err(_) => return Err(EINVAL),
+            };
+            let page = x86_64::structures::paging::Page::containing_address(
+                x86_64::VirtAddr::new(page_addr),
+            );
+            let flags = x86_64::structures::paging::PageTableFlags::PRESENT
+                | x86_64::structures::paging::PageTableFlags::WRITABLE
+                | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
+                | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
+            if crate::mem::paging::map_page(page, frame, flags).is_err() {
+                crate::debug!("[MMAP_FAULT] remap writable failed for {:#x}", page_addr);
+                return Err(ENOMEM);
+            }
+            region.mark_dirty_page((page_addr - region.start()) / 4096);
+            crate::debug!("[MMAP_FAULT] upgraded dirty page {:#x}", page_addr);
+            return Ok(());
+        }
+
+        let file_data = region.backing().file_data();
+        let copy_len = core::cmp::min(4096usize, file_data.len().saturating_sub(page_off));
+        let src = if copy_len > 0 {
+            &file_data[page_off..page_off + copy_len]
+        } else {
+            &[]
+        };
+        if crate::mem::paging::map_and_copy_segment_to(
+            pt_phys,
+            page_addr,
+            copy_len as u64,
+            4096,
+            src,
+            is_write && region.is_writable(),
+            false,
+        )
+        .is_err()
+        {
+            crate::debug!("[MMAP_FAULT] map_and_copy_segment_to failed for {:#x}", page_addr);
+            return Err(ENOMEM);
+        }
+        if is_write {
+            region.mark_dirty_page((page_addr - region.start()) / 4096);
+        }
+        crate::debug!("[MMAP_FAULT] mapped page {:#x}", page_addr);
+        Ok(())
+    });
+
+    matches!(result, Some(Ok(())))
+}
+
 /// Mmapシステムコール
 ///
-/// 匿名メモリマッピングを作成する (MAP_ANONYMOUS | MAP_PRIVATE のみサポート)
+/// 匿名マッピングと file-backed マッピングの最小実装。
 ///
 /// # 引数
 /// - `addr`: ヒント仮想アドレス (0で任意)
@@ -603,18 +712,16 @@ pub fn wait(_pid: u64, status_ptr: u64, options: u64) -> u64 {
 ///
 /// # 戻り値
 /// マップされた仮想アドレス、またはエラーコード
-pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
+pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
     use super::types::{EINVAL, ENOMEM};
 
     if length == 0 {
         return EINVAL;
     }
 
-    // MAP_ANONYMOUS (0x20) のみサポート
+    // MAP_ANONYMOUS (0x20) は従来通りサポートする。
     const MAP_ANONYMOUS: u64 = 0x20;
-    if flags & MAP_ANONYMOUS == 0 {
-        return ENOSYS;
-    }
+    let anonymous = flags & MAP_ANONYMOUS != 0;
 
     let current_tid = match current_thread_id() {
         Some(tid) => tid,
@@ -629,6 +736,30 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
     let size = match page_align_up(length) {
         Some(v) if v > 0 => v,
         _ => return EINVAL,
+    };
+
+    let writable = (prot & 0x2) != 0;
+    let shared = (flags & 0x1) != 0;
+    let file_backing = if anonymous {
+        None
+    } else if fd == 0 {
+        return EINVAL;
+    } else {
+        let idx = fd as usize;
+        let path = match crate::task::with_process(pid, |process| {
+            process
+                .fd_table()
+                .get(idx)
+                .and_then(|fh| fh.fs_path.clone())
+        }) {
+            Some(Some(path)) => path,
+            _ => return EINVAL,
+        };
+        let data = match crate::kmod::fs::read_all(&path) {
+            Some(data) => data,
+            None => return ENOMEM,
+        };
+        Some((path, data))
     };
 
     let result = crate::task::with_process_mut(pid, |process| {
@@ -674,18 +805,38 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
             None => return Err(ENOMEM),
         };
 
-        if crate::mem::paging::map_and_copy_segment_to(
-            pt_phys,
-            map_start,
-            0,
-            size,
-            &[],
-            true,
-            false,
-        )
-        .is_err()
-        {
-            return Err(ENOMEM);
+        if anonymous {
+            if crate::mem::paging::map_and_copy_segment_to(
+                pt_phys,
+                map_start,
+                0,
+                size,
+                &[],
+                true,
+                false,
+            )
+            .is_err()
+            {
+                return Err(ENOMEM);
+            }
+        } else {
+            let (path, data) = match file_backing.as_ref() {
+                Some((path, data)) => (path.clone(), data.clone()),
+                None => return Err(EINVAL),
+            };
+            let region = crate::task::MmapRegion::file_backed(
+                map_start,
+                size,
+                prot,
+                flags,
+                path,
+                data,
+                writable,
+                shared,
+            );
+            if !process.add_mmap_region(region) {
+                return Err(EINVAL);
+            }
         }
 
         // heap_end を更新してアドレス空間が重ならないようにする
@@ -737,6 +888,30 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
         Some(p) => p,
         None => return ENOSYS,
     };
+
+    let backing_region = crate::task::with_process_mut(pid, |process| {
+        process.remove_mmap_region(unmap_start, unmap_len)
+    })
+    .flatten();
+
+    if let Some(mut region) = backing_region {
+        if region.is_shared() && region.is_writable() {
+            let path = alloc::string::String::from(region.backing().file_path());
+            let dirty_pages = region.take_dirty_pages();
+            for page_index in dirty_pages {
+                let page_off = page_index.saturating_mul(4096);
+                if page_off >= region.len() {
+                    continue;
+                }
+                let page_addr = unmap_start + page_off;
+                let copy_len = core::cmp::min(4096u64, region.len() - page_off) as usize;
+                let mut page_buf = [0u8; 4096];
+                if crate::syscall::copy_from_user(page_addr, &mut page_buf[..copy_len]).is_ok() {
+                    let _ = crate::kmod::fs::write_all(&path, page_off, &page_buf[..copy_len]);
+                }
+            }
+        }
+    }
 
     match crate::mem::paging::unmap_range_in_table(pt_phys, unmap_start, unmap_len) {
         Ok(()) => SUCCESS,

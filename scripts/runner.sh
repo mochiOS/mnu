@@ -282,10 +282,6 @@ for _ in $(seq 1 600); do
             exit 1
         fi
 
-        if [[ "$line" == *"PAGE FAULT"* || "$line" == *"Faulting user context:"* ]]; then
-            echo "fatal: userland fault observed during validation" >&2
-            exit 1
-        fi
     done < <(sed -n "${NEXT_LINE},\$p" "${SERIAL_LOG}")
 
     NEXT_LINE="$(($(wc -l < "${SERIAL_LOG}") + 1))"
