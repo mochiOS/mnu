@@ -8,6 +8,7 @@ const MAX_ENDPOINTS: usize = 128;
 const MAILBOX_CAP: usize = 64;
 const MAX_MSG_SIZE: usize = 4128; // FsResponse(4112) / DiskBulkResponse(2064) を収容
 const MAX_EXT_PAGES: usize = 128;
+const FAST_IPC_MAX_BYTES: usize = 48;
 
 /// endpoint ベース IPC への移行用ハンドル
 ///
@@ -123,6 +124,86 @@ pub fn endpoint_is_valid(endpoint: IpcEndpoint) -> bool {
         Some((slot, generation)) => slot as u16 == endpoint.slot && generation == endpoint.generation,
         None => false,
     }
+}
+
+fn fast_ipc_take_request(receiver_tid: u64) -> Option<(u64, usize, [u8; FAST_IPC_MAX_BYTES])> {
+    crate::task::with_thread_mut(crate::task::ThreadId::from_u64(receiver_tid), |thread| {
+        thread.fast_ipc_mut().take_request()
+    })
+    .flatten()
+}
+
+fn fast_ipc_is_waiting(receiver_tid: u64) -> bool {
+    crate::task::with_thread(crate::task::ThreadId::from_u64(receiver_tid), |thread| {
+        thread.fast_ipc().waiting()
+    })
+    .unwrap_or(false)
+}
+
+fn fast_ipc_set_waiting(receiver_tid: u64, waiting: bool) {
+    let _ = crate::task::with_thread_mut(crate::task::ThreadId::from_u64(receiver_tid), |thread| {
+        thread.fast_ipc_mut().set_waiting(waiting);
+    });
+}
+
+fn fast_ipc_set_request(receiver_tid: u64, sender_tid: u64, data: &[u8]) -> bool {
+    crate::task::with_thread_mut(crate::task::ThreadId::from_u64(receiver_tid), |thread| {
+        let fast = thread.fast_ipc_mut();
+        fast.set_request(sender_tid, data);
+        fast.set_waiting(false);
+    })
+    .is_some()
+}
+
+fn fast_ipc_set_reply_target(sender_tid: u64, reply_ptr: u64, reply_len: usize) -> bool {
+    crate::task::with_thread_mut(crate::task::ThreadId::from_u64(sender_tid), |thread| {
+        let fast = thread.fast_ipc_mut();
+        fast.set_reply_target(reply_ptr, reply_len);
+        fast.set_reply_ready(false);
+    })
+    .is_some()
+}
+
+fn fast_ipc_reply_ready(sender_tid: u64) -> bool {
+    crate::task::with_thread(crate::task::ThreadId::from_u64(sender_tid), |thread| {
+        thread.fast_ipc().reply_ready()
+    })
+    .unwrap_or(false)
+}
+
+fn fast_ipc_take_reply_target(sender_tid: u64) -> Option<(u64, usize)> {
+    crate::task::with_thread_mut(crate::task::ThreadId::from_u64(sender_tid), |thread| {
+        thread.fast_ipc_mut().take_reply_target()
+    })
+}
+
+fn fast_ipc_mark_reply_ready(sender_tid: u64) {
+    let _ = crate::task::with_thread_mut(crate::task::ThreadId::from_u64(sender_tid), |thread| {
+        thread.fast_ipc_mut().set_reply_ready(true);
+    });
+}
+
+fn fast_ipc_set_reply_result_len(sender_tid: u64, len: usize) {
+    let _ = crate::task::with_thread_mut(crate::task::ThreadId::from_u64(sender_tid), |thread| {
+        thread.fast_ipc_mut().set_reply_result_len(len);
+    });
+}
+
+fn fast_ipc_take_reply_result_len(sender_tid: u64) -> usize {
+    crate::task::with_thread_mut(crate::task::ThreadId::from_u64(sender_tid), |thread| {
+        thread.fast_ipc_mut().take_reply_result_len()
+    })
+    .unwrap_or(0)
+}
+
+fn fast_ipc_clear(receiver_tid: u64) {
+    let _ = crate::task::with_thread_mut(crate::task::ThreadId::from_u64(receiver_tid), |thread| {
+        thread.clear_fast_ipc();
+    });
+}
+
+fn fast_ipc_supported_len(len: usize) -> bool {
+    len <= FAST_IPC_MAX_BYTES
 }
 
 pub fn endpoint_rights_for_process(_process_id: u64) -> EndpointRights {
@@ -650,6 +731,13 @@ pub fn send(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         }
     }
 
+    if fast_ipc_supported_len(len) && fast_ipc_is_waiting(dest_thread_id) {
+        if fast_ipc_set_request(dest_thread_id, sender, &data[..len]) {
+            crate::task::wake_thread(crate::task::ThreadId::from_u64(dest_thread_id));
+            return 0;
+        }
+    }
+
     let mut boxes = MAILBOXES.lock();
     if boxes[idx]
         .push_message(
@@ -676,6 +764,50 @@ pub fn send(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
 ///
 /// 送信後に送信元の mailbox から応答を待つ。
 pub fn call(dest_thread_id: u64, req_ptr: u64, req_len: u64, reply_ptr: u64, reply_len: u64) -> u64 {
+    let dest_thread_id = match resolve_endpoint_handle(dest_thread_id) {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+    let sender = match crate::task::current_thread_id() {
+        Some(id) => id.as_u64(),
+        None => return EINVAL,
+    };
+    let req_len_usize = req_len as usize;
+    let reply_len_usize = reply_len as usize;
+
+    if fast_ipc_supported_len(req_len_usize) && fast_ipc_supported_len(reply_len_usize) {
+        let mut req_data = [0u8; FAST_IPC_MAX_BYTES];
+        if req_len_usize > 0 {
+            if let Err(err) = crate::syscall::copy_from_user(req_ptr, &mut req_data[..req_len_usize]) {
+                return err;
+            }
+        }
+
+        if fast_ipc_is_waiting(dest_thread_id)
+            && fast_ipc_set_reply_target(sender, reply_ptr, reply_len_usize)
+            && fast_ipc_set_request(dest_thread_id, sender, &req_data[..req_len_usize])
+        {
+            crate::task::wake_thread(crate::task::ThreadId::from_u64(dest_thread_id));
+
+            loop {
+                if fast_ipc_reply_ready(sender) {
+                    let reply_n = fast_ipc_take_reply_result_len(sender);
+                    fast_ipc_clear(sender);
+                    return (dest_thread_id << 32) | (reply_n as u64);
+                }
+                if crate::task::sleep_thread_unless_woken(crate::task::ThreadId::from_u64(sender)) {
+                    crate::task::yield_now();
+                } else if fast_ipc_reply_ready(sender) {
+                    let reply_n = fast_ipc_take_reply_result_len(sender);
+                    fast_ipc_clear(sender);
+                    return (dest_thread_id << 32) | (reply_n as u64);
+                }
+            }
+        }
+
+        fast_ipc_clear(sender);
+    }
+
     let send_result = send(dest_thread_id, req_ptr, req_len);
     if send_result != SUCCESS {
         return send_result;
@@ -685,7 +817,67 @@ pub fn call(dest_thread_id: u64, req_ptr: u64, req_len: u64, reply_ptr: u64, rep
 
 /// 返信は単なる送信として扱う。
 pub fn reply(dest_thread_id: u64, reply_ptr: u64, reply_len: u64) -> u64 {
+    let dest_thread_id = match resolve_endpoint_handle(dest_thread_id) {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+    let reply_len_usize = reply_len as usize;
+
+    if fast_ipc_supported_len(reply_len_usize) {
+        let sender_tid = dest_thread_id;
+        if let Some((reply_dst_ptr, reply_dst_len)) = fast_ipc_take_reply_target(sender_tid) {
+            if reply_len_usize > reply_dst_len {
+                return EINVAL;
+            }
+
+            let mut tmp = [0u8; FAST_IPC_MAX_BYTES];
+            if reply_len_usize > 0 {
+                if let Err(err) = crate::syscall::copy_from_user(reply_ptr, &mut tmp[..reply_len_usize]) {
+                    return err;
+                }
+                if let Err(err) = crate::syscall::copy_to_user(reply_dst_ptr, &tmp[..reply_len_usize]) {
+                    return err;
+                }
+            }
+            fast_ipc_set_reply_result_len(sender_tid, reply_len_usize);
+            fast_ipc_mark_reply_ready(sender_tid);
+            crate::task::wake_thread(crate::task::ThreadId::from_u64(sender_tid));
+            if let Some(current) = crate::task::current_thread_id() {
+                fast_ipc_clear(current.as_u64());
+            }
+            return 0;
+        }
+    }
+
     send(dest_thread_id, reply_ptr, reply_len)
+}
+
+/// 返信後にそのまま次の受信へ移るための内部ヘルパ。
+pub fn reply_recv(
+    dest_thread_id: u64,
+    reply_ptr: u64,
+    reply_len: u64,
+    recv_buf_ptr: u64,
+    recv_buf_len: u64,
+) -> u64 {
+    let r = reply(dest_thread_id, reply_ptr, reply_len);
+    if r != SUCCESS {
+        return r;
+    }
+    recv_blocking(recv_buf_ptr, recv_buf_len)
+}
+
+/// fast IPC ベンチ用の cycle 計測。
+pub fn bench_call_cycles(
+    dest_thread_id: u64,
+    req_ptr: u64,
+    req_len: u64,
+    reply_ptr: u64,
+    reply_len: u64,
+) -> u64 {
+    let start = crate::cpu::rdtsc();
+    let _ = call(dest_thread_id, req_ptr, req_len, reply_ptr, reply_len);
+    crate::cpu::rdtsc().saturating_sub(start)
 }
 
 /// 待機は blocking recv の薄いラッパにする。
@@ -831,6 +1023,18 @@ pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
         return EINVAL;
     }
 
+    if let Some((from, req_len, data)) = fast_ipc_take_request(receiver) {
+        let max_copy = core::cmp::min(max_len as usize, FAST_IPC_MAX_BYTES);
+        let copy_len = core::cmp::min(req_len, max_copy);
+        if copy_len > 0 && buf_ptr != 0 {
+            if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &data[..copy_len]) {
+                return err;
+            }
+        }
+        fast_ipc_set_waiting(receiver, false);
+        return (from << 32) | (copy_len as u64);
+    }
+
     let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
     let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
     let (from, copy_len, ext_pages_count, ext_pages) = {
@@ -862,6 +1066,7 @@ pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
             return err;
         }
     }
+    fast_ipc_set_waiting(receiver, false);
 
     // 上位32bitに送信元ID、下位32bitに長さ
     (from << 32) | (copy_len as u64)
@@ -890,6 +1095,18 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
 
     let mut recv_buf = [0u8; MAX_MSG_SIZE];
     loop {
+        if let Some((from, req_len, data)) = fast_ipc_take_request(receiver_u64) {
+            let max_copy = core::cmp::min(max_len as usize, FAST_IPC_MAX_BYTES);
+            let copy_len = core::cmp::min(req_len, max_copy);
+            if copy_len > 0 && buf_ptr != 0 {
+                if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &data[..copy_len]) {
+                    return err;
+                }
+            }
+            fast_ipc_set_waiting(receiver_u64, false);
+            return (from << 32) | (copy_len as u64);
+        }
+
         let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
         // ロックを取得してメッセージを取り出すか、自分を waiter として登録する
         let recv = {
@@ -926,9 +1143,11 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
                         return err;
                     }
                 }
+                fast_ipc_set_waiting(receiver_u64, false);
                 return (from << 32) | (copy_len as u64);
             }
             None => {
+                fast_ipc_set_waiting(receiver_u64, true);
                 // メッセージなし：pending_wakeup がなければスリープして yield
                 if crate::task::sleep_thread_unless_woken(receiver) {
                     crate::task::yield_now();
@@ -936,6 +1155,7 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
                 } else {
                     // pending_wakeup で即起床（子プロセス終了通知など）だがメッセージなし
                     // → waiter をクリアして 0 を返し、呼び出し元が終了検知できるようにする
+                    fast_ipc_set_waiting(receiver_u64, false);
                     {
                         let mut boxes = MAILBOXES.lock();
                         if boxes[idx].waiter == receiver_u64 {
@@ -1006,6 +1226,15 @@ pub fn recv_blocking_from_sender_for_kernel(
     }
 
     loop {
+        if let Some((from, req_len, data)) = fast_ipc_take_request(receiver_u64) {
+            let copy_len = core::cmp::min(req_len, buf.len());
+            if copy_len > 0 {
+                buf[..copy_len].copy_from_slice(&data[..copy_len]);
+            }
+            fast_ipc_set_waiting(receiver_u64, false);
+            return Ok(copy_len);
+        }
+
         let n = {
             let mut boxes = MAILBOXES.lock();
             match boxes[idx].pop_from_sender_copy(

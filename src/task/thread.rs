@@ -4,6 +4,135 @@ use x86_64::VirtAddr;
 use super::context::Context;
 use super::ids::{ProcessId, ThreadId, ThreadState};
 
+const FAST_IPC_MAX_BYTES: usize = 48;
+
+#[derive(Clone, Copy, Debug)]
+pub struct IpcFastState {
+    waiting: bool,
+    has_request: bool,
+    reply_ready: bool,
+    sender_tid: u64,
+    reply_ptr: u64,
+    reply_len: usize,
+    reply_result_len: usize,
+    msg_len: usize,
+    msg: [u8; FAST_IPC_MAX_BYTES],
+}
+
+impl IpcFastState {
+    pub const fn new() -> Self {
+        Self {
+            waiting: false,
+            has_request: false,
+            reply_ready: false,
+            sender_tid: 0,
+            reply_ptr: 0,
+            reply_len: 0,
+            reply_result_len: 0,
+            msg_len: 0,
+            msg: [0; FAST_IPC_MAX_BYTES],
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    pub fn waiting(&self) -> bool {
+        self.waiting
+    }
+
+    pub fn set_waiting(&mut self, waiting: bool) {
+        self.waiting = waiting;
+    }
+
+    pub fn has_request(&self) -> bool {
+        self.has_request
+    }
+
+    pub fn sender_tid(&self) -> u64 {
+        self.sender_tid
+    }
+
+    pub fn reply_ready(&self) -> bool {
+        self.reply_ready
+    }
+
+    pub fn set_reply_ready(&mut self, ready: bool) {
+        self.reply_ready = ready;
+    }
+
+    pub fn reply_ptr(&self) -> u64 {
+        self.reply_ptr
+    }
+
+    pub fn reply_len(&self) -> usize {
+        self.reply_len
+    }
+
+    pub fn reply_result_len(&self) -> usize {
+        self.reply_result_len
+    }
+
+    pub fn request_len(&self) -> usize {
+        self.msg_len
+    }
+
+    pub fn request_bytes(&self) -> &[u8] {
+        &self.msg[..self.msg_len]
+    }
+
+    pub fn set_request(&mut self, sender_tid: u64, data: &[u8]) {
+        self.has_request = true;
+        self.sender_tid = sender_tid;
+        self.msg_len = core::cmp::min(data.len(), FAST_IPC_MAX_BYTES);
+        self.msg[..self.msg_len].copy_from_slice(&data[..self.msg_len]);
+        if self.msg_len < FAST_IPC_MAX_BYTES {
+            self.msg[self.msg_len..].fill(0);
+        }
+    }
+
+    pub fn take_request(&mut self) -> Option<(u64, usize, [u8; FAST_IPC_MAX_BYTES])> {
+        if !self.has_request {
+            return None;
+        }
+        let sender = self.sender_tid;
+        let len = self.msg_len;
+        let data = self.msg;
+        self.has_request = false;
+        self.reply_ready = false;
+        self.msg_len = 0;
+        self.msg = [0; FAST_IPC_MAX_BYTES];
+        Some((sender, len, data))
+    }
+
+    pub fn set_reply_target(&mut self, reply_ptr: u64, reply_len: usize) {
+        self.reply_ptr = reply_ptr;
+        self.reply_len = reply_len;
+        self.reply_result_len = 0;
+    }
+
+    pub fn take_reply_target(&mut self) -> (u64, usize) {
+        let ptr = self.reply_ptr;
+        let len = self.reply_len;
+        self.reply_ptr = 0;
+        self.reply_len = 0;
+        self.reply_ready = false;
+        self.reply_result_len = 0;
+        (ptr, len)
+    }
+
+    pub fn set_reply_result_len(&mut self, len: usize) {
+        self.reply_result_len = len;
+    }
+
+    pub fn take_reply_result_len(&mut self) -> usize {
+        let len = self.reply_result_len;
+        self.reply_result_len = 0;
+        len
+    }
+}
+
 /// スレッド終了時に呼ばれるハンドラ
 /// この関数から戻ることはない
 extern "C" fn thread_exit_handler() -> ! {
@@ -59,6 +188,8 @@ pub struct Thread {
     futex_timed_out: bool,
     /// IPC受信などで眠る前に起床要求が来たことを示すフラグ
     pending_wakeup: bool,
+    /// 低遅延IPCの待機/受信状態
+    fast_ipc: IpcFastState,
     /// 直近の対話的な待機/起床の傾向
     interactive_score: u8,
     /// 直近の量子使い切りの傾向
@@ -341,6 +472,7 @@ impl Thread {
             syscall_user_rflags: 0,
             futex_timed_out: false,
             pending_wakeup: false,
+            fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
         }
@@ -451,6 +583,7 @@ impl Thread {
             syscall_user_rflags: 0,
             futex_timed_out: false,
             pending_wakeup: false,
+            fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
         }
@@ -564,6 +697,7 @@ impl Thread {
             syscall_user_rflags: user_rflags,
             futex_timed_out: false,
             pending_wakeup: false,
+            fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
         }
@@ -625,6 +759,18 @@ impl Thread {
         let v = self.pending_wakeup;
         self.pending_wakeup = false;
         v
+    }
+
+    pub fn fast_ipc(&self) -> &IpcFastState {
+        &self.fast_ipc
+    }
+
+    pub fn fast_ipc_mut(&mut self) -> &mut IpcFastState {
+        &mut self.fast_ipc
+    }
+
+    pub fn clear_fast_ipc(&mut self) {
+        self.fast_ipc.clear();
     }
 
     pub fn interactive_score(&self) -> u8 {

@@ -540,7 +540,7 @@ pub fn reassert_runtime_hardening() {
 }
 
 #[inline]
-fn rdtsc() -> u64 {
+pub fn rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;
     unsafe {
