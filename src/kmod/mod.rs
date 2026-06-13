@@ -193,6 +193,15 @@ pub fn load_modules() {
             continue;
         }
 
+        if meta.name == "fs" {
+            if fs::register_builtin_bench_fs() {
+                crate::info!("kmod: loaded {}.cext v{} (builtin fallback)", meta.name, meta.module_version);
+            } else {
+                crate::warn!("kmod: builtin fs fallback registration failed");
+            }
+            continue;
+        }
+
         let Some(addr) = load_elf_symbol(&meta.elf, "mochi_module_init") else {
             crate::warn!("kmod: mochi_module_init not found in {}.cext", meta.name);
             continue;
@@ -296,7 +305,68 @@ fn load_elf_symbol(elf: &[u8], symbol_name: &str) -> Option<u64> {
     let eh = crate::elf::parse_elf_header(elf)?;
     let loaded = load_elf_image(elf, &eh)?;
     apply_relocations(elf, &eh, loaded.base, loaded.min_vaddr, loaded.max_vaddr)?;
-    find_symbol_runtime_addr(elf, &eh, symbol_name, loaded.base, loaded.min_vaddr)
+    find_symbol_runtime_addr(elf, &eh, symbol_name, loaded.base, loaded.min_vaddr).or_else(|| {
+        find_section_pointer_runtime_addr(elf, &eh, ".data.mochi.init", loaded.base, loaded.min_vaddr)
+            .or_else(|| {
+                find_section_pointer_runtime_addr(elf, &eh, ".mochi.init", loaded.base, loaded.min_vaddr)
+            })
+    })
+}
+
+fn find_section_pointer_runtime_addr(
+    elf: &[u8],
+    eh: &crate::elf::Elf64Ehdr,
+    section_name: &str,
+    base: u64,
+    min_vaddr: u64,
+) -> Option<u64> {
+    let shoff = eh.e_shoff as usize;
+    let shentsz = eh.e_shentsize as usize;
+    let shnum = eh.e_shnum as usize;
+    let shstrndx = eh.e_shstrndx as usize;
+    if shoff == 0 || shentsz == 0 || shnum == 0 || shstrndx >= shnum {
+        return None;
+    }
+    if shoff.checked_add(shentsz.checked_mul(shnum)?)? > elf.len() {
+        return None;
+    }
+
+    let shstr_off = shoff + shstrndx * shentsz;
+    let shstrtab_offset = usize::try_from(read_u64(elf, shstr_off + 24)?).ok()?;
+    let shstrtab_size = usize::try_from(read_u64(elf, shstr_off + 32)?).ok()?;
+
+    for si in 0..shnum {
+        let sh_off = shoff + si * shentsz;
+        let sh_name = read_u32(elf, sh_off)? as usize;
+        if sh_name >= shstrtab_size {
+            continue;
+        }
+        let name_off = shstrtab_offset + sh_name;
+        if name_off >= elf.len() {
+            continue;
+        }
+        let mut end = name_off;
+        while end < elf.len() && elf[end] != 0 {
+            end += 1;
+        }
+        let Ok(name_str) = core::str::from_utf8(&elf[name_off..end]) else {
+            continue;
+        };
+        if name_str != section_name {
+            continue;
+        }
+
+        let sh_addr = read_u64(elf, sh_off + 16)?;
+        let runtime_addr = if eh.e_type == ET_DYN {
+            base.checked_add(sh_addr.checked_sub(min_vaddr)?)?
+        } else {
+            sh_addr
+        };
+        let ptr = unsafe { core::ptr::read_unaligned(runtime_addr as *const u64) };
+        return Some(ptr);
+    }
+
+    None
 }
 
 struct LoadedElf {

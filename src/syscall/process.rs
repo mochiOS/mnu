@@ -632,16 +632,6 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
     };
 
     let result = crate::task::with_process_mut(pid, |process| {
-        crate::info!(
-            "mmap(pid={:?}, process='{}'): addr={:#x}, len={:#x}, flags={:#x}, heap_start={:#x}, heap_end={:#x}",
-            pid,
-            process.name(),
-            addr,
-            length,
-            flags,
-            process.heap_start(),
-            process.heap_end()
-        );
         // mmap用のヒープ領域を現在のbrk以降に割り当てる
         // (簡易実装: brkと同じ領域を使う)
         if process.heap_start() == 0 {
@@ -711,18 +701,9 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
     });
 
     match result {
-        Some(Ok(va)) => {
-            crate::info!("mmap(pid={:?}) -> {:#x}", pid, va);
-            va
-        }
-        Some(Err(e)) => {
-            crate::info!("mmap(pid={:?}) -> err {:#x}", pid, e);
-            e
-        }
-        None => {
-            crate::info!("mmap(pid={:?}) -> ENOMEM", pid);
-            ENOMEM
-        }
+        Some(Ok(va)) => va,
+        Some(Err(e)) => e,
+        None => ENOMEM,
     }
 }
 

@@ -10,6 +10,14 @@ const STACK_SIZE: u64 = 0x8000;
 const FAST_MSG_MAX: usize = 48;
 const ROUNDS: usize = 1;
 const PAGE_SIZE: u64 = 0x1000;
+const FS_BENCH_BYTES: usize = 4 * 1024 * 1024;
+const FS_BENCH_ROUNDS: usize = 2;
+const FS_BENCH_PATH: &[u8] = b"/bench/huge.bin\0";
+const FS_BENCH_BUF_SIZE: usize = 64 * 1024;
+const O_WRONLY: u64 = 0o1;
+const O_TRUNC: u64 = 0o1000;
+const TICKS_PER_SECOND: u64 = 500;
+const BYTES_PER_MIB: u64 = 1024 * 1024;
 
 const CAP_PROCESS_SPAWN: &[u8] = b"process.spawn";
 const CAP_IPC_CLIENT: &[u8] = b"ipc.client";
@@ -25,6 +33,12 @@ const STAGE_IPC_PP: &[u8] = b"stage: ipc ping/pong\n";
 const STAGE_CAP: &[u8] = b"stage: capability\n";
 const STAGE_THREAD: &[u8] = b"stage: thread\n";
 const STAGE_SPAWN: &[u8] = b"stage: process_spawn\n";
+const STAGE_FS_BENCH: &[u8] = b"stage: fs bench\n";
+const FS_OPEN_READ_LINE: &[u8] = b"fs.cext open/read: ";
+const FS_WRITE_LINE: &[u8] = b"fs.cext write: ";
+const FS_BYTES_LINE: &[u8] = b" bytes, ";
+const FS_TICKS_LINE: &[u8] = b" ticks, ";
+const FS_MIB_LINE: &[u8] = b" MiB/s\n";
 const EVENT_SIGNAL_A_FAIL: &[u8] = b"event: signal a failed\n";
 const EVENT_WAIT_A_FAIL: &[u8] = b"event: wait a failed\n";
 const EVENT_SIGNAL_B_FAIL: &[u8] = b"event: signal b failed\n";
@@ -41,6 +55,22 @@ fn expect_success(ret: u64) -> bool {
 
 fn expect_errno(ret: u64) -> bool {
     is_error(ret)
+}
+
+fn write_decimal(fd: u64, mut value: u64) {
+    let mut buf = [0u8; 32];
+    let mut idx = buf.len();
+    if value == 0 {
+        idx -= 1;
+        buf[idx] = b'0';
+    } else {
+        while value > 0 {
+            idx -= 1;
+            buf[idx] = b'0' + (value % 10) as u8;
+            value /= 10;
+        }
+    }
+    let _ = user::write(fd, buf[idx..].as_ptr() as u64, (buf.len() - idx) as u64);
 }
 
 extern "C" fn short_lived_thread(_arg: u64) {
@@ -213,6 +243,93 @@ fn run_process_spawn_test() -> bool {
     true
 }
 
+fn run_fs_benchmark() -> u64 {
+    let bench_size = FS_BENCH_BYTES as u64;
+    let buf_ptr = user::memory_map(0, FS_BENCH_BUF_SIZE as u64, 3, MAP_ANONYMOUS_PRIVATE, 0);
+    if buf_ptr == 0 || is_error(buf_ptr) {
+        return 70;
+    }
+
+    let path = FS_BENCH_PATH.as_ptr() as u64;
+    let chunk = FS_BENCH_BUF_SIZE as u64;
+
+    let mut open_ticks = 0u64;
+    for _ in 0..FS_BENCH_ROUNDS {
+        let open_start = user::time_now();
+        let fd = user::open(path, 0);
+        if is_error(fd) {
+            return 71;
+        }
+        open_ticks = open_ticks.saturating_add(user::time_now().saturating_sub(open_start));
+        let _ = user::close(fd);
+    }
+
+    let mut write_ticks = 0u64;
+    let mut written = 0u64;
+    for _ in 0..FS_BENCH_ROUNDS {
+        let write_start = user::time_now();
+        let fd = user::open(path, O_WRONLY | O_TRUNC);
+        if is_error(fd) {
+            return 72;
+        }
+        written = 0;
+        while written < bench_size {
+            let remaining = bench_size - written;
+            let to_write = core::cmp::min(remaining, chunk);
+            let ret = user::write(fd, buf_ptr, to_write);
+            if is_error(ret) {
+                let _ = user::close(fd);
+                return 73;
+            }
+            if ret == 0 {
+                break;
+            }
+            written = written.saturating_add(ret);
+        }
+        write_ticks = write_ticks.saturating_add(user::time_now().saturating_sub(write_start));
+        let _ = user::close(fd);
+        if written != bench_size {
+            break;
+        }
+    }
+
+    let _ = user::memory_unmap(buf_ptr, FS_BENCH_BUF_SIZE as u64);
+
+    if written != bench_size {
+        return 74;
+    }
+
+    let total_bytes = bench_size.saturating_mul(FS_BENCH_ROUNDS as u64);
+    let open_mib_s = if open_ticks == 0 {
+        0
+    } else {
+        (total_bytes.saturating_mul(TICKS_PER_SECOND) / open_ticks / BYTES_PER_MIB) as u64
+    };
+    let write_mib_s = if write_ticks == 0 {
+        0
+    } else {
+        (total_bytes.saturating_mul(TICKS_PER_SECOND) / write_ticks / BYTES_PER_MIB) as u64
+    };
+
+    let _ = user::write(1, FS_OPEN_READ_LINE.as_ptr() as u64, FS_OPEN_READ_LINE.len() as u64);
+    write_decimal(1, total_bytes);
+    let _ = user::write(1, FS_BYTES_LINE.as_ptr() as u64, FS_BYTES_LINE.len() as u64);
+    write_decimal(1, open_ticks);
+    let _ = user::write(1, FS_TICKS_LINE.as_ptr() as u64, FS_TICKS_LINE.len() as u64);
+    write_decimal(1, open_mib_s);
+    let _ = user::write(1, FS_MIB_LINE.as_ptr() as u64, FS_MIB_LINE.len() as u64);
+
+    let _ = user::write(1, FS_WRITE_LINE.as_ptr() as u64, FS_WRITE_LINE.len() as u64);
+    write_decimal(1, total_bytes);
+    let _ = user::write(1, FS_BYTES_LINE.as_ptr() as u64, FS_BYTES_LINE.len() as u64);
+    write_decimal(1, write_ticks);
+    let _ = user::write(1, FS_TICKS_LINE.as_ptr() as u64, FS_TICKS_LINE.len() as u64);
+    write_decimal(1, write_mib_s);
+    let _ = user::write(1, FS_MIB_LINE.as_ptr() as u64, FS_MIB_LINE.len() as u64);
+
+    0
+}
+
 fn run_thread_test() -> bool {
     let stack_bytes = STACK_SIZE + PAGE_SIZE;
     let stack_base = user::memory_map(0, stack_bytes, 3, MAP_ANONYMOUS_PRIVATE, 0);
@@ -235,6 +352,11 @@ fn run_all_tests() -> u64 {
     let _ = user::write(1, STAGE_SPAWN.as_ptr() as u64, STAGE_SPAWN.len() as u64);
     if !run_process_spawn_test() {
         return 9;
+    }
+    let _ = user::write(1, STAGE_FS_BENCH.as_ptr() as u64, STAGE_FS_BENCH.len() as u64);
+    let fs = run_fs_benchmark();
+    if fs != 0 {
+        return fs;
     }
     let _ = user::write(1, STAGE_MEMORY.as_ptr() as u64, STAGE_MEMORY.len() as u64);
     if !run_memory_tests() {

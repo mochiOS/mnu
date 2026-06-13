@@ -9,6 +9,7 @@ USER_TARGET_NAME="x86_64-unknown-none"
 
 USER_BUILD_DIR="${TARGET_DIR}/user-build"
 BOOT_BUILD_DIR="${TARGET_DIR}/boot-build"
+FSCEXT_BUILD_DIR="${TARGET_DIR}/fs-cext-build"
 
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
@@ -48,6 +49,7 @@ need_cmd stat
 need_cmd tee
 need_cmd sed
 need_cmd wc
+need_cmd sha256sum
 
 need_file "${OVMF_CODE}"
 need_file "${OVMF_VARS_TEMPLATE}"
@@ -57,6 +59,55 @@ need_file "${ROOT_DIR}/examples/user/linker.ld"
 need_file "${ROOT_DIR}/examples/boot/Cargo.toml"
 need_file "${ROOT_DIR}/examples/fs/hello.txt"
 need_file "${ROOT_DIR}/examples/fs/config/kernel.conf"
+
+pack_le_u16() {
+    local v="$1"
+    printf '%b' "\\x$(printf '%02x' $((v & 0xff)))\\x$(printf '%02x' $(((v >> 8) & 0xff)))"
+}
+
+pack_le_u32() {
+    local v="$1"
+    printf '%b' "\\x$(printf '%02x' $((v & 0xff)))\\x$(printf '%02x' $(((v >> 8) & 0xff)))\\x$(printf '%02x' $(((v >> 16) & 0xff)))\\x$(printf '%02x' $(((v >> 24) & 0xff)))"
+}
+
+pack_le_u64() {
+    local v="$1"
+    printf '%b' "\\x$(printf '%02x' $((v & 0xff)))\\x$(printf '%02x' $(((v >> 8) & 0xff)))\\x$(printf '%02x' $(((v >> 16) & 0xff)))\\x$(printf '%02x' $(((v >> 24) & 0xff)))\\x$(printf '%02x' $(((v >> 32) & 0xff)))\\x$(printf '%02x' $(((v >> 40) & 0xff)))\\x$(printf '%02x' $(((v >> 48) & 0xff)))\\x$(printf '%02x' $(((v >> 56) & 0xff)))"
+}
+
+build_cext() {
+    local out="$1"
+    local name="$2"
+    local dep="$3"
+    local elf="$4"
+    local module_version="$5"
+    local name_len="${#name}"
+    local dep_len="${#dep}"
+    local dep_count=0
+    local header_size=$((32 + name_len))
+    if [[ -n "${dep}" ]]; then
+        dep_count=1
+        header_size=$((header_size + 2 + dep_len))
+    fi
+    local elf_size
+    elf_size="$(stat -c %s "${elf}")"
+
+    : > "${out}"
+    printf 'MCEX' >> "${out}"
+    pack_le_u16 1 >> "${out}"
+    pack_le_u16 "${module_version}" >> "${out}"
+    pack_le_u16 "${name_len}" >> "${out}"
+    pack_le_u16 "${dep_count}" >> "${out}"
+    pack_le_u32 "${header_size}" >> "${out}"
+    pack_le_u64 "${elf_size}" >> "${out}"
+    printf '\0\0\0\0\0\0\0\0' >> "${out}"
+    printf '%s' "${name}" >> "${out}"
+    if [[ -n "${dep}" ]]; then
+        pack_le_u16 "${dep_len}" >> "${out}"
+        printf '%s' "${dep}" >> "${out}"
+    fi
+    cat "${elf}" >> "${out}"
+}
 
 mkdir -p "${TARGET_DIR}" "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}" "${ROOTFS_STAGE}/config"
 
@@ -115,8 +166,32 @@ if [[ -z "${BOOT_BIN}" || ! -f "${BOOT_BIN}" ]]; then
     die "bootloader binary not found"
 fi
 
+echo "[build] fs.cext"
+env RUSTFLAGS="-C strip=none -C link-dead-code=yes -C link-arg=-e -C link-arg=mochi_module_init" \
+    cargo build \
+    --locked \
+    --release \
+    --target "${KERNEL_TARGET_NAME}" \
+    --target-dir "${FSCEXT_BUILD_DIR}" \
+    --manifest-path "${ROOT_DIR}/modules/fs_cext/Cargo.toml"
+
+FSCEXT_BIN="$(
+    find "${FSCEXT_BUILD_DIR}/${KERNEL_TARGET_NAME}/release" \
+        -maxdepth 1 \
+        -type f \
+        \( -name 'fs_cext' -o -name 'libfs_cext.so' -o -name 'libfs_cext.dylib' \) \
+        | head -n 1
+)"
+
+if [[ -z "${FSCEXT_BIN}" || ! -f "${FSCEXT_BIN}" ]]; then
+    die "fs.cext binary not found"
+fi
+
+FSCEXT_PKG="${RUN_DIR}/fs.cext"
+build_cext "${FSCEXT_PKG}" "fs" "" "${FSCEXT_BIN}" 1
+
 rm -rf "${ESP_DIR}" "${INITFS_STAGE}" "${ROOTFS_STAGE}"
-mkdir -p "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}" "${ROOTFS_STAGE}/config"
+mkdir -p "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}/Modules" "${ROOTFS_STAGE}/config"
 
 install -m 0644 "${KERNEL_BIN}" "${ESP_DIR}/kernel"
 install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
@@ -124,6 +199,9 @@ install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/core.service"
 install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/captest.bin"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/hello.bin"
+install -m 0644 "${FSCEXT_PKG}" "${INITFS_STAGE}/Modules/fs.cext"
+
+sha256sum "${INITFS_STAGE}/Modules/fs.cext" | awk '{print "fs.cext=" $1}' > "${INITFS_STAGE}/Modules/modules.sha256"
 
 install -m 0644 "${ROOT_DIR}/examples/fs/hello.txt" "${ROOTFS_STAGE}/hello.txt"
 install -m 0644 "${ROOT_DIR}/examples/fs/config/kernel.conf" "${ROOTFS_STAGE}/config/kernel.conf"
