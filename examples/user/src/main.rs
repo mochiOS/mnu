@@ -43,7 +43,12 @@ fn expect_errno(ret: u64) -> bool {
     is_error(ret)
 }
 
-extern "C" fn short_lived_thread(_arg: u64) {}
+extern "C" fn short_lived_thread(_arg: u64) {
+    let _ = user::thread_exit(0);
+    loop {
+        let _ = user::yield_now();
+    }
+}
 
 fn run_memory_tests() -> bool {
     let ptr = user::memory_map(0, PAGE_SIZE, 3, MAP_ANONYMOUS_PRIVATE, 0);
@@ -204,9 +209,6 @@ fn run_process_spawn_test() -> bool {
     if is_error(child) {
         let _ = user::write(1, b"process_spawn: spawn error\n".as_ptr() as u64, 27);
         return false;
-    }
-    for _ in 0..4 {
-        let _ = user::yield_now();
     }
     true
 }
