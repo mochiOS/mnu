@@ -9,6 +9,7 @@ const FAST_IPC_MAX_BYTES: usize = 48;
 #[derive(Clone, Copy, Debug)]
 pub struct IpcFastState {
     waiting: bool,
+    wait_cpu: usize,
     has_request: bool,
     reply_ready: bool,
     sender_tid: u64,
@@ -23,6 +24,7 @@ impl IpcFastState {
     pub const fn new() -> Self {
         Self {
             waiting: false,
+            wait_cpu: usize::MAX,
             has_request: false,
             reply_ready: false,
             sender_tid: 0,
@@ -44,6 +46,18 @@ impl IpcFastState {
 
     pub fn set_waiting(&mut self, waiting: bool) {
         self.waiting = waiting;
+    }
+
+    pub fn wait_cpu(&self) -> Option<usize> {
+        if self.wait_cpu == usize::MAX {
+            None
+        } else {
+            Some(self.wait_cpu)
+        }
+    }
+
+    pub fn set_wait_cpu(&mut self, cpu: Option<usize>) {
+        self.wait_cpu = cpu.unwrap_or(usize::MAX);
     }
 
     pub fn has_request(&self) -> bool {
@@ -103,6 +117,7 @@ impl IpcFastState {
         self.reply_ready = false;
         self.msg_len = 0;
         self.msg = [0; FAST_IPC_MAX_BYTES];
+        self.wait_cpu = usize::MAX;
         Some((sender, len, data))
     }
 
@@ -119,6 +134,7 @@ impl IpcFastState {
         self.reply_len = 0;
         self.reply_ready = false;
         self.reply_result_len = 0;
+        self.wait_cpu = usize::MAX;
         (ptr, len)
     }
 

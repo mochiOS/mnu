@@ -140,9 +140,23 @@ fn fast_ipc_is_waiting(receiver_tid: u64) -> bool {
     .unwrap_or(false)
 }
 
+fn fast_ipc_wait_cpu(receiver_tid: u64) -> Option<usize> {
+    crate::task::with_thread(crate::task::ThreadId::from_u64(receiver_tid), |thread| {
+        thread.fast_ipc().wait_cpu()
+    })
+    .flatten()
+}
+
 fn fast_ipc_set_waiting(receiver_tid: u64, waiting: bool) {
     let _ = crate::task::with_thread_mut(crate::task::ThreadId::from_u64(receiver_tid), |thread| {
         thread.fast_ipc_mut().set_waiting(waiting);
+        if waiting {
+            thread
+                .fast_ipc_mut()
+                .set_wait_cpu(Some(crate::percpu::current_cpu_id()));
+        } else {
+            thread.fast_ipc_mut().set_wait_cpu(None);
+        }
     });
 }
 
@@ -204,6 +218,11 @@ fn fast_ipc_clear(receiver_tid: u64) {
 
 fn fast_ipc_supported_len(len: usize) -> bool {
     len <= FAST_IPC_MAX_BYTES
+}
+
+fn fast_ipc_can_fast_deliver(receiver_tid: u64) -> bool {
+    fast_ipc_is_waiting(receiver_tid)
+        && fast_ipc_wait_cpu(receiver_tid) == Some(crate::percpu::current_cpu_id())
 }
 
 pub fn endpoint_rights_for_process(_process_id: u64) -> EndpointRights {
@@ -731,7 +750,7 @@ pub fn send(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         }
     }
 
-    if fast_ipc_supported_len(len) && fast_ipc_is_waiting(dest_thread_id) {
+    if fast_ipc_supported_len(len) && fast_ipc_can_fast_deliver(dest_thread_id) {
         if fast_ipc_set_request(dest_thread_id, sender, &data[..len]) {
             crate::task::wake_thread(crate::task::ThreadId::from_u64(dest_thread_id));
             return 0;
@@ -783,7 +802,7 @@ pub fn call(dest_thread_id: u64, req_ptr: u64, req_len: u64, reply_ptr: u64, rep
             }
         }
 
-        if fast_ipc_is_waiting(dest_thread_id)
+        if fast_ipc_can_fast_deliver(dest_thread_id)
             && fast_ipc_set_reply_target(sender, reply_ptr, reply_len_usize)
             && fast_ipc_set_request(dest_thread_id, sender, &req_data[..req_len_usize])
         {
@@ -823,7 +842,9 @@ pub fn reply(dest_thread_id: u64, reply_ptr: u64, reply_len: u64) -> u64 {
     };
     let reply_len_usize = reply_len as usize;
 
-    if fast_ipc_supported_len(reply_len_usize) {
+    if fast_ipc_supported_len(reply_len_usize)
+        && fast_ipc_wait_cpu(dest_thread_id) == Some(crate::percpu::current_cpu_id())
+    {
         let sender_tid = dest_thread_id;
         if let Some((reply_dst_ptr, reply_dst_len)) = fast_ipc_take_reply_target(sender_tid) {
             if reply_len_usize > reply_dst_len {
