@@ -951,6 +951,11 @@ impl CapabilitySet {
         self.caps.insert(cap);
     }
 
+    /// capability を削除
+    pub fn remove(&mut self, cap: Capability) -> bool {
+        self.caps.remove(&cap)
+    }
+
     /// capability の個数を返す
     pub fn len(&self) -> usize {
         self.caps.len()

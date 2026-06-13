@@ -173,6 +173,11 @@ impl Process {
         &self.capabilities
     }
 
+    /// capability 集合を可変取得（kernel 内部用）
+    pub(crate) fn capabilities_mut(&mut self) -> &mut CapabilitySet {
+        &mut self.capabilities
+    }
+
     /// exec 経路でプロセス生成時に capability を設定する（カーネル内部用）
     ///
     /// # 注意

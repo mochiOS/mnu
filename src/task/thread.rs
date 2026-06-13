@@ -39,6 +39,8 @@ pub struct Thread {
     user_entry: u64,
     /// ユーザースタックトップ（0の場合はカーネルモードスレッド）
     user_stack: u64,
+    /// ユーザーモード初期引数（thread_create 用）
+    user_arg0: u64,
     /// fork時に子プロセスへ渡すユーザー RFLAGS
     fork_user_rflags: u64,
     /// TLS用 FS ベースレジスタ (arch_prctl ARCH_SET_FS で設定)
@@ -329,6 +331,7 @@ impl Thread {
             kernel_stack_size,
             user_entry: 0,
             user_stack: 0,
+            user_arg0: 0,
             fork_user_rflags: 0,
             fs_base: 0,
             in_syscall: false,
@@ -357,6 +360,7 @@ impl Thread {
         name: &str,
         user_entry: u64,
         user_stack: u64,
+        user_arg0: u64,
         kernel_stack: u64,
         kernel_stack_size: usize,
     ) -> Self {
@@ -403,8 +407,9 @@ impl Thread {
                 stack
             );
             unsafe {
-                crate::task::jump_to_usermode(entry, stack);
-            }
+                    let arg0 = with_thread(tid, |thread| thread.user_arg0()).unwrap_or(0);
+                    crate::task::jump_to_usermode(entry, stack, arg0);
+                }
         }
 
         let stack_ptr = stack_top - 8;
@@ -436,6 +441,7 @@ impl Thread {
             kernel_stack_size,
             user_entry,
             user_stack,
+            user_arg0,
             fork_user_rflags: 0,
             fs_base: 0,
             in_syscall: false,
@@ -458,6 +464,10 @@ impl Thread {
     /// ユーザースタックを取得
     pub fn user_stack(&self) -> u64 {
         self.user_stack
+    }
+
+    pub fn user_arg0(&self) -> u64 {
+        self.user_arg0
     }
 
     /// TLS FSベースを取得
@@ -544,6 +554,7 @@ impl Thread {
             kernel_stack_size,
             user_entry: user_rip,
             user_stack: user_rsp,
+            user_arg0: 0,
             fork_user_rflags: user_rflags,
             fs_base,
             in_syscall: false,

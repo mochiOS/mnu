@@ -1,9 +1,10 @@
 use crate::interrupt::spinlock::SpinLock;
 use alloc::vec;
 
-use super::{EACCES, EAGAIN, EFAULT, EINVAL};
+use super::{EACCES, EAGAIN, EFAULT, EINVAL, ENOSYS, SUCCESS};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
+const MAX_ENDPOINTS: usize = 128;
 const MAILBOX_CAP: usize = 64;
 const MAX_MSG_SIZE: usize = 4128; // FsResponse(4112) / DiskBulkResponse(2064) を収容
 const MAX_EXT_PAGES: usize = 128;
@@ -41,6 +42,73 @@ impl EndpointRights {
     }
 }
 
+#[derive(Clone, Copy)]
+struct EndpointRecord {
+    in_use: bool,
+    owner_thread_id: u64,
+    slot: u16,
+    generation: u64,
+}
+
+impl EndpointRecord {
+    const fn empty() -> Self {
+        Self {
+            in_use: false,
+            owner_thread_id: 0,
+            slot: 0,
+            generation: 0,
+        }
+    }
+}
+
+static ENDPOINTS: SpinLock<[EndpointRecord; MAX_ENDPOINTS]> =
+    SpinLock::new([EndpointRecord::empty(); MAX_ENDPOINTS]);
+
+fn encode_endpoint_handle(slot: u16, generation: u64) -> u64 {
+    ((generation & 0xFFFF_FFFF_FFFF) << 16) | slot as u64
+}
+
+fn decode_endpoint_handle(handle: u64) -> Option<(usize, u16, u64)> {
+    let slot = (handle & 0xFFFF) as usize;
+    if slot >= MAX_ENDPOINTS {
+        return None;
+    }
+    Some((slot, slot as u16, handle >> 16))
+}
+
+fn allocate_endpoint(owner_thread_id: u64) -> Option<u64> {
+    let mut endpoints = ENDPOINTS.lock();
+    for (slot, entry) in endpoints.iter_mut().enumerate() {
+        if !entry.in_use {
+            let generation = crate::interrupt::timer::get_ticks().wrapping_add(slot as u64 + 1);
+            *entry = EndpointRecord {
+                in_use: true,
+                owner_thread_id,
+                slot: slot as u16,
+                generation,
+            };
+            return Some(encode_endpoint_handle(entry.slot, entry.generation));
+        }
+    }
+    None
+}
+
+fn resolve_endpoint_handle(handle: u64) -> Option<u64> {
+    if let Some((slot, slot_u16, generation)) = decode_endpoint_handle(handle) {
+        let endpoints = ENDPOINTS.lock();
+        if let Some(entry) = endpoints.get(slot) {
+            if entry.in_use && entry.slot == slot_u16 && entry.generation == generation {
+                return Some(entry.owner_thread_id);
+            }
+        }
+    }
+    if crate::task::thread_slot_index_and_generation_by_u64(handle).is_some() {
+        Some(handle)
+    } else {
+        None
+    }
+}
+
 pub fn endpoint_for_thread(thread_id: u64) -> Option<IpcEndpoint> {
     let (slot, generation) = crate::task::thread_slot_index_and_generation_by_u64(thread_id)?;
     Some(IpcEndpoint {
@@ -61,6 +129,16 @@ pub fn endpoint_rights_for_process(_process_id: u64) -> EndpointRights {
     // 既存の権限モデルを壊さずに移行できるよう、現時点では呼び出し元側が
     // capability に基づいて解釈する前提のプレースホルダにしておく。
     EndpointRights::SEND.union(EndpointRights::RECV)
+}
+
+/// 公開 syscall 用の endpoint 作成。
+///
+/// current thread に紐づく endpoint handle を返す。
+pub fn create(_flags: u64, _reserved: u64) -> u64 {
+    match crate::task::current_thread_id() {
+        Some(tid) => allocate_endpoint(tid.as_u64()).unwrap_or(ENOSYS),
+        None => ENOSYS,
+    }
 }
 
 pub fn send_to_endpoint(endpoint: IpcEndpoint, buf_ptr: u64, len: u64) -> u64 {
@@ -518,6 +596,10 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
 /// arg1: buf_ptr
 /// arg2: len
 pub fn send(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
+    let dest_thread_id = match resolve_endpoint_handle(dest_thread_id) {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
     if dest_thread_id == 0 {
         return EINVAL;
     }
@@ -588,6 +670,31 @@ pub fn send(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
     }
 
     0
+}
+
+/// 同期 RPC 用の最小実装。
+///
+/// 送信後に送信元の mailbox から応答を待つ。
+pub fn call(dest_thread_id: u64, req_ptr: u64, req_len: u64, reply_ptr: u64, reply_len: u64) -> u64 {
+    let send_result = send(dest_thread_id, req_ptr, req_len);
+    if send_result != SUCCESS {
+        return send_result;
+    }
+    recv_blocking(reply_ptr, reply_len)
+}
+
+/// 返信は単なる送信として扱う。
+pub fn reply(dest_thread_id: u64, reply_ptr: u64, reply_len: u64) -> u64 {
+    send(dest_thread_id, reply_ptr, reply_len)
+}
+
+/// 待機は blocking recv の薄いラッパにする。
+pub fn wait(buf_ptr: u64, max_len: u64, blocking: u64) -> u64 {
+    if blocking == 0 {
+        recv(buf_ptr, max_len)
+    } else {
+        recv_blocking(buf_ptr, max_len)
+    }
 }
 
 fn map_external_pages_for_receiver(

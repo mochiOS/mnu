@@ -34,3 +34,40 @@ cargo run --release
 - IPC should center on endpoints, not raw thread IDs.
 - Failures should be contained inside the kernel boundary, including process kill, cext stop, endpoint close, capability revoke, MMIO unmap, IRQ release, waiter wake, and audit logging.
 - Anything that can be implemented in a service or cext should stay out of the kernel.
+
+## Public Syscall ABI
+The public syscall ABI is fixed to a small kernel surface:
+
+- `process_exit`
+- `process_spawn`
+- `process_wait`
+- `thread_create`
+- `thread_exit`
+- `thread_yield`
+- `memory_alloc`
+- `memory_free`
+- `memory_map`
+- `memory_unmap`
+- `memory_protect`
+- `memory_share`
+- `memory_sync`
+- `ipc_create`
+- `ipc_send`
+- `ipc_recv`
+- `ipc_call`
+- `ipc_reply`
+- `ipc_wait`
+- `cap_clone`
+- `cap_drop`
+- `cap_transfer`
+- `cap_query`
+- `cap_restrict`
+- `event_create`
+- `event_wait`
+- `event_signal`
+- `event_poll`
+- `time_now`
+- `sleep`
+- `check_gravity_exist`
+
+High-frequency filesystem, GPU, network, GUI, and device operations are expected to flow through IPC, shared memory, and `memory_map` rather than dedicated syscalls.

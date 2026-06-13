@@ -356,7 +356,8 @@ pub extern "sysv64" fn signal_and_return(kstack: *mut u64, syscall_ret: u64) -> 
     let syscall_num = unsafe { kstack.add(14).read() };
 
     // rt_sigreturn (15): シグナルフレームから元のコンテキストを復元
-    if syscall_num == crate::syscall::SyscallNumber::RtSigreturn as u64 {
+    const SYS_RT_SIGRETURN: u64 = 15;
+    if syscall_num == SYS_RT_SIGRETURN {
         rt_sigreturn(kstack);
         return 0;
     }

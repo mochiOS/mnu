@@ -231,26 +231,7 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov ds, ax",
         "mov es, ax",
 
-        // fork/clone のときだけユーザーコンテキストを保存
-        // align slot なし:
-        // [rsp+120]=syscall num
-        // [rsp+64] =user RIP
-        // [rsp+0]  =user RSP
-        // [rsp+56] =user RFLAGS
-        "mov rax, [rsp + 120]",
-        "cmp rax, 56",
-        "je 3f",
-        "cmp rax, 57",
-        "jne 4f",
-
-        "3:",
-        "mov rdi, rax",
-        "mov rsi, [rsp + 64]",
-        "mov rdx, [rsp + 0]",
-        "mov rcx, [rsp + 56]",
-        "call {save_ctx_fn}",
-
-        "4:",
+        "nop",
 
         // ここでは一旦 sti しない。
         // syscall return 用の per-CPU scratch を使っているので、
@@ -355,7 +336,6 @@ pub unsafe extern "C" fn syscall_entry() {
 
         sys_rsp_off = const crate::percpu::GS_SYSCALL_KERNEL_RSP_OFFSET,
         user_rsp_tmp_off = const crate::percpu::GS_SYSCALL_USER_RSP_TMP_OFFSET,
-        save_ctx_fn = sym super::save_user_context_for_fork,
         fs_base_fn = sym current_thread_fs_base_for_sysret,
         dispatch = sym super::syscall_dispatch_sysv,
         kill_fn = sym kill_non_canonical_rsp,

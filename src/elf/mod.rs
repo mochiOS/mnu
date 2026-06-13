@@ -242,6 +242,7 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
         name,
         loaded.entry,
         loaded.stack_top,
+        0,
         kernel_stack_addr,
         kernel_stack_size,
     );

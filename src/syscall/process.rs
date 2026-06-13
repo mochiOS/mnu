@@ -486,6 +486,15 @@ pub fn fork() -> u64 {
     child_pid.as_u64()
 }
 
+/// Spawnシステムコール
+///
+/// 現状は `fork()` と同じく現在のプロセスを複製する最小実装。
+/// flags/reserved は将来のプロセス生成オプション用に確保してある。
+pub fn spawn(flags: u64, reserved: u64) -> u64 {
+    let _ = (flags, reserved);
+    fork()
+}
+
 /// Sleepシステムコール
 ///
 /// 指定されたミリ秒数の間スリープする

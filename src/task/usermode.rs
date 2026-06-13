@@ -14,7 +14,7 @@ use core::arch::asm;
 ///
 /// # Safety
 /// `entry` と `user_stack` はユーザー空間の有効な実行/スタックアドレスである必要がある。
-pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64) -> ! {
+pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64, user_arg0: u64) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3; // RPL=3
     let user_ss = gdt::user_data_selector() as u64 | 3; // RPL=3
     let (fs_base, user_cr3) = crate::task::current_thread_id()
@@ -100,6 +100,7 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64) -> ! {
         "push r11",        // RFLAGS
         "push {cs}",       // CS (ユーザーコードセグメント)
         "push {rip}",      // RIP (エントリーポイント)
+        "mov rdi, {arg0}", // 最初の引数を user rdi に載せる
 
         // iretqでユーザーモードへジャンプ
         "iretq",
@@ -108,6 +109,7 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64) -> ! {
         rsp = in(reg) user_stack,
         cs = in(reg) user_cs,
         rip = in(reg) entry,
+        arg0 = in(reg) user_arg0,
         options(noreturn)
     )
 }
