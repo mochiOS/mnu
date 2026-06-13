@@ -71,12 +71,12 @@ fn kernel_main() -> ! {
 
     crate::smp::start_secondary_cpus();
 
-    // 最小のサービス管理プロセスを起動する。
-    info!("Starting service manager");
     let mut caps = crate::capability::CapabilitySet::empty();
     for cap in crate::capability::Capability::kernel_enforced_capabilities() {
         caps.insert(*cap);
     }
+    // 最小のサービス管理プロセスを起動する。
+    info!("Starting service manager");
     let boot_launch = crate::policy::service_manager_launch();
     let manager_pid = exec_kernel_with_name_and_caps(
         boot_launch.exec_path,

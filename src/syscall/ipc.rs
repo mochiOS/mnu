@@ -1,6 +1,4 @@
 use crate::interrupt::spinlock::SpinLock;
-use alloc::vec;
-
 use super::{EACCES, EAGAIN, EFAULT, EINVAL, ENOSYS, SUCCESS};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
@@ -8,7 +6,8 @@ const MAX_ENDPOINTS: usize = 128;
 const MAILBOX_CAP: usize = 64;
 const MAX_MSG_SIZE: usize = 4128; // FsResponse(4112) / DiskBulkResponse(2064) を収容
 const MAX_EXT_PAGES: usize = 128;
-const FAST_IPC_MAX_BYTES: usize = 48;
+// Thread の fast IPC state と同じ上限に合わせる。
+const FAST_IPC_MAX_BYTES: usize = 128;
 
 /// endpoint ベース IPC への移行用ハンドル
 ///
@@ -689,20 +688,6 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
             off += 8;
             msg.data[off..off + 8].copy_from_slice(&(total).to_le_bytes());
             off += 8;
-            crate::debug!(
-                "[IPC KERN] map_header: magic={:#x} map_start={:#x} total={} -> msg.data[0..20]={:02x?}",
-                MAP_HEADER_MAGIC,
-                map_start,
-                total,
-                &msg.data[0..20]
-            );
-            crate::info!(
-                "[IPC KERN] send_map_header dest={} map_start=0x{:x} total={} data={:02x?}",
-                dest_thread_id,
-                map_start,
-                total,
-                &msg.data[0..20]
-            );
             msg.len = off;
             msg.ext_pages_count = 0;
             // enqueue
@@ -1087,7 +1072,7 @@ fn recv_for_thread(receiver: u64, buf_ptr: u64, max_len: u64) -> u64 {
     }
 
     let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
-    let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
+    let mut recv_buf = [0u8; MAX_MSG_SIZE];
     let (from, copy_len, ext_pages_count, ext_pages) = {
         let mut boxes = MAILBOXES.lock();
         match boxes[idx].pop_valid_for_receiver_copy(
@@ -1168,16 +1153,6 @@ fn recv_blocking_for_thread(receiver: u64, buf_ptr: u64, max_len: u64) -> u64 {
 
         match recv {
             Some((from, copy_len, ext_pages_count, ext_pages)) => {
-                if receiver == from || copy_len >= 64 {
-                    crate::debug!(
-                        "ipc recv blocking slow: receiver={} from={} idx={} gen={} copy_len={}",
-                        receiver,
-                        from,
-                        idx,
-                        receiver_generation,
-                        copy_len
-                    );
-                }
                 let copy_len = match prepare_external_pages_for_user(
                     receiver,
                     &mut recv_buf,

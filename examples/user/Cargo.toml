@@ -17,6 +17,13 @@ bench = false
 harness = false
 
 [[bin]]
+name = "fs_service"
+path = "src/fs_service_main.rs"
+test = false
+bench = false
+harness = false
+
+[[bin]]
 name = "captest"
 path = "src/captest_main.rs"
 test = false

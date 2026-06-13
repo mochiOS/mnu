@@ -51,7 +51,6 @@ const R_X86_64_RELATIVE: u32 = 8;
 const ET_DYN: u16 = 3;
 static NEXT_MODULE_LOAD_BASE: AtomicU64 = AtomicU64::new(0);
 
-type FsInitFn = unsafe extern "C" fn() -> *const McxFsOps;
 type DiskInitFn = unsafe extern "C" fn() -> *const disk::McxDiskOps;
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -74,7 +73,7 @@ pub fn init_runtime_config() {
 }
 
 fn load_module_hash_manifest() -> Option<BTreeMap<String, String>> {
-    let bytes = crate::init::fs::read("/Modules/modules.sha256")?;
+    let bytes = crate::init::fs::kernel_read_initfs("/Modules/modules.sha256")?;
     let text = core::str::from_utf8(&bytes).ok()?;
     let mut out = BTreeMap::new();
     for raw_line in text.lines() {
@@ -97,12 +96,6 @@ fn register_disk_module(init_addr: u64, module_version: u16) -> bool {
     let init: DiskInitFn = unsafe { core::mem::transmute(init_addr) };
     let ops = unsafe { init() };
     disk::register(ops, module_version)
-}
-
-fn register_fs_module(init_addr: u64, module_version: u16) -> bool {
-    let init: FsInitFn = unsafe { core::mem::transmute(init_addr) };
-    let ops = unsafe { init() };
-    fs::register(ops, module_version)
 }
 
 struct CextHeader {
@@ -141,7 +134,7 @@ pub fn load_modules() {
     let registrations = registry::registrations();
 
     for path in module_paths {
-        let Some(bytes) = crate::init::fs::read(&path) else {
+        let Some(bytes) = crate::init::fs::kernel_read_initfs(&path) else {
             crate::warn!("kmod: failed to read {}", path);
             continue;
         };
@@ -190,15 +183,6 @@ pub fn load_modules() {
                 reg.version,
                 meta.module_version
             );
-            continue;
-        }
-
-        if meta.name == "fs" {
-            if fs::register_builtin_bench_fs() {
-                crate::info!("kmod: loaded {}.cext v{} (builtin fallback)", meta.name, meta.module_version);
-            } else {
-                crate::warn!("kmod: builtin fs fallback registration failed");
-            }
             continue;
         }
 

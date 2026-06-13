@@ -7,17 +7,13 @@ const SHORT_PING: &[u8] = b"ping-message";
 const SHORT_PONG: &[u8] = b"pong-message";
 const SELF_MSG: &[u8] = b"self-message";
 const STACK_SIZE: u64 = 0x8000;
+const PAGE_SIZE: u64 = 0x1000;
 const FAST_MSG_MAX: usize = 48;
 const ROUNDS: usize = 1;
-const PAGE_SIZE: u64 = 0x1000;
 const FS_BENCH_BYTES: usize = 4 * 1024 * 1024;
 const FS_BENCH_ROUNDS: usize = 2;
 const FS_BENCH_WRITE_ROUNDS: usize = 8;
-const FS_BENCH_PATH: &[u8] = b"/bench/huge.bin\0";
-const MAP_PRIVATE: u64 = 0x2;
-const MAP_SHARED: u64 = 0x1;
-const O_WRONLY: u64 = 0o1;
-const O_TRUNC: u64 = 0o1000;
+const FS_BENCH_WRITE_CHUNK: usize = 4000;
 const TICKS_PER_SECOND: u64 = 500;
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
@@ -247,55 +243,50 @@ fn run_process_spawn_test() -> bool {
 
 fn run_fs_benchmark() -> u64 {
     let bench_size = FS_BENCH_BYTES as u64;
-    let path = FS_BENCH_PATH.as_ptr() as u64;
-    let map_len = bench_size;
+    let path = "/bench/huge.bin";
+    let mut read_buf = [0u8; 4096];
+    let write_buf = [0xA5u8; FS_BENCH_WRITE_CHUNK];
 
-    let checksum = |base: u64, len: u64| -> u64 {
-        let mut sum = 0u64;
-        let mut off = 0u64;
-        while off < len {
-            let byte = unsafe { core::ptr::read_volatile((base + off) as *const u8) } as u64;
-            sum = sum.wrapping_add(byte);
-            off += 4096;
-        }
-        sum
-    };
+    if user::fs_service::ensure_started() == 0 {
+        return 71;
+    }
 
     let mut read_ticks = 0u64;
     for _ in 0..FS_BENCH_ROUNDS {
-        let fd = user::open(path, 0);
-        if is_error(fd) {
-            return 71;
-        }
-        let map_start = user::memory_map(0, map_len, 1, MAP_PRIVATE, fd);
-        let _ = user::close(fd);
-        if map_start == 0 || is_error(map_start) {
-            return 72;
-        }
         let read_start = user::time_now();
-        let _checksum = checksum(map_start, map_len);
+        let mut offset = 0u64;
+        let mut checksum = 0u64;
+        while offset < bench_size {
+            let to_read = core::cmp::min(read_buf.len() as u64, bench_size - offset) as usize;
+            match user::fs_service::read(path, offset, &mut read_buf[..to_read]) {
+                Ok(n) if n > 0 => {
+                    for byte in &read_buf[..n] {
+                        checksum = checksum.wrapping_add(*byte as u64);
+                    }
+                    offset += n as u64;
+                }
+                Ok(_) => break,
+                Err(_) => return 72,
+            }
+        }
+        let _ = checksum;
         read_ticks = read_ticks.saturating_add(user::time_now().saturating_sub(read_start));
-        let _ = user::memory_unmap(map_start, map_len);
     }
 
     let mut write_ticks = 0u64;
     let mut written = 0u64;
     for _ in 0..FS_BENCH_WRITE_ROUNDS {
-        let fd = user::open(path, O_WRONLY | O_TRUNC);
-        if is_error(fd) {
-            return 73;
-        }
-        let map_start = user::memory_map(0, map_len, 3, MAP_SHARED, fd);
-        let _ = user::close(fd);
-        if map_start == 0 || is_error(map_start) {
-            return 74;
-        }
         let write_start = user::time_now();
-        unsafe {
-            core::ptr::write_bytes(map_start as *mut u8, 0xA5, map_len as usize);
+        let mut offset = 0u64;
+        while offset < bench_size {
+            let to_write = core::cmp::min(write_buf.len() as u64, bench_size - offset) as usize;
+            match user::fs_service::write(path, offset, &write_buf[..to_write]) {
+                Ok(n) if n > 0 => offset += n as u64,
+                Ok(_) => break,
+                Err(_) => return 74,
+            }
         }
-        written = map_len;
-        let _ = user::memory_unmap(map_start, map_len);
+        written = bench_size;
         write_ticks = write_ticks.saturating_add(user::time_now().saturating_sub(write_start));
     }
 
@@ -353,6 +344,9 @@ fn run_thread_test() -> bool {
 fn run_all_tests() -> u64 {
     if !user::run_self_test() {
         return 1;
+    }
+    if user::fs_service::ensure_started() == 0 {
+        return 71;
     }
     let _ = user::write(1, STAGE_SPAWN.as_ptr() as u64, STAGE_SPAWN.len() as u64);
     if !run_process_spawn_test() {

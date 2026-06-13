@@ -172,7 +172,7 @@ pub fn init() {
 
 fn load_kernel_config() -> KernelConfig {
     let mut config = KernelConfig::default();
-    let Some(bytes) = crate::init::fs::read("/config/kernel.conf") else {
+    let Some(bytes) = crate::init::fs::kernel_read_initfs("/config/kernel.conf") else {
         return config;
     };
     let Ok(text) = String::from_utf8(bytes) else {

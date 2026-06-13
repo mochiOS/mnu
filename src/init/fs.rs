@@ -157,6 +157,16 @@ pub fn read_initfs(name: &str) -> Option<Vec<u8>> {
     read_path_in(ext2_image(), name)
 }
 
+/// カーネル内部で initfs を読むための明示的な別名
+pub fn kernel_read_initfs(name: &str) -> Option<Vec<u8>> {
+    read_initfs(name)
+}
+
+/// ブート処理や early boot の初期資産取得用の明示的な別名
+pub fn bootfs_read(name: &str) -> Option<Vec<u8>> {
+    read_initfs(name)
+}
+
 /// rootfs からだけファイルを取得する
 pub fn read_rootfs(name: &str) -> Option<Vec<u8>> {
     if rootfs_image().is_empty() {

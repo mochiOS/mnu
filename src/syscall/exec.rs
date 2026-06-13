@@ -310,12 +310,12 @@ fn load_exec_image(path: &str, is_service: bool) -> Option<(Vec<u8>, &'static st
             .map(|data| (data, "initfs"))
             .or_else(|| crate::init::fs::read_rootfs(path).map(|data| (data, "rootfs")))
             .or_else(|| crate::kmod::fs::read_all(path).map(|data| (data, "kmod")))
-            .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
+            .or_else(|| crate::init::fs::kernel_read_initfs(path).map(|data| (data, "fallback")))
     } else {
         crate::init::fs::read_rootfs(path)
             .map(|data| (data, "rootfs"))
             .or_else(|| crate::kmod::fs::read_all(path).map(|data| (data, "kmod")))
-            .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
+            .or_else(|| crate::init::fs::kernel_read_initfs(path).map(|data| (data, "fallback")))
     }
 }
 
@@ -1174,7 +1174,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     }
 
     // initfs からファイルを読み込む
-    let data_vec = match crate::init::fs::read(path) {
+    let data_vec = match crate::init::fs::kernel_read_initfs(path) {
         Some(d) => d,
         None => return ENOENT,
     };

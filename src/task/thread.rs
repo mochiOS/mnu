@@ -4,7 +4,9 @@ use x86_64::VirtAddr;
 use super::context::Context;
 use super::ids::{ProcessId, ThreadId, ThreadState};
 
-const FAST_IPC_MAX_BYTES: usize = 48;
+// L4 風の short IPC を register 相当で運ぶための上限。
+// ここを少し広げると、小さめの RPC が slow path に落ちにくくなる。
+const FAST_IPC_MAX_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Debug)]
 pub struct IpcFastState {

@@ -2,6 +2,8 @@
 
 use core::arch::asm;
 
+pub mod fs_service;
+
 pub const SYS_PROCESS_EXIT: u64 = mnu_abi::SyscallNumber::ProcessExit as u64;
 pub const SYS_PROCESS_SPAWN: u64 = mnu_abi::SyscallNumber::ProcessSpawn as u64;
 pub const SYS_PROCESS_WAIT: u64 = mnu_abi::SyscallNumber::ProcessWait as u64;
@@ -34,12 +36,6 @@ pub const SYS_TIME_NOW: u64 = mnu_abi::SyscallNumber::TimeNow as u64;
 pub const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
 pub const SYS_CHECK_GRAVITY_EXIST: u64 = mnu_abi::SyscallNumber::CheckGravityExist as u64;
 pub const SYS_WRITE: u64 = mnu_abi::SyscallNumber::Write as u64;
-pub const SYS_FILE_OPEN: u64 = mnu_abi::SyscallNumber::FileOpen as u64;
-pub const SYS_FILE_CLOSE: u64 = mnu_abi::SyscallNumber::FileClose as u64;
-pub const SYS_FILE_READ: u64 = mnu_abi::SyscallNumber::FileRead as u64;
-pub const SYS_FILE_SEEK: u64 = mnu_abi::SyscallNumber::FileSeek as u64;
-pub const SYS_FILE_STAT: u64 = mnu_abi::SyscallNumber::FileStat as u64;
-pub const SYS_FILE_TRUNCATE: u64 = mnu_abi::SyscallNumber::FileTruncate as u64;
 
 #[inline(always)]
 unsafe fn syscall0(n: u64) -> u64 {
@@ -189,30 +185,6 @@ pub fn check_gravity_exist() -> u64 {
 
 pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     unsafe { syscall3(SYS_WRITE, fd, buf_ptr, len) }
-}
-
-pub fn open(path_ptr: u64, flags: u64) -> u64 {
-    unsafe { syscall2(SYS_FILE_OPEN, path_ptr, flags) }
-}
-
-pub fn close(fd: u64) -> u64 {
-    unsafe { syscall1(SYS_FILE_CLOSE, fd) }
-}
-
-pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
-    unsafe { syscall3(SYS_FILE_READ, fd, buf_ptr, len) }
-}
-
-pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
-    unsafe { syscall3(SYS_FILE_SEEK, fd, offset as u64, whence) }
-}
-
-pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
-    unsafe { syscall2(SYS_FILE_STAT, path_ptr, stat_ptr) }
-}
-
-pub fn truncate(path_ptr: u64, len: u64) -> u64 {
-    unsafe { syscall2(SYS_FILE_TRUNCATE, path_ptr, len) }
 }
 
 pub fn ipc_create(flags: u64) -> u64 {

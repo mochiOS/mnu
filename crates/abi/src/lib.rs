@@ -36,12 +36,6 @@ pub enum SyscallNumber {
     Sleep = 29,
     CheckGravityExist = 30,
     Write = 31,
-    FileOpen = 32,
-    FileClose = 33,
-    FileRead = 34,
-    FileSeek = 35,
-    FileStat = 36,
-    FileTruncate = 37,
 }
 
 /// 成功
