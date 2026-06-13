@@ -66,6 +66,8 @@ pub struct Process {
     parent_id: Option<ProcessId>,
     /// ページテーブルのアドレス（メモリ空間）。Noneの場合はカーネル空間を共有。
     page_table: Option<u64>,
+    /// page_table をこの Process が所有しているかどうか
+    page_table_owned: bool,
     /// ヒープ開始アドレス
     heap_start: u64,
     /// 現在のヒープ終了アドレス (program break)
@@ -131,6 +133,7 @@ impl Process {
             capabilities: CapabilitySet::empty(),
             parent_id,
             page_table: None, // TODO: ページテーブル実装後に設定
+            page_table_owned: true,
             heap_start,
             heap_end: heap_start,
             stack_bottom: 0,
@@ -243,6 +246,17 @@ impl Process {
     /// ページテーブルアドレスを設定
     pub fn set_page_table(&mut self, page_table: u64) {
         self.page_table = Some(page_table);
+        self.page_table_owned = true;
+    }
+
+    /// 既存のページテーブルを共有する
+    pub fn set_shared_page_table(&mut self, page_table: u64) {
+        self.page_table = Some(page_table);
+        self.page_table_owned = false;
+    }
+
+    pub fn page_table_owned(&self) -> bool {
+        self.page_table_owned
     }
 
     /// ヒープ終了アドレスを取得
@@ -574,7 +588,11 @@ impl ProcessTable {
             if let Some(proc) = slot.take() {
                 let pid = proc.id();
                 let exit_code = proc.exit_code().unwrap_or(0);
-                let page_table = proc.page_table();
+                let page_table = if proc.page_table_owned() {
+                    proc.page_table()
+                } else {
+                    None
+                };
                 self.count = self.count.saturating_sub(1);
                 return Some((pid, exit_code, page_table));
             }

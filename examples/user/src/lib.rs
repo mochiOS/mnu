@@ -33,6 +33,7 @@ pub const SYS_EVENT_POLL: u64 = mnu_abi::SyscallNumber::EventPoll as u64;
 pub const SYS_TIME_NOW: u64 = mnu_abi::SyscallNumber::TimeNow as u64;
 pub const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
 pub const SYS_CHECK_GRAVITY_EXIST: u64 = mnu_abi::SyscallNumber::CheckGravityExist as u64;
+pub const SYS_WRITE: u64 = mnu_abi::SyscallNumber::Write as u64;
 
 #[inline(always)]
 unsafe fn syscall0(n: u64) -> u64 {
@@ -149,6 +150,10 @@ pub fn thread_yield() -> u64 {
     unsafe { syscall0(SYS_THREAD_YIELD) }
 }
 
+pub fn yield_now() -> u64 {
+    thread_yield()
+}
+
 pub fn time_now() -> u64 {
     unsafe { syscall0(SYS_TIME_NOW) }
 }
@@ -159,6 +164,10 @@ pub fn sleep(milliseconds: u64) -> u64 {
 
 pub fn check_gravity_exist() -> u64 {
     unsafe { syscall0(SYS_CHECK_GRAVITY_EXIST) }
+}
+
+pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
+    unsafe { syscall3(SYS_WRITE, fd, buf_ptr, len) }
 }
 
 pub fn ipc_create(flags: u64) -> u64 {

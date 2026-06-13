@@ -35,6 +35,7 @@ pub enum SyscallNumber {
     TimeNow = 28,
     Sleep = 29,
     CheckGravityExist = 30,
+    Write = 31,
 }
 
 /// 成功

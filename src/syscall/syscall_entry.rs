@@ -233,6 +233,13 @@ pub unsafe extern "C" fn syscall_entry() {
 
         "nop",
 
+        // fork/spawn 用に、直近のユーザー文脈を thread metadata に保存する。
+        "mov rdi, [rsp + 120]",
+        "mov rsi, [rsp + 64]",
+        "mov rdx, [rsp + 0]",
+        "mov rcx, [rsp + 56]",
+        "call {save_user_context_for_fork}",
+
         // ここでは一旦 sti しない。
         // syscall return 用の per-CPU scratch を使っているので、
         // 安定するまで IRQ/preempt を入れない。
@@ -336,6 +343,7 @@ pub unsafe extern "C" fn syscall_entry() {
 
         sys_rsp_off = const crate::percpu::GS_SYSCALL_KERNEL_RSP_OFFSET,
         user_rsp_tmp_off = const crate::percpu::GS_SYSCALL_USER_RSP_TMP_OFFSET,
+        save_user_context_for_fork = sym crate::syscall::save_user_context_for_fork,
         fs_base_fn = sym current_thread_fs_base_for_sysret,
         dispatch = sym super::syscall_dispatch_sysv,
         kill_fn = sym kill_non_canonical_rsp,

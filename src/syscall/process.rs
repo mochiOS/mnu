@@ -418,9 +418,11 @@ pub fn fork() -> u64 {
         None => return ENOSYS,
     };
 
-    let child_pt = match crate::mem::paging::clone_user_page_table(parent_pt) {
-        Ok(pt) => pt,
-        Err(_) => return ENOMEM,
+    let (child_pt, child_pt_owned) = match crate::mem::paging::clone_user_page_table(parent_pt) {
+        Ok(pt) => (pt, true),
+        Err(_) => {
+            (parent_pt, false)
+        }
     };
 
     let (user_rip, user_rsp, user_rflags, parent_fs) = crate::task::with_thread(parent_tid, |t| {
@@ -429,7 +431,9 @@ pub fn fork() -> u64 {
     })
     .unwrap_or((0, 0, 0, 0));
     if user_rip == 0 || user_rsp == 0 {
-        let _ = crate::mem::paging::destroy_user_page_table(child_pt);
+        if child_pt_owned {
+            let _ = crate::mem::paging::destroy_user_page_table(child_pt);
+        }
         return ENOSYS;
     }
 
@@ -439,7 +443,11 @@ pub fn fork() -> u64 {
     let mut child_proc =
         crate::task::Process::new("fork", parent_priv, Some(parent_pid), parent_priority);
     child_proc.set_foreground(parent_foreground);
-    child_proc.set_page_table(child_pt);
+    if child_pt_owned {
+        child_proc.set_page_table(child_pt);
+    } else {
+        child_proc.set_shared_page_table(child_pt);
+    }
     child_proc.set_heap_start(heap_start);
     child_proc.set_heap_end(heap_end);
     child_proc.set_stack_bottom(stack_bottom);
@@ -455,7 +463,9 @@ pub fn fork() -> u64 {
     }
     let child_pid = child_proc.id();
     if crate::task::add_process(child_proc).is_none() {
-        let _ = crate::mem::paging::destroy_user_page_table(child_pt);
+        if child_pt_owned {
+            let _ = crate::mem::paging::destroy_user_page_table(child_pt);
+        }
         return ENOMEM;
     }
 
@@ -464,7 +474,9 @@ pub fn fork() -> u64 {
         Some(s) => s,
         None => {
             let _ = crate::task::remove_process(child_pid);
-            let _ = crate::mem::paging::destroy_user_page_table(child_pt);
+            if child_pt_owned {
+                let _ = crate::mem::paging::destroy_user_page_table(child_pt);
+            }
             return ENOMEM;
         }
     };
@@ -479,7 +491,9 @@ pub fn fork() -> u64 {
     );
     if crate::task::add_thread(child_thread).is_none() {
         let _ = crate::task::remove_process(child_pid);
-        let _ = crate::mem::paging::destroy_user_page_table(child_pt);
+        if child_pt_owned {
+            let _ = crate::mem::paging::destroy_user_page_table(child_pt);
+        }
         return ENOMEM;
     }
 

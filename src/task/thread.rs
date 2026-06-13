@@ -12,6 +12,7 @@ pub struct IpcFastState {
     wait_cpu: usize,
     has_request: bool,
     reply_ready: bool,
+    awaiting_reply: bool,
     sender_tid: u64,
     reply_ptr: u64,
     reply_len: usize,
@@ -27,6 +28,7 @@ impl IpcFastState {
             wait_cpu: usize::MAX,
             has_request: false,
             reply_ready: false,
+            awaiting_reply: false,
             sender_tid: 0,
             reply_ptr: 0,
             reply_len: 0,
@@ -76,6 +78,14 @@ impl IpcFastState {
         self.reply_ready = ready;
     }
 
+    pub fn awaiting_reply(&self) -> bool {
+        self.awaiting_reply
+    }
+
+    pub fn set_awaiting_reply(&mut self, awaiting: bool) {
+        self.awaiting_reply = awaiting;
+    }
+
     pub fn reply_ptr(&self) -> u64 {
         self.reply_ptr
     }
@@ -115,6 +125,7 @@ impl IpcFastState {
         let data = self.msg;
         self.has_request = false;
         self.reply_ready = false;
+        self.awaiting_reply = false;
         self.msg_len = 0;
         self.msg = [0; FAST_IPC_MAX_BYTES];
         self.wait_cpu = usize::MAX;
@@ -134,6 +145,7 @@ impl IpcFastState {
         self.reply_len = 0;
         self.reply_ready = false;
         self.reply_result_len = 0;
+        self.awaiting_reply = false;
         self.wait_cpu = usize::MAX;
         (ptr, len)
     }

@@ -252,6 +252,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::TimeNow as u64 => time::get_ticks(),
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
         x if x == SyscallNumber::CheckGravityExist as u64 => io::check_gravity_exist(),
+        x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
         _ => ENOSYS,
     }
 }
@@ -264,7 +265,12 @@ pub extern "sysv64" fn save_user_context_for_fork(
     user_rsp: u64,
     user_rflags: u64,
 ) {
-    let _ = (num, user_rip, user_rsp, user_rflags);
+    let _ = num;
+    if let Some(tid) = crate::task::current_thread_id() {
+        let _ = crate::task::with_thread_mut(tid, |thread| {
+            thread.set_syscall_user_context(user_rip, user_rsp, user_rflags);
+        });
+    }
 }
 
 /// システムコール割り込みハンドラ (int 0x80) - アセンブリラッパー

@@ -14,6 +14,7 @@ mnuのシステムコールは、次の領域だけを扱います。
 * Capability
 * Event
 * Time
+* I/O
 
 カーネルは、パス名、アプリケーション名、ウィンドウ、ソケット、GPUコマンド、デバイス名などの高レベル概念を直接ABIとして持ちません。
 
@@ -62,7 +63,7 @@ ptr        ユーザー空間ポインタ
 ## システムコール一覧
 
 | 分類               | syscall        |
-| ---------------- | -------------- |
+| ---------------- |----------------|
 | Process / Thread | process_exit   |
 | Process / Thread | process_spawn  |
 | Process / Thread | process_wait   |
@@ -93,6 +94,7 @@ ptr        ユーザー空間ポインタ
 | Event            | event_poll     |
 | Time             | time_now       |
 | Time             | sleep          |
+| I/O              | write          |
 
 ## Process / Thread
 
@@ -267,6 +269,8 @@ memory_sync(addr: ptr, size: usize, flags: u64) -> isize
 `flags` にはflush、invalidate、writebackなどの同期種別を指定できます。
 
 ## IPC
+
+IPC の詳細設計は [`docs/ipc.md`](ipc.md) を参照してください。
 
 ### ipc_create
 
@@ -477,6 +481,14 @@ sleep(duration_ns: u64, flags: u64) -> isize
 `duration_ns` は待機時間をナノ秒単位で指定します。
 
 スケジューラは指定時間が経過するまで対象スレッドを実行可能状態から外します。
+
+## I/O
+
+### Write
+```
+write(str: &str) -> isize
+```
+シリアルコンソールへ文字列を書き込みます。
 
 ## 高速IPCの扱い
 
