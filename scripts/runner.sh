@@ -135,6 +135,7 @@ ROOTFS_SOURCE_DIR="${ROOT_DIR}/examples/fs/rootfs" \
 INITFS_STAGE="${INITFS_STAGE}" \
 ROOTFS_STAGE="${ROOTFS_STAGE}" \
 ROOTFS_IMG="${TARGET_DIR}/rootfs.img" \
+ROOTFS_CLEAN_INITFS=0 \
 bash "${ROOT_DIR}/scripts/rootfs.sh"
 
 echo "[build] initfs"

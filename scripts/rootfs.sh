@@ -9,6 +9,7 @@ ROOTFS_STAGE="${ROOTFS_STAGE:-${TARGET_DIR}/rootfs-root}"
 ROOTFS_IMG="${ROOTFS_IMG:-${TARGET_DIR}/rootfs.img}"
 ROOTFS_SIZE="${ROOTFS_SIZE:-16M}"
 ROOTFS_BLOCK_SIZE="${ROOTFS_BLOCK_SIZE:-1024}"
+ROOTFS_CLEAN_INITFS="${ROOTFS_CLEAN_INITFS:-1}"
 
 die() {
     echo "fatal: $*" >&2
@@ -32,8 +33,13 @@ need_cmd truncate
 need_file "${ROOTFS_SOURCE_DIR}"
 
 mkdir -p "$(dirname "${ROOTFS_IMG}")"
-rm -rf "${INITFS_STAGE}" "${ROOTFS_STAGE}"
-mkdir -p "${INITFS_STAGE}" "${ROOTFS_STAGE}"
+rm -rf "${ROOTFS_STAGE}"
+mkdir -p "${ROOTFS_STAGE}"
+
+if [[ "${ROOTFS_CLEAN_INITFS}" != "0" ]]; then
+    rm -rf "${INITFS_STAGE}"
+fi
+mkdir -p "${INITFS_STAGE}"
 
 cp -a "${ROOTFS_SOURCE_DIR}/." "${ROOTFS_STAGE}/"
 cp -a "${ROOTFS_SOURCE_DIR}/." "${INITFS_STAGE}/"

@@ -29,6 +29,9 @@ sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 spin = "0.9"
 x86_64 = "0.15"
 
+[dependencies]
+plugkit-sys = { path = "crates/PlugKit/plugkit-sys" }
+
 [features]
 default = ["kernel-bin"]
 kernel-bin = []
