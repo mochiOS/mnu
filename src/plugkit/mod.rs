@@ -96,6 +96,10 @@ fn with_assignments_mut<R>(f: impl FnOnce(&mut BTreeMap<u64, Option<String>>) ->
 
 pub fn register_driver(manifest: DriverManifest, descriptor: DriverDescriptor) -> bool {
     with_drivers_mut(|drivers| {
+        if drivers.contains_key(&manifest.id) {
+            return false;
+        }
+
         drivers.insert(
             manifest.id.clone(),
             RegisteredDriver {
@@ -104,8 +108,8 @@ pub fn register_driver(manifest: DriverManifest, descriptor: DriverDescriptor) -
                 loaded: true,
             },
         );
-    });
-    true
+        true
+    })
 }
 
 pub fn unregister_driver(id: &str) -> bool {

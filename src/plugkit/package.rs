@@ -37,8 +37,7 @@ pub fn register_package(manifest: PackageManifest) -> bool {
 
         packages.insert(manifest.package_id.clone(), manifest);
         true
-    });
-    true
+    })
 }
 
 pub fn package_manifest(id: &str) -> Option<PackageManifest> {
