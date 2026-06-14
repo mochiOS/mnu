@@ -19,7 +19,6 @@ use crate::mem::{paging, user};
 use crate::result::{Kernel, Memory, Process, Result};
 use crate::task::{
     add_process, add_thread, remove_process, PrivilegeLevel, Process as TaskProcess, Thread,
-    ThreadId,
 };
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -209,22 +208,15 @@ pub fn load_elf_into(table_phys: u64, data: &[u8]) -> Result<LoadedElf> {
     })
 }
 
-pub fn spawn_service(path: &str, name: &str) -> Result<(crate::task::ProcessId, ThreadId)> {
-    let data = crate::kmod::fs::read_all(path)
-        .or_else(|| init::fs::kernel_read_initfs(path))
+pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
+    let data = crate::cext::fs::read_all(path)
+        .or_else(|| init::fs::read(path))
         .ok_or(Kernel::InvalidParam)?;
     let new_pt_phys = paging::create_user_page_table()?;
 
     let priority = 10;
-    let parent_pid = crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()));
 
-    let mut process = TaskProcess::new(name, PrivilegeLevel::Service, parent_pid, priority);
-    process.set_capabilities_for_exec({
-        let mut caps = crate::capability::CapabilitySet::empty();
-        caps.insert(crate::capability::Capability::IpcServer);
-        caps
-    });
+    let mut process = TaskProcess::new(name, PrivilegeLevel::Service, None, priority);
     process.set_page_table(new_pt_phys);
     let pid = process.id();
 
@@ -250,7 +242,6 @@ pub fn spawn_service(path: &str, name: &str) -> Result<(crate::task::ProcessId, 
         name,
         loaded.entry,
         loaded.stack_top,
-        0,
         kernel_stack_addr,
         kernel_stack_size,
     );
@@ -319,17 +310,12 @@ pub fn spawn_service(path: &str, name: &str) -> Result<(crate::task::ProcessId, 
     thread.context_mut().rsp = sp;
     thread.context_mut().rbp = 0;
 
-    let thread_id = match add_thread(thread) {
-        Some(tid) => tid,
-        None => {
-            return Err(Kernel::Process(Process::MaxProcessesReached));
-        }
-    };
-
-    let _ = crate::task::with_process_mut(pid, |p| p.set_service_id(alloc::string::String::from(name)));
+    if add_thread(thread).is_none() {
+        return Err(Kernel::Process(Process::MaxProcessesReached));
+    }
 
     guard.disarm();
-    Ok((pid, thread_id))
+    Ok(())
 }
 
 fn parse_header(data: &[u8]) -> Result<Elf64Ehdr> {

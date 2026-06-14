@@ -209,7 +209,7 @@ pub fn pipe_syscall(pipefd_ptr: u64) -> u64 {
 /// pipe2(2) システムコール（flags: O_CLOEXEC / O_NONBLOCK に部分対応）
 pub fn pipe2_syscall(pipefd_ptr: u64, flags: u64) -> u64 {
     use super::types::EFAULT;
-    use crate::task::fd_table::{FileHandle, O_CLOEXEC};
+    use crate::task::fd_table::{FileHandle, FileHandleCap, O_CLOEXEC};
 
     const EMFILE_VAL: u64 = (-24i64) as u64;
 
@@ -245,6 +245,10 @@ pub fn pipe2_syscall(pipefd_ptr: u64, flags: u64) -> u64 {
         pipe_id: Some(pipe_id),
         pipe_write: false,
         open_flags: 0,
+        cap: FileHandleCap::READ
+            .union(FileHandleCap::SEEK)
+            .union(FileHandleCap::STAT)
+            .union(FileHandleCap::CLOSE),
     });
     let write_handle = alloc::boxed::Box::new(FileHandle {
         data: alloc::boxed::Box::new([]),
@@ -257,6 +261,7 @@ pub fn pipe2_syscall(pipefd_ptr: u64, flags: u64) -> u64 {
         pipe_id: Some(pipe_id),
         pipe_write: true,
         open_flags: 1,
+        cap: FileHandleCap::WRITE.union(FileHandleCap::CLOSE),
     });
 
     let pid_id = crate::task::ids::ProcessId::from_u64(pid);

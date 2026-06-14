@@ -51,18 +51,20 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
 
     fs::init();
     crate::config::init();
-    crate::kmod::init_runtime_config();
-    crate::kmod::load_modules();
-    if crate::kmod::fs::is_loaded() {
-        if crate::kmod::disk::is_loaded() {
-            let rc = crate::kmod::fs::set_disk_ops(crate::kmod::disk::ops_ptr());
+    crate::cext::init_runtime_config();
+    crate::cext::register_builtin_cext("disk", crate::cext::CextKind::BlockDevice);
+    crate::cext::register_builtin_cext("fs", crate::cext::CextKind::Filesystem);
+    crate::cext::load_modules();
+    if crate::cext::fs::is_loaded() {
+        if crate::cext::disk::is_loaded() {
+            let rc = crate::cext::fs::set_disk_ops(crate::cext::disk::ops_ptr());
             if rc != 0 {
-                crate::warn!("kmod: fs set_disk_ops failed rc={}", rc);
+                crate::warn!("cext: fs set_disk_ops failed rc={}", rc);
             }
         }
-        let rc = crate::kmod::fs::mount(0);
+        let rc = crate::cext::fs::mount(0);
         if rc != 0 {
-            crate::warn!("kmod: fs mount failed rc={}", rc);
+            crate::warn!("cext: fs mount failed rc={}", rc);
         } else {
             crate::audit::flush_to_disk();
         }

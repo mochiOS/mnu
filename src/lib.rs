@@ -49,8 +49,6 @@ pub mod config;
 /// カーネル本体
 #[cfg(not(test))]
 pub mod kernel;
-#[cfg(not(test))]
-pub mod kmod;
 
 #[cfg(not(test))]
 /// メモリ管理、GDT、TSSを含む
@@ -100,6 +98,8 @@ pub mod percpu;
 #[cfg(not(test))]
 /// SMP/マルチコアの共有ハンドオフ
 pub mod smp;
+#[cfg(not(test))]
+mod plugkit;
 
 pub const MAX_CPU_IDS: usize = 64;
 

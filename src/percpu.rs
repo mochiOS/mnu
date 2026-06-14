@@ -149,6 +149,10 @@ pub fn current_thread_raw_id() -> u64 {
 }
 
 pub fn set_current_thread_raw_id(id: u64) {
+    let current = current_thread_raw_id();
+    if current == 2 || current == 3 || id == 2 || id == 3 {
+        crate::info!("[PERCPU] set_current_thread_raw_id {} -> {}", current, id);
+    }
     state_for_current_cpu()
         .current_thread_id
         .store(id, Ordering::SeqCst);
@@ -167,6 +171,22 @@ pub fn current_thread_slot() -> Option<usize> {
 
 pub fn set_current_thread_slot(slot: Option<usize>) {
     let raw = slot.map(|value| value as u64).unwrap_or(u64::MAX);
+    let current = state_for_current_cpu()
+        .current_thread_slot
+        .load(Ordering::SeqCst);
+    if current == 2 || current == 3 || raw == 2 || raw == 3 || raw > 1024 {
+        if current == u64::MAX {
+            if raw == u64::MAX {
+                crate::info!("[PERCPU] set_current_thread_slot None -> None");
+            } else {
+                crate::info!("[PERCPU] set_current_thread_slot None -> {}", raw);
+            }
+        } else if raw == u64::MAX {
+            crate::info!("[PERCPU] set_current_thread_slot {} -> None", current);
+        } else {
+            crate::info!("[PERCPU] set_current_thread_slot {} -> {}", current, raw);
+        }
+    }
     state_for_current_cpu()
         .current_thread_slot
         .store(raw, Ordering::SeqCst);

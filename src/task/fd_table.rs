@@ -17,6 +17,65 @@ pub const FD_CLOEXEC: u8 = 0x01;
 /// open() フラグ: O_CLOEXEC (Linux: 0o2000000 = 0x80000)
 pub const O_CLOEXEC: u64 = 0x80000;
 
+/// FileHandle に付与する権限
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileHandleCap(u32);
+
+impl FileHandleCap {
+    pub const NONE: Self = Self(0);
+    pub const READ: Self = Self(1 << 0);
+    pub const WRITE: Self = Self(1 << 1);
+    pub const SEEK: Self = Self(1 << 2);
+    pub const STAT: Self = Self(1 << 3);
+    pub const CLOSE: Self = Self(1 << 4);
+    pub const READDIR: Self = Self(1 << 5);
+    pub const CREATE: Self = Self(1 << 6);
+    pub const REMOVE: Self = Self(1 << 7);
+    pub const RENAME: Self = Self(1 << 8);
+    pub const SYNC: Self = Self(1 << 9);
+    pub const TRUNCATE: Self = Self(1 << 10);
+    pub const ALL: Self = Self((1 << 11) - 1);
+
+    #[inline]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    #[inline]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub fn from_open_flags(flags: u64) -> Self {
+        let mut cap = Self::CLOSE.union(Self::STAT).union(Self::SEEK).union(Self::SYNC);
+        let acc = flags & 0o3;
+        if acc == 0o0 {
+            cap = cap.union(Self::READ);
+        }
+        if acc == 0o1 {
+            cap = cap.union(Self::WRITE);
+        }
+        if acc == 0o2 {
+            cap = cap.union(Self::READ).union(Self::WRITE);
+        }
+        if (flags & 0o100) != 0 {
+            cap = cap.union(Self::CREATE);
+        }
+        if (flags & 0o200) != 0 {
+            cap = cap.union(Self::CREATE);
+        }
+        if (flags & 0o1000) != 0 {
+            cap = cap.union(Self::TRUNCATE);
+        }
+        cap
+    }
+}
+
 /// オープンファイルの状態を保持するハンドル
 pub struct FileHandle {
     /// ファイル内容（initfs からロード済み、パイプの場合は空）
@@ -39,6 +98,8 @@ pub struct FileHandle {
     pub pipe_write: bool,
     /// open()/openat() のファイル状態フラグ（F_GETFL/F_SETFL 用）
     pub open_flags: u64,
+    /// この FD に許可された操作
+    pub cap: FileHandleCap,
 }
 
 impl FileHandle {
@@ -54,6 +115,7 @@ impl FileHandle {
             pipe_id: Some(pipe_id),
             pipe_write: false,
             open_flags: 0,
+            cap: FileHandleCap::READ.union(FileHandleCap::SEEK).union(FileHandleCap::STAT).union(FileHandleCap::CLOSE),
         }
     }
 
@@ -69,6 +131,7 @@ impl FileHandle {
             pipe_id: Some(pipe_id),
             pipe_write: true,
             open_flags: 1,
+            cap: FileHandleCap::WRITE.union(FileHandleCap::CLOSE),
         }
     }
 
@@ -236,6 +299,7 @@ impl FdTable {
                 pipe_id: fh.pipe_id,
                 pipe_write: fh.pipe_write,
                 open_flags: fh.open_flags,
+                cap: fh.cap,
             });
             new_table.entries[i] = Box::into_raw(new_fh) as u64;
             new_table.flags[i] = self.flags[i];

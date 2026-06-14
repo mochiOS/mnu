@@ -200,7 +200,7 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
-    exec_internal(path, None, &extra_args, None, None)
+    exec_internal(path, None, &extra_args, None)
 }
 
 /// exec 時に capability を付与して起動する
@@ -259,12 +259,12 @@ pub fn exec_with_capabilities_syscall(
 
     // capability はプロセス生成時に設定する必要がある。
     // 後付けだと、スケジューラ有効時に起動直後の IPC 等が cap 無しで走り得る。
-    exec_internal(path.as_str(), None, &extra_args, Some(caps), None)
+    exec_internal(path.as_str(), None, &extra_args, Some(caps))
 }
 
 /// 名前を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
 pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
-    exec_internal(path, Some(name), &[], None, None)
+    exec_internal(path, Some(name), &[], None)
 }
 
 /// 名前と初期 capability を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
@@ -273,17 +273,7 @@ pub fn exec_kernel_with_name_and_caps(
     name: &str,
     initial_caps: crate::capability::CapabilitySet,
 ) -> u64 {
-    exec_internal(path, Some(name), &[], Some(initial_caps), None)
-}
-
-/// 名前・capability・親PIDを指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
-pub fn exec_kernel_with_name_caps_parent(
-    path: &str,
-    name: &str,
-    initial_caps: crate::capability::CapabilitySet,
-    parent_override: Option<crate::task::ProcessId>,
-) -> u64 {
-    exec_internal(path, Some(name), &[], Some(initial_caps), parent_override)
+    exec_internal(path, Some(name), &[], Some(initial_caps))
 }
 
 fn exec_internal(
@@ -291,7 +281,6 @@ fn exec_internal(
     name_override: Option<&str>,
     args: &[&str],
     initial_caps: Option<crate::capability::CapabilitySet>,
-    parent_override: Option<crate::task::ProcessId>,
 ) -> u64 {
     let mut process_name = name_override
         .map(|s| s.to_string())
@@ -300,25 +289,35 @@ fn exec_internal(
         process_name = alias;
     }
     let loaded = load_exec_image(path, process_name.ends_with(".service"));
-
     if let Some((data, source)) = loaded {
+        let fingerprint = fingerprint_exec_bytes(&data);
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",
             path,
             source,
             data.len()
         );
-        exec_with_data(
-            &data,
-            &process_name,
-            path,
-            args,
-            parent_override,
-            initial_caps,
-        )
+        exec_with_data(&data, &process_name, path, args, None, initial_caps)
     } else {
         crate::warn!("exec: file not found: {}", path);
         crate::syscall::types::ENOENT
+    }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+fn fingerprint_exec_bytes(data: &[u8]) -> &'static str {
+    if contains_bytes(data, b"raw syscall write: start") {
+        "RAW SYSCALL BUILD"
+    } else if contains_bytes(data, b"userland self-test: start") {
+        "OLD SELFTEST BUILD"
+    } else {
+        "UNKNOWN BUILD"
     }
 }
 
@@ -327,13 +326,13 @@ fn load_exec_image(path: &str, is_service: bool) -> Option<(Vec<u8>, &'static st
         crate::init::fs::read_initfs(path)
             .map(|data| (data, "initfs"))
             .or_else(|| crate::init::fs::read_rootfs(path).map(|data| (data, "rootfs")))
-            .or_else(|| crate::kmod::fs::read_all(path).map(|data| (data, "kmod")))
-            .or_else(|| crate::init::fs::kernel_read_initfs(path).map(|data| (data, "fallback")))
+            .or_else(|| crate::cext::fs::read_all(path).map(|data| (data, "cext")))
+            .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
     } else {
         crate::init::fs::read_rootfs(path)
             .map(|data| (data, "rootfs"))
-            .or_else(|| crate::kmod::fs::read_all(path).map(|data| (data, "kmod")))
-            .or_else(|| crate::init::fs::kernel_read_initfs(path).map(|data| (data, "fallback")))
+            .or_else(|| crate::cext::fs::read_all(path).map(|data| (data, "cext")))
+            .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
     }
 }
 
@@ -374,7 +373,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
 
-    if let Some(data) = crate::kmod::fs::read_all(&path) {
+    if let Some(data) = crate::cext::fs::read_all(&path) {
         return exec_with_data(&data, &path, &path, &extra_args, None, None);
     }
 
@@ -1055,7 +1054,6 @@ fn exec_with_data(
             process_name,
             entry,
             initial_rsp,
-            0,
             kstack,
             kstack_size,
         );
@@ -1118,7 +1116,8 @@ fn exec_with_data(
             entry
         );
 
-        pid.as_u64()
+        let launched_tid = add_res.expect("add_thread succeeded after non-None check");
+        launched_tid.as_u64()
     }
 }
 
@@ -1192,7 +1191,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     }
 
     // initfs からファイルを読み込む
-    let data_vec = match crate::init::fs::kernel_read_initfs(path) {
+    let data_vec = match crate::init::fs::read(path) {
         Some(d) => d,
         None => return ENOENT,
     };
@@ -1431,7 +1430,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     // 新しいページテーブルに切り替えてジャンプ
     unsafe {
         crate::mem::paging::switch_page_table(new_pt_phys);
-        crate::task::jump_to_usermode(entry, initial_rsp, 0);
+        crate::task::jump_to_usermode(entry, initial_rsp);
     }
 }
 

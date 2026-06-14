@@ -3,9 +3,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, Ordering};
 #[repr(C)]
 pub struct McxDiskOps {
     pub probe: extern "C" fn() -> i32,
-    /// 512バイトセクタを読み取る。buf_len は 512 以上を要求する。
     pub read_sector: extern "C" fn(disk_id: u32, lba: u64, buf: *mut u8, buf_len: usize) -> i32,
-    /// 512バイトセクタを書き込む。buf_len は 512 以上を要求する。
     pub write_sector: extern "C" fn(disk_id: u32, lba: u64, buf: *const u8, buf_len: usize) -> i32,
 }
 

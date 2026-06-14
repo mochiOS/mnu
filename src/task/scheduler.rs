@@ -208,15 +208,15 @@ pub fn scheduler_tick() -> bool {
 /// # Returns
 /// 次に実行すべきスレッドID。実行可能なスレッドがない場合はNone
 pub fn schedule() -> Option<ThreadId> {
-    schedule_with_slot().map(|(next_id, _)| next_id)
+    schedule_with_slot().map(|(next_id, _, _)| next_id)
 }
 
 /// 次に実行すべきスレッドIDとスロットを取得
-fn schedule_with_slot() -> Option<(ThreadId, usize)> {
+fn schedule_with_slot() -> Option<(ThreadId, usize, Option<usize>)> {
     let mut queue = THREAD_QUEUE.lock();
 
-    let current_slot = current_thread_slot();
     let current = current_thread_id();
+    let current_slot = current.and_then(|id| queue.slot_index(id));
 
     // 現在のスレッドの状態を Running から Ready に戻す
     if let Some(slot) = current_slot {
@@ -268,7 +268,7 @@ fn schedule_with_slot() -> Option<(ThreadId, usize)> {
     scheduler.set_time_slice(next_time_slice.max(1));
     scheduler.reset_slice();
 
-    Some((next_id, next_slot))
+    Some((next_id, next_slot, current_slot))
 }
 
 /// 現在のスレッドを明示的にCPUを手放す（yield）
@@ -282,9 +282,18 @@ pub fn yield_now() {
     // スケジューリングと切り替えは割り込み禁止区間で実行し、
     // 状態更新と実際の切替の間に割り込みが入る競合窓を防ぐ。
     x86_64::instructions::interrupts::without_interrupts(|| {
-        if let Some((next_id, next_slot)) = schedule_with_slot() {
+        if let Some((next_id, next_slot, current_slot)) = schedule_with_slot() {
             let current = current_thread_id();
-            let current_slot = current_thread_slot();
+            if current.is_some_and(|id| id.as_u64() == 2 || id.as_u64() == 3)
+                || next_id.as_u64() == 2
+                || next_id.as_u64() == 3
+            {
+                crate::info!(
+                    "[SCHED] yield current={:?} next={:?}",
+                    current.map(|id| id.as_u64()),
+                    next_id.as_u64()
+                );
+            }
 
             // 次のスレッドが現在のスレッドと異なる場合のみ切り替え
             if Some(next_id) != current {
@@ -356,6 +365,16 @@ pub fn sleep_thread_unless_woken(id: ThreadId) -> bool {
             let _ = with_thread_mut(id, |thread| thread.note_voluntary_yield());
         }
         set_thread_state(id, ThreadState::Sleeping);
+        let mut woke_during_transition = false;
+        crate::task::with_thread_mut(id, |thread| {
+            if thread.take_pending_wakeup() {
+                woke_during_transition = true;
+            }
+        });
+        if woke_during_transition {
+            set_thread_state(id, ThreadState::Ready);
+            return false;
+        }
         true
     } else {
         false
@@ -440,7 +459,7 @@ pub fn exit_current_task(exit_code: u64) -> ! {
 
         x86_64::instructions::interrupts::without_interrupts(|| {
             // 次のスレッドにスケジューリング（戻ってこない）
-            if let Some((next_id, next_slot)) = schedule_with_slot() {
+            if let Some((next_id, next_slot, _current_slot)) = schedule_with_slot() {
                 crate::debug!("Switching from exited thread to {:?}", next_id);
 
                 // スレッドをキューから削除（コンテキストスイッチ前に削除）
@@ -496,10 +515,9 @@ pub fn schedule_and_switch() {
 
     x86_64::instructions::interrupts::without_interrupts(|| {
         let current = current_thread_id();
-        let current_slot = current_thread_slot();
 
         // 次のスレッドを選択
-        if let Some((next_id, next_slot)) = schedule_with_slot() {
+        if let Some((next_id, next_slot, current_slot)) = schedule_with_slot() {
             // 次のスレッドが現在のスレッドと異なる場合のみ切り替え
             if Some(next_id) != current {
                 unsafe {

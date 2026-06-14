@@ -1,0 +1,5 @@
+name = "disk"
+kind = "built-in"
+version = 1
+entry = "builtin"
+type = "storage"

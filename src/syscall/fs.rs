@@ -1,24 +1,13 @@
 //! ファイルシステム関連のシステムコール
 
 use super::types::{
-    EACCES, EBADF, EEXIST, EFAULT, EINVAL, EIO, ENOENT, ENOSYS, ENOTDIR, ESRCH, SUCCESS,
+    EACCES, EBADF, EEXIST, EFAULT, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, ESRCH, SUCCESS,
 };
-use crate::task::fd_table::{FdTable, FileHandle, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS};
-use alloc::collections::BTreeMap;
+use crate::task::fd_table::{FdTable, FileHandle, FileHandleCap, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS};
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Mutex;
-
-#[derive(Clone, Debug)]
-struct ShmEntry {
-    data: Vec<u8>,
-    open_count: usize,
-    removed: bool,
-}
-
-static SHM_NAMESPACE: Mutex<Option<BTreeMap<String, ShmEntry>>> = Mutex::new(None);
 
 // グローバル FD テーブルは廃止。各プロセスの Process::fd_table を使用する。
 
@@ -44,6 +33,27 @@ where
 {
     let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
     crate::task::with_process_mut(pid, |p| f(p.fd_table_mut()))
+}
+
+fn file_handle_cap(pid_raw: u64, fd: u64) -> Result<FileHandleCap, u64> {
+    if fd < FD_BASE as u64 {
+        return Err(EBADF);
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return Err(EBADF);
+    }
+    with_fd_table(pid_raw, |t| t.get(idx).map(|fh| fh.cap)).ok_or(EBADF)?
+        .ok_or(EBADF)
+}
+
+fn require_cap(pid_raw: u64, fd: u64, need: FileHandleCap) -> Result<(), u64> {
+    let cap = file_handle_cap(pid_raw, fd)?;
+    if cap.contains(need) {
+        Ok(())
+    } else {
+        Err(EACCES)
+    }
 }
 
 fn read_cstring(ptr: u64) -> Result<String, u64> {
@@ -74,38 +84,9 @@ fn resolve_path_at(pid_raw: u64, dirfd: i64, path_ptr: u64) -> Result<String, u6
     Ok(normalize_path(&full_path))
 }
 
-fn path_has_prefix(path: &str, prefix: &str) -> bool {
-    path == prefix
-        || path
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with('/'))
-}
-
-fn path_requires_fs_read_all(path: &str) -> bool {
-    path_has_prefix(path, "/system")
-        || path_has_prefix(path, "/Modules")
-        || path_has_prefix(path, "/config")
-        || path_has_prefix(path, "/bin")
-        || path_has_prefix(path, "/lib")
-        || path_has_prefix(path, "/log")
-        || path_has_prefix(path, "/var/log")
-}
-
 pub(crate) fn ensure_fs_path_readable(path: &str) -> Result<(), u64> {
-    if !path_requires_fs_read_all(path) {
-        return Ok(());
-    }
-
-    let pid = match current_process_id_raw() {
-        Some(pid) => pid,
-        None => return Err(EBADF),
-    };
-    let pid = crate::task::ids::ProcessId::from_u64(pid);
-    if crate::task::process::process_has_capability(pid, crate::capability::Capability::FsReadAll) {
-        Ok(())
-    } else {
-        Err(EACCES)
-    }
+    let _ = path;
+    Ok(())
 }
 
 pub(crate) fn close_remote_fd_from_kernel(_fd_remote: u64) {}
@@ -129,224 +110,17 @@ fn mode_for_stat(mode: u16) -> u32 {
 
 #[inline]
 pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64)> {
-    crate::kmod::fs::file_metadata(path).or_else(|| crate::init::fs::file_metadata(path))
+    crate::cext::fs::file_metadata(path).or_else(|| crate::init::fs::file_metadata(path))
 }
 
 #[inline]
 pub(crate) fn is_directory_rootfs_first(path: &str) -> bool {
-    crate::kmod::fs::is_directory(path) || crate::init::fs::is_directory(path)
+    crate::cext::fs::is_directory(path) || crate::init::fs::is_directory(path)
 }
 
 #[inline]
 pub(crate) fn readdir_rootfs_first(path: &str) -> Option<Vec<String>> {
-    let entries = crate::kmod::fs::readdir_path(path)
-        .or_else(|| crate::init::fs::readdir_path(path))
-        .unwrap_or_default();
-    if path == "/" {
-        return filter_hidden_root_entries(entries);
-    }
-    merge_special_dir_entries(entries, path)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SpecialFileKind {
-    Zero,
-    Null,
-    AuditLog,
-    RuntimeDir,
-}
-
-#[inline]
-fn special_file_kind(path: &str) -> Option<SpecialFileKind> {
-    match path {
-        "/var/zero" | "/dev/zero" => Some(SpecialFileKind::Zero),
-        "/dev" | "/dev/shm" => Some(SpecialFileKind::RuntimeDir),
-        "/dev/null" => Some(SpecialFileKind::Null),
-        "/log/audit.log" | "/var/log/audit.log" => Some(SpecialFileKind::AuditLog),
-        "/run" | "/run/user" | "/run/user/0" => Some(SpecialFileKind::RuntimeDir),
-        _ => None,
-    }
-}
-
-#[inline]
-fn is_shm_root(path: &str) -> bool {
-    path == "/dev/shm"
-}
-
-#[inline]
-fn shm_entry_name(path: &str) -> Option<&str> {
-    path.strip_prefix("/dev/shm/").and_then(|name| {
-        if name.is_empty() || name.contains('/') {
-            None
-        } else {
-            Some(name)
-        }
-    })
-}
-
-#[inline]
-fn is_shm_entry_path(path: &str) -> bool {
-    shm_entry_name(path).is_some()
-}
-
-fn with_shm_namespace<R>(f: impl FnOnce(&BTreeMap<String, ShmEntry>) -> R) -> R {
-    let mut guard = SHM_NAMESPACE.lock();
-    let map = guard.get_or_insert_with(BTreeMap::new);
-    f(map)
-}
-
-fn with_shm_namespace_mut<R>(f: impl FnOnce(&mut BTreeMap<String, ShmEntry>) -> R) -> R {
-    let mut guard = SHM_NAMESPACE.lock();
-    let map = guard.get_or_insert_with(BTreeMap::new);
-    f(map)
-}
-
-fn shm_file_metadata(path: &str) -> Option<(u16, u64)> {
-    if is_shm_root(path) {
-        return Some((0x4000 | 0o755, 0));
-    }
-    let name = shm_entry_name(path)?;
-    with_shm_namespace(|map| {
-        map.get(name)
-            .and_then(|entry| (!entry.removed).then_some((0x8000 | 0o600, entry.data.len() as u64)))
-    })
-}
-
-#[inline]
-fn special_file_metadata(path: &str) -> Option<(u16, u64)> {
-    if let Some(meta) = shm_file_metadata(path) {
-        return Some(meta);
-    }
-    match special_file_kind(path)? {
-        SpecialFileKind::Zero | SpecialFileKind::Null => Some((0x2000 | 0o666, 0)),
-        SpecialFileKind::AuditLog => Some((0x8000 | 0o444, crate::audit::file_size() as u64)),
-        SpecialFileKind::RuntimeDir => Some((0x4000 | 0o755, 0)),
-    }
-}
-
-#[inline]
-fn special_dir_entries(path: &str) -> Option<Vec<String>> {
-    match path {
-        "/dev" => Some(vec!["shm".to_string()]),
-        "/dev/shm" => Some(with_shm_namespace(|map| {
-            map.iter()
-                .filter(|(_, entry)| !entry.removed)
-                .map(|(name, _)| name.clone())
-                .collect()
-        })),
-        "/run" => Some(vec!["user".to_string()]),
-        "/run/user" => Some(vec!["0".to_string()]),
-        _ => None,
-    }
-}
-
-#[inline]
-fn filter_hidden_root_entries(mut entries: Vec<String>) -> Option<Vec<String>> {
-    let hidden = ["dev", "run"];
-    entries.retain(|entry| !hidden.iter().any(|name| name == entry));
-    if entries.is_empty() {
-        None
-    } else {
-        Some(entries)
-    }
-}
-
-#[inline]
-fn merge_special_dir_entries(mut entries: Vec<String>, path: &str) -> Option<Vec<String>> {
-    if let Some(special) = special_dir_entries(path) {
-        for name in special {
-            if !entries.iter().any(|existing| existing == &name) {
-                entries.push(name);
-            }
-        }
-        Some(entries)
-    } else if entries.is_empty() {
-        None
-    } else {
-        Some(entries)
-    }
-}
-
-#[inline]
-fn special_dir_entry_dtype(path: &str, name: &str) -> Option<u8> {
-    match (path, name) {
-        ("/run", "user") | ("/run/user", "0") => Some(4),
-        ("/dev/shm", _) => Some(8),
-        _ => None,
-    }
-}
-
-#[inline]
-fn is_special_local_path(path: &str) -> bool {
-    special_file_metadata(path).is_some()
-}
-
-#[inline]
-fn special_file_requires_read_cap(path: &str) -> bool {
-    matches!(special_file_kind(path), Some(SpecialFileKind::AuditLog))
-}
-
-#[inline]
-fn special_path_blocks_mutation(path: &str) -> bool {
-    matches!(
-        special_file_kind(path),
-        Some(SpecialFileKind::RuntimeDir | SpecialFileKind::AuditLog)
-    )
-}
-
-#[inline]
-fn special_file_allows_open(path: &str, flags: u64) -> bool {
-    match special_file_kind(path) {
-        Some(SpecialFileKind::RuntimeDir) => {
-            !has_write_intent(flags) && (flags & O_CREAT) == 0 && (flags & O_TRUNC) == 0
-        }
-        Some(SpecialFileKind::AuditLog) => !has_write_intent(flags),
-        Some(SpecialFileKind::Zero) | Some(SpecialFileKind::Null) => true,
-        None => true,
-    }
-}
-
-#[inline]
-fn stat_path_local_or_special(path: &str) -> Result<(u16, u64), u64> {
-    if let Some((mode, size)) = special_file_metadata(path) {
-        Ok((mode, size))
-    } else {
-        ensure_fs_path_readable(path)?;
-        metadata_rootfs_first(path).ok_or(ENOENT)
-    }
-}
-
-fn handle_is_special(fh: &FileHandle) -> bool {
-    fh.dir_path
-        .as_deref()
-        .map(is_special_local_path)
-        .unwrap_or(false)
-}
-
-fn handle_special_kind(fh: &FileHandle) -> Option<SpecialFileKind> {
-    fh.dir_path.as_deref().and_then(special_file_kind)
-}
-
-fn handle_is_shm(fh: &FileHandle) -> Option<&str> {
-    fh.fs_path.as_deref().and_then(shm_entry_name)
-}
-
-fn close_shm_handle(path: &str) {
-    let Some(name) = shm_entry_name(path) else {
-        return;
-    };
-    with_shm_namespace_mut(|map| {
-        let mut should_remove = false;
-        if let Some(entry) = map.get_mut(name) {
-            if entry.open_count > 0 {
-                entry.open_count -= 1;
-            }
-            should_remove = entry.removed && entry.open_count == 0;
-        }
-        if should_remove {
-            map.remove(name);
-        }
-    });
+    crate::cext::fs::readdir_path(path).or_else(|| crate::init::fs::readdir_path(path))
 }
 
 fn parse_readdir_names(bytes: &[u8]) -> Vec<String> {
@@ -429,210 +203,67 @@ const O_EXCL: u64 = 0o200;
 const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 
-pub(crate) fn is_tty_like_path(path: &str) -> bool {
-    path == "/dev/tty"
-        || path == "/dev/console"
-        || path == "/dev/stdin"
-        || path == "/dev/stdout"
-        || path == "/dev/stderr"
-        || path.starts_with("/dev/pts/")
-}
-
-fn make_tty_handle(path: &str) -> alloc::boxed::Box<FileHandle> {
-    let tty_path = if is_tty_like_path(path) {
-        path
-    } else {
-        "/dev/tty"
-    };
-    alloc::boxed::Box::new(FileHandle {
-        data: alloc::boxed::Box::new([]),
-        pos: 0,
-        fs_path: None,
-        dir_path: Some(tty_path.to_string()),
-        is_remote: false,
-        fd_remote: 0,
-        remote_refs: None,
-        pipe_id: None,
-        pipe_write: false,
-        open_flags: O_RDWR,
-    })
-}
-
-fn has_write_intent(flags: u64) -> bool {
-    let acc = flags & O_ACCMODE;
-    acc == O_WRONLY || acc == O_RDWR || (flags & (O_CREAT | O_TRUNC)) != 0
-}
-
 fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
-    if is_tty_like_path(path) {
-        let cloexec = (flags & O_CLOEXEC) != 0;
-        return match with_fd_table_mut(owner_pid, |t| t.alloc(make_tty_handle(path), cloexec)) {
-            Some(Some(fd)) => fd as u64,
-            _ => ENOSYS,
-        };
+    let metadata = metadata_rootfs_first(path);
+    let is_dir = metadata
+        .map(|(mode, _)| mode_is_directory(mode))
+        .unwrap_or_else(|| crate::cext::fs::is_directory(path));
+
+    let acc = flags & O_ACCMODE;
+    if is_dir && acc != 0 {
+        return EISDIR;
     }
 
-    if let Some(name) = shm_entry_name(path) {
-        let mut status = ENOENT;
-        with_shm_namespace_mut(|map| {
-            let entry = map.get_mut(name);
-            match entry {
-                Some(entry) if entry.removed => {
-                    if (flags & O_CREAT) != 0 {
-                        status = EEXIST;
-                    } else {
-                        status = ENOENT;
-                    }
-                }
-                Some(entry) => {
-                    if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 {
-                        status = EEXIST;
-                        return;
-                    }
-                    if (flags & O_TRUNC) != 0 {
-                        entry.data.clear();
-                    }
-                    entry.open_count = entry.open_count.saturating_add(1);
-                    status = 0;
-                }
-                None => {
-                    if (flags & O_CREAT) == 0 {
-                        status = ENOENT;
-                        return;
-                    }
-                    map.insert(
-                        name.to_string(),
-                        ShmEntry {
-                            data: Vec::new(),
-                            open_count: 1,
-                            removed: false,
-                        },
-                    );
-                    status = 0;
-                }
-            }
-        });
-        if status != 0 {
-            return status;
-        }
-        let cloexec = (flags & O_CLOEXEC) != 0;
-        let handle = alloc::boxed::Box::new(FileHandle {
-            data: Vec::new().into_boxed_slice(),
-            pos: 0,
-            fs_path: Some(path.to_string()),
-            dir_path: None,
-            is_remote: false,
-            fd_remote: 0,
-            remote_refs: None,
-            pipe_id: None,
-            pipe_write: false,
-            open_flags: flags,
-        });
-        return match with_fd_table_mut(owner_pid, |t| t.alloc(handle, cloexec)) {
-            Some(Some(fd)) => fd as u64,
-            _ => ENOSYS,
-        };
-    }
-
-    if let Err(errno) = ensure_fs_path_readable(path) {
-        return errno;
-    }
-    if special_file_requires_read_cap(path) {
-        // 監査ログは special file としても読み取りには通常の fs.read.all を要求する。
-        if let Some(pid_raw) = current_process_id_raw() {
-            let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
-            if !crate::task::process::process_has_capability(
-                pid,
-                crate::capability::Capability::FsReadAll,
-            ) {
-                return EACCES;
+    let exists = metadata.is_some() || crate::cext::fs::file_metadata(path).is_some();
+    if !exists {
+        if (flags & O_CREAT) != 0 {
+            if crate::cext::fs::create(path, 0o644) != 0 {
+                return crate::syscall::types::EIO;
             }
         } else {
-            return EBADF;
+            return ENOENT;
         }
+    }
+    if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 && exists {
+        return EEXIST;
+    }
+    if (flags & O_TRUNC) != 0 && crate::cext::fs::truncate(path, 0) != 0 {
+        return crate::syscall::types::EIO;
     }
 
-    // O_CREAT|O_EXCL は先に存在チェックしておく。
-    if (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL) {
-        let exists_in_fallback = metadata_rootfs_first(path).is_some();
-        if exists_in_fallback {
-            return EEXIST;
-        }
-    }
-
-    if is_special_local_path(path) {
-        if !special_file_allows_open(path, flags) {
-            return EACCES;
-        }
-        let cloexec = (flags & O_CLOEXEC) != 0;
-        let handle = alloc::boxed::Box::new(FileHandle {
-            data: alloc::boxed::Box::new([]),
-            pos: 0,
-            fs_path: None,
-            dir_path: Some(path.to_string()),
-            is_remote: false,
-            fd_remote: 0,
-            remote_refs: None,
-            pipe_id: None,
-            pipe_write: false,
-            open_flags: flags,
-        });
-        return match with_fd_table_mut(owner_pid, |t| t.alloc(handle, cloexec)) {
-            Some(Some(fd)) => fd as u64,
-            _ => ENOSYS,
-        };
-    }
-
-    let visible_exists = metadata_rootfs_first(path).is_some();
-    let existing_persistent = crate::kmod::fs::file_metadata(path).is_some();
-    if has_write_intent(flags) && !existing_persistent && (flags & O_CREAT) == 0 {
-        return EACCES;
-    }
-    if (flags & O_CREAT) != 0 && !visible_exists {
-        if crate::kmod::fs::create(path, 0o644) != 0 {
-            return crate::syscall::types::EIO;
-        }
-    }
-    if (flags & O_TRUNC) != 0
-        && (existing_persistent || crate::kmod::fs::file_metadata(path).is_some())
-    {
-        if crate::kmod::fs::truncate(path, 0) != 0 {
-            return crate::syscall::types::EIO;
-        }
-    }
-    let persistent_path = crate::kmod::fs::file_metadata(path).is_some();
-    if has_write_intent(flags) && !persistent_path && (flags & O_CREAT) == 0 {
-        return EACCES;
-    }
-
-    // 通常パス: disk.cext/fs.cext 経由で読む（IPC しない）
-    let (data_vec, dir_path) = if is_directory_rootfs_first(path) {
-        (Vec::new(), Some(path.to_string()))
+    let data_vec = if is_dir {
+        Vec::new()
     } else {
-        match crate::kmod::fs::read_all(path) {
-            Some(d) => (d, None),
+        match crate::cext::fs::read_all(path) {
+            Some(d) => d,
             None => return ENOENT,
         }
     };
-    let is_remote = false;
-    let fd_remote = 0u64;
 
     let cloexec = (flags & O_CLOEXEC) != 0;
     let handle = alloc::boxed::Box::new(FileHandle {
         data: data_vec.into_boxed_slice(),
         pos: 0,
-        fs_path: if persistent_path {
+        fs_path: if exists {
             Some(path.to_string())
         } else {
             None
         },
-        dir_path,
-        is_remote,
-        fd_remote,
+        dir_path: if is_dir { Some(path.to_string()) } else { None },
+        is_remote: false,
+        fd_remote: 0,
         remote_refs: None,
         pipe_id: None,
         pipe_write: false,
         open_flags: flags,
+        cap: if is_dir {
+            FileHandleCap::READDIR
+                .union(FileHandleCap::STAT)
+                .union(FileHandleCap::SEEK)
+                .union(FileHandleCap::CLOSE)
+        } else {
+            FileHandleCap::from_open_flags(flags).union(FileHandleCap::CLOSE)
+        },
     });
 
     match with_fd_table_mut(owner_pid, |t| t.alloc(handle, cloexec)) {
@@ -662,22 +293,19 @@ pub fn close(fd: u64) -> u64 {
     if fd < FD_BASE as u64 {
         return EBADF;
     }
-    let idx = fd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
     let pid = match current_process_id_raw() {
         Some(p) => p,
         None => return EBADF,
     };
-    let handle = with_fd_table_mut(pid, |t| t.take(idx));
-    match handle {
-        Some(Some(h)) => {
-            if let Some(path) = h.fs_path.as_deref() {
-                close_shm_handle(path);
-            }
-            SUCCESS
-        }
+    if let Err(errno) = require_cap(pid, fd, FileHandleCap::CLOSE) {
+        return errno;
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
+    match with_fd_table_mut(pid, |t| t.take(idx)) {
+        Some(Some(_)) => SUCCESS,
         _ => EBADF,
     }
 }
@@ -687,57 +315,30 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
     if fd < FD_BASE as u64 {
         return ENOSYS;
     }
-    let idx = fd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
     let pid = match current_process_id_raw() {
         Some(p) => p,
         None => return EBADF,
     };
+    if let Err(errno) = require_cap(pid, fd, FileHandleCap::SEEK) {
+        return errno;
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
 
     match with_fd_table_mut(pid, |t| {
         let fh = t.get_mut(idx).ok_or(EBADF)?;
         let new_pos = match whence {
             0 => offset,
             1 => fh.pos as i64 + offset,
-            2 => {
-                let len = if handle_is_shm(fh).is_some() {
-                    fh.fs_path
-                        .as_deref()
-                        .and_then(shm_entry_name)
-                        .and_then(|name| {
-                            with_shm_namespace(|map| {
-                                map.get(name).map(|entry| entry.data.len() as i64)
-                            })
-                        })
-                        .unwrap_or(0)
-                } else if handle_special_kind(fh) == Some(SpecialFileKind::AuditLog) {
-                    crate::audit::file_size() as i64
-                } else {
-                    fh.data.len() as i64
-                };
-                len + offset
-            }
+            2 => fh.data.len() as i64 + offset,
             _ => return Err(EINVAL),
         };
         if new_pos < 0 {
             return Err(EINVAL);
         }
-        let limit = if handle_is_shm(fh).is_some() {
-            fh.fs_path
-                .as_deref()
-                .and_then(shm_entry_name)
-                .and_then(|name| {
-                    with_shm_namespace(|map| map.get(name).map(|entry| entry.data.len()))
-                })
-                .unwrap_or(0)
-        } else if handle_special_kind(fh) == Some(SpecialFileKind::AuditLog) {
-            crate::audit::file_size()
-        } else {
-            fh.data.len()
-        };
-        let new_pos = core::cmp::min(new_pos as usize, limit);
+        let new_pos = core::cmp::min(new_pos as usize, fh.data.len());
         fh.pos = new_pos;
         Ok(fh.pos as u64)
     }) {
@@ -796,6 +397,9 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
         Some(p) => p,
         None => return EBADF,
     };
+    if let Err(errno) = require_cap(pid, fd, FileHandleCap::STAT) {
+        return errno;
+    }
     let idx = fd as usize;
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
@@ -804,51 +408,26 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
     // FileHandle からメタデータを取得する
     let file_info = with_fd_table(pid, |t| {
         t.get(idx).map(|fh| {
-            let shm_name = handle_is_shm(fh);
-            let is_tty = fh
+            let metadata = fh
                 .dir_path
                 .as_deref()
-                .map(is_tty_like_path)
-                .unwrap_or(false);
-            let is_special = handle_is_special(fh);
-            let special_kind = handle_special_kind(fh);
-            let size = if special_kind == Some(SpecialFileKind::AuditLog) {
-                crate::audit::file_size() as u64
-            } else if let Some(name) = shm_name {
-                with_shm_namespace(|map| {
-                    map.get(name)
-                        .map(|entry| entry.data.len() as u64)
-                        .unwrap_or(0)
-                })
-            } else {
-                fh.data.len() as u64
-            };
-            (
-                size,
-                fh.dir_path.is_some(),
-                is_tty,
-                is_special,
-                special_kind,
-                shm_name.is_some(),
-            )
+                .or(fh.fs_path.as_deref())
+                .and_then(metadata_rootfs_first);
+            let size = metadata.map(|(_, size)| size).unwrap_or(fh.data.len() as u64);
+            let is_dir = metadata
+                .map(|(mode, _)| mode_is_directory(mode))
+                .unwrap_or(fh.dir_path.is_some());
+            (size, is_dir)
         })
     });
-    let (size, is_dir, is_tty, is_special, special_kind, is_shm_file) = match file_info {
+    let (size, is_dir) = match file_info {
         Some(Some(v)) => v,
         _ => return EBADF,
     };
-    let mode = if special_kind == Some(SpecialFileKind::AuditLog) {
-        0x8000u32 | 0o444
-    } else if is_shm_file {
-        0x8000u32 | 0o600
-    } else if special_kind == Some(SpecialFileKind::RuntimeDir) || is_dir {
+    let mode = if is_dir {
         0x4000u32 | 0o755
-    } else if is_special {
-        0x2000u32 | 0o666
-    } else if is_tty {
-        0x2000u32 | 0o666
     } else {
-        0x8000u32 | 0o755
+        0x8000u32 | 0o644
     };
     write_stat_buf(stat_ptr, mode, size);
     SUCCESS
@@ -875,12 +454,12 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
     if let Err(errno) = ensure_fs_path_readable(&resolved) {
         return errno;
     }
-    match stat_path_local_or_special(&resolved) {
-        Ok((mode, size)) => {
+    match metadata_rootfs_first(&resolved) {
+        Some((mode, size)) => {
             write_stat_buf(stat_ptr, mode_for_stat(mode), size);
             SUCCESS
         }
-        Err(errno) => errno,
+        None => ENOENT,
     }
 }
 
@@ -903,28 +482,15 @@ pub fn rmdir(path_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(pid, &path);
-    if let Some(name) = shm_entry_name(&resolved) {
-        return with_shm_namespace(|map| {
-            if map.get(name).is_some_and(|entry| !entry.removed) {
-                ENOTDIR
-            } else {
-                ENOENT
-            }
-        });
-    }
-    if is_shm_root(&resolved) {
-        return EACCES;
-    }
     if let Err(errno) = ensure_fs_path_readable(&resolved) {
         return errno;
     }
-    if special_path_blocks_mutation(&resolved) {
-        return EACCES;
+    match metadata_rootfs_first(&resolved) {
+        Some((mode, _)) if mode_is_directory(mode) => {}
+        Some(_) => return ENOTDIR,
+        None => return ENOENT,
     }
-    if !crate::kmod::fs::is_directory(&resolved) {
-        return ENOTDIR;
-    }
-    if crate::kmod::fs::remove(&resolved, true) != 0 {
+    if crate::cext::fs::remove(&resolved, true) != 0 {
         return crate::syscall::types::EIO;
     }
     SUCCESS
@@ -941,27 +507,20 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     if fd < FD_BASE as u64 {
         return EBADF;
     }
-    let idx = fd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
     let pid = match current_process_id_raw() {
         Some(p) => p,
         None => return EBADF,
     };
+    if let Err(errno) = require_cap(pid, fd, FileHandleCap::READDIR) {
+        return errno;
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
 
-    let (dir_path, _is_special) = match with_fd_table(pid, |t| {
-        t.get(idx)
-            .map(|fh| (fh.dir_path.clone(), handle_is_special(fh)))
-    }) {
-        Some(Some((Some(p), false))) => (p, false),
-        Some(Some((Some(p), true))) => {
-            if special_file_kind(&p) == Some(SpecialFileKind::RuntimeDir) {
-                (p, true)
-            } else {
-                return ENOTDIR;
-            }
-        }
+    let dir_path = match with_fd_table(pid, |t| t.get(idx).and_then(|fh| fh.dir_path.clone())) {
+        Some(Some(p)) => p,
         _ => return EBADF,
     };
 
@@ -999,13 +558,13 @@ pub fn chdir(path_ptr: u64) -> u64 {
     if let Err(errno) = ensure_fs_path_readable(&resolved) {
         return errno;
     }
-    match stat_path_local_or_special(&resolved) {
-        Ok((mode, _)) => {
+    match metadata_rootfs_first(&resolved) {
+        Some((mode, _)) => {
             if !mode_is_directory(mode) {
                 return ENOTDIR;
             }
         }
-        Err(errno) => return errno,
+        None => return ENOENT,
     }
     let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
     crate::task::with_process_mut(pid, |p| p.set_cwd(&resolved));
@@ -1060,56 +619,20 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if fd < FD_BASE as u64 {
         return EBADF;
     }
-    let idx = fd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
     let pid = match current_process_id_raw() {
         Some(p) => p,
         None => return EBADF,
     };
+    if let Err(errno) = require_cap(pid, fd, FileHandleCap::READ) {
+        return errno;
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
 
     let local = match with_fd_table_mut(pid, |t| {
         let fh = t.get_mut(idx)?;
-        if let Some(name) = handle_is_shm(fh) {
-            let (data, next_pos) = with_shm_namespace(|map| {
-                let data = map
-                    .get(name)
-                    .map(|entry| entry.data.clone())
-                    .unwrap_or_default();
-                let start = fh.pos.min(data.len());
-                let end = core::cmp::min(start.saturating_add(len as usize), data.len());
-                (data[start..end].to_vec(), end)
-            });
-            fh.pos = next_pos;
-            return Some(data);
-        }
-        if handle_is_special(fh) {
-            let to_read = match handle_special_kind(fh) {
-            Some(SpecialFileKind::Null) => 0usize,
-            Some(SpecialFileKind::Zero) => core::cmp::min(len as usize, len as usize),
-            Some(SpecialFileKind::AuditLog) => {
-                let available = crate::audit::file_size().saturating_sub(fh.pos);
-                core::cmp::min(available, len as usize)
-            }
-            Some(SpecialFileKind::RuntimeDir) => 0usize,
-            None => 0usize,
-        };
-            if to_read == 0 {
-                return Some(Vec::new());
-            }
-            let mut data = Vec::with_capacity(to_read);
-            if matches!(handle_special_kind(fh), Some(SpecialFileKind::AuditLog)) {
-                data.resize(to_read, 0);
-                let copied = crate::audit::read_file_at(fh.pos, &mut data);
-                data.truncate(copied);
-                fh.pos = fh.pos.saturating_add(copied);
-                return Some(data);
-            }
-            data.resize(to_read, 0);
-            fh.pos = fh.pos.saturating_add(to_read);
-            return Some(data);
-        }
         let avail = fh.data.len().saturating_sub(fh.pos);
         if avail == 0 {
             return Some(Vec::new());
@@ -1148,74 +671,32 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if fd < FD_BASE as u64 {
         return EBADF;
     }
-    let idx = fd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
     let pid = match current_process_id_raw() {
         Some(p) => p,
         None => return EBADF,
     };
+    if let Err(errno) = require_cap(pid, fd, FileHandleCap::WRITE) {
+        return errno;
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
 
     let mut buf = alloc::vec![0u8; len as usize];
     if let Err(errno) = crate::syscall::copy_from_user(buf_ptr, &mut buf) {
         return errno;
     }
 
-    let (start_pos, fs_path, is_special, special_kind) = match with_fd_table(pid, |t| {
-        t.get(idx).map(|fh| {
-            (
-                fh.pos,
-                fh.fs_path.clone(),
-                handle_is_special(fh),
-                handle_special_kind(fh),
-            )
-        })
+    let (start_pos, fs_path) = match with_fd_table(pid, |t| {
+        t.get(idx).map(|fh| (fh.pos, fh.fs_path.clone()))
     }) {
         Some(Some(info)) => info,
         _ => return EBADF,
     };
 
-    if let Some(name) = fs_path.as_deref().and_then(shm_entry_name) {
-        let updated = with_shm_namespace_mut(|map| {
-            let entry = map.get_mut(name)?;
-            let start = start_pos.min(entry.data.len());
-            let end = start.checked_add(buf.len()).unwrap_or(usize::MAX);
-            if end > entry.data.len() {
-                entry.data.resize(end, 0);
-            }
-            entry.data[start..end].copy_from_slice(&buf);
-            Some(())
-        });
-        if updated.is_none() {
-            return ENOENT;
-        }
-        let wrote = with_fd_table_mut(pid, |t| {
-            let fh = t.get_mut(idx).ok_or(EBADF)?;
-            fh.pos = start_pos.saturating_add(buf.len());
-            Ok(buf.len() as u64)
-        });
-        return match wrote {
-            Some(Ok(n)) => n,
-            Some(Err(errno)) => errno,
-            None => EBADF,
-        };
-    }
-
-    if is_special && special_kind == Some(SpecialFileKind::AuditLog) {
-        return EACCES;
-    }
-    if is_special
-        && matches!(
-            special_kind,
-            Some(SpecialFileKind::RuntimeDir)
-        )
-    {
-        return EACCES;
-    }
-
     if let Some(path) = fs_path.as_deref() {
-        match crate::kmod::fs::write_all(path, start_pos as u64, &buf) {
+        match crate::cext::fs::write_all(path, start_pos as u64, &buf) {
             Some(written) if written == buf.len() => {}
             _ => return crate::syscall::types::EIO,
         }
@@ -1223,9 +704,6 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
 
     let wrote = with_fd_table_mut(pid, |t| {
         let fh = t.get_mut(idx).ok_or(EBADF)?;
-        if handle_is_special(fh) {
-            return Ok(buf.len() as u64);
-        }
         let end = start_pos.checked_add(buf.len()).ok_or(EINVAL)?;
         let mut data = fh.data.to_vec();
         if end > data.len() {
@@ -1315,14 +793,17 @@ pub fn fsync(fd: u64) -> u64 {
     if fd < FD_BASE as u64 {
         return SUCCESS;
     }
-    let idx = fd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
     let pid = match current_process_id_raw() {
         Some(p) => p,
         None => return EBADF,
     };
+    if let Err(errno) = require_cap(pid, fd, FileHandleCap::SYNC) {
+        return errno;
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
     match with_fd_table(pid, |t| t.get(idx).is_some()) {
         Some(true) => SUCCESS,
         _ => EBADF,
@@ -1343,28 +824,15 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
         None => return EBADF,
     };
     let path = resolve_path(pid, &path);
-    if let Some(name) = shm_entry_name(&path) {
-        let exists = with_shm_namespace(|map| map.get(name).is_some_and(|entry| !entry.removed));
-        if !exists {
-            return ENOENT;
-        }
-        with_shm_namespace_mut(|map| {
-            if let Some(entry) = map.get_mut(name) {
-                entry.data.resize(len as usize, 0);
-            }
-        });
-        return SUCCESS;
+    match metadata_rootfs_first(&path) {
+        Some((mode, _)) if mode_is_directory(mode) => return EISDIR,
+        Some(_) => {}
+        None => return ENOENT,
     }
-    if special_path_blocks_mutation(&path) {
-        return EACCES;
-    }
-    if special_file_requires_read_cap(&path) {
-        return EACCES;
-    }
-    if crate::kmod::fs::file_metadata(&path).is_none() {
+    if crate::cext::fs::file_metadata(&path).is_none() {
         return ENOENT;
     }
-    if crate::kmod::fs::truncate(&path, len) != 0 {
+    if crate::cext::fs::truncate(&path, len) != 0 {
         return crate::syscall::types::EIO;
     }
     SUCCESS
@@ -1375,44 +843,28 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
     if fd < FD_BASE as u64 {
         return EBADF;
     }
-    let idx = fd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
     let pid = match current_process_id_raw() {
         Some(p) => p,
         None => return EBADF,
     };
+    if let Err(errno) = require_cap(pid, fd, FileHandleCap::TRUNCATE) {
+        return errno;
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
     let new_len = match usize::try_from(len) {
         Ok(v) => v,
         Err(_) => return EINVAL,
     };
     let res = with_fd_table_mut(pid, |t| {
         let fh = t.get_mut(idx).ok_or(EBADF)?;
-        if let Some(name) = handle_is_shm(fh) {
-            let exists =
-                with_shm_namespace(|map| map.get(name).is_some_and(|entry| !entry.removed));
-            if !exists {
-                return Err(ENOENT);
-            }
-            with_shm_namespace_mut(|map| {
-                if let Some(entry) = map.get_mut(name) {
-                    entry.data.resize(new_len, 0);
-                }
-            });
-            if fh.pos > new_len {
-                fh.pos = new_len;
-            }
-            return Ok(());
-        }
-        if handle_is_special(fh) {
-            if handle_special_kind(fh) == Some(SpecialFileKind::AuditLog) {
-                return Err(ENOSYS);
-            }
-            return Err(ENOSYS);
+        if fh.dir_path.is_some() {
+            return Err(EISDIR);
         }
         if let Some(path) = fh.fs_path.as_deref() {
-            if crate::kmod::fs::truncate(path, len) != 0 {
+            if crate::cext::fs::truncate(path, len) != 0 {
                 return Err(crate::syscall::types::EIO);
             }
         }
@@ -1434,14 +886,7 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
 /// Dup システムコール: FD を複製して最小の空き番号に割り当てる
 pub fn dup(fd: u64) -> u64 {
     if fd < FD_BASE as u64 {
-        let pid = match current_process_id_raw() {
-            Some(p) => p,
-            None => return EBADF,
-        };
-        return match with_fd_table_mut(pid, |t| t.alloc(make_tty_handle("/dev/tty"), false)) {
-            Some(Some(new_fd)) => new_fd as u64,
-            _ => ENOSYS,
-        };
+        return EBADF;
     }
     let idx = fd as usize;
     if idx >= PROCESS_MAX_FDS {
@@ -1466,6 +911,7 @@ pub fn dup(fd: u64) -> u64 {
                 pipe_id: fh.pipe_id,
                 pipe_write: fh.pipe_write,
                 open_flags: fh.open_flags,
+                cap: fh.cap,
             })
         })
     });
@@ -1488,7 +934,7 @@ pub fn dup2(old_fd: u64, new_fd: u64) -> u64 {
     if old_fd == new_fd {
         // old_fd が有効かどうかだけ確認
         if old_fd < FD_BASE as u64 {
-            return old_fd;
+            return EBADF;
         }
         let pid = match current_process_id_raw() {
             Some(p) => p,
@@ -1506,33 +952,32 @@ pub fn dup2(old_fd: u64, new_fd: u64) -> u64 {
         None => return EBADF,
     };
 
-    let new_handle = if old_fd < FD_BASE as u64 {
-        make_tty_handle("/dev/tty")
-    } else {
-        let old_idx = old_fd as usize;
-        if old_idx >= PROCESS_MAX_FDS {
-            return EBADF;
-        }
-        let cloned = with_fd_table(pid, |t| {
-            t.get(old_idx).map(|fh| {
-                alloc::boxed::Box::new(FileHandle {
-                    data: fh.data.clone(),
-                    pos: fh.pos,
-                    fs_path: fh.fs_path.clone(),
-                    dir_path: fh.dir_path.clone(),
-                    is_remote: false,
-                    fd_remote: 0,
-                    remote_refs: None,
-                    pipe_id: fh.pipe_id,
-                    pipe_write: fh.pipe_write,
-                    open_flags: fh.open_flags,
-                })
+    if old_fd < FD_BASE as u64 {
+        return EBADF;
+    }
+    let old_idx = old_fd as usize;
+    if old_idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
+    let new_handle = match with_fd_table(pid, |t| {
+        t.get(old_idx).map(|fh| {
+            alloc::boxed::Box::new(FileHandle {
+                data: fh.data.clone(),
+                pos: fh.pos,
+                fs_path: fh.fs_path.clone(),
+                dir_path: fh.dir_path.clone(),
+                is_remote: false,
+                fd_remote: 0,
+                remote_refs: None,
+                pipe_id: fh.pipe_id,
+                pipe_write: fh.pipe_write,
+                open_flags: fh.open_flags,
+                cap: fh.cap,
             })
-        });
-        match cloned {
-            Some(Some(h)) => h,
-            _ => return EBADF,
-        }
+        })
+    }) {
+        Some(Some(h)) => h,
+        _ => return EBADF,
     };
 
     // new_fd が使用中なら閉じる
@@ -1560,39 +1005,15 @@ pub fn unlink(path_ptr: u64) -> u64 {
         Err(errno) => return errno,
     };
     let resolved = resolve_path(pid, &path);
-    if let Some(name) = shm_entry_name(&resolved) {
-        let (existed, should_remove) = with_shm_namespace_mut(|map| {
-            let mut should_remove = false;
-            let existed = if let Some(entry) = map.get_mut(name) {
-                if entry.removed {
-                    false
-                } else {
-                    entry.removed = true;
-                    should_remove = entry.open_count == 0;
-                    true
-                }
-            } else {
-                false
-            };
-            (existed, should_remove)
-        });
-        if should_remove {
-            with_shm_namespace_mut(|map| {
-                map.remove(name);
-            });
-        }
-        return if existed { SUCCESS } else { ENOENT };
-    }
     if let Err(errno) = ensure_fs_path_readable(&resolved) {
         return errno;
     }
-    if special_path_blocks_mutation(&resolved) {
-        return EACCES;
+    match metadata_rootfs_first(&resolved) {
+        Some((mode, _)) if mode_is_directory(mode) => return EISDIR,
+        Some(_) => {}
+        None => return ENOENT,
     }
-    if crate::kmod::fs::is_directory(&resolved) {
-        return ENOTDIR;
-    }
-    if crate::kmod::fs::remove(&resolved, false) != 0 {
+    if crate::cext::fs::remove(&resolved, false) != 0 {
         return crate::syscall::types::EIO;
     }
     SUCCESS
@@ -1626,16 +1047,10 @@ pub fn renameat(old_dirfd: i64, old_path_ptr: u64, new_dirfd: i64, new_path_ptr:
     if let Err(errno) = ensure_fs_path_readable(&new_path) {
         return errno;
     }
-    if is_shm_root(&old_path) || is_shm_root(&new_path) {
-        return EACCES;
+    if metadata_rootfs_first(&old_path).is_none() || metadata_rootfs_first(&new_path).is_none() {
+        return ENOENT;
     }
-    if is_shm_entry_path(&old_path) || is_shm_entry_path(&new_path) {
-        return EACCES;
-    }
-    if special_path_blocks_mutation(&old_path) || special_path_blocks_mutation(&new_path) {
-        return EACCES;
-    }
-    if crate::kmod::fs::rename(&old_path, &new_path) != 0 {
+    if crate::cext::fs::rename(&old_path, &new_path) != 0 {
         return EIO;
     }
     SUCCESS
@@ -1726,8 +1141,8 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
             path
         ))
     };
-    match stat_path_local_or_special(&full) {
-        Ok((mode, size)) => {
+    match metadata_rootfs_first(&full) {
+        Some((mode, size)) => {
             const STAT_SIZE: u64 = 144;
             if !crate::syscall::validate_user_ptr(stat_ptr, STAT_SIZE) {
                 return EFAULT;
@@ -1735,7 +1150,7 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
             write_stat_buf(stat_ptr, mode_for_stat(mode), size);
             SUCCESS
         }
-        Err(errno) => errno,
+        None => ENOENT,
     }
 }
 
@@ -1769,9 +1184,10 @@ pub fn faccessat(dirfd: i64, path_ptr: u64, _mode: u64, _flags: u64) -> u64 {
             _ => return EBADF,
         }
     };
-    match stat_path_local_or_special(&resolved) {
-        Ok(_) => SUCCESS,
-        Err(errno) => errno,
+    if metadata_rootfs_first(&resolved).is_some() {
+        SUCCESS
+    } else {
+        ENOENT
     }
 }
 
@@ -1799,7 +1215,7 @@ pub fn statfs(path_ptr: u64, buf_ptr: u64) -> u64 {
     if let Err(errno) = ensure_fs_path_readable(&resolved) {
         return errno;
     }
-    if stat_path_local_or_special(&resolved).is_err() {
+    if metadata_rootfs_first(&resolved).is_none() {
         return ENOENT;
     }
 
@@ -1898,16 +1314,12 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         None => return EBADF,
     };
 
-    let (dir_path, start_pos, is_special) = match with_fd_table(pid, |t| {
-        t.get(idx)
-            .map(|fh| (fh.dir_path.clone(), fh.pos, handle_is_special(fh)))
+    let (dir_path, start_pos) = match with_fd_table(pid, |t| {
+        t.get(idx).map(|fh| (fh.dir_path.clone(), fh.pos))
     }) {
-        Some(Some((Some(p), pos, is_special))) => (p, pos, is_special),
+        Some(Some((Some(p), pos))) => (p, pos),
         _ => return EBADF,
     };
-    if is_special {
-        return ENOTDIR;
-    }
 
     if let Err(errno) = ensure_fs_path_readable(&dir_path) {
         return errno;
@@ -1916,10 +1328,13 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     let entries: Vec<(alloc::string::String, u8)> = match readdir_rootfs_first(&dir_path) {
         Some(e) => e
             .into_iter()
-            // special runtime path で型が分かるものだけ最小限の d_type を返す。
-            // それ以外は追加 stat を避けるため DT_UNKNOWN(0) のままにする。
             .map(|name| {
-                let dtype = special_dir_entry_dtype(&dir_path, &name).unwrap_or(0u8);
+                let child = normalize_path(&alloc::format!("{}/{}", dir_path.trim_end_matches('/'), name));
+                let dtype = match metadata_rootfs_first(&child) {
+                    Some((mode, _)) if mode_is_directory(mode) => 4u8,
+                    Some(_) => 8u8,
+                    None => 0u8,
+                };
                 (name, dtype)
             })
             .collect(),
@@ -1975,4 +1390,60 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     });
 
     written as u64
+}
+
+pub fn file_open(path_ptr: u64, flags: u64) -> u64 {
+    open(path_ptr, flags)
+}
+
+pub fn file_open_at(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
+    openat(dirfd, path_ptr, flags, mode)
+}
+
+pub fn file_close(fd: u64) -> u64 {
+    close(fd)
+}
+
+pub fn file_read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
+    read(fd, buf_ptr, len)
+}
+
+pub fn file_write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
+    write(fd, buf_ptr, len)
+}
+
+pub fn file_seek(fd: u64, offset: i64, whence: u64) -> u64 {
+    seek(fd, offset, whence)
+}
+
+pub fn file_stat(path_ptr: u64, stat_ptr: u64) -> u64 {
+    stat(path_ptr, stat_ptr)
+}
+
+pub fn file_stat_at(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
+    newfstatat(dirfd, path_ptr, stat_ptr, flags)
+}
+
+pub fn file_fstat(fd: u64, stat_ptr: u64) -> u64 {
+    fstat(fd, stat_ptr)
+}
+
+pub fn file_read_dir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
+    getdents64(fd, buf_ptr, buf_len)
+}
+
+pub fn file_create_dir(_path_ptr: u64, _mode: u64) -> u64 {
+    mkdir(_path_ptr, _mode)
+}
+
+pub fn file_remove(path_ptr: u64) -> u64 {
+    unlink(path_ptr)
+}
+
+pub fn file_rename(old_dirfd: i64, old_path_ptr: u64, new_dirfd: i64, new_path_ptr: u64) -> u64 {
+    renameat(old_dirfd, old_path_ptr, new_dirfd, new_path_ptr)
+}
+
+pub fn file_sync(fd: u64) -> u64 {
+    fsync(fd)
 }
