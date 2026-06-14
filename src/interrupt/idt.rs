@@ -724,6 +724,17 @@ extern "x86-interrupt" fn page_fault_handler(
     let is_user_mode = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
     let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(is_user_mode);
 
+    if is_user_mode
+        && !error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION)
+        && crate::syscall::process::handle_user_mmap_fault(
+            faulting_addr.as_u64(),
+            error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE),
+        )
+    {
+        leave_to_user(entered_from_user);
+        return;
+    }
+
     error!(
         "EXCEPTION: PAGE FAULT ({})",
         if is_user_mode {

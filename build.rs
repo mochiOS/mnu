@@ -1,7 +1,7 @@
 fn main() {
     match std::env::var("CARGO_CFG_TARGET_OS") {
         Ok(value) if value == "none" => {}
-        Ok(value) => {
+        Ok(_) => {
             eprintln!("this target isnt supported");
             std::process::exit(0);
         }
@@ -9,7 +9,6 @@ fn main() {
             eprintln!("CARGO_CFG_TARGET_OS not set: {}", error);
             std::process::exit(0);
         }
-        _ => {}
     }
 
     if std::env::var_os("CARGO_CFG_TEST").is_some() {

@@ -2,6 +2,7 @@
 
 pub mod block;
 pub mod capability;
+pub mod event;
 pub mod exec;
 pub mod fs;
 pub mod io;
@@ -210,219 +211,52 @@ use crate::syscall::syscall_entry::switch_to_current_thread_user_page_table;
 /// システムコールのディスパッチ
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
     match num {
-        x if x == SyscallNumber::Read as u64 => io::read(arg0, arg1, arg2),
-        x if x == SyscallNumber::Readv as u64 => io::readv(arg0, arg1, arg2),
-        x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
-        x if x == SyscallNumber::Writev as u64 => io::writev(arg0, arg1, arg2),
-        x if x == SyscallNumber::Poll as u64 => pgroup::poll(arg0, arg1, arg2),
-        x if x == SyscallNumber::Open as u64 => fs::open(arg0, arg1),
-        x if x == SyscallNumber::Close as u64 => fs::close(arg0),
-        x if x == SyscallNumber::Stat as u64 => fs::stat(arg0, arg1),
-        x if x == SyscallNumber::Fstat as u64 => fs::fstat(arg0, arg1),
-        x if x == SyscallNumber::Lseek as u64 => fs::seek(arg0, arg1 as i64, arg2),
-        x if x == SyscallNumber::Mmap as u64 => process::mmap(arg0, arg1, arg2, arg3, arg4),
-        x if x == SyscallNumber::Munmap as u64 => process::munmap(arg0, arg1),
-        x if x == SyscallNumber::Brk as u64 => process::brk(arg0),
-        x if x == SyscallNumber::RtSigaction as u64 => signal::rt_sigaction(arg0, arg1, arg2),
-        x if x == SyscallNumber::RtSigprocmask as u64 => signal::rt_sigprocmask(arg0, arg1, arg2),
-        x if x == SyscallNumber::Kill as u64 => signal::kill(arg0, arg1),
-        x if x == SyscallNumber::Tkill as u64 => signal::tkill(arg0, arg1),
-        x if x == SyscallNumber::Tgkill as u64 => signal::tgkill(arg0, arg1, arg2),
-        x if x == SyscallNumber::Sigaltstack as u64 => process::sigaltstack(arg0, arg1),
-        x if x == SyscallNumber::Statfs as u64 => fs::statfs(arg0, arg1),
-        x if x == SyscallNumber::GetPid as u64 => process::getpid(),
-        x if x == SyscallNumber::Clone as u64 => process::fork(),
-        x if x == SyscallNumber::Fork as u64 => process::fork(),
-        x if x == SyscallNumber::Execve as u64 => exec::execve_syscall(arg0, arg1, arg2),
-        x if x == SyscallNumber::Wait as u64 => process::wait(arg0, arg1, arg2),
-        x if x == SyscallNumber::GetTid as u64 => process::gettid(),
-        x if x == SyscallNumber::Futex as u64 => process::futex(arg0, arg1 as u32, arg2, arg3),
-        x if x == SyscallNumber::ArchPrctl as u64 => process::arch_prctl(arg0, arg1),
-        x if x == SyscallNumber::ClockGettime as u64 => {
-            if crate::syscall::security::caller_has_any_capability(&[
-                crate::capability::Capability::SystemTimeRead,
-            ]) || crate::syscall::security::caller_is_core_or_service()
-            {
-                time::clock_gettime(arg0, arg1)
+        x if x == SyscallNumber::ProcessExit as u64 => process::exit(arg0),
+        x if x == SyscallNumber::ProcessSpawn as u64 => process::spawn(arg0, arg1),
+        x if x == SyscallNumber::ProcessWait as u64 => process::wait(arg0, arg1, arg2),
+        x if x == SyscallNumber::ThreadCreate as u64 => task::thread_create(arg0, arg1, arg2),
+        x if x == SyscallNumber::ThreadExit as u64 => {
+            if let Some(id) = crate::task::current_thread_id() {
+                crate::task::terminate_thread(id);
+                SUCCESS
             } else {
-                EPERM
+                ENOSYS
             }
         }
-        x if x == SyscallNumber::Getcwd as u64 => fs::getcwd(arg0, arg1),
-        x if x == SyscallNumber::Truncate as u64 => fs::truncate(arg0, arg1),
-        x if x == SyscallNumber::Ftruncate as u64 => fs::ftruncate(arg0, arg1),
-        x if x == SyscallNumber::Exit as u64 => process::exit(arg0),
-        x if x == SyscallNumber::ExitGroup as u64 => process::exit(arg0),
-        x if x == SyscallNumber::Yield as u64 => {
+        x if x == SyscallNumber::ThreadYield as u64 => {
             task::yield_now();
             SUCCESS
         }
-        x if x == SyscallNumber::GetTicks as u64 => {
-            if crate::syscall::security::caller_has_any_capability(&[
-                crate::capability::Capability::SystemTimeRead,
-            ]) || crate::syscall::security::caller_is_core_or_service()
-            {
-                time::get_ticks()
-            } else {
-                EPERM
-            }
-        }
+        x if x == SyscallNumber::MemoryAlloc as u64 => process::mmap(0, arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::MemoryFree as u64 => process::munmap(arg0, arg1),
+        x if x == SyscallNumber::MemoryMap as u64 => process::mmap(arg0, arg1, arg2, arg3, arg4),
+        x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
+        x if x == SyscallNumber::MemoryProtect as u64 => pgroup::mprotect(arg0, arg1, arg2),
+        x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
+        x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
+        x if x == SyscallNumber::IpcCreate as u64 => ipc::create(arg0, arg1),
         x if x == SyscallNumber::IpcSend as u64 => ipc::send(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcRecv as u64 => ipc::recv(arg0, arg1),
-        x if x == SyscallNumber::IpcRecvWait as u64 => ipc::recv_blocking(arg0, arg1),
-        x if x == SyscallNumber::Exec as u64 => exec::exec_kernel(arg0, arg1),
-        x if x == SyscallNumber::ExecFromFsStream as u64 => exec::exec_from_fs_stream(arg0, arg1),
+        x if x == SyscallNumber::IpcCall as u64 => ipc::call(arg0, arg1, arg2, arg3, arg4),
+        x if x == SyscallNumber::IpcReply as u64 => ipc::reply(arg0, arg1, arg2),
+        x if x == SyscallNumber::IpcWait as u64 => ipc::wait(arg0, arg1, arg2),
+        x if x == SyscallNumber::CapClone as u64 => capability::clone_capability(arg0, arg1),
+        x if x == SyscallNumber::CapDrop as u64 => capability::drop_capability(arg0, arg1),
+        x if x == SyscallNumber::CapTransfer as u64 => capability::transfer_capability(arg0, arg1, arg2),
+        x if x == SyscallNumber::CapQuery as u64 => capability::query(arg0, arg1),
+        x if x == SyscallNumber::CapRestrict as u64 => capability::restrict_capability(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::EventCreate as u64 => event::create(arg0, arg1),
+        x if x == SyscallNumber::EventWait as u64 => event::wait(arg0, arg1, arg2),
+        x if x == SyscallNumber::EventSignal as u64 => event::signal(arg0, arg1, arg2),
+        x if x == SyscallNumber::EventPoll as u64 => event::poll(arg0, arg1, arg2),
+        x if x == SyscallNumber::TimeNow as u64 => time::get_ticks(),
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
-        x if x == SyscallNumber::Log as u64 => io::log(arg0, arg1, arg2),
-        x if x == SyscallNumber::PortIn as u64 => io_port::port_in(arg0, arg1),
-        x if x == SyscallNumber::PortOut as u64 => io_port::port_out(arg0, arg1, arg2),
-        x if x == SyscallNumber::PortInWords as u64 => io_port::port_in_words(arg0, arg1, arg2),
-        x if x == SyscallNumber::PortOutWords as u64 => io_port::port_out_words(arg0, arg1, arg2),
-        x if x == SyscallNumber::Mkdir as u64 => fs::mkdir(arg0, arg1),
-        x if x == SyscallNumber::Rmdir as u64 => fs::rmdir(arg0),
-        x if x == SyscallNumber::Readdir as u64 => fs::readdir(arg0, arg1, arg2),
-        x if x == SyscallNumber::Chdir as u64 => fs::chdir(arg0),
-        x if x == SyscallNumber::KeyboardRead as u64 => keyboard::read_char(),
-        x if x == SyscallNumber::KeyboardReadTap as u64 => keyboard::read_char_tap(),
-        x if x == SyscallNumber::KeyboardReadWait as u64 => {
-            if crate::syscall::security::caller_has_any_capability(&[
-                crate::capability::Capability::InputKeyboard,
-            ]) || crate::syscall::security::caller_is_core_or_service()
-            {
-                keyboard::read_char_blocking() as u64
-            } else {
-                EPERM
-            }
-        }
-        x if x == SyscallNumber::MouseRead as u64 => {
-            if arg0 == 0 {
-                match mouse::read_packet() {
-                    Ok(packet) => packet,
-                    Err(errno) => errno,
-                }
-            } else {
-                match mouse::read_packet() {
-                    Ok(packet) => {
-                        let packet_bytes = (packet as u32).to_ne_bytes();
-                        match copy_to_user(arg0, &packet_bytes) {
-                            Ok(()) => SUCCESS,
-                            Err(errno) => errno,
-                        }
-                    }
-                    Err(errno) => errno,
-                }
-            }
-        }
-        x if x == SyscallNumber::MouseReadWait as u64 => {
-            if arg0 == 0 {
-                match mouse::read_packet_blocking() {
-                    Ok(packet) => packet,
-                    Err(errno) => errno,
-                }
-            } else {
-                match mouse::read_packet_blocking() {
-                    Ok(packet) => {
-                        let packet_bytes = (packet as u32).to_ne_bytes();
-                        match copy_to_user(arg0, &packet_bytes) {
-                            Ok(()) => SUCCESS,
-                            Err(errno) => errno,
-                        }
-                    }
-                    Err(errno) => errno,
-                }
-            }
-        }
-        x if x == SyscallNumber::KeyboardInject as u64 => keyboard::inject_scancode(arg0),
-        x if x == SyscallNumber::MouseInject as u64 => mouse::inject_packet(arg0),
-        x if x == SyscallNumber::MapPhysicalRange as u64 => mmio::map_physical_range(arg0, arg1),
-        x if x == SyscallNumber::VirtToPhys as u64 => mmio::virt_to_phys(arg0),
-        x if x == SyscallNumber::FindProcessByName as u64 => {
-            process::find_process_by_name(arg0, arg1)
-        }
-        x if x == SyscallNumber::ListProcesses as u64 => process::list_processes(arg0, arg1),
-        x if x == SyscallNumber::CheckThreadCapability as u64 => {
-            capability::check_thread_capability(arg0, arg1, arg2)
-        }
-        x if x == SyscallNumber::ExecWithCapabilities as u64 => {
-            exec::exec_with_capabilities_syscall(arg0, arg1, arg2, arg3)
-        }
-        x if x == SyscallNumber::BlockRead as u64 => block::block_read(arg0, arg1, arg2, arg3),
-        x if x == SyscallNumber::BlockWrite as u64 => block::block_write(arg0, arg1, arg2, arg3),
-        x if x == SyscallNumber::GetThreadPrivilege as u64 => task::get_thread_privilege(arg0),
-        x if x == SyscallNumber::GetFramebufferInfo as u64 => vga::get_framebuffer_info(arg0),
-        x if x == SyscallNumber::MapFramebuffer as u64 => vga::map_framebuffer(),
-        x if x == SyscallNumber::ExecFromBuffer as u64 => {
-            exec::exec_from_buffer_syscall(arg0, arg1)
-        }
-        x if x == SyscallNumber::ExecFromBufferNamed as u64 => {
-            exec::exec_from_buffer_named_syscall(arg0, arg1, arg2)
-        }
-        x if x == SyscallNumber::ExecFromBufferNamedArgs as u64 => {
-            exec::exec_from_buffer_named_args_syscall(arg0, arg1, arg2, arg3)
-        }
-        x if x == SyscallNumber::ExecFromBufferNamedArgsWithRequester as u64 => {
-            exec::exec_from_buffer_named_args_with_requester_syscall(arg0, arg1, arg2, arg3, arg4)
-        }
-        x if x == SyscallNumber::SetConsoleCursor as u64 => {
-            crate::util::vga::set_cursor_pixel_y(arg0 as usize);
-            0
-        }
-        x if x == SyscallNumber::GetConsoleCursor as u64 => {
-            crate::util::vga::get_cursor_pixel_y() as u64
-        }
-        x if x == SyscallNumber::GetPpid as u64 => pgroup::getppid(),
-        x if x == SyscallNumber::Setpgid as u64 => pgroup::setpgid(arg0, arg1),
-        x if x == SyscallNumber::Getpgid as u64 => pgroup::getpgid(arg0),
-        x if x == SyscallNumber::Setsid as u64 => pgroup::setsid(),
-        x if x == SyscallNumber::Getsid as u64 => pgroup::getsid(arg0),
-        x if x == SyscallNumber::Ioctl as u64 => pgroup::ioctl(arg0, arg1, arg2),
-        x if x == SyscallNumber::Access as u64 => pgroup::access(arg0, arg1),
-        x if x == SyscallNumber::Select as u64 => pgroup::pselect6(arg0, arg1, arg2, arg3, arg4, 0),
-        x if x == SyscallNumber::Getuid as u64 => pgroup::getuid(),
-        x if x == SyscallNumber::Getgid as u64 => pgroup::getgid(),
-        x if x == SyscallNumber::Geteuid as u64 => pgroup::geteuid(),
-        x if x == SyscallNumber::Getegid as u64 => pgroup::getegid(),
-        x if x == SyscallNumber::Lstat as u64 => fs::stat(arg0, arg1),
-        x if x == SyscallNumber::Readlink as u64 => fs::readlinkat(-100, arg0, arg1, arg2),
-        x if x == SyscallNumber::Unlink as u64 => fs::unlink(arg0),
-        x if x == SyscallNumber::Fcntl as u64 => fs::fcntl(arg0, arg1, arg2),
-        x if x == SyscallNumber::Fsync as u64 => fs::fsync(arg0),
-        x if x == SyscallNumber::Fdatasync as u64 => fs::fsync(arg0),
-        x if x == SyscallNumber::Pipe as u64 => pipe::pipe_syscall(arg0),
-        x if x == SyscallNumber::Dup as u64 => fs::dup(arg0),
-        x if x == SyscallNumber::Dup2 as u64 => fs::dup2(arg0, arg1),
-        x if x == SyscallNumber::Mprotect as u64 => pgroup::mprotect(arg0, arg1, arg2),
-        x if x == SyscallNumber::Nanosleep as u64 => pgroup::nanosleep(arg0, arg1),
-        x if x == SyscallNumber::Uname as u64 => pgroup::uname(arg0),
-        x if x == SyscallNumber::Getrlimit as u64 => pgroup::getrlimit(arg0, arg1),
-        x if x == SyscallNumber::SetTidAddress as u64 => pgroup::set_tid_address(arg0),
-        x if x == SyscallNumber::Prlimit64 as u64 => pgroup::prlimit64(arg0, arg1, arg2, arg3),
-        x if x == SyscallNumber::SetRobustList as u64 => process::set_robust_list(arg0, arg1),
-        x if x == SyscallNumber::Pipe2 as u64 => pipe::pipe2_syscall(arg0, arg1),
-        x if x == SyscallNumber::Openat as u64 => fs::openat(arg0 as i64, arg1, arg2, arg3),
-        x if x == SyscallNumber::Getdents64 as u64 => fs::getdents64(arg0, arg1, arg2),
-        x if x == SyscallNumber::Newfstatat as u64 => fs::newfstatat(arg0 as i64, arg1, arg2, arg3),
-        x if x == SyscallNumber::Unlinkat as u64 => fs::unlinkat(arg0 as i64, arg1, arg2),
-        x if x == SyscallNumber::Renameat as u64 => {
-            fs::renameat(arg0 as i64, arg1, arg2 as i64, arg3)
-        }
-        x if x == SyscallNumber::Faccessat as u64 => fs::faccessat(arg0 as i64, arg1, arg2, arg3),
-        x if x == SyscallNumber::Pselect6 as u64 => {
-            pgroup::pselect6(arg0, arg1, arg2, arg3, arg4, 0)
-        }
-        x if x == SyscallNumber::Ppoll as u64 => pgroup::ppoll(arg0, arg1, arg2, arg3, arg4),
-        x if x == SyscallNumber::Readlinkat as u64 => fs::readlinkat(arg0 as i64, arg1, arg2, arg3),
-        x if x == SyscallNumber::Getrandom as u64 => process::getrandom(arg0, arg1, arg2),
-        x if x == SyscallNumber::MapPhysicalPages as u64 => {
-            privileged::map_physical_pages(arg0, arg1, arg2, arg3)
-        }
-        x if x == SyscallNumber::GetPhysicalAddr as u64 => {
-            privileged::get_physical_addr(arg0, arg1)
-        }
+        x if x == SyscallNumber::CheckGravityExist as u64 => io::check_gravity_exist(),
+        x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
+        x if x == SyscallNumber::ServiceSpawn as u64 => process::service_spawn(arg0),
         x if x == SyscallNumber::AllocSharedPages as u64 => {
             privileged::alloc_shared_pages(arg0, arg1, arg2, arg3)
         }
-        x if x == SyscallNumber::UnmapPages as u64 => privileged::unmap_pages(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcSendPages as u64 => {
             privileged::ipc_send_pages(arg0, arg1, arg2, arg3)
         }
@@ -458,12 +292,10 @@ pub extern "sysv64" fn save_user_context_for_fork(
     user_rsp: u64,
     user_rflags: u64,
 ) {
-    if num != SyscallNumber::Clone as u64 && num != SyscallNumber::Fork as u64 {
-        return;
-    }
+    let _ = num;
     if let Some(tid) = crate::task::current_thread_id() {
-        crate::task::with_thread_mut(tid, |t| {
-            t.set_syscall_user_context(user_rip, user_rsp, user_rflags);
+        let _ = crate::task::with_thread_mut(tid, |thread| {
+            thread.set_syscall_user_context(user_rip, user_rsp, user_rflags);
         });
     }
 }
@@ -549,12 +381,6 @@ extern "sysv64" fn syscall_interrupt_handler_rust(kstack: *mut u64) -> u64 {
     crate::cpu::reassert_runtime_hardening();
 
     let syscall_num = unsafe { kstack.add(14).read() };
-    if syscall_num == SyscallNumber::Clone as u64 || syscall_num == SyscallNumber::Fork as u64 {
-        let user_rip = unsafe { kstack.add(15).read() };
-        let user_rflags = unsafe { kstack.add(17).read() };
-        let user_rsp = unsafe { kstack.add(18).read() };
-        save_user_context_for_fork(syscall_num, user_rip, user_rsp, user_rflags);
-    }
 
     let current_tid = crate::task::current_thread_id();
     let current_slot = crate::task::current_thread_slot();

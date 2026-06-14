@@ -19,10 +19,5 @@ pub fn registrations() -> Vec<ModuleRegistration> {
             version: 1,
             register: super::register_disk_module,
         },
-        ModuleRegistration {
-            name: "fs",
-            version: 1,
-            register: super::register_fs_module,
-        },
     ]
 }

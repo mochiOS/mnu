@@ -4,6 +4,165 @@ use x86_64::VirtAddr;
 use super::context::Context;
 use super::ids::{ProcessId, ThreadId, ThreadState};
 
+// L4 風の short IPC を register 相当で運ぶための上限。
+// ここを少し広げると、小さめの RPC が slow path に落ちにくくなる。
+const FAST_IPC_MAX_BYTES: usize = 128;
+
+#[derive(Clone, Copy, Debug)]
+pub struct IpcFastState {
+    waiting: bool,
+    wait_cpu: usize,
+    has_request: bool,
+    reply_ready: bool,
+    awaiting_reply: bool,
+    sender_tid: u64,
+    reply_ptr: u64,
+    reply_len: usize,
+    reply_result_len: usize,
+    msg_len: usize,
+    msg: [u8; FAST_IPC_MAX_BYTES],
+}
+
+impl IpcFastState {
+    pub const fn new() -> Self {
+        Self {
+            waiting: false,
+            wait_cpu: usize::MAX,
+            has_request: false,
+            reply_ready: false,
+            awaiting_reply: false,
+            sender_tid: 0,
+            reply_ptr: 0,
+            reply_len: 0,
+            reply_result_len: 0,
+            msg_len: 0,
+            msg: [0; FAST_IPC_MAX_BYTES],
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    pub fn waiting(&self) -> bool {
+        self.waiting
+    }
+
+    pub fn set_waiting(&mut self, waiting: bool) {
+        self.waiting = waiting;
+    }
+
+    pub fn wait_cpu(&self) -> Option<usize> {
+        if self.wait_cpu == usize::MAX {
+            None
+        } else {
+            Some(self.wait_cpu)
+        }
+    }
+
+    pub fn set_wait_cpu(&mut self, cpu: Option<usize>) {
+        self.wait_cpu = cpu.unwrap_or(usize::MAX);
+    }
+
+    pub fn has_request(&self) -> bool {
+        self.has_request
+    }
+
+    pub fn sender_tid(&self) -> u64 {
+        self.sender_tid
+    }
+
+    pub fn reply_ready(&self) -> bool {
+        self.reply_ready
+    }
+
+    pub fn set_reply_ready(&mut self, ready: bool) {
+        self.reply_ready = ready;
+    }
+
+    pub fn awaiting_reply(&self) -> bool {
+        self.awaiting_reply
+    }
+
+    pub fn set_awaiting_reply(&mut self, awaiting: bool) {
+        self.awaiting_reply = awaiting;
+    }
+
+    pub fn reply_ptr(&self) -> u64 {
+        self.reply_ptr
+    }
+
+    pub fn reply_len(&self) -> usize {
+        self.reply_len
+    }
+
+    pub fn reply_result_len(&self) -> usize {
+        self.reply_result_len
+    }
+
+    pub fn request_len(&self) -> usize {
+        self.msg_len
+    }
+
+    pub fn request_bytes(&self) -> &[u8] {
+        &self.msg[..self.msg_len]
+    }
+
+    pub fn set_request(&mut self, sender_tid: u64, data: &[u8]) {
+        self.has_request = true;
+        self.sender_tid = sender_tid;
+        self.msg_len = core::cmp::min(data.len(), FAST_IPC_MAX_BYTES);
+        self.msg[..self.msg_len].copy_from_slice(&data[..self.msg_len]);
+        if self.msg_len < FAST_IPC_MAX_BYTES {
+            self.msg[self.msg_len..].fill(0);
+        }
+    }
+
+    pub fn take_request(&mut self) -> Option<(u64, usize, [u8; FAST_IPC_MAX_BYTES])> {
+        if !self.has_request {
+            return None;
+        }
+        let sender = self.sender_tid;
+        let len = self.msg_len;
+        let data = self.msg;
+        self.has_request = false;
+        self.reply_ready = false;
+        self.awaiting_reply = false;
+        self.msg_len = 0;
+        self.msg = [0; FAST_IPC_MAX_BYTES];
+        self.wait_cpu = usize::MAX;
+        Some((sender, len, data))
+    }
+
+    pub fn set_reply_target(&mut self, reply_ptr: u64, reply_len: usize) {
+        self.reply_ptr = reply_ptr;
+        self.reply_len = reply_len;
+        self.reply_result_len = 0;
+    }
+
+    pub fn take_reply_target(&mut self) -> (u64, usize) {
+        let ptr = self.reply_ptr;
+        let len = self.reply_len;
+        self.reply_ptr = 0;
+        self.reply_len = 0;
+        self.reply_ready = false;
+        self.reply_result_len = 0;
+        self.awaiting_reply = false;
+        self.wait_cpu = usize::MAX;
+        (ptr, len)
+    }
+
+    pub fn set_reply_result_len(&mut self, len: usize) {
+        self.reply_result_len = len;
+    }
+
+    pub fn take_reply_result_len(&mut self) -> usize {
+        let len = self.reply_result_len;
+        self.reply_result_len = 0;
+        len
+    }
+}
+
 /// スレッド終了時に呼ばれるハンドラ
 /// この関数から戻ることはない
 extern "C" fn thread_exit_handler() -> ! {
@@ -39,6 +198,8 @@ pub struct Thread {
     user_entry: u64,
     /// ユーザースタックトップ（0の場合はカーネルモードスレッド）
     user_stack: u64,
+    /// ユーザーモード初期引数（thread_create 用）
+    user_arg0: u64,
     /// fork時に子プロセスへ渡すユーザー RFLAGS
     fork_user_rflags: u64,
     /// TLS用 FS ベースレジスタ (arch_prctl ARCH_SET_FS で設定)
@@ -57,6 +218,8 @@ pub struct Thread {
     futex_timed_out: bool,
     /// IPC受信などで眠る前に起床要求が来たことを示すフラグ
     pending_wakeup: bool,
+    /// 低遅延IPCの待機/受信状態
+    fast_ipc: IpcFastState,
     /// 直近の対話的な待機/起床の傾向
     interactive_score: u8,
     /// 直近の量子使い切りの傾向
@@ -329,6 +492,7 @@ impl Thread {
             kernel_stack_size,
             user_entry: 0,
             user_stack: 0,
+            user_arg0: 0,
             fork_user_rflags: 0,
             fs_base: 0,
             in_syscall: false,
@@ -338,6 +502,7 @@ impl Thread {
             syscall_user_rflags: 0,
             futex_timed_out: false,
             pending_wakeup: false,
+            fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
         }
@@ -357,6 +522,7 @@ impl Thread {
         name: &str,
         user_entry: u64,
         user_stack: u64,
+        user_arg0: u64,
         kernel_stack: u64,
         kernel_stack_size: usize,
     ) -> Self {
@@ -404,8 +570,9 @@ impl Thread {
                 stack
             );
             unsafe {
-                crate::task::jump_to_usermode(entry, stack);
-            }
+                    let arg0 = with_thread(tid, |thread| thread.user_arg0()).unwrap_or(0);
+                    crate::task::jump_to_usermode(entry, stack, arg0);
+                }
         }
 
         let stack_ptr = stack_top - 8;
@@ -445,6 +612,7 @@ impl Thread {
             kernel_stack_size,
             user_entry,
             user_stack,
+            user_arg0,
             fork_user_rflags: 0,
             fs_base: 0,
             in_syscall: false,
@@ -454,6 +622,7 @@ impl Thread {
             syscall_user_rflags: 0,
             futex_timed_out: false,
             pending_wakeup: false,
+            fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
         }
@@ -467,6 +636,10 @@ impl Thread {
     /// ユーザースタックを取得
     pub fn user_stack(&self) -> u64 {
         self.user_stack
+    }
+
+    pub fn user_arg0(&self) -> u64 {
+        self.user_arg0
     }
 
     /// TLS FSベースを取得
@@ -553,6 +726,7 @@ impl Thread {
             kernel_stack_size,
             user_entry: user_rip,
             user_stack: user_rsp,
+            user_arg0: 0,
             fork_user_rflags: user_rflags,
             fs_base,
             in_syscall: false,
@@ -562,6 +736,7 @@ impl Thread {
             syscall_user_rflags: user_rflags,
             futex_timed_out: false,
             pending_wakeup: false,
+            fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
         }
@@ -623,6 +798,18 @@ impl Thread {
         let v = self.pending_wakeup;
         self.pending_wakeup = false;
         v
+    }
+
+    pub fn fast_ipc(&self) -> &IpcFastState {
+        &self.fast_ipc
+    }
+
+    pub fn fast_ipc_mut(&mut self) -> &mut IpcFastState {
+        &mut self.fast_ipc
+    }
+
+    pub fn clear_fast_ipc(&mut self) {
+        self.fast_ipc.clear();
     }
 
     pub fn interactive_score(&self) -> u8 {

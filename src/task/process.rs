@@ -38,6 +38,133 @@ impl Default for ResourceLimits {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum MmapBacking {
+    File {
+        path: alloc::string::String,
+        data: alloc::vec::Vec<u8>,
+        writable: bool,
+        shared: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct MmapRegion {
+    start: u64,
+    len: u64,
+    prot: u64,
+    flags: u64,
+    backing: MmapBacking,
+    dirty_pages: alloc::vec::Vec<u64>,
+}
+
+impl MmapRegion {
+    pub fn file_backed(
+        start: u64,
+        len: u64,
+        prot: u64,
+        flags: u64,
+        path: alloc::string::String,
+        data: alloc::vec::Vec<u8>,
+        writable: bool,
+        shared: bool,
+    ) -> Self {
+        Self {
+            start,
+            len,
+            prot,
+            flags,
+            backing: MmapBacking::File {
+                path,
+                data,
+                writable,
+                shared,
+            },
+            dirty_pages: alloc::vec::Vec::new(),
+        }
+    }
+
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn end(&self) -> Option<u64> {
+        self.start.checked_add(self.len)
+    }
+
+    pub fn contains(&self, addr: u64) -> bool {
+        self.end()
+            .map(|end| addr >= self.start && addr < end)
+            .unwrap_or(false)
+    }
+
+    pub fn backing(&self) -> &MmapBacking {
+        &self.backing
+    }
+
+    pub fn backing_mut(&mut self) -> &mut MmapBacking {
+        &mut self.backing
+    }
+
+    pub fn mark_dirty_page(&mut self, page_index: u64) {
+        if !self.dirty_pages.contains(&page_index) {
+            self.dirty_pages.push(page_index);
+        }
+    }
+
+    pub fn take_dirty_pages(&mut self) -> alloc::vec::Vec<u64> {
+        core::mem::take(&mut self.dirty_pages)
+    }
+
+    pub fn dirty_pages(&self) -> &[u64] {
+        &self.dirty_pages
+    }
+
+    pub fn is_writable(&self) -> bool {
+        (self.prot & 0x2) != 0
+    }
+
+    pub fn is_shared(&self) -> bool {
+        (self.flags & 0x1) != 0
+    }
+}
+
+impl MmapBacking {
+    pub fn file_path(&self) -> &str {
+        match self {
+            MmapBacking::File { path, .. } => path.as_str(),
+        }
+    }
+
+    pub fn file_data(&self) -> &[u8] {
+        match self {
+            MmapBacking::File { data, .. } => data.as_slice(),
+        }
+    }
+
+    pub fn file_data_mut(&mut self) -> &mut alloc::vec::Vec<u8> {
+        match self {
+            MmapBacking::File { data, .. } => data,
+        }
+    }
+
+    pub fn file_writable(&self) -> bool {
+        match self {
+            MmapBacking::File { writable, .. } => *writable,
+        }
+    }
+
+    pub fn file_shared(&self) -> bool {
+        match self {
+            MmapBacking::File { shared, .. } => *shared,
+        }
+    }
+}
+
 /// プロセス構造体
 ///
 /// メモリ空間とリソースを管理する実行単位。
@@ -66,6 +193,8 @@ pub struct Process {
     parent_id: Option<ProcessId>,
     /// ページテーブルのアドレス（メモリ空間）。Noneの場合はカーネル空間を共有。
     page_table: Option<u64>,
+    /// page_table をこの Process が所有しているかどうか
+    page_table_owned: bool,
     /// ヒープ開始アドレス
     heap_start: u64,
     /// 現在のヒープ終了アドレス (program break)
@@ -93,6 +222,8 @@ pub struct Process {
     signal_state: alloc::boxed::Box<SignalState>,
     /// プロセスごとのファイルディスクリプタテーブル — ヒープに置いてスタック消費を抑える
     fd_table: alloc::boxed::Box<FdTable>,
+    /// file-backed mmap の VMA テーブル
+    mmap_regions: alloc::vec::Vec<MmapRegion>,
     /// プロセスごとの resource limit
     resource_limits: ResourceLimits,
 }
@@ -131,6 +262,7 @@ impl Process {
             capabilities: CapabilitySet::empty(),
             parent_id,
             page_table: None, // TODO: ページテーブル実装後に設定
+            page_table_owned: true,
             heap_start,
             heap_end: heap_start,
             stack_bottom: 0,
@@ -149,6 +281,7 @@ impl Process {
             sid: 0,
             signal_state: alloc::boxed::Box::new(SignalState::new()),
             fd_table: FdTable::new_boxed(),
+            mmap_regions: alloc::vec::Vec::new(),
             resource_limits: ResourceLimits::default(),
         }
     }
@@ -168,9 +301,19 @@ impl Process {
         self.service_id.as_deref()
     }
 
+    /// サービスIDを設定する（カーネル内部用）
+    pub(crate) fn set_service_id<S: Into<String>>(&mut self, service_id: S) {
+        self.service_id = Some(service_id.into());
+    }
+
     /// capability 集合を取得（読み取り専用）
     pub fn capabilities(&self) -> &CapabilitySet {
         &self.capabilities
+    }
+
+    /// capability 集合を可変取得（kernel 内部用）
+    pub(crate) fn capabilities_mut(&mut self) -> &mut CapabilitySet {
+        &mut self.capabilities
     }
 
     /// exec 経路でプロセス生成時に capability を設定する（カーネル内部用）
@@ -238,6 +381,17 @@ impl Process {
     /// ページテーブルアドレスを設定
     pub fn set_page_table(&mut self, page_table: u64) {
         self.page_table = Some(page_table);
+        self.page_table_owned = true;
+    }
+
+    /// 既存のページテーブルを共有する
+    pub fn set_shared_page_table(&mut self, page_table: u64) {
+        self.page_table = Some(page_table);
+        self.page_table_owned = false;
+    }
+
+    pub fn page_table_owned(&self) -> bool {
+        self.page_table_owned
     }
 
     /// ヒープ終了アドレスを取得
@@ -321,9 +475,56 @@ impl Process {
         self.resource_limits = limits;
     }
 
+    pub fn mmap_regions(&self) -> &[MmapRegion] {
+        &self.mmap_regions
+    }
+
+    pub fn mmap_regions_mut(&mut self) -> &mut alloc::vec::Vec<MmapRegion> {
+        &mut self.mmap_regions
+    }
+
+    pub fn set_mmap_regions(&mut self, regions: alloc::vec::Vec<MmapRegion>) {
+        self.mmap_regions = regions;
+    }
+
+    pub fn add_mmap_region(&mut self, region: MmapRegion) -> bool {
+        let overlaps = self
+            .mmap_regions
+            .iter()
+            .any(|existing| regions_overlap(existing, &region));
+        if overlaps {
+            return false;
+        }
+        self.mmap_regions.push(region);
+        true
+    }
+
+    pub fn find_mmap_region(&self, addr: u64) -> Option<&MmapRegion> {
+        self.mmap_regions.iter().find(|region| region.contains(addr))
+    }
+
+    pub fn find_mmap_region_mut(&mut self, addr: u64) -> Option<&mut MmapRegion> {
+        self.mmap_regions
+            .iter_mut()
+            .find(|region| region.contains(addr))
+    }
+
+    pub fn remove_mmap_region(&mut self, start: u64, len: u64) -> Option<MmapRegion> {
+        let end = start.checked_add(len)?;
+        let idx = self
+            .mmap_regions
+            .iter()
+            .position(|region| region.start == start && region.end() == Some(end))?;
+        Some(self.mmap_regions.remove(idx))
+    }
+
     /// fork 用: FD テーブルをクローンして新しい Box を返す
     pub fn clone_fd_table_for_fork(&self) -> alloc::boxed::Box<FdTable> {
         self.fd_table.clone_for_fork()
+    }
+
+    pub fn clone_mmap_regions_for_fork(&self) -> alloc::vec::Vec<MmapRegion> {
+        self.mmap_regions.clone()
     }
 
     /// FD テーブルを差し替える（fork の子プロセス初期化で使用）
@@ -358,6 +559,13 @@ impl Process {
     pub fn set_sid(&mut self, sid: u64) {
         self.sid = sid;
     }
+}
+
+fn regions_overlap(a: &MmapRegion, b: &MmapRegion) -> bool {
+    let (Some(a_end), Some(b_end)) = (a.end(), b.end()) else {
+        return true;
+    };
+    a.start < b_end && b.start < a_end
 }
 
 impl core::fmt::Debug for Process {
@@ -569,7 +777,11 @@ impl ProcessTable {
             if let Some(proc) = slot.take() {
                 let pid = proc.id();
                 let exit_code = proc.exit_code().unwrap_or(0);
-                let page_table = proc.page_table();
+                let page_table = if proc.page_table_owned() {
+                    proc.page_table()
+                } else {
+                    None
+                };
                 self.count = self.count.saturating_sub(1);
                 return Some((pid, exit_code, page_table));
             }
