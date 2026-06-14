@@ -297,11 +297,6 @@ fn exec_internal(
             source,
             data.len()
         );
-        if path == "core.service" || process_name == "core.service" {
-            crate::info!("core.service fingerprint: {}", fingerprint);
-        } else {
-            crate::info!("exec fingerprint: {} ({})", fingerprint, path);
-        }
         exec_with_data(&data, &process_name, path, args, None, initial_caps)
     } else {
         crate::warn!("exec: file not found: {}", path);
