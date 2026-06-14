@@ -32,11 +32,11 @@ built-in cextは、主に起動に必要な最小限の機能に使います。
 代表的なbuilt-in cextは次のとおりです。
 
 - fs.cext
-- storage.cext
+- disk.cext
 
 fs.cextは、initfsやrootfsを扱うためのファイルシステム機能を提供します。
 外部のserviceやmodule cextを読み込むためには、最初にファイルシステムが必要になります。そのため、fs.cextはbuilt-in cextとして扱います。
-storage.cextは、fs.cextが実際のストレージやinitfsにアクセスするための機能を提供します。
+disk.cextは、fs.cextが実際のストレージやinitfsにアクセスするための機能を提供します。
 built-in cextは、カーネル本体と同時に読み込まれるため、動的にアンロードされません。
 また、起動に必須なbuilt-in cextが失敗した場合、カーネルは通常の起動を継続できません。
 その際は、カーネルはログを出力してハングアップします。
@@ -88,8 +88,8 @@ Cextに置くべきものは、カーネルの実行基盤ではなく、デバ�
 
 各Cextには、cext.tomlを配置します。
 cext.tomlには、そのCextが何を実装しているか、何に依存しているか、どのCapabilityを必要とするかを記述します。
-cext.tomlは、Cextを安全にロードするためのmanifestです。
-カーネルやcore.serviceは、cext.tomlを読んで、そのCextをロードしてよいか判断します。
+cext.tomlは、Cextを安全にロードするためのbuild-time manifest入力です。
+ビルド時に集約され、カーネルは生成済みの manifest を読みます。runtime で TOML を解釈しません。
 基本的な構成は次のとおりです。
 
 ```toml
@@ -97,7 +97,7 @@ cext.tomlは、Cextを安全にロードするためのmanifestです。
 id = "org.mochios.fs"
 name = "fs"
 version = "0.1.0"
-entry = "fs.cext"
+entry = "builtin"
 type = "filesystem"
 builtin = true
 
@@ -327,7 +327,7 @@ module cextでは、署名検証とCapability検査に通った場合のみロ�
 
 module cextをロードするときは、次の順序で処理します。
 
-- cext.tomlを読む
+- cext.tomlを build 時に集約した manifest を読む
 - cext.idとversionを確認する
 - 署名を検証する
 - dependsを確認する
@@ -359,7 +359,7 @@ built-in cextにするべきものは、起動の根になる機能だけです�
 今の段階では、次のCextをbuilt-inとして扱います。
 
 - fs.cext
-- storage.cext
+- disk.cext
 
 それ以外のCextは、原則としてmodule cextとして扱います。
 
