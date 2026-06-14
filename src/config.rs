@@ -360,17 +360,17 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
                 config.exec.kernel_thread_stack_size = v;
             }
         }
-        "cext.module_load_base_start" | "kmod.module_load_base_start" => {
+        "cext.module_load_base_start" => {
             if let Some(v) = parse_u64(value) {
                 config.cext.module_load_base_start = v;
             }
         }
-        "cext.module_load_guard" | "kmod.module_load_guard" => {
+        "cext.module_load_guard" => {
             if let Some(v) = parse_u64(value) {
                 config.cext.module_load_guard = v;
             }
         }
-        "cext.max_read_bytes" | "kmod.max_read_bytes" => {
+        "cext.max_read_bytes" => {
             if let Some(v) = parse_usize(value) {
                 config.cext.max_read_bytes = v;
             }

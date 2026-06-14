@@ -13,25 +13,7 @@ fn stdin_ready() -> bool {
 }
 
 fn is_tty_fd(fd: i32) -> bool {
-    if fd < 0 {
-        return false;
-    }
-    if fd <= 2 {
-        return true;
-    }
-    if (fd as u64) < FD_BASE as u64 {
-        return false;
-    }
-    let pid = match current_pid() {
-        Some(p) => p,
-        None => return false,
-    };
-    crate::task::with_process(pid, |p| {
-        p.fd_table().get(fd as usize).is_some_and(|fh| {
-            crate::syscall::fs::is_tty_like_path(fh.dir_path.as_deref().unwrap_or(""))
-        })
-    })
-    .unwrap_or(false)
+    fd >= 0 && fd <= 2
 }
 
 fn stdin_ready_for_fd(fd: i32) -> bool {

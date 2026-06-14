@@ -49,8 +49,6 @@ pub mod config;
 /// カーネル本体
 #[cfg(not(test))]
 pub mod kernel;
-#[cfg(not(test))]
-mod kmod;
 
 #[cfg(not(test))]
 /// メモリ管理、GDT、TSSを含む

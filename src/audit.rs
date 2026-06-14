@@ -292,5 +292,5 @@ pub fn flush_to_disk() {
     if snapshot.len() < AUDIT_FILE_CAPACITY {
         snapshot.resize(AUDIT_FILE_CAPACITY, 0);
     }
-    let _ = crate::cext::fs::write_all("/log/audit.log", 0, &snapshot);
+    let _ = crate::cext::fs::write_all("/audit.log", 0, &snapshot);
 }

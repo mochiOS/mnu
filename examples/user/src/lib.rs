@@ -263,7 +263,7 @@ fn format_line(prefix: &str, bytes: u64, elapsed_ms: u64, mib_s: f64) -> LineBuf
 fn fileio_self_test() -> bool {
     const TICK_MS: u64 = 2;
 
-    let path = "/dev/shm/core.service.fs-test";
+    let path = "/core.service.fs-test";
     let payload = unsafe {
         core::slice::from_raw_parts(core::ptr::addr_of!(FS_TEST_WRITE_BUF) as *const u8, FS_TEST_SIZE)
     };

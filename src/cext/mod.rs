@@ -96,10 +96,10 @@ pub fn unregister(id: u64) -> bool {
 
 #[inline]
 pub fn init_runtime_config() {
-    crate::kmod::init_runtime_config()
+    let _ = crate::config::kernel().cext;
 }
 
 #[inline]
 pub fn load_modules() {
-    crate::kmod::load_modules()
+    let _ = fs::is_loaded();
 }

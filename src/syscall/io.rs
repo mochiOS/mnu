@@ -15,14 +15,6 @@ fn iov_max() -> u64 {
     crate::config::kernel().io.max_iov
 }
 
-#[inline]
-fn is_tty_path(path: Option<&str>) -> bool {
-    match path {
-        Some(p) => crate::syscall::fs::is_tty_like_path(p),
-        None => false,
-    }
-}
-
 /// 現在のプロセスの親プロセスのメインスレッドIDを返す
 fn get_parent_thread_id() -> Option<u64> {
     let tid = crate::task::current_thread_id()?;
@@ -257,21 +249,14 @@ fn write_fd(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     };
 
     let idx = fd as usize;
-    // パイプ/TTY かどうか確認
+    // パイプか通常ファイルかを確認する
     let fd_info = crate::task::with_process(pid, |p| {
-        p.fd_table().get(idx).map(|fh| {
-            (
-                fh.pipe_id,
-                fh.pipe_write,
-                is_tty_path(fh.dir_path.as_deref()),
-            )
-        })
+        p.fd_table().get(idx).map(|fh| (fh.pipe_id, fh.pipe_write))
     })
     .flatten();
 
     match fd_info {
-        Some((_, _, true)) => write(STDOUT_FD, buf_ptr, len),
-        Some((Some(pipe_id), true, false)) => {
+        Some((Some(pipe_id), true)) => {
             // パイプ書き込み端
             if !super::validate_user_ptr(buf_ptr, len) {
                 return EFAULT;
@@ -285,8 +270,8 @@ fn write_fd(fd: u64, buf_ptr: u64, len: u64) -> u64 {
                 Err(e) => e,
             }
         }
-        Some((None, _, false)) => crate::syscall::fs::write(fd, buf_ptr, len),
-        Some((Some(_), false, false)) => EBADF,
+        Some((Some(_), false)) => EBADF,
+        Some((None, _)) => crate::syscall::fs::write(fd, buf_ptr, len),
         None => EBADF,
     }
 }
@@ -326,20 +311,10 @@ fn read_fd(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     };
 
     let idx = fd as usize;
-    let fd_info = crate::task::with_process(pid, |p| {
-        p.fd_table().get(idx).map(|fh| {
-            (
-                fh.pipe_id,
-                fh.pipe_write,
-                is_tty_path(fh.dir_path.as_deref()),
-            )
-        })
-    })
-    .flatten();
+    let fd_info = crate::task::with_process(pid, |p| p.fd_table().get(idx).map(|fh| (fh.pipe_id, fh.pipe_write))).flatten();
 
     match fd_info {
-        Some((_, _, true)) => crate::syscall::tty::read_stdin(buf_ptr, len),
-        Some((Some(pipe_id), false, false)) => {
+        Some((Some(pipe_id), false)) => {
             // パイプ読み込み端: ブロッキング読み取り
             if !super::validate_user_ptr(buf_ptr, len) {
                 return EFAULT;
