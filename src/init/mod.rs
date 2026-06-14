@@ -55,6 +55,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     crate::cext::register_builtin_cext("disk", crate::cext::CextKind::BlockDevice);
     crate::cext::register_builtin_cext("fs", crate::cext::CextKind::Filesystem);
     crate::cext::load_modules();
+    crate::plugkit::init_runtime();
     if crate::cext::fs::is_loaded() {
         if crate::cext::disk::is_loaded() {
             let rc = crate::cext::fs::set_disk_ops(crate::cext::disk::ops_ptr());

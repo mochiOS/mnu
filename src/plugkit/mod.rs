@@ -10,6 +10,10 @@ pub use plugkit_sys::{
     PlugKitError, PlugKitEvent, PlugKitResources, PlugKitResult, ProbeResult,
 };
 
+mod package;
+
+pub use package::{discover_packages, package_manifest, package_manifests, PackageManifest};
+
 #[derive(Clone, Debug)]
 pub struct MatchRule {
     pub bus: Option<DeviceBus>,
@@ -174,6 +178,13 @@ pub fn assigned_driver(device: &PlugKitDevice) -> Option<String> {
 
 pub fn emit_event(event: PlugKitEvent) -> PlugKitResult<()> {
     plugkit_sys::emit_event(event)
+}
+
+pub fn init_runtime() {
+    let discovered = discover_packages("/library/extensions");
+    if discovered > 0 {
+        crate::info!("plugkit: discovered {} package(s)", discovered);
+    }
 }
 
 // 　_(ﾟДﾟ)_

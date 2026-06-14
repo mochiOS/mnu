@@ -17,9 +17,7 @@ pub use plugkit_sys::{
 
 pub trait PlugKitDriver {
     fn probe(device: &PlugKitDevice) -> ProbeResult;
-
     fn start(device: PlugKitDevice, resources: PlugKitResources) -> PlugKitResult<()>;
-
     fn stop(device: PlugKitDevice) -> PlugKitResult<()>;
 }
 
