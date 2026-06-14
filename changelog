@@ -1,8 +1,6 @@
-ChangeLog   - mnu version X.X
-    Release date: YYYY-MM-DD
+the mnu kernel ChangeLog   - version 0.1-rc1
+    Release date: 2026-06-14
     Release creator: tas0dev
-    
+
     Changes:
-    - Added new feature X
-    - Improved performance of Y
-    - Fixed bug Z
+    - First Release
