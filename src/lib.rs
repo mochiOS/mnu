@@ -98,6 +98,8 @@ pub mod percpu;
 #[cfg(not(test))]
 /// SMP/マルチコアの共有ハンドオフ
 pub mod smp;
+#[cfg(not(test))]
+mod plugkit;
 
 pub const MAX_CPU_IDS: usize = 64;
 
