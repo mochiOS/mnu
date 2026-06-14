@@ -31,9 +31,9 @@ need_cmd truncate
 
 need_file "${ROOTFS_SOURCE_DIR}"
 
-mkdir -p "${INITFS_STAGE}" "${ROOTFS_STAGE}" "$(dirname "${ROOTFS_IMG}")"
-rm -rf "${ROOTFS_STAGE}"
-mkdir -p "${ROOTFS_STAGE}"
+mkdir -p "$(dirname "${ROOTFS_IMG}")"
+rm -rf "${INITFS_STAGE}" "${ROOTFS_STAGE}"
+mkdir -p "${INITFS_STAGE}" "${ROOTFS_STAGE}"
 
 cp -a "${ROOTFS_SOURCE_DIR}/." "${ROOTFS_STAGE}/"
 cp -a "${ROOTFS_SOURCE_DIR}/." "${INITFS_STAGE}/"
