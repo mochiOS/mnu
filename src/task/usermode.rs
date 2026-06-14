@@ -75,6 +75,13 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64) -> ! {
         user_stack,
         fs_base
     );
+    crate::info!(
+        "[UMODE] entry={:#x} stack={:#x} fs_base={:#x} user_cr3={:#x}",
+        entry,
+        user_stack,
+        fs_base,
+        user_cr3
+    );
 
     crate::cpu::write_fs_base(fs_base);
     if user_cr3 != 0 {

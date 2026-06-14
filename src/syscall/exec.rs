@@ -1116,7 +1116,8 @@ fn exec_with_data(
             entry
         );
 
-        pid.as_u64()
+        let launched_tid = add_res.expect("add_thread succeeded after non-None check");
+        launched_tid.as_u64()
     }
 }
 

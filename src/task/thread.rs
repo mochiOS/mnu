@@ -384,6 +384,7 @@ impl Thread {
                     crate::task::exit_current_task(crate::syscall::EINVAL);
                 }
             };
+            crate::info!("[THREAD] usermode trampoline tid={}", tid.as_u64());
             let (entry, stack) =
                 match with_thread(tid, |thread| (thread.user_entry(), thread.user_stack())) {
                     Some(v) => v,
@@ -421,6 +422,14 @@ impl Thread {
         crate::debug!(
             "Creating usermode thread '{}': user_entry={:#x}, user_stack={:#x}",
             name,
+            user_entry,
+            user_stack
+        );
+        crate::info!(
+            "[THREAD] new_usermode name='{}' rip={:#x} rsp={:#x} user_entry={:#x} user_stack={:#x}",
+            name,
+            context.rip,
+            context.rsp,
             user_entry,
             user_stack
         );

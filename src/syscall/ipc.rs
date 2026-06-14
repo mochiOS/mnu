@@ -581,6 +581,13 @@ pub fn send(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
     {
         return EAGAIN;
     }
+    crate::info!(
+        "[IPC SEND] from={} to={} len={} data={:02x?}",
+        sender,
+        dest_thread_id,
+        len,
+        &data[..core::cmp::min(len, 16)]
+    );
     let waiter = boxes[idx].take_waiter();
     drop(boxes);
     if waiter != 0 {
@@ -755,6 +762,13 @@ pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
             return err;
         }
     }
+    crate::info!(
+        "[IPC RECV] tid={} from={} len={} data={:02x?}",
+        receiver,
+        from,
+        copy_len,
+        &recv_buf[..core::cmp::min(copy_len, 16)]
+    );
 
     // 上位32bitに送信元ID、下位32bitに長さ
     (from << 32) | (copy_len as u64)
@@ -819,9 +833,58 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
                         return err;
                     }
                 }
+                crate::info!(
+                    "[IPC RECV] tid={} from={} len={} data={:02x?}",
+                    receiver_u64,
+                    from,
+                    copy_len,
+                    &recv_buf[..core::cmp::min(copy_len, 16)]
+                );
                 return (from << 32) | (copy_len as u64);
             }
             None => {
+                // waiter 登録直後に送信が走った場合、wake を落とさないよう再確認する。
+                {
+                    let mut boxes = MAILBOXES.lock();
+                    if let Some((from, copy_len, ext_pages_count, ext_pages)) =
+                        boxes[idx].pop_valid_for_receiver_copy(
+                            receiver_u64,
+                            idx as u16,
+                            receiver_generation,
+                            &mut recv_buf[..max_copy],
+                        )
+                    {
+                        if boxes[idx].waiter == receiver_u64 {
+                            boxes[idx].waiter = 0;
+                        }
+                        drop(boxes);
+                        let copy_len = match prepare_external_pages_for_user(
+                            receiver_u64,
+                            &mut recv_buf,
+                            copy_len,
+                            ext_pages_count,
+                            &ext_pages,
+                        ) {
+                            Ok(n) => n,
+                            Err(e) => return e,
+                        };
+                        if copy_len > 0 && buf_ptr != 0 {
+                            if let Err(err) =
+                                crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len])
+                            {
+                                return err;
+                            }
+                        }
+                        crate::info!(
+                            "[IPC RECV] tid={} from={} len={} data={:02x?}",
+                            receiver_u64,
+                            from,
+                            copy_len,
+                            &recv_buf[..core::cmp::min(copy_len, 16)]
+                        );
+                        return (from << 32) | (copy_len as u64);
+                    }
+                }
                 // メッセージなし：pending_wakeup がなければスリープして yield
                 if crate::task::sleep_thread_unless_woken(receiver) {
                     crate::task::yield_now();
@@ -919,6 +982,21 @@ pub fn recv_blocking_from_sender_for_kernel(
         match n {
             Some(n) => return Ok(n),
             None => {
+                {
+                    let mut boxes = MAILBOXES.lock();
+                    if let Some((_, n)) = boxes[idx].pop_from_sender_copy(
+                        sender_thread_id,
+                        receiver_u64,
+                        idx as u16,
+                        receiver_generation,
+                        buf,
+                    ) {
+                        if boxes[idx].waiter == receiver_u64 {
+                            boxes[idx].waiter = 0;
+                        }
+                        return Ok(n);
+                    }
+                }
                 if crate::task::sleep_thread_unless_woken(receiver) {
                     crate::task::yield_now();
                 } else {

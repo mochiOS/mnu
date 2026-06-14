@@ -134,18 +134,29 @@ pub unsafe fn switch_to_thread_with_slots(
     next_id: ThreadId,
     next_slot: usize,
 ) {
+    if next_id.as_u64() == 2 || next_id.as_u64() == 3 || current_id.is_some_and(|id| id.as_u64() == 2 || id.as_u64() == 3) {
+        crate::info!(
+            "[CTX] enter current={:?} next={} current_slot={:?} next_slot={}",
+            current_id.map(|id| id.as_u64()),
+            next_id.as_u64(),
+            current_slot,
+            next_slot
+        );
+    }
     // コンテキストスイッチ中は割り込みを禁止する
     // ロック解放からコンテキストスイッチまでの間に割り込みが入ると不整合が起きる可能性があるため
     x86_64::instructions::interrupts::disable();
 
+    if next_id.as_u64() == 2 || next_id.as_u64() == 3 || current_id.is_some_and(|id| id.as_u64() == 2 || id.as_u64() == 3) {
+        crate::info!("[CTX] before THREAD_QUEUE.lock()");
+    }
     let mut queue = THREAD_QUEUE.lock();
+    if next_id.as_u64() == 2 || next_id.as_u64() == 3 || current_id.is_some_and(|id| id.as_u64() == 2 || id.as_u64() == 3) {
+        crate::info!("[CTX] after THREAD_QUEUE.lock()");
+    }
 
-    let (old_ctx_ptr, current_process_id, current_priv) = if let Some(id) = current_id {
-        let current_thread = if let Some(slot) = current_slot {
-            queue.get_slot_mut(slot)
-        } else {
-            queue.get_mut(id)
-        };
+    let (old_ctx_ptr, current_process_id) = if let Some(id) = current_id {
+        let current_thread = queue.get_mut(id);
         if let Some(thread) = current_thread {
             if !thread.is_kernel_stack_guard_intact() {
                 let bottom = thread.kernel_stack_bottom();
@@ -166,9 +177,7 @@ pub unsafe fn switch_to_thread_with_slots(
             }
             let ptr = thread.context_mut() as *mut Context;
             let pid = thread.process_id();
-            let priv_level =
-                with_process(pid, |p| p.privilege()).unwrap_or(crate::task::PrivilegeLevel::Core);
-            (ptr, Some(pid), priv_level)
+            (ptr, Some(pid))
         } else {
             return; // 現在のスレッドが見つからない
         }
@@ -177,7 +186,6 @@ pub unsafe fn switch_to_thread_with_slots(
         (
             unsafe { core::ptr::addr_of_mut!(INITIAL_DUMMY_CONTEXT) },
             None,
-            crate::task::PrivilegeLevel::Core,
         )
     };
 
@@ -188,16 +196,22 @@ pub unsafe fn switch_to_thread_with_slots(
         next_process_id,
         next_fs_base,
         _next_in_syscall,
-        next_priv,
     ) = if let Some(thread) = queue.get_slot(next_slot).or_else(|| queue.get(next_id)) {
         let ptr = thread.context() as *const Context;
         let kstack = thread.kernel_stack_top();
         let pid = thread.process_id();
         let fs = thread.fs_base();
         let in_syscall = thread.in_syscall();
-        let priv_level =
-            with_process(pid, |p| p.privilege()).unwrap_or(crate::task::PrivilegeLevel::Core);
-        (ptr, kstack, pid, fs, in_syscall, priv_level)
+        crate::info!(
+            "[CTX] next tid={} pid={:?} rip={:#x} rsp={:#x} fs={:#x} kstack={:#x}",
+            next_id.as_u64(),
+            pid,
+            thread.context().rip,
+            thread.context().rsp,
+            fs,
+            kstack
+        );
+        (ptr, kstack, pid, fs, in_syscall)
     } else {
         return; // 次のスレッドが見つからない
     };
@@ -214,8 +228,7 @@ pub unsafe fn switch_to_thread_with_slots(
     // SYSCALL 入口の swapgs により IA32_KERNEL_GS_BASE がユーザー値へ一時退避されるため、
     // ブロッキング syscall 中に他スレッドへ切り替える前に per-CPU GS ベースへ戻しておく。
     crate::percpu::install_current_cpu_gs_base();
-    let predictor_domain_changed =
-        current_process_id != Some(next_process_id) || current_priv != next_priv;
+    let predictor_domain_changed = current_process_id != Some(next_process_id);
     if predictor_domain_changed {
         crate::cpu::branch_predictor_barrier();
     }
