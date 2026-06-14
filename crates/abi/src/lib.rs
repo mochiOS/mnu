@@ -45,6 +45,21 @@ pub enum SyscallNumber {
     Getcwd = 79,
     Unlink = 87,
     Readlink = 89,
+    // Native mnu file syscalls
+    FileOpen = 560,
+    FileOpenAt = 561,
+    FileClose = 562,
+    FileRead = 563,
+    FileWrite = 564,
+    FileSeek = 565,
+    FileStat = 566,
+    FileStatAt = 567,
+    FileFstat = 568,
+    FileReadDir = 569,
+    FileCreateDir = 570,
+    FileRemove = 571,
+    FileRename = 572,
+    FileSync = 573,
     Getuid = 102,
     Getgid = 104,
     Geteuid = 107,
@@ -154,10 +169,14 @@ pub const EFAULT: u64 = (-14i64) as u64;
 pub const EEXIST: u64 = (-17i64) as u64;
 /// ディレクトリではない
 pub const ENOTDIR: u64 = (-20i64) as u64;
+/// ディレクトリを開こうとしたがファイルだった
+pub const EISDIR: u64 = (-21i64) as u64;
 /// 無効な引数
 pub const EINVAL: u64 = (-22i64) as u64;
 /// ファイルディスクリプタが多すぎる
 pub const EMFILE: u64 = (-24i64) as u64;
+/// ディスク/ストレージに空きがない
+pub const ENOSPC: u64 = (-28i64) as u64;
 /// デバイスでない
 pub const ENOTTY: u64 = (-25i64) as u64;
 /// パイプが壊れている

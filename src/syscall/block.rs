@@ -47,7 +47,7 @@ pub fn block_read(disk_id: u64, lba: u64, buf_ptr: u64, sector_count: u64) -> u6
     // 1セクタずつ読み取って user へコピー（今後: まとめ読みの ABI へ拡張可能）
     let mut sector = [0u8; SECTOR_SIZE];
     for i in 0..sector_count {
-        let ret = crate::kmod::disk::read_sector(disk_id as u32, lba + i, &mut sector) as i64;
+        let ret = crate::cext::disk::read_sector(disk_id as u32, lba + i, &mut sector) as i64;
         if ret < 0 {
             return EIO;
         }
@@ -88,7 +88,7 @@ pub fn block_write(disk_id: u64, lba: u64, buf_ptr: u64, sector_count: u64) -> u
         if copy_from_user(buf_ptr + off, &mut sector).is_err() {
             return EINVAL;
         }
-        let ret = crate::kmod::disk::write_sector(disk_id as u32, lba + i, &sector) as i64;
+        let ret = crate::cext::disk::write_sector(disk_id as u32, lba + i, &sector) as i64;
         if ret < 0 {
             return EIO;
         }

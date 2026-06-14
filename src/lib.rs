@@ -50,7 +50,7 @@ pub mod config;
 #[cfg(not(test))]
 pub mod kernel;
 #[cfg(not(test))]
-pub mod kmod;
+mod kmod;
 
 #[cfg(not(test))]
 /// メモリ管理、GDT、TSSを含む

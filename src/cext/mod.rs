@@ -14,6 +14,9 @@ use spin::Mutex;
 
 use crate::task::ResourceLimits;
 
+pub mod disk;
+pub mod fs;
+
 /// cext の種類
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CextKind {
@@ -89,4 +92,14 @@ pub fn revoke(id: u64) -> bool {
 
 pub fn unregister(id: u64) -> bool {
     with_registry_mut(|registry| registry.remove(&id).is_some())
+}
+
+#[inline]
+pub fn init_runtime_config() {
+    crate::kmod::init_runtime_config()
+}
+
+#[inline]
+pub fn load_modules() {
+    crate::kmod::load_modules()
 }

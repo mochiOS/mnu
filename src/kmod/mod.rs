@@ -65,11 +65,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[inline]
 pub fn module_max_read_bytes() -> usize {
-    crate::config::kernel().kmod.max_read_bytes
+    crate::config::kernel().cext.max_read_bytes
 }
 
 pub fn init_runtime_config() {
-    let base = crate::config::kernel().kmod.module_load_base_start;
+    let base = crate::config::kernel().cext.module_load_base_start;
     NEXT_MODULE_LOAD_BASE.store(base, Ordering::Release);
 }
 
@@ -122,12 +122,12 @@ struct CextMeta {
 
 pub fn load_modules() {
     let Some(entries) = crate::init::fs::readdir_path("/Modules") else {
-        crate::info!("kmod: /Modules is empty");
+        crate::info!("cext: /Modules is empty");
         return;
     };
 
     let Some(expected_hashes) = load_module_hash_manifest() else {
-        crate::warn!("kmod: /Modules/modules.sha256 missing or invalid");
+        crate::warn!("cext: /Modules/modules.sha256 missing or invalid");
         return;
     };
 
@@ -142,23 +142,23 @@ pub fn load_modules() {
 
     for path in module_paths {
         let Some(bytes) = crate::init::fs::read(&path) else {
-            crate::warn!("kmod: failed to read {}", path);
+            crate::warn!("cext: failed to read {}", path);
             continue;
         };
         let Some(meta) = parse_cext(&bytes) else {
-            crate::warn!("kmod: invalid cext {}", path);
+            crate::warn!("cext: invalid cext {}", path);
             continue;
         };
 
         let expected_name = alloc::format!("{}.cext", meta.name);
         let Some(expected_hash) = expected_hashes.get(&expected_name) else {
-            crate::warn!("kmod: missing hash entry for {}", expected_name);
+            crate::warn!("cext: missing hash entry for {}", expected_name);
             continue;
         };
         let actual_hash = sha256_hex(&bytes);
         if actual_hash != *expected_hash {
             crate::warn!(
-                "kmod: hash mismatch for {} (expected {}, got {})",
+                "cext: hash mismatch for {} (expected {}, got {})",
                 expected_name,
                 expected_hash,
                 actual_hash
@@ -169,7 +169,7 @@ pub fn load_modules() {
         let mut missing_dep = false;
         for dep in &meta.deps {
             if dep == "disk" && !disk::is_loaded() {
-                crate::warn!("kmod: skip {} (disk not loaded)", meta.name);
+                crate::warn!("cext: skip {} (disk not loaded)", meta.name);
                 missing_dep = true;
                 break;
             }
@@ -179,13 +179,13 @@ pub fn load_modules() {
         }
 
         let Some(reg) = registrations.iter().find(|r| r.name == meta.name) else {
-            crate::warn!("kmod: unknown module {}", meta.name);
+            crate::warn!("cext: unknown module {}", meta.name);
             continue;
         };
 
         if meta.module_version != reg.version {
             crate::warn!(
-                "kmod: version mismatch for {} (expected {}, got {})",
+                "cext: version mismatch for {} (expected {}, got {})",
                 meta.name,
                 reg.version,
                 meta.module_version
@@ -194,14 +194,14 @@ pub fn load_modules() {
         }
 
         let Some(addr) = load_elf_symbol(&meta.elf, "mochi_module_init") else {
-            crate::warn!("kmod: mochi_module_init not found in {}.cext", meta.name);
+            crate::warn!("cext: mochi_module_init not found in {}.cext", meta.name);
             continue;
         };
 
         if (reg.register)(addr, meta.module_version) {
-            crate::info!("kmod: loaded {}.cext v{}", meta.name, meta.module_version);
+            crate::info!("cext: loaded {}.cext v{}", meta.name, meta.module_version);
         } else {
-            crate::warn!("kmod: {} init returned null ops", meta.name);
+            crate::warn!("cext: {} init returned null ops", meta.name);
         }
     }
 }
@@ -311,7 +311,7 @@ fn align_up_4k(v: u64) -> Option<u64> {
 }
 
 fn alloc_module_base(span: u64) -> Option<u64> {
-    let module_cfg = crate::config::kernel().kmod;
+    let module_cfg = crate::config::kernel().cext;
     let size = align_up_4k(span)?;
     let step = size.checked_add(module_cfg.module_load_guard)?;
     if NEXT_MODULE_LOAD_BASE.load(Ordering::Acquire) == 0 {

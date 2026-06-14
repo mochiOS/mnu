@@ -326,12 +326,12 @@ fn load_exec_image(path: &str, is_service: bool) -> Option<(Vec<u8>, &'static st
         crate::init::fs::read_initfs(path)
             .map(|data| (data, "initfs"))
             .or_else(|| crate::init::fs::read_rootfs(path).map(|data| (data, "rootfs")))
-            .or_else(|| crate::kmod::fs::read_all(path).map(|data| (data, "kmod")))
+            .or_else(|| crate::cext::fs::read_all(path).map(|data| (data, "cext")))
             .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
     } else {
         crate::init::fs::read_rootfs(path)
             .map(|data| (data, "rootfs"))
-            .or_else(|| crate::kmod::fs::read_all(path).map(|data| (data, "kmod")))
+            .or_else(|| crate::cext::fs::read_all(path).map(|data| (data, "cext")))
             .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
     }
 }
@@ -373,7 +373,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
 
-    if let Some(data) = crate::kmod::fs::read_all(&path) {
+    if let Some(data) = crate::cext::fs::read_all(&path) {
         return exec_with_data(&data, &path, &path, &extra_args, None, None);
     }
 

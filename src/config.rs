@@ -90,7 +90,7 @@ pub struct ExecConfig {
 }
 
 #[derive(Clone, Copy)]
-pub struct KmodConfig {
+pub struct CextConfig {
     pub module_load_base_start: u64,
     pub module_load_guard: u64,
     pub max_read_bytes: usize,
@@ -105,7 +105,7 @@ pub struct KernelConfig {
     pub io: IoConfig,
     pub capability: CapabilityConfig,
     pub exec: ExecConfig,
-    pub kmod: KmodConfig,
+    pub cext: CextConfig,
 }
 
 impl Default for KernelConfig {
@@ -150,7 +150,7 @@ impl Default for KernelConfig {
                 mmap_heap_aslr_max_pages: 0x10000,
                 kernel_thread_stack_size: 4096 * 4,
             },
-            kmod: KmodConfig {
+            cext: CextConfig {
                 module_load_base_start: 0x0000_6000_0000_0000,
                 module_load_guard: 0x20_0000,
                 max_read_bytes: 64 * 1024 * 1024,
@@ -360,19 +360,19 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
                 config.exec.kernel_thread_stack_size = v;
             }
         }
-        "kmod.module_load_base_start" => {
+        "cext.module_load_base_start" | "kmod.module_load_base_start" => {
             if let Some(v) = parse_u64(value) {
-                config.kmod.module_load_base_start = v;
+                config.cext.module_load_base_start = v;
             }
         }
-        "kmod.module_load_guard" => {
+        "cext.module_load_guard" | "kmod.module_load_guard" => {
             if let Some(v) = parse_u64(value) {
-                config.kmod.module_load_guard = v;
+                config.cext.module_load_guard = v;
             }
         }
-        "kmod.max_read_bytes" => {
+        "cext.max_read_bytes" | "kmod.max_read_bytes" => {
             if let Some(v) = parse_usize(value) {
-                config.kmod.max_read_bytes = v;
+                config.cext.max_read_bytes = v;
             }
         }
         _ => {}

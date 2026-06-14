@@ -426,6 +426,26 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::IpcSendPages as u64 => {
             privileged::ipc_send_pages(arg0, arg1, arg2, arg3)
         }
+        x if x == SyscallNumber::FileOpen as u64 => fs::file_open(arg0, arg1),
+        x if x == SyscallNumber::FileOpenAt as u64 => {
+            fs::file_open_at(arg0 as i64, arg1, arg2, arg3)
+        }
+        x if x == SyscallNumber::FileClose as u64 => fs::file_close(arg0),
+        x if x == SyscallNumber::FileRead as u64 => fs::file_read(arg0, arg1, arg2),
+        x if x == SyscallNumber::FileWrite as u64 => fs::file_write(arg0, arg1, arg2),
+        x if x == SyscallNumber::FileSeek as u64 => fs::file_seek(arg0, arg1 as i64, arg2),
+        x if x == SyscallNumber::FileStat as u64 => fs::file_stat(arg0, arg1),
+        x if x == SyscallNumber::FileStatAt as u64 => {
+            fs::file_stat_at(arg0 as i64, arg1, arg2, arg3)
+        }
+        x if x == SyscallNumber::FileFstat as u64 => fs::file_fstat(arg0, arg1),
+        x if x == SyscallNumber::FileReadDir as u64 => fs::file_read_dir(arg0, arg1, arg2),
+        x if x == SyscallNumber::FileCreateDir as u64 => fs::file_create_dir(arg0, arg1),
+        x if x == SyscallNumber::FileRemove as u64 => fs::file_remove(arg0),
+        x if x == SyscallNumber::FileRename as u64 => {
+            fs::file_rename(arg0 as i64, arg1, arg2 as i64, arg3)
+        }
+        x if x == SyscallNumber::FileSync as u64 => fs::file_sync(arg0),
         _ => ENOSYS,
     }
 }

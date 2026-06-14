@@ -15,10 +15,31 @@ pub enum Kernel {
     Device(Device),
     /// ELFエラー
     Elf(Elf),
+    /// syscall / VFS エラー
+    Syscall(Syscall),
     /// 無効なパラメータ
     InvalidParam,
     /// 未実装の機能
     NotImplemented,
+}
+
+/// syscall / VFS の標準エラー
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Syscall {
+    NotImplemented,
+    Unsupported,
+    InvalidSyscall,
+    InvalidArgument,
+    InvalidPointer,
+    PermissionDenied,
+    NotFound,
+    AlreadyExists,
+    BadFd,
+    NotDirectory,
+    IsDirectory,
+    NoMemory,
+    NoSpace,
+    IoError,
 }
 
 /// メモリ関連
@@ -158,6 +179,7 @@ impl fmt::Display for Kernel {
             Kernel::Process(e) => write!(f, "Process error: {:?}", e),
             Kernel::Device(e) => write!(f, "Device error: {:?}", e),
             Kernel::Elf(e) => write!(f, "ELF error: {:?}", e),
+            Kernel::Syscall(e) => write!(f, "Syscall error: {:?}", e),
             Kernel::InvalidParam => write!(f, "Invalid parameter"),
             Kernel::NotImplemented => write!(f, "Not implemented"),
         }
@@ -194,6 +216,9 @@ pub fn handle_kernel_error(error: Kernel) {
         Kernel::Device(dev_err) => {
             crate::warn!("Device error: {:?}", dev_err);
         }
+        Kernel::Syscall(sys_err) => {
+            crate::warn!("Syscall error: {:?}", sys_err);
+        }
         _ => {
             crate::warn!("Unknown error: {:?}", error);
         }
@@ -205,4 +230,5 @@ pub fn handle_kernel_error(error: Kernel) {
 /// 結果型のエイリアス
 pub type KernelErr = Kernel;
 pub type KernelState = KernelErr;
+pub type SyscallErr = Syscall;
 pub type Result<T> = core::result::Result<T, KernelState>;

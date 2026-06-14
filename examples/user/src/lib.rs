@@ -75,7 +75,17 @@ const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
 const SYS_GET_TICKS: u64 = mnu_abi::SyscallNumber::GetTicks as u64;
 const SYS_CHECK_THREAD_CAPABILITY: u64 = mnu_abi::SyscallNumber::CheckThreadCapability as u64;
 const SYS_LIST_PROCESSES: u64 = mnu_abi::SyscallNumber::ListProcesses as u64;
+const SYS_FILE_OPEN: u64 = mnu_abi::SyscallNumber::FileOpen as u64;
+#[allow(dead_code)]
+const SYS_FILE_OPEN_AT: u64 = mnu_abi::SyscallNumber::FileOpenAt as u64;
+const SYS_FILE_CLOSE: u64 = mnu_abi::SyscallNumber::FileClose as u64;
+const SYS_FILE_READ: u64 = mnu_abi::SyscallNumber::FileRead as u64;
+const SYS_FILE_WRITE: u64 = mnu_abi::SyscallNumber::FileWrite as u64;
+const SYS_FILE_SEEK: u64 = mnu_abi::SyscallNumber::FileSeek as u64;
 const STDOUT_FD: u64 = 1;
+const FS_TEST_SIZE: usize = 1024 * 1024;
+static mut FS_TEST_WRITE_BUF: [u8; FS_TEST_SIZE] = [0x55; FS_TEST_SIZE];
+static mut FS_TEST_READ_BUF: [u8; FS_TEST_SIZE] = [0; FS_TEST_SIZE];
 
 #[inline(always)]
 unsafe fn syscall0(n: u64) -> u64 {
@@ -147,10 +157,184 @@ unsafe fn syscall3(n: u64, a0: u64, a1: u64, a2: u64) -> u64 {
     ret
 }
 
+#[inline(always)]
+#[allow(dead_code)]
+unsafe fn syscall4(n: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+        "syscall",
+        inlateout("rax") n => ret,
+        in("rdi") a0,
+        in("rsi") a1,
+        in("rdx") a2,
+        in("r10") a3,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack),
+        );
+    }
+    ret
+}
+
 pub fn write_str(s: &str) {
     unsafe {
         let _ = syscall3(SYS_WRITE, STDOUT_FD, s.as_ptr() as u64, s.len() as u64);
     }
+}
+
+fn file_path_bytes(path: &str) -> [u8; 96] {
+    let mut buf = [0u8; 96];
+    let bytes = path.as_bytes();
+    let len = bytes.len().min(buf.len() - 1);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    buf[len] = 0;
+    buf
+}
+
+fn file_open(path: &str, flags: u64) -> u64 {
+    let buf = file_path_bytes(path);
+    unsafe { syscall2(SYS_FILE_OPEN, buf.as_ptr() as u64, flags) }
+}
+
+#[allow(dead_code)]
+fn file_open_at(dirfd: i64, path: &str, flags: u64, mode: u64) -> u64 {
+    let buf = file_path_bytes(path);
+    unsafe { syscall4(SYS_FILE_OPEN_AT, dirfd as u64, buf.as_ptr() as u64, flags, mode) }
+}
+
+fn file_close(fd: u64) -> u64 {
+    unsafe { syscall1(SYS_FILE_CLOSE, fd) }
+}
+
+fn file_read(fd: u64, buf: &mut [u8]) -> u64 {
+    unsafe { syscall3(SYS_FILE_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) }
+}
+
+fn file_write(fd: u64, buf: &[u8]) -> u64 {
+    unsafe { syscall3(SYS_FILE_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) }
+}
+
+fn file_seek(fd: u64, offset: i64, whence: u64) -> u64 {
+    unsafe { syscall3(SYS_FILE_SEEK, fd, offset as u64, whence) }
+}
+
+struct LineBuf {
+    buf: [u8; 160],
+    len: usize,
+}
+
+impl LineBuf {
+    fn new() -> Self {
+        Self {
+            buf: [0; 160],
+            len: 0,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("<fmt>")
+    }
+}
+
+impl core::fmt::Write for LineBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let remaining = self.buf.len().saturating_sub(self.len);
+        let take = bytes.len().min(remaining);
+        self.buf[self.len..self.len + take].copy_from_slice(&bytes[..take]);
+        self.len += take;
+        if take < bytes.len() {
+            return Err(core::fmt::Error);
+        }
+        Ok(())
+    }
+}
+
+fn format_line(prefix: &str, bytes: u64, elapsed_ms: u64, mib_s: f64) -> LineBuf {
+    let mut line = LineBuf::new();
+    let _ = core::fmt::write(
+        &mut line,
+        format_args!("{} {} bytes in {} ms: {:.1} MiB/s", prefix, bytes, elapsed_ms, mib_s),
+    );
+    line
+}
+
+fn fileio_self_test() -> bool {
+    const TICK_MS: u64 = 2;
+
+    let path = "/dev/shm/core.service.fs-test";
+    let payload = unsafe {
+        core::slice::from_raw_parts(core::ptr::addr_of!(FS_TEST_WRITE_BUF) as *const u8, FS_TEST_SIZE)
+    };
+    let buffer = unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(FS_TEST_READ_BUF) as *mut u8,
+            FS_TEST_SIZE,
+        )
+    };
+
+    let fd = file_open(path, 0o2 | 0o100 | 0o1000);
+    if fd == mnu_abi::EBADF as u64 || fd == mnu_abi::ENOENT as u64 {
+        write_line("fs-test: open failed");
+        return false;
+    }
+
+    let write_start = get_ticks();
+    let wrote = file_write(fd, payload);
+    let write_elapsed_ms = get_ticks().saturating_sub(write_start) * TICK_MS;
+    if wrote != payload.len() as u64 {
+        let _ = file_close(fd);
+        return false;
+    }
+
+    let _ = file_seek(fd, 0, 0);
+    let read_start = get_ticks();
+    let read = file_read(fd, buffer);
+    let read_elapsed_ms = get_ticks().saturating_sub(read_start) * TICK_MS;
+
+    let _ = file_close(fd);
+    let closed_errno = file_read(fd, buffer);
+
+    let ro_fd = file_open(path, 0o0);
+    let ro_write_errno = if ro_fd < (1u64 << 63) {
+        let rc = file_write(ro_fd, &payload[..16]);
+        let _ = file_close(ro_fd);
+        rc
+    } else {
+        ro_fd
+    };
+
+    let wo_fd = file_open(path, 0o1 | 0o100);
+    let wo_read_errno = if wo_fd < (1u64 << 63) {
+        let rc = file_read(wo_fd, &mut buffer[..16]);
+        let _ = file_close(wo_fd);
+        rc
+    } else {
+        wo_fd
+    };
+
+    let same = read == payload.len() as u64 && bytes_eq(payload, buffer);
+    let write_mib_s = if write_elapsed_ms == 0 {
+        0.0
+    } else {
+        (wrote as f64) / (1024.0 * 1024.0) / ((write_elapsed_ms as f64) / 1000.0)
+    };
+    let read_mib_s = if read_elapsed_ms == 0 {
+        0.0
+    } else {
+        (read as f64) / (1024.0 * 1024.0) / ((read_elapsed_ms as f64) / 1000.0)
+    };
+
+    let write_line_buf = format_line("[core.service][fs-test] write", wrote, write_elapsed_ms, write_mib_s);
+    let read_line_buf = format_line("[core.service][fs-test] read ", read, read_elapsed_ms, read_mib_s);
+    write_line(write_line_buf.as_str());
+    write_line(read_line_buf.as_str());
+
+    same
+        && closed_errno == mnu_abi::EBADF as u64
+        && ro_write_errno == mnu_abi::EACCES as u64
+        && wo_read_errno == mnu_abi::EACCES as u64
 }
 
 pub fn exit(code: u64) -> ! {
@@ -416,6 +600,16 @@ pub fn run_self_test() -> bool {
     }
 
     write_line("selftest: allowed-checks");
+    if !test_allowed_capabilities_on_core_service() {
+        write_line("selftest: capability check failed");
+        return false;
+    }
+
+    if !fileio_self_test() {
+        write_line("selftest: fs-test failed");
+        return false;
+    }
+
     true
 }
 

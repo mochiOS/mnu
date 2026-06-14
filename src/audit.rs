@@ -267,7 +267,7 @@ fn should_force_flush(kind: AuditEventKind) -> bool {
 }
 
 fn maybe_flush_to_disk(kind: AuditEventKind) {
-    if !crate::kmod::fs::is_loaded() {
+    if !crate::cext::fs::is_loaded() {
         return;
     }
 
@@ -279,7 +279,7 @@ fn maybe_flush_to_disk(kind: AuditEventKind) {
 }
 
 pub fn flush_to_disk() {
-    if !crate::kmod::fs::is_loaded() {
+    if !crate::cext::fs::is_loaded() {
         return;
     }
 
@@ -292,5 +292,5 @@ pub fn flush_to_disk() {
     if snapshot.len() < AUDIT_FILE_CAPACITY {
         snapshot.resize(AUDIT_FILE_CAPACITY, 0);
     }
-    let _ = crate::kmod::fs::write_all("/log/audit.log", 0, &snapshot);
+    let _ = crate::cext::fs::write_all("/log/audit.log", 0, &snapshot);
 }

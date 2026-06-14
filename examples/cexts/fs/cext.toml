@@ -1,0 +1,8 @@
+name = "fs"
+kind = "Filesystem"
+version = 1
+entry = "src/lib.rs"
+
+[build]
+target = "x86_64-unknown-none"
+crate_type = "cdylib"

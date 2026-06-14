@@ -584,7 +584,7 @@ impl ProcessTable {
 }
 
 pub(crate) fn driver_alias_for_path(path: &str) -> Option<String> {
-    let data = crate::kmod::fs::read_all("/config/drivers.list")?;
+    let data = crate::cext::fs::read_all("/config/drivers.list")?;
     let text = core::str::from_utf8(&data).ok()?;
     for line in text.lines() {
         let line = line.trim();
