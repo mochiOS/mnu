@@ -80,7 +80,7 @@ pub struct RegisteredDriver {
 }
 
 static DRIVERS: Mutex<Option<BTreeMap<String, RegisteredDriver>>> = Mutex::new(None);
-static DEVICE_ASSIGNMENTS: Mutex<Option<BTreeMap<u64, String>>> = Mutex::new(None);
+static DEVICE_ASSIGNMENTS: Mutex<Option<BTreeMap<u64, Option<String>>>> = Mutex::new(None);
 
 fn with_drivers_mut<R>(f: impl FnOnce(&mut BTreeMap<String, RegisteredDriver>) -> R) -> R {
     let mut guard = DRIVERS.lock();
@@ -88,7 +88,7 @@ fn with_drivers_mut<R>(f: impl FnOnce(&mut BTreeMap<String, RegisteredDriver>) -
     f(map)
 }
 
-fn with_assignments_mut<R>(f: impl FnOnce(&mut BTreeMap<u64, String>) -> R) -> R {
+fn with_assignments_mut<R>(f: impl FnOnce(&mut BTreeMap<u64, Option<String>>) -> R) -> R {
     let mut guard = DEVICE_ASSIGNMENTS.lock();
     let map = guard.get_or_insert_with(BTreeMap::new);
     f(map)
@@ -118,7 +118,7 @@ pub fn driver_manifest(id: &str) -> Option<DriverManifest> {
 
 pub fn register_device(device: PlugKitDevice) {
     with_assignments_mut(|assignments| {
-        assignments.entry(device.id().0).or_insert_with(String::new);
+        assignments.entry(device.id().0).or_insert(None);
     });
 }
 
@@ -161,9 +161,14 @@ pub fn bind_device_to_driver(device: &PlugKitDevice, driver_id: &str) -> PlugKit
         let Some(driver) = drivers.get(driver_id) else {
             return Err(PlugKitError::NoDevice);
         };
-        if driver.manifest.matches.iter().any(|rule| rule.matches(device)) {
+        if driver
+            .manifest
+            .matches
+            .iter()
+            .any(|rule| rule.matches(device))
+        {
             with_assignments_mut(|assignments| {
-                assignments.insert(device.id().0, driver_id.to_string());
+                assignments.insert(device.id().0, Some(driver_id.to_string()));
             });
             Ok(())
         } else {
@@ -173,7 +178,7 @@ pub fn bind_device_to_driver(device: &PlugKitDevice, driver_id: &str) -> PlugKit
 }
 
 pub fn assigned_driver(device: &PlugKitDevice) -> Option<String> {
-    with_assignments_mut(|assignments| assignments.get(&device.id().0).cloned())
+    with_assignments_mut(|assignments| assignments.get(&device.id().0).cloned().flatten())
 }
 
 pub fn emit_event(event: PlugKitEvent) -> PlugKitResult<()> {
