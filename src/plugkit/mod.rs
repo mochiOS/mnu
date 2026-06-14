@@ -12,7 +12,7 @@ pub use plugkit_sys::{
 
 mod package;
 
-pub use package::{discover_packages, package_manifest, package_manifests, PackageManifest};
+pub use package::{package_manifest, package_manifests, register_package, PackageManifest};
 
 #[derive(Clone, Debug)]
 pub struct MatchRule {
@@ -178,13 +178,6 @@ pub fn assigned_driver(device: &PlugKitDevice) -> Option<String> {
 
 pub fn emit_event(event: PlugKitEvent) -> PlugKitResult<()> {
     plugkit_sys::emit_event(event)
-}
-
-pub fn init_runtime() {
-    let discovered = discover_packages("/library/extensions");
-    if discovered > 0 {
-        crate::info!("plugkit: discovered {} package(s)", discovered);
-    }
 }
 
 // 　_(ﾟДﾟ)_

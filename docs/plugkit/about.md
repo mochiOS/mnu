@@ -24,8 +24,10 @@ PlugKitは、PlugKitDriverがカーネル内部構造へ直接アクセスしな
 PlugKitDriverは、カーネルからケーパビリティに基づいて渡されたhandleを通じてデバイスやリソースを操作します。
 これにより、ユーザー空間ドライバであっても、許可されていないデバイスやリソースへ直接アクセスできないようにします。
 
-PlugKitDriverは、rootfsの/library/extensions/に配置します。
-PlugKitDriverの形式は以下のとおりです。
+PlugKitDriverの配置と検出はserviceが担当します。
+kernelは特定のディレクトリを特別扱いせず、serviceから渡されるmanifestとパッケージ情報を元にPlugKitDriverを管理します。
+
+PlugKitDriverパッケージの形式は以下のとおりです。
 
 ```
 /foo.driver
@@ -35,6 +37,8 @@ PlugKitDriverの形式は以下のとおりです。
 
 about.tomlは、PlugKitDriverのメタデータを記述するファイルです。
 entry.elfは、PlugKitDriverの実装を含むELF形式のバイナリファイルです。
+
+配置先のディレクトリやパッケージ探索規則はserviceが決めます。kernelは場所を前提にしません。
 
 ## メタデータ
 about.tomlには、PlugKitDriverのメタデータを記述します。
@@ -113,6 +117,8 @@ interfaces = [ "net.device" ]
 ## 実行モデル
 
 PlugKitDriverはユーザー空間プロセスとして起動します。
+serviceは、必要な場所に配置されたPlugKitDriverパッケージを検出し、manifestを読み取り、対象デバイスに対応するPlugKitDriverを選びます。
+
 PlugKitは、対象デバイスに対応するPlugKitDriverを選び、必要なhandleを渡して起動します。
 
 PlugKitDriverは、PlugKit APIを通してデバイス情報、MMIO、IRQ、DMAなどを操作します。
