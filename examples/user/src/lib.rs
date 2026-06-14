@@ -69,12 +69,16 @@ const SYS_EXIT: u64 = mnu_abi::SyscallNumber::Exit as u64;
 const SYS_GETPID: u64 = mnu_abi::SyscallNumber::GetPid as u64;
 const SYS_GETTID: u64 = mnu_abi::SyscallNumber::GetTid as u64;
 const SYS_EXEC: u64 = mnu_abi::SyscallNumber::Exec as u64;
+const SYS_EXEC_WITH_CAPS: u64 = mnu_abi::SyscallNumber::ExecWithCapabilities as u64;
+const SYS_IPC_SEND: u64 = mnu_abi::SyscallNumber::IpcSend as u64;
+const SYS_IPC_RECV_WAIT: u64 = mnu_abi::SyscallNumber::IpcRecvWait as u64;
 const SYS_WAIT: u64 = mnu_abi::SyscallNumber::Wait as u64;
 const SYS_YIELD: u64 = mnu_abi::SyscallNumber::Yield as u64;
 const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
 const SYS_GET_TICKS: u64 = mnu_abi::SyscallNumber::GetTicks as u64;
 const SYS_CHECK_THREAD_CAPABILITY: u64 = mnu_abi::SyscallNumber::CheckThreadCapability as u64;
 const SYS_LIST_PROCESSES: u64 = mnu_abi::SyscallNumber::ListProcesses as u64;
+const SYS_FIND_PROCESS_BY_NAME: u64 = mnu_abi::SyscallNumber::FindProcessByName as u64;
 const SYS_FILE_OPEN: u64 = mnu_abi::SyscallNumber::FileOpen as u64;
 #[allow(dead_code)]
 const SYS_FILE_OPEN_AT: u64 = mnu_abi::SyscallNumber::FileOpenAt as u64;
@@ -83,6 +87,7 @@ const SYS_FILE_READ: u64 = mnu_abi::SyscallNumber::FileRead as u64;
 const SYS_FILE_WRITE: u64 = mnu_abi::SyscallNumber::FileWrite as u64;
 const SYS_FILE_SEEK: u64 = mnu_abi::SyscallNumber::FileSeek as u64;
 const STDOUT_FD: u64 = 1;
+const PLUGKIT_TEST_DRIVER_PATH: &str = "/plugkit/test/entry.elf";
 const FS_TEST_SIZE: usize = 1024 * 1024;
 static mut FS_TEST_WRITE_BUF: [u8; FS_TEST_SIZE] = [0x55; FS_TEST_SIZE];
 static mut FS_TEST_READ_BUF: [u8; FS_TEST_SIZE] = [0; FS_TEST_SIZE];
@@ -219,6 +224,105 @@ fn file_seek(fd: u64, offset: i64, whence: u64) -> u64 {
     unsafe { syscall3(SYS_FILE_SEEK, fd, offset as u64, whence) }
 }
 
+fn exec_with_capabilities(path: &str, caps: &[&str]) -> u64 {
+    let mut path_buf = [0u8; 128];
+    let path_bytes = path.as_bytes();
+    if path_bytes.len() + 1 > path_buf.len() {
+        return mnu_abi::EINVAL as u64;
+    }
+    path_buf[..path_bytes.len()].copy_from_slice(path_bytes);
+    path_buf[path_bytes.len()] = 0;
+
+    let mut caps_buf = [0u8; 256];
+    let mut len = 0usize;
+    for cap in caps {
+        let bytes = cap.as_bytes();
+        if len + bytes.len() + 1 >= caps_buf.len() {
+            return mnu_abi::EINVAL as u64;
+        }
+        caps_buf[len..len + bytes.len()].copy_from_slice(bytes);
+        len += bytes.len();
+        caps_buf[len] = 0;
+        len += 1;
+    }
+
+    unsafe {
+        syscall4(
+            SYS_EXEC_WITH_CAPS,
+            path_buf.as_ptr() as u64,
+            0,
+            caps_buf.as_ptr() as u64,
+            len as u64,
+        )
+    }
+}
+
+fn ipc_send(dest: u64, buf: &[u8]) -> u64 {
+    unsafe { syscall3(SYS_IPC_SEND, dest, buf.as_ptr() as u64, buf.len() as u64) }
+}
+
+fn ipc_recv_wait(buf: &mut [u8]) -> u64 {
+    unsafe { syscall2(SYS_IPC_RECV_WAIT, buf.as_mut_ptr() as u64, buf.len() as u64) }
+}
+
+fn find_process_by_name(name: &str) -> u64 {
+    let mut name_buf = [0u8; 64];
+    let bytes = name.as_bytes();
+    if bytes.len() > name_buf.len() {
+        return 0;
+    }
+    name_buf[..bytes.len()].copy_from_slice(bytes);
+    unsafe { syscall2(SYS_FIND_PROCESS_BY_NAME, name_buf.as_ptr() as u64, bytes.len() as u64) }
+}
+
+fn launch_plugkit_test_driver() -> Option<u64> {
+    let pid = exec_with_capabilities(
+        PLUGKIT_TEST_DRIVER_PATH,
+        &["ipc.client", "ipc.server", "fs.read.all", "fs.write.all"],
+    );
+    if pid & (1u64 << 63) != 0 || pid == 0 {
+        None
+    } else {
+        for _ in 0..100 {
+            let tid = find_process_by_name("com.mnu.plugkit.test.null");
+            if tid != 0 {
+                return Some(tid);
+            }
+            let tid = find_process_by_name(PLUGKIT_TEST_DRIVER_PATH);
+            if tid != 0 {
+                return Some(tid);
+            }
+            let _ = yield_now();
+        }
+        None
+    }
+}
+
+fn recv_ipc_response(buf: &mut [u8]) -> Option<(u64, usize)> {
+    let rc = ipc_recv_wait(buf);
+    if rc == 0 || rc & (1u64 << 63) != 0 {
+        return None;
+    }
+    Some((rc >> 32, (rc & 0xffff_ffff) as usize))
+}
+
+fn ipc_round_trip(dest: u64, msg: &str, buf: &mut [u8]) -> Option<usize> {
+    let sent = ipc_send(dest, msg.as_bytes());
+    if sent & (1u64 << 63) != 0 {
+        return None;
+    }
+    loop {
+        let (from, len) = recv_ipc_response(buf)?;
+        if from == dest && len <= buf.len() {
+            let text = core::str::from_utf8(&buf[..len]).ok()?;
+            if text == "ready" {
+                continue;
+            }
+            return Some(len);
+        }
+    }
+}
+
 struct LineBuf {
     buf: [u8; 160],
     len: usize,
@@ -337,6 +441,98 @@ fn fileio_self_test() -> bool {
         && wo_read_errno == mnu_abi::EACCES as u64
 }
 
+fn plugkit_ipc_self_test() -> bool {
+    let Some(driver_tid) = launch_plugkit_test_driver() else {
+        write_line("plugkit-test: driver launch failed");
+        return false;
+    };
+    let tid_line = format_line("plugkit-test tid", driver_tid, 0, 0.0);
+    write_line(tid_line.as_str());
+    for cap in ["ipc.client", "ipc.server", "fs.write.all"] {
+        let mut line = [0u8; 64];
+        let prefix = b"plugkit-test cap ";
+        line[..prefix.len()].copy_from_slice(prefix);
+        let mut len = prefix.len();
+        let bytes = cap.as_bytes();
+        line[len..len + bytes.len()].copy_from_slice(bytes);
+        len += bytes.len();
+        line[len..len + 3].copy_from_slice(b" = ");
+        len += 3;
+        let ok = thread_has_capability(driver_tid, cap);
+        let value = if ok { b"yes" } else { b"no " };
+        line[len..len + value.len()].copy_from_slice(value);
+        len += value.len();
+        if let Ok(text) = core::str::from_utf8(&line[..len]) {
+            write_line(text);
+        }
+    }
+    let mut proc_buf = [0u8; 2048];
+    let count = list_processes(&mut proc_buf);
+    if count > 0 {
+        let record_size = 88usize;
+        let max_records = core::cmp::min(count as usize, proc_buf.len() / record_size);
+        for idx in 0..max_records {
+            let start = idx * record_size;
+            let end = start + record_size;
+            if process_record_matches_name(
+                &proc_buf[start..end],
+                b"com.mnu.plugkit.test.null",
+            ) {
+                let state = process_record_state(&proc_buf[start..end]);
+                let mut line = LineBuf::new();
+                let _ = core::fmt::write(
+                    &mut line,
+                    format_args!("plugkit-test state {}", state),
+                );
+                write_line(line.as_str());
+                break;
+            }
+        }
+    }
+    for _ in 0..20 {
+        if find_process_state_by_name(b"com.mnu.plugkit.test.null") == Some(3) {
+            break;
+        }
+        let _ = yield_now();
+    }
+    let _ = yield_now();
+
+    let commands = [
+        ("manifest", "ok manifest com.mnu.plugkit.test.null"),
+        ("match", "ok match"),
+        ("start", "ok start"),
+        ("io", "io mmio=1 irq=1 ok"),
+        ("deny missing.cap", "err PermissionDenied"),
+        ("start-fail missing.cap", "err PermissionDenied cleanup=ok"),
+        ("stop", "ok stop"),
+        ("logs", "ok logs"),
+        ("shutdown", "ok shutdown"),
+    ];
+
+    for (cmd, expected) in commands.iter() {
+        let mut buf = [0u8; 1024];
+        let Some(len) = ipc_round_trip(driver_tid, cmd, &mut buf) else {
+            write_line("plugkit-test: ipc round trip failed");
+            return false;
+        };
+        let Ok(resp) = core::str::from_utf8(&buf[..len]) else {
+            return false;
+        };
+        if !resp.contains(expected) {
+            write_line("plugkit-test: response mismatch");
+            return false;
+        }
+    }
+
+    match wait_for_any_child() {
+        Ok((_pid, status)) if status == 0 => true,
+        _ => {
+            write_line("plugkit-test: child wait failed");
+            false
+        }
+    }
+}
+
 pub fn exit(code: u64) -> ! {
     unsafe {
         let _ = syscall1(SYS_EXIT, code);
@@ -380,6 +576,20 @@ pub fn list_processes(buf: &mut [u8]) -> u64 {
 
 pub fn has_capability(cap_name: &str) -> bool {
     let tid = gettid();
+    if tid == 0 {
+        return false;
+    }
+    unsafe {
+        syscall3(
+            SYS_CHECK_THREAD_CAPABILITY,
+            tid,
+            cap_name.as_ptr() as u64,
+            cap_name.len() as u64,
+        ) == 1
+    }
+}
+
+fn thread_has_capability(tid: u64, cap_name: &str) -> bool {
     if tid == 0 {
         return false;
     }
@@ -504,6 +714,31 @@ fn process_record_matches_name(record: &[u8], expected_name: &[u8]) -> bool {
     name[expected_name.len()..].iter().copied().all(|b| b == 0)
 }
 
+fn process_record_state(record: &[u8]) -> u64 {
+    u64::from_ne_bytes([
+        record[16], record[17], record[18], record[19], record[20], record[21], record[22],
+        record[23],
+    ])
+}
+
+fn find_process_state_by_name(expected_name: &[u8]) -> Option<u64> {
+    let mut proc_buf = [0u8; 2048];
+    let count = list_processes(&mut proc_buf);
+    if count == 0 {
+        return None;
+    }
+    let record_size = 88usize;
+    let max_records = core::cmp::min(count as usize, proc_buf.len() / record_size);
+    for idx in 0..max_records {
+        let start = idx * record_size;
+        let end = start + record_size;
+        if process_record_matches_name(&proc_buf[start..end], expected_name) {
+            return Some(process_record_state(&proc_buf[start..end]));
+        }
+    }
+    None
+}
+
 pub fn test_syscall_list_processes_includes_core_service() -> bool {
     let mut buf = [0u8; 2048];
     let count = list_processes(&mut buf);
@@ -607,6 +842,11 @@ pub fn run_self_test() -> bool {
 
     if !fileio_self_test() {
         write_line("selftest: fs-test failed");
+        return false;
+    }
+
+    if !plugkit_ipc_self_test() {
+        write_line("selftest: plugkit-test failed");
         return false;
     }
 

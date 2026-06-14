@@ -10,9 +10,9 @@ pub use plugkit_sys::{
     device_exists, emit_event, log_error, log_info, log_warn, register_device, register_interface,
     take_events, take_logs, unregister_device, unregister_interface, DmaBuffer, DmaHandle,
     DeviceBus, DeviceBytes, DeviceClass, DeviceId, DeviceName, DevicePath, DeviceProperty,
-    DeviceString, DriverDescriptor, InterfaceHandle, Irq, IrqEvent, Mmio, MmioHandle, PciConfig,
-    PciConfigHandle, PlugKitDevice, PlugKitError, PlugKitEvent, PlugKitResources, PlugKitResult,
-    ProbeResult,
+    DeviceSpec, DeviceString, DriverDescriptor, InterfaceHandle, Irq, IrqEvent, Mmio, MmioHandle,
+    PciConfig, PciConfigHandle, PlugKitDevice, PlugKitError, PlugKitEvent, PlugKitResources,
+    PlugKitResult, ProbeResult,
 };
 
 pub trait PlugKitDriver {
@@ -38,8 +38,9 @@ pub mod prelude {
         device_exists, driver, driver_descriptor, emit_event, log_error, log_info, log_warn,
         register_device, register_interface, take_events, take_logs, unregister_device,
         unregister_interface, DeviceBus, DeviceBytes, DeviceClass, DeviceId, DeviceName,
-        DevicePath, DeviceProperty, DeviceString, DmaBuffer, DmaHandle, InterfaceHandle, Irq,
-        IrqEvent, Mmio, MmioHandle, PciConfig, PciConfigHandle, PlugKitDevice, PlugKitDriver,
-        PlugKitError, PlugKitEvent, PlugKitResources, PlugKitResult, ProbeResult,
+        DevicePath, DeviceProperty, DeviceSpec, DeviceString, DmaBuffer, DmaHandle,
+        InterfaceHandle, Irq, IrqEvent, Mmio, MmioHandle, PciConfig, PciConfigHandle,
+        PlugKitDevice, PlugKitDriver, PlugKitError, PlugKitEvent, PlugKitResources,
+        PlugKitResult, ProbeResult,
     };
 }

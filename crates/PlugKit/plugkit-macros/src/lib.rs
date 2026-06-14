@@ -11,7 +11,7 @@ pub fn driver(input: TokenStream) -> TokenStream {
 
     let expanded = format!(
         r#"
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn plugkit_driver_entry() -> *const ::plugkit::DriverDescriptor {{
             ::plugkit::driver_descriptor::<{ty}>() as *const ::plugkit::DriverDescriptor
         }}

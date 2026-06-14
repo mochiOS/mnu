@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [workspace]
-members = ["crates/PlugKit/plugkit", "crates/PlugKit/plugkit-macros","crates/PlugKit/plugkit-sys","examples/user"]
+members = ["crates/PlugKit/plugkit", "crates/PlugKit/plugkit-macros","crates/PlugKit/plugkit-sys","examples/user","examples/plugkit/test"]
 default-members = [".", "examples/user"]
 exclude = ["examples/boot"]
 

@@ -9,6 +9,7 @@ USER_TARGET_NAME="x86_64-unknown-none"
 
 USER_BUILD_DIR="${TARGET_DIR}/user-build"
 BOOT_BUILD_DIR="${TARGET_DIR}/boot-build"
+PLUGKIT_BUILD_DIR="${TARGET_DIR}/plugkit-build"
 
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
@@ -56,6 +57,8 @@ need_file "${ROOT_DIR}/Cargo.toml"
 need_file "${ROOT_DIR}/examples/user/Cargo.toml"
 need_file "${ROOT_DIR}/examples/user/linker.ld"
 need_file "${ROOT_DIR}/examples/boot/Cargo.toml"
+need_file "${ROOT_DIR}/examples/plugkit/test/Cargo.toml"
+need_file "${ROOT_DIR}/examples/plugkit/test/about.toml"
 need_file "${ROOT_DIR}/scripts/cexts.sh"
 need_file "${ROOT_DIR}/scripts/rootfs.sh"
 
@@ -86,6 +89,18 @@ CAPTEST_BIN="${USER_BUILD_DIR}/${USER_TARGET_NAME}/release/captest"
 
 need_file "${USER_BIN}"
 need_file "${CAPTEST_BIN}"
+
+echo "[build] plugkit test"
+env RUSTFLAGS="-C relocation-model=static -C link-arg=-T${ROOT_DIR}/examples/user/linker.ld -C link-arg=-no-pie" \
+    cargo build \
+    --locked \
+    --release \
+    --target "${USER_TARGET_NAME}" \
+    --target-dir "${PLUGKIT_BUILD_DIR}" \
+    --manifest-path "${ROOT_DIR}/examples/plugkit/test/Cargo.toml"
+
+PLUGKIT_TEST_BIN="${PLUGKIT_BUILD_DIR}/${USER_TARGET_NAME}/release/entry"
+need_file "${PLUGKIT_TEST_BIN}"
 
 echo "[check] user binary used for initfs: ${USER_BIN}"
 stat "${USER_BIN}"
@@ -128,6 +143,9 @@ install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/core.service"
 install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/captest.bin"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/hello.bin"
+mkdir -p "${INITFS_STAGE}/plugkit/test"
+install -m 0644 "${ROOT_DIR}/examples/plugkit/test/about.toml" "${INITFS_STAGE}/plugkit/test/about.toml"
+install -m 0755 "${PLUGKIT_TEST_BIN}" "${INITFS_STAGE}/plugkit/test/entry.elf"
 stage_module_cexts
 
 echo "[build] rootfs"
