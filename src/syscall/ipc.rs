@@ -52,7 +52,9 @@ pub fn endpoint_for_thread(thread_id: u64) -> Option<IpcEndpoint> {
 
 pub fn endpoint_is_valid(endpoint: IpcEndpoint) -> bool {
     match crate::task::thread_slot_index_and_generation_by_u64(endpoint.thread_id) {
-        Some((slot, generation)) => slot as u16 == endpoint.slot && generation == endpoint.generation,
+        Some((slot, generation)) => {
+            slot as u16 == endpoint.slot && generation == endpoint.generation
+        }
         None => false,
     }
 }
@@ -603,7 +605,7 @@ fn map_external_pages_for_receiver(
     total: u64,
     ext_pages_count: u16,
     ext_pages: &[u64; MAX_EXT_PAGES],
-) -> Result<u64, u64> {
+) -> Result<ExternalPageMapping, u64> {
     if ext_pages_count == 0 || ext_pages_count as usize > ext_pages.len() {
         return Err(EINVAL);
     }
@@ -662,7 +664,37 @@ fn map_external_pages_for_receiver(
         }
     }
 
-    Ok(virt_addr)
+    Ok(ExternalPageMapping {
+        target_pid,
+        page_table,
+        virt_addr,
+        old_end: reserved_heap_old.unwrap_or(0),
+        new_end: reserved_heap_new.unwrap_or(0),
+        page_count: ext_pages_count as usize,
+    })
+}
+
+struct ExternalPageMapping {
+    target_pid: crate::task::ProcessId,
+    page_table: u64,
+    virt_addr: u64,
+    old_end: u64,
+    new_end: u64,
+    page_count: usize,
+}
+
+impl ExternalPageMapping {
+    fn rollback(&self) {
+        for i in 0..self.page_count {
+            let rollback_virt = self.virt_addr + (i as u64 * 0x1000);
+            let _ = crate::mem::paging::unmap_page_in_table(self.page_table, rollback_virt);
+        }
+        let _ = crate::task::with_process_mut(self.target_pid, |p| {
+            if p.heap_end() == self.new_end {
+                p.set_heap_end(self.old_end);
+            }
+        });
+    }
 }
 
 fn prepare_external_pages_for_user(
@@ -671,9 +703,9 @@ fn prepare_external_pages_for_user(
     copy_len: usize,
     ext_pages_count: u16,
     ext_pages: &[u64; MAX_EXT_PAGES],
-) -> Result<usize, u64> {
+) -> Result<(usize, Option<ExternalPageMapping>), u64> {
     if ext_pages_count == 0 {
-        return Ok(copy_len);
+        return Ok((copy_len, None));
     }
     crate::debug!("[IPC RCV] prepare_external_pages_for_user receiver={} copy_len={} ext_pages_count={} data={:02x?}", receiver_tid, copy_len, ext_pages_count, &recv_buf[0..16]);
     if copy_len < 16 || recv_buf.len() < 16 {
@@ -706,9 +738,9 @@ fn prepare_external_pages_for_user(
         ext_pages_count,
         ext_pages,
     )?;
-    recv_buf[0..8].copy_from_slice(&mapped_addr.to_le_bytes());
+    recv_buf[0..8].copy_from_slice(&mapped_addr.virt_addr.to_le_bytes());
     recv_buf[8..16].copy_from_slice(&total.to_le_bytes());
-    Ok(16)
+    Ok((16, Some(mapped_addr)))
 }
 
 /// IPC受信
@@ -746,19 +778,22 @@ pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
         }
     };
     // NOTE: デバッグログは大量になりやすいので、通常は出さない
-    let copy_len = match prepare_external_pages_for_user(
+    let (copy_len, mapping) = match prepare_external_pages_for_user(
         receiver,
         &mut recv_buf,
         copy_len,
         ext_pages_count,
         &ext_pages,
     ) {
-        Ok(n) => n,
+        Ok(v) => v,
         Err(e) => return e,
     };
 
     if copy_len > 0 && buf_ptr != 0 {
         if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len]) {
+            if let Some(mapping) = mapping.as_ref() {
+                mapping.rollback();
+            }
             return err;
         }
     }
@@ -818,18 +853,21 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
 
         match recv {
             Some((from, copy_len, ext_pages_count, ext_pages)) => {
-                let copy_len = match prepare_external_pages_for_user(
+                let (copy_len, mapping) = match prepare_external_pages_for_user(
                     receiver_u64,
                     &mut recv_buf,
                     copy_len,
                     ext_pages_count,
                     &ext_pages,
                 ) {
-                    Ok(n) => n,
+                    Ok(v) => v,
                     Err(e) => return e,
                 };
                 if copy_len > 0 && buf_ptr != 0 {
                     if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len]) {
+                        if let Some(mapping) = mapping.as_ref() {
+                            mapping.rollback();
+                        }
                         return err;
                     }
                 }
@@ -846,8 +884,8 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
                 // waiter 登録直後に送信が走った場合、wake を落とさないよう再確認する。
                 {
                     let mut boxes = MAILBOXES.lock();
-                    if let Some((from, copy_len, ext_pages_count, ext_pages)) =
-                        boxes[idx].pop_valid_for_receiver_copy(
+                    if let Some((from, copy_len, ext_pages_count, ext_pages)) = boxes[idx]
+                        .pop_valid_for_receiver_copy(
                             receiver_u64,
                             idx as u16,
                             receiver_generation,
@@ -858,20 +896,23 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
                             boxes[idx].waiter = 0;
                         }
                         drop(boxes);
-                        let copy_len = match prepare_external_pages_for_user(
+                        let (copy_len, mapping) = match prepare_external_pages_for_user(
                             receiver_u64,
                             &mut recv_buf,
                             copy_len,
                             ext_pages_count,
                             &ext_pages,
                         ) {
-                            Ok(n) => n,
+                            Ok(v) => v,
                             Err(e) => return e,
                         };
                         if copy_len > 0 && buf_ptr != 0 {
                             if let Err(err) =
                                 crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len])
                             {
+                                if let Some(mapping) = mapping.as_ref() {
+                                    mapping.rollback();
+                                }
                                 return err;
                             }
                         }
