@@ -67,23 +67,39 @@ cext_manifest_value() {
     sed -n "s/^${key}[[:space:]]*=[[:space:]]*\"\(.*\)\"[[:space:]]*$/\1/p" "${file}" | head -n 1
 }
 
+cext_manifest_number() {
+    local key="$1"
+    local file="$2"
+    sed -n "s/^${key}[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p" "${file}" | head -n 1
+}
+
 stage_module_cexts() {
     local modules_dir="${INITFS_STAGE}/Modules"
+    local manifest_file="${INITFS_STAGE}/cexts.manifest"
     mkdir -p "${modules_dir}"
     : > "${modules_dir}/modules.sha256"
+    : > "${manifest_file}"
 
     while IFS= read -r -d '' manifest; do
         local cext_dir
         cext_dir="$(dirname "${manifest}")"
-        local name kind artifact artifact_path staged_path digest
+        local name kind version artifact artifact_path staged_path digest
 
         name="$(cext_manifest_value "name" "${manifest}")"
         kind="$(cext_manifest_value "kind" "${manifest}")"
+        version="$(cext_manifest_number "version" "${manifest}")"
         artifact="$(cext_manifest_value "artifact" "${manifest}")"
 
-        if [[ -z "${name}" || -z "${kind}" ]]; then
+        if [[ -z "${name}" || -z "${kind}" || -z "${version}" ]]; then
             die "invalid cext manifest: ${manifest}"
         fi
+
+        printf '%s|%s|%s|%s|%s\n' \
+            "${name}" \
+            "${kind}" \
+            "${version}" \
+            "${artifact}" \
+            "${manifest}" >> "${manifest_file}"
 
         if [[ "${kind}" == "built-in" ]]; then
             continue

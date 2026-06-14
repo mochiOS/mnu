@@ -2,3 +2,4 @@ name = "fs"
 kind = "built-in"
 version = 1
 entry = "src/lib.rs"
+type = "filesystem"
