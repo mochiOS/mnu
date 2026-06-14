@@ -52,6 +52,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     fs::init();
     crate::config::init();
     crate::cext::init_runtime_config();
+    crate::cext::register_builtin_cext("disk", crate::cext::CextKind::BlockDevice);
     crate::cext::register_builtin_cext("fs", crate::cext::CextKind::Filesystem);
     crate::cext::load_modules();
     if crate::cext::fs::is_loaded() {

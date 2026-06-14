@@ -1,5 +1,5 @@
-name = "fs"
+name = "disk"
 kind = "built-in"
 version = 1
 entry = "builtin"
-type = "filesystem"
+type = "storage"
