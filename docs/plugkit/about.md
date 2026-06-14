@@ -25,6 +25,7 @@ PlugKitDriverは、カーネルからケーパビリティに基づいて渡さ�
 これにより、ユーザー空間ドライバであっても、許可されていないデバイスやリソースへ直接アクセスできないようにします。
 
 PlugKitDriverの配置と検出はserviceが担当します。
+serviceはパッケージを配置し、`about.toml` を読み、kernelのPlugKit登録APIへmanifestを渡します。
 kernelは特定のディレクトリを特別扱いせず、serviceから渡されるmanifestとパッケージ情報を元にPlugKitDriverを管理します。
 
 PlugKitDriverパッケージの形式は以下のとおりです。
