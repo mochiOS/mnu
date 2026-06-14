@@ -45,6 +45,7 @@ need_cmd mcopy
 need_cmd readelf
 need_cmd strings
 need_cmd stat
+need_cmd sha256sum
 need_cmd tee
 need_cmd sed
 need_cmd wc
@@ -59,6 +60,58 @@ need_file "${ROOT_DIR}/examples/fs/hello.txt"
 need_file "${ROOT_DIR}/examples/fs/config/kernel.conf"
 
 mkdir -p "${TARGET_DIR}" "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}" "${ROOTFS_STAGE}/config"
+
+cext_manifest_value() {
+    local key="$1"
+    local file="$2"
+    sed -n "s/^${key}[[:space:]]*=[[:space:]]*\"\(.*\)\"[[:space:]]*$/\1/p" "${file}" | head -n 1
+}
+
+stage_module_cexts() {
+    local modules_dir="${INITFS_STAGE}/Modules"
+    mkdir -p "${modules_dir}"
+    : > "${modules_dir}/modules.sha256"
+
+    while IFS= read -r -d '' manifest; do
+        local cext_dir
+        cext_dir="$(dirname "${manifest}")"
+        local name kind artifact artifact_path staged_path digest
+
+        name="$(cext_manifest_value "name" "${manifest}")"
+        kind="$(cext_manifest_value "kind" "${manifest}")"
+        artifact="$(cext_manifest_value "artifact" "${manifest}")"
+
+        if [[ -z "${name}" || -z "${kind}" ]]; then
+            die "invalid cext manifest: ${manifest}"
+        fi
+
+        if [[ "${kind}" == "built-in" ]]; then
+            continue
+        fi
+
+        if [[ "${kind}" != "module" ]]; then
+            die "unsupported cext kind '${kind}' in ${manifest}"
+        fi
+
+        if [[ -z "${artifact}" ]]; then
+            die "module cext '${name}' is missing artifact path in ${manifest}"
+        fi
+
+        artifact_path="${artifact}"
+        if [[ "${artifact_path}" != /* ]]; then
+            artifact_path="${cext_dir}/${artifact_path}"
+        fi
+        if [[ ! -f "${artifact_path}" ]]; then
+            die "module artifact not found: ${artifact_path}"
+        fi
+
+        staged_path="${modules_dir}/${name}.cext"
+        install -m 0644 "${artifact_path}" "${staged_path}"
+        digest="$(sha256sum "${staged_path}" | awk '{print $1}')"
+        printf '%s = %s\n' "${name}.cext" "${digest}" >> "${modules_dir}/modules.sha256"
+        install -m 0644 "${manifest}" "${modules_dir}/${name}.toml"
+    done < <(find "${ROOT_DIR}/examples/cexts" -mindepth 2 -maxdepth 2 -name cext.toml -print0)
+}
 
 echo "[build] kernel"
 cargo build \
@@ -124,6 +177,7 @@ install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/core.service"
 install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/captest.bin"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/hello.bin"
+stage_module_cexts
 
 install -m 0644 "${ROOT_DIR}/examples/fs/hello.txt" "${ROOTFS_STAGE}/hello.txt"
 install -m 0644 "${ROOT_DIR}/examples/fs/config/kernel.conf" "${ROOTFS_STAGE}/config/kernel.conf"
