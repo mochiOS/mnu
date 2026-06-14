@@ -31,7 +31,12 @@ fn with_packages<R>(f: impl FnOnce(&BTreeMap<String, PackageManifest>) -> R) -> 
 
 pub fn register_package(manifest: PackageManifest) -> bool {
     with_packages_mut(|packages| {
+        if packages.contains_key(&manifest.package_id) {
+            return false;
+        }
+
         packages.insert(manifest.package_id.clone(), manifest);
+        true
     });
     true
 }
