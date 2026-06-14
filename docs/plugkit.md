@@ -36,4 +36,84 @@ PlugKitDriverの形式は以下のとおりです。
 about.tomlは、PlugKitDriverのメタデータを記述するファイルです。
 entry.elfは、PlugKitDriverの実装を含むELF形式のバイナリファイルです。
 
-メタデータの詳細はまだ未定です。
+## メタデータ
+about.tomlには、PlugKitDriverのメタデータを記述します。
+以下は、about.tomlの例です。
+
+```toml
+[driver]
+id = "com.example.net"
+name = "VirtIO Network Driver"
+version = "0.1.0"
+description = "A driver for VirtIO network devices."
+developer = "Example"
+entry = "entry.elf"
+
+[plugkit]
+api = "1"
+driver_class = "network"
+
+[[match]]
+bus = "pci"
+vendor_id = "0x1af4"
+device_id = "0x1000"
+
+[capabilities]
+requires = [
+    "device.pci.config",
+    "device.mmio.map",
+    "irq.bind",
+    "dma.map",
+    "ipc.server"
+]
+
+[provides] 
+interfaces = [ "net.device" ]
+
+```
+
+- `[driver]`セクションは、PlugKitDriverの基本情報を記述します。
+- `[plugkit]`セクションは、PlugKitに関する情報を記述します。
+- `[match]`セクションは、PlugKitDriverが対応するデバイスの検出条件を記述します。
+- `[capabilities]`セクションは、PlugKitDriverが必要とするケーパビリティを記述します。
+- `[provides]`セクションは、PlugKitDriverが提供するインターフェースを記述します。
+
+それぞれのキーの意味は以下のとおりです。
+
+- `id`: PlugKitDriverの一意な識別子
+- `name`: PlugKitDriverの表示名
+- `version`: PlugKitDriverのバージョン
+- `description`: PlugKitDriverの説明
+- `developer`: PlugKitDriverの開発者/組織
+- `entry`: PlugKitDriverの実装が含まれるELFファイルの名前
+- `api`: PlugKitのAPIバージョン
+- `driver_class`: PlugKitDriverのクラス（任意の文字列で、ドライバのカテゴリを表す）
+- `bus`: デバイスのバス（例: "pci", "usb", "virtio"など）
+- `vendor_id`: デバイスのベンダーID（16進数形式）
+- `device_id`: デバイスのデバイスID（16進数形式）
+- `requires`: PlugKitDriverが必要とするケーパビリティのリスト
+- `interfaces`: PlugKitDriverが提供するインターフェースのリスト
+
+`driver_class`は、ドライバのカテゴリを表す任意の文字列です。次のものを利用することが推奨されますが、必須ではありません。
+
+- `network`: ネットワークデバイスドライバ
+- `storage`: ストレージデバイスドライバ
+- `input`: 入力デバイスドライバ
+- `gpu`: グラフィックデバイスドライバ
+- `audio`: オーディオデバイスドライバ
+- `usb`: USBデバイスドライバ
+- `virtio`: VirtIOデバイスドライバ
+- `filesystem`: ファイルシステムドライバ
+- `block`: ブロックデバイスドライバ
+- `character`: キャラクタデバイスドライバ
+- `display`: ディスプレイドライバ
+- `input`: 入力ドライバ
+- `other`: 上記以外のドライバ
+
+## 実行モデル
+
+PlugKitDriverはユーザー空間プロセスとして起動します。
+PlugKitは、対象デバイスに対応するPlugKitDriverを選び、必要なhandleを渡して起動します。
+
+PlugKitDriverは、PlugKit APIを通してデバイス情報、MMIO、IRQ、DMAなどを操作します。
+PlugKitDriverが異常終了した場合、PlugKitはそのドライバを停止済みとして扱い、貸与していたhandleを回収します。
