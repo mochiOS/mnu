@@ -11,6 +11,7 @@ close $fh;
 chomp @lines;
 
 my @errors;
+my $max_line_length = 60;
 
 sub error {
     my ($line_no, $message) = @_;
@@ -20,6 +21,15 @@ sub error {
 sub get_line {
     my ($index) = @_;
     return defined $lines[$index] ? $lines[$index] : "";
+}
+
+for my $i (0 .. $#lines) {
+    my $line_no = $i + 1;
+    my $line = $lines[$i];
+
+    if (length($line) > $max_line_length) {
+        error($line_no, "line too long. max $max_line_length characters");
+    }
 }
 
 if (get_line(0) !~ /^the mnu kernel ChangeLog\s+- version \d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9._-]+)?$/) {
