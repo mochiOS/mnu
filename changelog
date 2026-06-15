@@ -1,6 +1,17 @@
-the mnu kernel ChangeLog   - version 0.1-rc1
-    Release date: 2026-06-14
-    Release creator: tas0dev
+the mnu kernel ChangeLog   - version 0.1-rc2
+    - Release date: 2026-06-
+    - Release creator: tas0dev
 
-    Changes:
-    - First Release
+Changes:
+* Fixed an issue that occurred when user
+  copying failed while receiving an IPC external page
+* Fixed an issue where drivers would be overwritten
+  if PlugKit driver IDs were duplicated.
+* Fixed an issue where unassigned PlugKit devices
+  were being recognized as assigned.
+* Fixed some bugs in the PlugKit.
+* Fixed an issue where service permissions were
+  being granted based solely on the path or filename.
+* Delete unused files.
+* Updated the documentations.
+* Updated the cext build system.
