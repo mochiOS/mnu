@@ -821,7 +821,7 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
             Some(Some(path)) => path,
             _ => return EINVAL,
         };
-        let data = match crate::kmod::fs::read_all(&path) {
+        let data = match crate::cext::fs::read_all(&path) {
             Some(data) => data,
             None => return ENOMEM,
         };
@@ -966,7 +966,7 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
                 let copy_len = core::cmp::min(4096u64, region.len() - page_off) as usize;
                 let mut page_buf = [0u8; 4096];
                 if crate::syscall::copy_from_user(page_addr, &mut page_buf[..copy_len]).is_ok() {
-                    let _ = crate::kmod::fs::write_all(&path, page_off, &page_buf[..copy_len]);
+                    let _ = crate::cext::fs::write_all(&path, page_off, &page_buf[..copy_len]);
                 }
             }
         }

@@ -65,6 +65,42 @@ pub fn endpoint_rights_for_process(_process_id: u64) -> EndpointRights {
     EndpointRights::SEND.union(EndpointRights::RECV)
 }
 
+pub fn resolve_endpoint_handle(dest: u64) -> Option<u64> {
+    crate::task::thread_slot_index_and_generation_by_u64(dest).map(|_| dest)
+}
+
+pub fn create(flags: u64, _reserved: u64) -> u64 {
+    if flags != 0 {
+        return EINVAL;
+    }
+    match crate::task::current_thread_id() {
+        Some(id) => id.as_u64(),
+        None => EINVAL,
+    }
+}
+
+pub fn call(
+    dest_thread_id: u64,
+    req_ptr: u64,
+    req_len: u64,
+    reply_ptr: u64,
+    reply_len: u64,
+) -> u64 {
+    let sent = send(dest_thread_id, req_ptr, req_len);
+    if sent != 0 {
+        return sent;
+    }
+    recv_blocking(reply_ptr, reply_len)
+}
+
+pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
+    send(dest_thread_id, buf_ptr, len)
+}
+
+pub fn wait(buf_ptr: u64, max_len: u64, _timeout: u64) -> u64 {
+    recv_blocking(buf_ptr, max_len)
+}
+
 pub fn send_to_endpoint(endpoint: IpcEndpoint, buf_ptr: u64, len: u64) -> u64 {
     if !endpoint_is_valid(endpoint) {
         return EINVAL;

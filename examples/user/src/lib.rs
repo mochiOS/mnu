@@ -2,6 +2,8 @@
 
 use core::arch::asm;
 
+pub mod fs_service;
+
 /// kernel 側 policy に渡す launch contract の userland 側表現
 ///
 /// ここでは manifest のパースは扱わず、固定のデータ形だけを検証する。
@@ -70,8 +72,39 @@ const SYS_GETPID: u64 = mnu_abi::SyscallNumber::GetPid as u64;
 const SYS_GETTID: u64 = mnu_abi::SyscallNumber::GetTid as u64;
 const SYS_EXEC: u64 = mnu_abi::SyscallNumber::Exec as u64;
 const SYS_EXEC_WITH_CAPS: u64 = mnu_abi::SyscallNumber::ExecWithCapabilities as u64;
+const SYS_PROCESS_EXIT: u64 = mnu_abi::SyscallNumber::ProcessExit as u64;
+const SYS_PROCESS_SPAWN: u64 = mnu_abi::SyscallNumber::ProcessSpawn as u64;
+const SYS_PROCESS_WAIT: u64 = mnu_abi::SyscallNumber::ProcessWait as u64;
+const SYS_THREAD_CREATE: u64 = mnu_abi::SyscallNumber::ThreadCreate as u64;
+const SYS_THREAD_EXIT: u64 = mnu_abi::SyscallNumber::ThreadExit as u64;
+const SYS_THREAD_YIELD: u64 = mnu_abi::SyscallNumber::ThreadYield as u64;
+const SYS_MEMORY_ALLOC: u64 = mnu_abi::SyscallNumber::MemoryAlloc as u64;
+const SYS_MEMORY_FREE: u64 = mnu_abi::SyscallNumber::MemoryFree as u64;
+const SYS_MEMORY_MAP: u64 = mnu_abi::SyscallNumber::MemoryMap as u64;
+const SYS_MEMORY_UNMAP: u64 = mnu_abi::SyscallNumber::MemoryUnmap as u64;
+const SYS_MEMORY_PROTECT: u64 = mnu_abi::SyscallNumber::MemoryProtect as u64;
+const SYS_MEMORY_SHARE: u64 = mnu_abi::SyscallNumber::MemoryShare as u64;
+const SYS_MEMORY_SYNC: u64 = mnu_abi::SyscallNumber::MemorySync as u64;
+const SYS_IPC_CREATE: u64 = mnu_abi::SyscallNumber::IpcCreate as u64;
+const SYS_IPC_CALL: u64 = mnu_abi::SyscallNumber::IpcCall as u64;
+const SYS_IPC_REPLY: u64 = mnu_abi::SyscallNumber::IpcReply as u64;
+const SYS_IPC_WAIT: u64 = mnu_abi::SyscallNumber::IpcWait as u64;
+const SYS_ALLOC_SHARED_PAGES: u64 = mnu_abi::SyscallNumber::AllocSharedPages as u64;
+const SYS_UNMAP_PAGES: u64 = mnu_abi::SyscallNumber::UnmapPages as u64;
+const SYS_IPC_SEND_PAGES: u64 = mnu_abi::SyscallNumber::IpcSendPages as u64;
 const SYS_IPC_SEND: u64 = mnu_abi::SyscallNumber::IpcSend as u64;
 const SYS_IPC_RECV_WAIT: u64 = mnu_abi::SyscallNumber::IpcRecvWait as u64;
+const SYS_CAP_CLONE: u64 = mnu_abi::SyscallNumber::CapClone as u64;
+const SYS_CAP_DROP: u64 = mnu_abi::SyscallNumber::CapDrop as u64;
+const SYS_CAP_TRANSFER: u64 = mnu_abi::SyscallNumber::CapTransfer as u64;
+const SYS_CAP_QUERY: u64 = mnu_abi::SyscallNumber::CapQuery as u64;
+const SYS_CAP_RESTRICT: u64 = mnu_abi::SyscallNumber::CapRestrict as u64;
+const SYS_EVENT_CREATE: u64 = mnu_abi::SyscallNumber::EventCreate as u64;
+const SYS_EVENT_WAIT: u64 = mnu_abi::SyscallNumber::EventWait as u64;
+const SYS_EVENT_SIGNAL: u64 = mnu_abi::SyscallNumber::EventSignal as u64;
+const SYS_EVENT_POLL: u64 = mnu_abi::SyscallNumber::EventPoll as u64;
+const SYS_TIME_NOW: u64 = mnu_abi::SyscallNumber::TimeNow as u64;
+const SYS_SERVICE_SPAWN: u64 = mnu_abi::SyscallNumber::ServiceSpawn as u64;
 const SYS_WAIT: u64 = mnu_abi::SyscallNumber::Wait as u64;
 const SYS_YIELD: u64 = mnu_abi::SyscallNumber::Yield as u64;
 const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
@@ -163,6 +196,26 @@ unsafe fn syscall3(n: u64, a0: u64, a1: u64, a2: u64) -> u64 {
 }
 
 #[inline(always)]
+unsafe fn syscall5(n: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+        "syscall",
+        inlateout("rax") n => ret,
+        in("rdi") a0,
+        in("rsi") a1,
+        in("rdx") a2,
+        in("r10") a3,
+        in("r8") a4,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack),
+        );
+    }
+    ret
+}
+
+#[inline(always)]
 #[allow(dead_code)]
 unsafe fn syscall4(n: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     let ret: u64;
@@ -188,6 +241,186 @@ pub fn write_str(s: &str) {
     }
 }
 
+pub fn write(fd: u64, ptr: u64, len: u64) -> u64 {
+    unsafe { syscall3(SYS_WRITE, fd, ptr, len) }
+}
+
+pub fn process_exit(code: u64) -> ! {
+    unsafe {
+        let _ = syscall1(SYS_PROCESS_EXIT, code);
+    }
+    loop {
+        unsafe {
+            asm!("pause", options(nomem, nostack, preserves_flags));
+        }
+    }
+}
+
+pub fn process_spawn(flags: u64, reserved: u64) -> u64 {
+    unsafe { syscall2(SYS_PROCESS_SPAWN, flags, reserved) }
+}
+
+pub fn process_wait(pid: u64, status_ptr: u64, flags: u64) -> u64 {
+    unsafe { syscall3(SYS_PROCESS_WAIT, pid, status_ptr, flags) }
+}
+
+pub fn thread_create(entry: u64, stack: u64, arg0: u64) -> u64 {
+    unsafe { syscall3(SYS_THREAD_CREATE, entry, stack, arg0) }
+}
+
+pub fn thread_exit(code: u64) -> ! {
+    unsafe {
+        let _ = syscall1(SYS_THREAD_EXIT, code);
+    }
+    loop {
+        unsafe {
+            asm!("pause", options(nomem, nostack, preserves_flags));
+        }
+    }
+}
+
+pub fn thread_yield() -> u64 {
+    unsafe { syscall0(SYS_THREAD_YIELD) }
+}
+
+pub fn memory_alloc(len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
+    unsafe { syscall5(SYS_MEMORY_ALLOC, len, prot, flags, fd, offset) }
+}
+
+pub fn memory_free(addr: u64, len: u64) -> u64 {
+    unsafe { syscall2(SYS_MEMORY_FREE, addr, len) }
+}
+
+pub fn memory_map(addr: u64, len: u64, prot: u64, flags: u64, fd: u64) -> u64 {
+    unsafe { syscall5(SYS_MEMORY_MAP, addr, len, prot, flags, fd) }
+}
+
+pub fn memory_unmap(addr: u64, len: u64) -> u64 {
+    unsafe { syscall2(SYS_MEMORY_UNMAP, addr, len) }
+}
+
+pub fn memory_protect(addr: u64, len: u64, prot: u64) -> u64 {
+    unsafe { syscall3(SYS_MEMORY_PROTECT, addr, len, prot) }
+}
+
+pub fn memory_share(addr: u64, len: u64, flags: u64) -> u64 {
+    unsafe { syscall3(SYS_MEMORY_SHARE, addr, len, flags) }
+}
+
+pub fn memory_sync(addr: u64, len: u64, flags: u64) -> u64 {
+    unsafe { syscall3(SYS_MEMORY_SYNC, addr, len, flags) }
+}
+
+pub fn ipc_create(flags: u64) -> u64 {
+    unsafe { syscall2(SYS_IPC_CREATE, flags, 0) }
+}
+
+pub fn ipc_call(endpoint: u64, req_ptr: u64, req_len: u64, reply_ptr: u64, reply_len: u64) -> u64 {
+    unsafe {
+        syscall5(
+            SYS_IPC_CALL,
+            endpoint,
+            req_ptr,
+            req_len,
+            reply_ptr,
+            reply_len,
+        )
+    }
+}
+
+pub fn ipc_reply(dest: u64, ptr: u64, len: u64) -> u64 {
+    unsafe { syscall3(SYS_IPC_REPLY, dest, ptr, len) }
+}
+
+pub fn ipc_wait(ptr: u64, len: u64, flags: u64) -> u64 {
+    unsafe { syscall3(SYS_IPC_WAIT, ptr, len, flags) }
+}
+
+pub fn alloc_shared_pages(
+    page_count: u64,
+    phys_pages_ptr: u64,
+    phys_page_count: u64,
+    flags: u64,
+) -> u64 {
+    unsafe {
+        syscall4(
+            SYS_ALLOC_SHARED_PAGES,
+            page_count,
+            phys_pages_ptr,
+            phys_page_count,
+            flags,
+        )
+    }
+}
+
+pub fn unmap_pages(addr: u64, len: u64) -> u64 {
+    unsafe { syscall2(SYS_UNMAP_PAGES, addr, len) }
+}
+
+pub fn ipc_send_pages(endpoint: u64, phys_pages_ptr: u64, page_count: u64, local_base: u64) -> u64 {
+    unsafe {
+        syscall4(
+            SYS_IPC_SEND_PAGES,
+            endpoint,
+            phys_pages_ptr,
+            page_count,
+            local_base,
+        )
+    }
+}
+
+pub fn ipc_send(dest: u64, ptr: u64, len: u64) -> u64 {
+    unsafe { syscall3(SYS_IPC_SEND, dest, ptr, len) }
+}
+
+pub fn ipc_recv(ptr: u64, len: u64) -> u64 {
+    unsafe { syscall2(SYS_IPC_RECV_WAIT, ptr, len) }
+}
+
+pub fn cap_clone(ptr: u64, len: u64) -> u64 {
+    unsafe { syscall2(SYS_CAP_CLONE, ptr, len) }
+}
+
+pub fn cap_drop(ptr: u64, len: u64) -> u64 {
+    unsafe { syscall2(SYS_CAP_DROP, ptr, len) }
+}
+
+pub fn cap_transfer(dest: u64, ptr: u64, len: u64) -> u64 {
+    unsafe { syscall3(SYS_CAP_TRANSFER, dest, ptr, len) }
+}
+
+pub fn cap_query(ptr: u64, len: u64) -> u64 {
+    unsafe { syscall2(SYS_CAP_QUERY, ptr, len) }
+}
+
+pub fn cap_restrict(src_ptr: u64, src_len: u64, dst_ptr: u64, dst_len: u64) -> u64 {
+    unsafe { syscall4(SYS_CAP_RESTRICT, src_ptr, src_len, dst_ptr, dst_len) }
+}
+
+pub fn event_create(flags: u64) -> u64 {
+    unsafe { syscall2(SYS_EVENT_CREATE, flags, 0) }
+}
+
+pub fn event_wait(event: u64, timeout: u64) -> u64 {
+    unsafe { syscall3(SYS_EVENT_WAIT, event, timeout, 0) }
+}
+
+pub fn event_signal(event: u64) -> u64 {
+    unsafe { syscall3(SYS_EVENT_SIGNAL, event, 0, 0) }
+}
+
+pub fn event_poll(ids_ptr: u64, count: u64, timeout: u64) -> u64 {
+    unsafe { syscall3(SYS_EVENT_POLL, ids_ptr, count, timeout) }
+}
+
+pub fn time_now() -> u64 {
+    unsafe { syscall0(SYS_TIME_NOW) }
+}
+
+pub fn service_spawn(path_ptr: u64) -> u64 {
+    unsafe { syscall1(SYS_SERVICE_SPAWN, path_ptr) }
+}
+
 fn file_path_bytes(path: &str) -> [u8; 96] {
     let mut buf = [0u8; 96];
     let bytes = path.as_bytes();
@@ -205,7 +438,15 @@ fn file_open(path: &str, flags: u64) -> u64 {
 #[allow(dead_code)]
 fn file_open_at(dirfd: i64, path: &str, flags: u64, mode: u64) -> u64 {
     let buf = file_path_bytes(path);
-    unsafe { syscall4(SYS_FILE_OPEN_AT, dirfd as u64, buf.as_ptr() as u64, flags, mode) }
+    unsafe {
+        syscall4(
+            SYS_FILE_OPEN_AT,
+            dirfd as u64,
+            buf.as_ptr() as u64,
+            flags,
+            mode,
+        )
+    }
 }
 
 fn file_close(fd: u64) -> u64 {
@@ -257,11 +498,11 @@ fn exec_with_capabilities(path: &str, caps: &[&str]) -> u64 {
     }
 }
 
-fn ipc_send(dest: u64, buf: &[u8]) -> u64 {
+fn ipc_send_bytes(dest: u64, buf: &[u8]) -> u64 {
     unsafe { syscall3(SYS_IPC_SEND, dest, buf.as_ptr() as u64, buf.len() as u64) }
 }
 
-fn ipc_recv_wait(buf: &mut [u8]) -> u64 {
+fn ipc_recv_wait_bytes(buf: &mut [u8]) -> u64 {
     unsafe { syscall2(SYS_IPC_RECV_WAIT, buf.as_mut_ptr() as u64, buf.len() as u64) }
 }
 
@@ -272,7 +513,13 @@ fn find_process_by_name(name: &str) -> u64 {
         return 0;
     }
     name_buf[..bytes.len()].copy_from_slice(bytes);
-    unsafe { syscall2(SYS_FIND_PROCESS_BY_NAME, name_buf.as_ptr() as u64, bytes.len() as u64) }
+    unsafe {
+        syscall2(
+            SYS_FIND_PROCESS_BY_NAME,
+            name_buf.as_ptr() as u64,
+            bytes.len() as u64,
+        )
+    }
 }
 
 fn launch_plugkit_test_driver() -> Option<u64> {
@@ -299,7 +546,7 @@ fn launch_plugkit_test_driver() -> Option<u64> {
 }
 
 fn recv_ipc_response(buf: &mut [u8]) -> Option<(u64, usize)> {
-    let rc = ipc_recv_wait(buf);
+    let rc = ipc_recv_wait_bytes(buf);
     if rc == 0 || rc & (1u64 << 63) != 0 {
         return None;
     }
@@ -307,7 +554,7 @@ fn recv_ipc_response(buf: &mut [u8]) -> Option<(u64, usize)> {
 }
 
 fn ipc_round_trip(dest: u64, msg: &str, buf: &mut [u8]) -> Option<usize> {
-    let sent = ipc_send(dest, msg.as_bytes());
+    let sent = ipc_send_bytes(dest, msg.as_bytes());
     if sent & (1u64 << 63) != 0 {
         return None;
     }
@@ -359,7 +606,10 @@ fn format_line(prefix: &str, bytes: u64, elapsed_ms: u64, mib_s: f64) -> LineBuf
     let mut line = LineBuf::new();
     let _ = core::fmt::write(
         &mut line,
-        format_args!("{} {} bytes in {} ms: {:.1} MiB/s", prefix, bytes, elapsed_ms, mib_s),
+        format_args!(
+            "{} {} bytes in {} ms: {:.1} MiB/s",
+            prefix, bytes, elapsed_ms, mib_s
+        ),
     );
     line
 }
@@ -369,7 +619,10 @@ fn fileio_self_test() -> bool {
 
     let path = "/core.service.fs-test";
     let payload = unsafe {
-        core::slice::from_raw_parts(core::ptr::addr_of!(FS_TEST_WRITE_BUF) as *const u8, FS_TEST_SIZE)
+        core::slice::from_raw_parts(
+            core::ptr::addr_of!(FS_TEST_WRITE_BUF) as *const u8,
+            FS_TEST_SIZE,
+        )
     };
     let buffer = unsafe {
         core::slice::from_raw_parts_mut(
@@ -430,13 +683,22 @@ fn fileio_self_test() -> bool {
         (read as f64) / (1024.0 * 1024.0) / ((read_elapsed_ms as f64) / 1000.0)
     };
 
-    let write_line_buf = format_line("[core.service][fs-test] write", wrote, write_elapsed_ms, write_mib_s);
-    let read_line_buf = format_line("[core.service][fs-test] read ", read, read_elapsed_ms, read_mib_s);
+    let write_line_buf = format_line(
+        "[core.service][fs-test] write",
+        wrote,
+        write_elapsed_ms,
+        write_mib_s,
+    );
+    let read_line_buf = format_line(
+        "[core.service][fs-test] read ",
+        read,
+        read_elapsed_ms,
+        read_mib_s,
+    );
     write_line(write_line_buf.as_str());
     write_line(read_line_buf.as_str());
 
-    same
-        && closed_errno == mnu_abi::EBADF as u64
+    same && closed_errno == mnu_abi::EBADF as u64
         && ro_write_errno == mnu_abi::EACCES as u64
         && wo_read_errno == mnu_abi::EACCES as u64
 }
@@ -474,16 +736,10 @@ fn plugkit_ipc_self_test() -> bool {
         for idx in 0..max_records {
             let start = idx * record_size;
             let end = start + record_size;
-            if process_record_matches_name(
-                &proc_buf[start..end],
-                b"com.mnu.plugkit.test.null",
-            ) {
+            if process_record_matches_name(&proc_buf[start..end], b"com.mnu.plugkit.test.null") {
                 let state = process_record_state(&proc_buf[start..end]);
                 let mut line = LineBuf::new();
-                let _ = core::fmt::write(
-                    &mut line,
-                    format_args!("plugkit-test state {}", state),
-                );
+                let _ = core::fmt::write(&mut line, format_args!("plugkit-test state {}", state));
                 write_line(line.as_str());
                 break;
             }

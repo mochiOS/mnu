@@ -4,7 +4,6 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -208,7 +207,10 @@ pub fn load_elf_into(table_phys: u64, data: &[u8]) -> Result<LoadedElf> {
     })
 }
 
-pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
+pub fn spawn_service(
+    path: &str,
+    name: &str,
+) -> Result<(crate::task::ProcessId, crate::task::ThreadId)> {
     let data = crate::cext::fs::read_all(path)
         .or_else(|| init::fs::read(path))
         .ok_or(Kernel::InvalidParam)?;
@@ -242,6 +244,7 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
         name,
         loaded.entry,
         loaded.stack_top,
+        0,
         kernel_stack_addr,
         kernel_stack_size,
     );
@@ -310,12 +313,12 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
     thread.context_mut().rsp = sp;
     thread.context_mut().rbp = 0;
 
-    if add_thread(thread).is_none() {
+    let Some(thread_id) = add_thread(thread) else {
         return Err(Kernel::Process(Process::MaxProcessesReached));
-    }
+    };
 
     guard.disarm();
-    Ok(())
+    Ok((pid, thread_id))
 }
 
 fn parse_header(data: &[u8]) -> Result<Elf64Ehdr> {

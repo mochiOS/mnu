@@ -1060,6 +1060,7 @@ fn exec_with_data(
             process_name,
             entry,
             initial_rsp,
+            0,
             kstack,
             kstack_size,
         );
@@ -1431,7 +1432,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     // 新しいページテーブルに切り替えてジャンプ
     unsafe {
         crate::mem::paging::switch_page_table(new_pt_phys);
-        crate::task::jump_to_usermode(entry, initial_rsp);
+        crate::task::jump_to_usermode(entry, initial_rsp, 0);
     }
 }
 
