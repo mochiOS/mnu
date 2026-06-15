@@ -23,8 +23,8 @@ fn caller_has_storage_capability() -> bool {
 
 /// ブロック読み取り: (disk_id, lba, buf_ptr, sector_count)
 pub fn block_read(disk_id: u64, lba: u64, buf_ptr: u64, sector_count: u64) -> u64 {
-    // privilege: 最低でも Service/Core を要求 (ユーザへ raw disk は出さない)
-    if !crate::syscall::security::caller_is_core_or_service() {
+    // privilege: Core だけを例外にし、Service も capability を必須にする
+    if !crate::syscall::security::caller_is_core() {
         return EPERM;
     }
 
@@ -62,7 +62,7 @@ pub fn block_read(disk_id: u64, lba: u64, buf_ptr: u64, sector_count: u64) -> u6
 
 /// ブロック書き込み: (disk_id, lba, buf_ptr, sector_count)
 pub fn block_write(disk_id: u64, lba: u64, buf_ptr: u64, sector_count: u64) -> u64 {
-    if !crate::syscall::security::caller_is_core_or_service() {
+    if !crate::syscall::security::caller_is_core() {
         return EPERM;
     }
 

@@ -5,7 +5,7 @@ use crate::capability::Capability;
 
 fn caller_has_display_capture_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[Capability::DisplayCapture])
-        || crate::syscall::security::caller_is_core_or_service()
+        || crate::syscall::security::caller_is_core()
 }
 
 /// ユーザー空間に返すフレームバッファ情報構造体のレイアウト

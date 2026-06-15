@@ -3,19 +3,18 @@
 use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS, EPERM, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
-use alloc::vec;
 use alloc::vec::Vec;
 
 fn caller_has_process_inspect_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessInspect,
-    ]) || crate::syscall::security::caller_is_core_or_service()
+    ]) || crate::syscall::security::caller_is_core()
 }
 
 fn caller_has_process_spawn_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessSpawn,
-    ]) || crate::syscall::security::caller_is_core_or_service()
+    ]) || crate::syscall::security::caller_is_core()
 }
 
 /// ユーザー空間の上限アドレス (x86-64 canonical hole 下側)
@@ -423,9 +422,7 @@ pub fn fork() -> u64 {
 
     let (child_pt, child_pt_owned) = match crate::mem::paging::clone_user_page_table(parent_pt) {
         Ok(pt) => (pt, true),
-        Err(_) => {
-            (parent_pt, false)
-        }
+        Err(_) => (parent_pt, false),
     };
 
     let (user_rip, user_rsp, user_rflags, parent_fs) = crate::task::with_thread(parent_tid, |t| {
@@ -559,15 +556,17 @@ pub fn service_spawn(path_ptr: u64) -> u64 {
                         crate::task::ThreadState::Ready,
                     );
                 } else {
-                    let _ = crate::task::set_thread_state(
-                        current_tid,
-                        crate::task::ThreadState::Ready,
-                    );
+                    let _ =
+                        crate::task::set_thread_state(current_tid, crate::task::ThreadState::Ready);
                 }
                 if let Some(next_slot) = next_slot {
-                    let _ = crate::task::set_thread_state_at_slot(next_slot, crate::task::ThreadState::Running);
+                    let _ = crate::task::set_thread_state_at_slot(
+                        next_slot,
+                        crate::task::ThreadState::Running,
+                    );
                 } else {
-                    let _ = crate::task::set_thread_state(thread_id, crate::task::ThreadState::Running);
+                    let _ =
+                        crate::task::set_thread_state(thread_id, crate::task::ThreadState::Running);
                 }
                 crate::task::yield_now();
             }
@@ -716,9 +715,9 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool) -> bool {
                 Ok(frame) => frame,
                 Err(_) => return Err(EINVAL),
             };
-            let page = x86_64::structures::paging::Page::containing_address(
-                x86_64::VirtAddr::new(page_addr),
-            );
+            let page = x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(
+                page_addr,
+            ));
             let flags = x86_64::structures::paging::PageTableFlags::PRESENT
                 | x86_64::structures::paging::PageTableFlags::WRITABLE
                 | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
@@ -750,7 +749,10 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool) -> bool {
         )
         .is_err()
         {
-            crate::debug!("[MMAP_FAULT] map_and_copy_segment_to failed for {:#x}", page_addr);
+            crate::debug!(
+                "[MMAP_FAULT] map_and_copy_segment_to failed for {:#x}",
+                page_addr
+            );
             return Err(ENOMEM);
         }
         if is_write {
@@ -889,14 +891,7 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
                 None => return Err(EINVAL),
             };
             let region = crate::task::MmapRegion::file_backed(
-                map_start,
-                size,
-                prot,
-                flags,
-                path,
-                data,
-                writable,
-                shared,
+                map_start, size, prot, flags, path, data, writable, shared,
             );
             if !process.add_mmap_region(region) {
                 return Err(EINVAL);

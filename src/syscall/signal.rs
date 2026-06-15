@@ -6,7 +6,7 @@
 use super::types::{EINVAL, EPERM, ESRCH, SUCCESS};
 use crate::task::{
     current_thread_id, default_action, thread_to_process_id, with_process, with_process_mut,
-    DefaultAction, ProcessId, SigAction, SIGCHLD, SIGKILL, SIG_DFL, SIG_IGN,
+    DefaultAction, ProcessId, SigAction, SIGCHLD, SIGKILL,
 };
 
 // ---- rt_sigprocmask の how 引数 ----
@@ -521,7 +521,7 @@ fn current_pid() -> Option<ProcessId> {
 fn caller_has_process_kill_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessKill,
-    ]) || crate::syscall::security::caller_is_core_or_service()
+    ]) || crate::syscall::security::caller_is_core()
 }
 
 fn caller_can_broadcast_signal() -> bool {

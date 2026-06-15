@@ -5,16 +5,13 @@ use core::arch::asm;
 
 /// 呼び出し元プロセスがI/Oポートアクセス権限を持つか確認する
 ///
-/// ServiceまたはCore権限レベルのプロセスのみ許可する
+/// Core権限レベルのプロセスのみ許可する
 fn caller_has_port_privilege() -> bool {
     crate::task::current_thread_id()
         .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
         .and_then(|pid| {
             crate::task::with_process(pid, |p| {
-                matches!(
-                    p.privilege(),
-                    crate::task::PrivilegeLevel::Core | crate::task::PrivilegeLevel::Service
-                )
+                matches!(p.privilege(), crate::task::PrivilegeLevel::Core)
             })
         })
         .unwrap_or(false)
@@ -29,7 +26,7 @@ fn caller_has_port_privilege() -> bool {
 /// # Returns
 /// 読み取った値、またはエラー時は EINVAL
 pub fn port_in(port: u64, size: u64) -> u64 {
-    // 権限チェック: ServiceまたはCore権限のプロセスのみI/Oポートアクセスを許可
+    // 権限チェック: Core権限のプロセスのみI/Oポートアクセスを許可
     if !caller_has_port_privilege() {
         return EPERM;
     }
@@ -90,7 +87,7 @@ pub fn port_in(port: u64, size: u64) -> u64 {
 /// # Returns
 /// SUCCESS、またはエラー時は EINVAL
 pub fn port_out(port: u64, value: u64, size: u64) -> u64 {
-    // 権限チェック: ServiceまたはCore権限のプロセスのみI/Oポートアクセスを許可
+    // 権限チェック: Core権限のプロセスのみI/Oポートアクセスを許可
     if !caller_has_port_privilege() {
         return EPERM;
     }

@@ -2,16 +2,13 @@ use crate::syscall::{EINVAL, ENODATA, EPERM, SUCCESS};
 
 /// 入力監視 API（tap）を呼び出せるか確認する
 ///
-/// Service または Core 権限のみ許可する。
+/// Core 権限のみ許可する。
 fn caller_has_input_privilege() -> bool {
     crate::task::current_thread_id()
         .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
         .and_then(|pid| {
             crate::task::with_process(pid, |p| {
-                matches!(
-                    p.privilege(),
-                    crate::task::PrivilegeLevel::Core | crate::task::PrivilegeLevel::Service
-                )
+                matches!(p.privilege(), crate::task::PrivilegeLevel::Core)
             })
         })
         .unwrap_or(false)
@@ -37,7 +34,7 @@ pub fn read_char_tap() -> u64 {
     }
 }
 
-/// raw スキャンコードを通常入力キューへ注入する（Service/Core専用）
+/// raw スキャンコードを通常入力キューへ注入する（Core専用）
 pub fn inject_scancode(scancode: u64) -> u64 {
     if !caller_has_input_privilege() {
         return EPERM;

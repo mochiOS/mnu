@@ -144,7 +144,7 @@ fn read_nul_caps_from_user(caps_ptr: u64, caps_total_len: u64) -> Result<Vec<Str
 
 fn caller_has_process_spawn_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[Capability::ProcessSpawn])
-        || crate::syscall::security::caller_is_core_or_service()
+        || crate::syscall::security::caller_is_core()
 }
 
 fn current_process_capabilities() -> Option<CapabilitySet> {

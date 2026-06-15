@@ -14,7 +14,7 @@ fn caller_has_low_level_device_capability() -> bool {
         UsbAccess,
         SerialAccess,
         BluetoothAccess,
-    ])
+    ]) || crate::syscall::security::caller_is_core()
 }
 
 /// I/Oポートから読み取り

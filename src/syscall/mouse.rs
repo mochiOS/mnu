@@ -3,7 +3,7 @@ use crate::syscall::{EINVAL, ENODATA, EPERM, SUCCESS};
 
 fn caller_has_mouse_capability(cap: Capability) -> bool {
     crate::syscall::security::caller_has_any_capability(&[cap])
-        || crate::syscall::security::caller_is_core_or_service()
+        || crate::syscall::security::caller_is_core()
 }
 
 /// PS/2 マウスパケットを 1 つ読み取る（非ブロッキング）

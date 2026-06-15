@@ -2,16 +2,13 @@ use crate::syscall::{EINVAL, ENODATA, EPERM, SUCCESS};
 
 /// マウス入力監視 API を呼び出せるか確認する
 ///
-/// Service または Core 権限のみ許可する。
+/// Core 権限のみ許可する。
 fn caller_has_mouse_privilege() -> bool {
     crate::task::current_thread_id()
         .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
         .and_then(|pid| {
             crate::task::with_process(pid, |p| {
-                matches!(
-                    p.privilege(),
-                    crate::task::PrivilegeLevel::Core | crate::task::PrivilegeLevel::Service
-                )
+                matches!(p.privilege(), crate::task::PrivilegeLevel::Core)
             })
         })
         .unwrap_or(false)
@@ -31,7 +28,7 @@ pub fn read_packet() -> Result<u64, u64> {
     }
 }
 
-/// 3バイト相当のマウスパケットを通常入力キューへ注入する（Service/Core専用）
+/// 3バイト相当のマウスパケットを通常入力キューへ注入する（Core専用）
 ///
 /// `packet` は `b0 | (b1 << 8) | (b2 << 16)` 形式。
 pub fn inject_packet(packet: u64) -> u64 {

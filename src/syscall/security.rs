@@ -38,6 +38,11 @@ pub fn caller_has_privilege(levels: &[PrivilegeLevel]) -> bool {
 }
 
 #[inline]
+pub fn caller_is_core() -> bool {
+    caller_has_privilege(&[PrivilegeLevel::Core])
+}
+
+#[inline]
 pub fn caller_is_core_or_service() -> bool {
     caller_has_privilege(&[PrivilegeLevel::Core, PrivilegeLevel::Service])
 }

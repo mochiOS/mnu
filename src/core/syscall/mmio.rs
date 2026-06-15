@@ -8,10 +8,7 @@ fn caller_has_mmio_privilege() -> bool {
         .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
         .and_then(|pid| {
             crate::task::with_process(pid, |p| {
-                matches!(
-                    p.privilege(),
-                    crate::task::PrivilegeLevel::Core | crate::task::PrivilegeLevel::Service
-                )
+                matches!(p.privilege(), crate::task::PrivilegeLevel::Core)
             })
         })
         .unwrap_or(false)

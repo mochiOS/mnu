@@ -14,7 +14,7 @@ fn caller_has_mmio_capability() -> bool {
         UsbAccess,
         SerialAccess,
         BluetoothAccess,
-    ])
+    ]) || crate::syscall::security::caller_is_core()
 }
 
 fn current_process_page_table() -> Option<u64> {
