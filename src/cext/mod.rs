@@ -13,8 +13,8 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
 use sha2::{Digest, Sha256};
+use spin::Mutex;
 
 use crate::task::ResourceLimits;
 
@@ -380,6 +380,8 @@ const SHF_ALLOC: u64 = 0x2;
 const SHT_RELA: u32 = 4;
 const R_X86_64_RELATIVE: u32 = 8;
 const ET_DYN: u16 = 3;
+const CEXT_LOAD_VADDR_MIN: u64 = 0x0000_6000_0000_0000;
+const CEXT_LOAD_VADDR_MAX: u64 = 0x0000_7FFF_FFFF_FFFF;
 
 fn load_elf_image(elf: &[u8], eh: &crate::elf::Elf64Ehdr) -> Option<LoadedElf> {
     let phoff = eh.e_phoff as usize;
@@ -429,13 +431,24 @@ fn load_elf_image(elf: &[u8], eh: &crate::elf::Elf64Ehdr) -> Option<LoadedElf> {
         if filesz > memsz {
             return None;
         }
+        let seg_vaddr = ph.p_vaddr.checked_add(vaddr_bias)?;
+        let seg_end = seg_vaddr.checked_add(ph.p_memsz.checked_sub(1)?)?;
+        if seg_vaddr < CEXT_LOAD_VADDR_MIN || seg_end > CEXT_LOAD_VADDR_MAX {
+            crate::warn!(
+                "cext: rejecting PT_LOAD outside cext range [{:#x}, {:#x}] at {:#x}-{:#x}",
+                CEXT_LOAD_VADDR_MIN,
+                CEXT_LOAD_VADDR_MAX,
+                seg_vaddr,
+                seg_end
+            );
+            return None;
+        }
         let src_off = usize::try_from(ph.p_offset).ok()?;
         let src_end = src_off.checked_add(filesz)?;
         if src_end > elf.len() {
             return None;
         }
         let src = &elf[src_off..src_end];
-        let seg_vaddr = ph.p_vaddr.checked_add(vaddr_bias)?;
         crate::mem::paging::map_and_copy_segment(
             seg_vaddr,
             ph.p_filesz,

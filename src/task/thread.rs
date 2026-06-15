@@ -550,7 +550,7 @@ impl Thread {
                     crate::task::exit_current_task(crate::syscall::EINVAL);
                 }
             };
-            crate::info!("[THREAD] usermode trampoline tid={}", tid.as_u64());
+            crate::debug!("[THREAD] usermode trampoline tid={}", tid.as_u64());
             let (entry, stack) =
                 match with_thread(tid, |thread| (thread.user_entry(), thread.user_stack())) {
                     Some(v) => v,
@@ -570,9 +570,9 @@ impl Thread {
                 stack
             );
             unsafe {
-                    let arg0 = with_thread(tid, |thread| thread.user_arg0()).unwrap_or(0);
-                    crate::task::jump_to_usermode(entry, stack, arg0);
-                }
+                let arg0 = with_thread(tid, |thread| thread.user_arg0()).unwrap_or(0);
+                crate::task::jump_to_usermode(entry, stack, arg0);
+            }
         }
 
         let stack_ptr = stack_top - 8;
@@ -592,7 +592,7 @@ impl Thread {
             user_entry,
             user_stack
         );
-        crate::info!(
+        crate::debug!(
             "[THREAD] new_usermode name='{}' rip={:#x} rsp={:#x} user_entry={:#x} user_stack={:#x}",
             name,
             context.rip,
@@ -974,7 +974,8 @@ impl ThreadQueue {
             return None;
         }
 
-        if let Some(limits) = crate::task::with_process(thread.process_id(), |p| p.resource_limits())
+        if let Some(limits) =
+            crate::task::with_process(thread.process_id(), |p| p.resource_limits())
         {
             let current_threads = self
                 .threads
@@ -983,10 +984,7 @@ impl ThreadQueue {
                 .filter(|t| t.process_id() == thread.process_id())
                 .count();
             if current_threads >= limits.max_threads {
-                crate::audit::log(
-                    crate::audit::AuditEventKind::Fault,
-                    "thread limit exceeded",
-                );
+                crate::audit::log(crate::audit::AuditEventKind::Fault, "thread limit exceeded");
                 return None;
             }
         }

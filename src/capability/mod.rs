@@ -20,6 +20,8 @@ pub enum KernelCapability {
     VmMap,
     VmUnmap,
     MmioMap,
+    PhysMap,
+    PhysTranslate,
     IrqBind,
     CextLoad,
     CextStop,
@@ -65,6 +67,8 @@ impl KernelCapability {
             VmMap => "vm.map",
             VmUnmap => "vm.unmap",
             MmioMap => "mmio.map",
+            PhysMap => "memory.phys.map",
+            PhysTranslate => "memory.phys.translate",
             IrqBind => "irq.bind",
             CextLoad => "cext.load",
             CextStop => "cext.stop",
@@ -84,6 +88,8 @@ impl KernelCapability {
             "vm.map" => Some(VmMap),
             "vm.unmap" => Some(VmUnmap),
             "mmio.map" => Some(MmioMap),
+            "memory.phys.map" => Some(PhysMap),
+            "memory.phys.translate" => Some(PhysTranslate),
             "irq.bind" => Some(IrqBind),
             "cext.load" => Some(CextLoad),
             "cext.stop" => Some(CextStop),
@@ -413,6 +419,9 @@ pub enum Capability {
     VmCreate,
     VmControl,
 
+    MemoryPhysMap,
+    MemoryPhysTranslate,
+
     KernelModuleLoad,
     KernelDebug,
 
@@ -521,6 +530,9 @@ impl Capability {
 
             VmCreate => "vm.create",
             VmControl => "vm.control",
+
+            MemoryPhysMap => "memory.phys.map",
+            MemoryPhysTranslate => "memory.phys.translate",
 
             KernelModuleLoad => "kernel.module.load",
             KernelDebug => "kernel.debug",
@@ -631,6 +643,9 @@ impl Capability {
             "vm.create" => VmCreate,
             "vm.control" => VmControl,
 
+            "memory.phys.map" => MemoryPhysMap,
+            "memory.phys.translate" => MemoryPhysTranslate,
+
             "kernel.module.load" => KernelModuleLoad,
             "kernel.debug" => KernelDebug,
 
@@ -675,6 +690,8 @@ impl Capability {
             IpcClient => KernelCapability::IpcEndpointSend,
             IpcServer => KernelCapability::IpcEndpointRecv,
             VmCreate | VmControl => KernelCapability::VmMap,
+            MemoryPhysMap => KernelCapability::PhysMap,
+            MemoryPhysTranslate => KernelCapability::PhysTranslate,
             KernelModuleLoad => KernelCapability::CextLoad,
             KernelDebug => KernelCapability::KernelDebug,
             _ => return None,
@@ -742,6 +759,7 @@ impl Capability {
             ServiceControl => UserCapability::ServiceControl,
             VmCreate => UserCapability::VmCreate,
             VmControl => UserCapability::VmControl,
+            MemoryPhysMap | MemoryPhysTranslate => return None,
             KernelModuleLoad => UserCapability::KernelModuleLoad,
             AccountSelfRead => UserCapability::AccountSelfRead,
             AccountSelfModify => UserCapability::AccountSelfModify,
@@ -832,6 +850,8 @@ impl Capability {
             ServiceControl,
             VmCreate,
             VmControl,
+            MemoryPhysMap,
+            MemoryPhysTranslate,
             KernelModuleLoad,
             KernelDebug,
             DeviceGpu,

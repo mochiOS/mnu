@@ -35,7 +35,7 @@ pub fn get_thread_id() -> u64 {
 pub fn get_thread_privilege(tid_val: u64) -> u64 {
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessInspect,
-    ]) && !crate::syscall::security::caller_is_core_or_service()
+    ]) && !crate::syscall::security::caller_is_core()
     {
         return super::types::EPERM;
     }
@@ -69,7 +69,7 @@ pub fn get_thread_id_by_name(name_ptr: u64, name_len: u64) -> u64 {
     }
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessInspect,
-    ]) && !crate::syscall::security::caller_is_core_or_service()
+    ]) && !crate::syscall::security::caller_is_core()
     {
         return super::types::EPERM;
     }
@@ -109,7 +109,7 @@ pub fn thread_create(entry: u64, stack: u64, arg0: u64) -> u64 {
     }
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessSpawn,
-    ]) && !crate::syscall::security::caller_is_core_or_service()
+    ]) && !crate::syscall::security::caller_is_core()
     {
         return EACCES;
     }
@@ -127,15 +127,8 @@ pub fn thread_create(entry: u64, stack: u64, arg0: u64) -> u64 {
         Some(a) => a,
         None => return ENOMEM,
     };
-    let mut thread = crate::task::Thread::new_usermode(
-        pid,
-        "thread",
-        entry,
-        stack,
-        arg0,
-        kstack,
-        kstack_size,
-    );
+    let mut thread =
+        crate::task::Thread::new_usermode(pid, "thread", entry, stack, arg0, kstack, kstack_size);
     if let Some(fs_base) = crate::task::with_thread(current_tid, |t| t.fs_base()) {
         thread.set_fs_base(fs_base);
     }

@@ -563,60 +563,31 @@ pub fn map_and_copy_segment(
     let mut page_addr = start;
     while page_addr < end {
         let page = Page::containing_address(VirtAddr::new(page_addr));
-        let phys_frame_addr;
-
-        // Check if page is already mapped
-        let is_mapped = translate_addr(VirtAddr::new(page_addr)).is_some();
-
-        if is_mapped {
-            // Already mapped. Ensure it is writable for loading.
-            phys_frame_addr = translate_addr(VirtAddr::new(page_addr))
-                .ok_or(Kernel::Memory(Memory::InvalidAddress))?
-                .as_u64();
-
-            // Temporarily map as writable for loading, but preserve execute permission
-            // to avoid conflicts with final flags
-            let flags = PageTableFlags::PRESENT
-                | PageTableFlags::USER_ACCESSIBLE
-                | PageTableFlags::WRITABLE;
-            // Don't set NO_EXECUTE during loading - we'll set it in the final flag update if needed
-
-            if let Some(ref mut pt) = PAGE_TABLE.lock().as_mut() {
-                unsafe {
-                    // Update flags ignoring error (e.g. if already same)
-                    let _ = pt.update_flags(page, flags).map(|f| f.flush());
-                }
-            }
-
-            crate::debug!(
-                "reusing mapped page {:#x} -> phys {:#x}",
-                page_addr,
-                phys_frame_addr
-            );
-        } else {
-            // Not mapped, allocate new frame
-            let frame = frame::allocate_frame()?;
-
-            // Setup flags: PRESENT + USER + WRITABLE
-            let flags = PageTableFlags::PRESENT
-                | PageTableFlags::USER_ACCESSIBLE
-                | PageTableFlags::WRITABLE;
-
-            crate::debug!(
-                "about to map page {:#x} -> frame {:#x}, flags={:?}, writable={}",
-                page_addr,
-                frame.start_address().as_u64(),
-                flags,
-                writable
-            );
-            map_page(page, frame, flags)?;
-            phys_frame_addr = frame.start_address().as_u64();
-            crate::debug!(
-                "mapped page {:#x} -> phys {:#x}",
-                page_addr,
-                phys_frame_addr
-            );
+        if translate_addr(VirtAddr::new(page_addr)).is_some() {
+            return Err(Kernel::Memory(Memory::AlreadyMapped));
         }
+
+        // Not mapped, allocate new frame
+        let frame = frame::allocate_frame()?;
+
+        // Setup flags: PRESENT + USER + WRITABLE
+        let flags =
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
+
+        crate::debug!(
+            "about to map page {:#x} -> frame {:#x}, flags={:?}, writable={}",
+            page_addr,
+            frame.start_address().as_u64(),
+            flags,
+            writable
+        );
+        map_page(page, frame, flags)?;
+        let phys_frame_addr = frame.start_address().as_u64();
+        crate::debug!(
+            "mapped page {:#x} -> phys {:#x}",
+            page_addr,
+            phys_frame_addr
+        );
 
         let page_start = page_addr;
         let page_end = page_addr + 4096;
@@ -847,7 +818,120 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
 
     let src_l4 = unsafe { &*((src_table_phys + phys_off) as *const PageTable) };
     let dst_l4 = unsafe { &mut *((dst_table_phys + phys_off) as *mut PageTable) };
-    let mut dst_pt = unsafe { OffsetPageTable::new(dst_l4, VirtAddr::new(phys_off)) };
+
+    fn ensure_leaf_table_for_vaddr(
+        dst_l4: &mut PageTable,
+        vaddr: u64,
+        phys_off: u64,
+        user_accessible: bool,
+    ) -> Result<*mut PageTable> {
+        use x86_64::structures::paging::PageTableFlags as Flags;
+
+        let vaddr = VirtAddr::new(vaddr);
+        let l4e = &mut dst_l4[vaddr.p4_index()];
+        let l3_phys = if l4e.is_unused() || !l4e.flags().contains(Flags::PRESENT) {
+            let new_l3_frame = frame::allocate_frame()?;
+            let new_l3_phys = new_l3_frame.start_address().as_u64();
+            let new_l3_virt = new_l3_phys
+                .checked_add(phys_off)
+                .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+            unsafe { core::ptr::write_bytes(new_l3_virt as *mut u8, 0, 4096) };
+            let mut flags = Flags::PRESENT | Flags::WRITABLE;
+            if user_accessible {
+                flags |= Flags::USER_ACCESSIBLE;
+            }
+            l4e.set_addr(PhysAddr::new(new_l3_phys), flags);
+            new_l3_phys
+        } else {
+            if user_accessible && !l4e.flags().contains(Flags::USER_ACCESSIBLE) {
+                l4e.set_addr(l4e.addr(), l4e.flags() | Flags::USER_ACCESSIBLE);
+            }
+            l4e.addr().as_u64()
+        };
+
+        let l3 = unsafe { &mut *((l3_phys + phys_off) as *mut PageTable) };
+        let l3e = &mut l3[vaddr.p3_index()];
+        if l3e.is_unused() || !l3e.flags().contains(Flags::PRESENT) {
+            let new_l2_frame = frame::allocate_frame()?;
+            let new_l2_phys = new_l2_frame.start_address().as_u64();
+            let new_l2_virt = new_l2_phys
+                .checked_add(phys_off)
+                .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+            unsafe { core::ptr::write_bytes(new_l2_virt as *mut u8, 0, 4096) };
+            let mut flags = Flags::PRESENT | Flags::WRITABLE;
+            if user_accessible {
+                flags |= Flags::USER_ACCESSIBLE;
+            }
+            l3e.set_addr(PhysAddr::new(new_l2_phys), flags);
+        } else if l3e.flags().contains(Flags::HUGE_PAGE) {
+            return Err(Kernel::Memory(Memory::InvalidAddress));
+        } else if user_accessible && !l3e.flags().contains(Flags::USER_ACCESSIBLE) {
+            l3e.set_addr(l3e.addr(), l3e.flags() | Flags::USER_ACCESSIBLE);
+        }
+
+        let l2_phys = l3e.addr().as_u64();
+        let l2 = unsafe { &mut *((l2_phys + phys_off) as *mut PageTable) };
+        let l2e = &mut l2[vaddr.p2_index()];
+        if l2e.is_unused() || !l2e.flags().contains(Flags::PRESENT) {
+            let new_l1_frame = frame::allocate_frame()?;
+            let new_l1_phys = new_l1_frame.start_address().as_u64();
+            let new_l1_virt = new_l1_phys
+                .checked_add(phys_off)
+                .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+            unsafe { core::ptr::write_bytes(new_l1_virt as *mut u8, 0, 4096) };
+            let mut flags = Flags::PRESENT | Flags::WRITABLE;
+            if user_accessible {
+                flags |= Flags::USER_ACCESSIBLE;
+            }
+            l2e.set_addr(PhysAddr::new(new_l1_phys), flags);
+        } else if l2e.flags().contains(Flags::HUGE_PAGE) {
+            let old_flags = l2e.flags();
+            let new_l1_frame = frame::allocate_frame()?;
+            let new_l1_phys = new_l1_frame.start_address().as_u64();
+            let new_l1_virt = new_l1_phys
+                .checked_add(phys_off)
+                .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+            unsafe { core::ptr::write_bytes(new_l1_virt as *mut u8, 0, 4096) };
+            let mut flags = old_flags;
+            flags.remove(Flags::HUGE_PAGE);
+            l2e.set_addr(PhysAddr::new(new_l1_phys), flags);
+        } else if user_accessible && !l2e.flags().contains(Flags::USER_ACCESSIBLE) {
+            l2e.set_addr(l2e.addr(), l2e.flags() | Flags::USER_ACCESSIBLE);
+        }
+
+        let l1_phys = l2e.addr().as_u64();
+        Ok((l1_phys + phys_off) as *mut PageTable)
+    }
+
+    fn clone_page(
+        dst_l4: &mut PageTable,
+        vaddr: u64,
+        src_phys: u64,
+        src_flags: Flags,
+        phys_off: u64,
+    ) -> Result<()> {
+        let user_accessible = src_flags.contains(Flags::USER_ACCESSIBLE);
+        let l1_ptr = ensure_leaf_table_for_vaddr(dst_l4, vaddr, phys_off, user_accessible)?;
+        let l1 = unsafe { &mut *l1_ptr };
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(vaddr));
+        let l1e = &mut l1[page.p1_index()];
+        if !l1e.is_unused() && l1e.flags().contains(Flags::PRESENT) {
+            return Err(Kernel::Memory(Memory::AlreadyMapped));
+        }
+
+        let new_frame = frame::allocate_frame()?;
+        let new_phys = new_frame.start_address().as_u64();
+        let mut dst_flags = src_flags;
+        dst_flags.remove(Flags::HUGE_PAGE);
+        l1e.set_addr(PhysAddr::new(new_phys), dst_flags);
+
+        let src_ptr = (src_phys + phys_off) as *const u8;
+        let dst_ptr = (new_phys + phys_off) as *mut u8;
+        unsafe {
+            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, 4096);
+        }
+        Ok(())
+    }
 
     for l4i in 0usize..256 {
         let l4e = &src_l4[l4i];
@@ -869,7 +953,24 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
                 if l2e.is_unused() || !l2e.flags().contains(Flags::PRESENT) {
                     continue;
                 }
-                if l2e.flags().contains(Flags::HUGE_PAGE) {
+                let src_flags = l2e.flags();
+                if src_flags.contains(Flags::HUGE_PAGE) {
+                    if !src_flags.contains(Flags::USER_ACCESSIBLE) {
+                        continue;
+                    }
+                    let vaddr_base =
+                        ((l4i as u64) << 39) | ((l3i as u64) << 30) | ((l2i as u64) << 21);
+                    let src_phys_base = l2e.addr().as_u64();
+                    for sub in 0usize..512 {
+                        let vaddr = vaddr_base + ((sub as u64) << 12);
+                        clone_page(
+                            dst_l4,
+                            vaddr,
+                            src_phys_base + ((sub as u64) << 12),
+                            src_flags,
+                            phys_off,
+                        )?;
+                    }
                     continue;
                 }
                 let src_l1 = unsafe { &*((l2e.addr().as_u64() + phys_off) as *const PageTable) };
@@ -889,52 +990,7 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
                         | ((l3i as u64) << 30)
                         | ((l2i as u64) << 21)
                         | ((l1i as u64) << 12);
-                    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(vaddr));
-
-                    let new_frame = frame::allocate_frame()?;
-                    let mut dst_flags = Flags::PRESENT | Flags::USER_ACCESSIBLE;
-                    if src_flags.contains(Flags::WRITABLE) {
-                        dst_flags |= Flags::WRITABLE;
-                    }
-                    if src_flags.contains(Flags::NO_EXECUTE) {
-                        dst_flags |= Flags::NO_EXECUTE;
-                    }
-
-                    unsafe {
-                        let mut alloc_lock = frame::FRAME_ALLOCATOR.lock();
-                        let alloc_ref = alloc_lock
-                            .as_mut()
-                            .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-                        match dst_pt.map_to(page, new_frame, dst_flags, alloc_ref) {
-                            Ok(flush) => flush.ignore(),
-                            Err(
-                                x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(
-                                    _,
-                                ),
-                            ) => {
-                                let (old_frame, flush) = dst_pt
-                                    .unmap(page)
-                                    .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?;
-                                flush.ignore();
-                                let _ = frame::deallocate_frame(old_frame);
-                                let mut alloc_lock2 = frame::FRAME_ALLOCATOR.lock();
-                                let alloc_ref2 = alloc_lock2
-                                    .as_mut()
-                                    .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-                                dst_pt
-                                    .map_to(page, new_frame, dst_flags, alloc_ref2)
-                                    .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?
-                                    .ignore();
-                            }
-                            Err(_) => return Err(Kernel::Memory(Memory::InvalidAddress)),
-                        }
-                    }
-
-                    let src_ptr = (pte.addr().as_u64() + phys_off) as *const u8;
-                    let dst_ptr = (new_frame.start_address().as_u64() + phys_off) as *mut u8;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, 4096);
-                    }
+                    clone_page(dst_l4, vaddr, pte.addr().as_u64(), src_flags, phys_off)?;
                 }
             }
         }

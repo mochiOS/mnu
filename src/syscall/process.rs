@@ -3,19 +3,18 @@
 use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS, EPERM, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
-use alloc::vec;
 use alloc::vec::Vec;
 
 fn caller_has_process_inspect_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessInspect,
-    ]) || crate::syscall::security::caller_is_core_or_service()
+    ]) || crate::syscall::security::caller_is_core()
 }
 
 fn caller_has_process_spawn_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessSpawn,
-    ]) || crate::syscall::security::caller_is_core_or_service()
+    ]) || crate::syscall::security::caller_is_core()
 }
 
 /// ユーザー空間の上限アドレス (x86-64 canonical hole 下側)
@@ -421,10 +420,11 @@ pub fn fork() -> u64 {
         None => return ENOSYS,
     };
 
-    let (child_pt, child_pt_owned) = match crate::mem::paging::clone_user_page_table(parent_pt) {
-        Ok(pt) => (pt, true),
-        Err(_) => {
-            (parent_pt, false)
+    let child_pt = match crate::mem::paging::clone_user_page_table(parent_pt) {
+        Ok(pt) => pt,
+        Err(err) => {
+            crate::warn!("fork: clone_user_page_table failed: {:?}", err);
+            return ENOMEM;
         }
     };
 
@@ -434,9 +434,7 @@ pub fn fork() -> u64 {
     })
     .unwrap_or((0, 0, 0, 0));
     if user_rip == 0 || user_rsp == 0 {
-        if child_pt_owned {
-            let _ = crate::mem::paging::destroy_user_page_table(child_pt);
-        }
+        let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOSYS;
     }
 
@@ -446,11 +444,7 @@ pub fn fork() -> u64 {
     let mut child_proc =
         crate::task::Process::new("fork", parent_priv, Some(parent_pid), parent_priority);
     child_proc.set_foreground(parent_foreground);
-    if child_pt_owned {
-        child_proc.set_page_table(child_pt);
-    } else {
-        child_proc.set_shared_page_table(child_pt);
-    }
+    child_proc.set_page_table(child_pt);
     child_proc.set_heap_start(heap_start);
     child_proc.set_heap_end(heap_end);
     child_proc.set_stack_bottom(stack_bottom);
@@ -467,9 +461,7 @@ pub fn fork() -> u64 {
     }
     let child_pid = child_proc.id();
     if crate::task::add_process(child_proc).is_none() {
-        if child_pt_owned {
-            let _ = crate::mem::paging::destroy_user_page_table(child_pt);
-        }
+        let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOMEM;
     }
 
@@ -478,9 +470,7 @@ pub fn fork() -> u64 {
         Some(s) => s,
         None => {
             let _ = crate::task::remove_process(child_pid);
-            if child_pt_owned {
-                let _ = crate::mem::paging::destroy_user_page_table(child_pt);
-            }
+            let _ = crate::mem::paging::destroy_user_page_table(child_pt);
             return ENOMEM;
         }
     };
@@ -495,9 +485,7 @@ pub fn fork() -> u64 {
     );
     if crate::task::add_thread(child_thread).is_none() {
         let _ = crate::task::remove_process(child_pid);
-        if child_pt_owned {
-            let _ = crate::mem::paging::destroy_user_page_table(child_pt);
-        }
+        let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOMEM;
     }
 
@@ -516,9 +504,9 @@ pub fn spawn(flags: u64, reserved: u64) -> u64 {
 /// サービスプロセスを起動する
 ///
 /// `path_ptr` は NUL 終端のサービス名（例: `fs.service`）を指す。
-/// 戻り値は起動したサービスの main thread ID。
+/// 戻り値は起動したサービスの endpoint handle。
 pub fn service_spawn(path_ptr: u64) -> u64 {
-    if !caller_has_process_spawn_capability() {
+    if !crate::policy::caller_can_launch_service() {
         return crate::syscall::EPERM;
     }
     if path_ptr == 0 {
@@ -535,12 +523,13 @@ pub fn service_spawn(path_ptr: u64) -> u64 {
 
     crate::info!("service_spawn: launching {}", path);
     match crate::elf::spawn_service(&path, &path) {
-        Ok((pid, thread_id)) => {
+        Ok((pid, thread_id, endpoint)) => {
             crate::info!(
-                "service_spawn: launched {} pid={:?} tid={:?}",
+                "service_spawn: launched {} pid={:?} tid={:?} endpoint={:#x}",
                 path,
                 pid,
-                thread_id
+                thread_id,
+                endpoint
             );
             crate::info!("fs.service started pid={:?} tid={:?}", pid, thread_id);
             if let Some(current_tid) = crate::task::current_thread_id() {
@@ -559,19 +548,21 @@ pub fn service_spawn(path_ptr: u64) -> u64 {
                         crate::task::ThreadState::Ready,
                     );
                 } else {
-                    let _ = crate::task::set_thread_state(
-                        current_tid,
-                        crate::task::ThreadState::Ready,
-                    );
+                    let _ =
+                        crate::task::set_thread_state(current_tid, crate::task::ThreadState::Ready);
                 }
                 if let Some(next_slot) = next_slot {
-                    let _ = crate::task::set_thread_state_at_slot(next_slot, crate::task::ThreadState::Running);
+                    let _ = crate::task::set_thread_state_at_slot(
+                        next_slot,
+                        crate::task::ThreadState::Running,
+                    );
                 } else {
-                    let _ = crate::task::set_thread_state(thread_id, crate::task::ThreadState::Running);
+                    let _ =
+                        crate::task::set_thread_state(thread_id, crate::task::ThreadState::Running);
                 }
                 crate::task::yield_now();
             }
-            thread_id.as_u64()
+            endpoint
         }
         Err(_) => ENOSYS,
     }
@@ -716,9 +707,9 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool) -> bool {
                 Ok(frame) => frame,
                 Err(_) => return Err(EINVAL),
             };
-            let page = x86_64::structures::paging::Page::containing_address(
-                x86_64::VirtAddr::new(page_addr),
-            );
+            let page = x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(
+                page_addr,
+            ));
             let flags = x86_64::structures::paging::PageTableFlags::PRESENT
                 | x86_64::structures::paging::PageTableFlags::WRITABLE
                 | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
@@ -750,7 +741,10 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool) -> bool {
         )
         .is_err()
         {
-            crate::debug!("[MMAP_FAULT] map_and_copy_segment_to failed for {:#x}", page_addr);
+            crate::debug!(
+                "[MMAP_FAULT] map_and_copy_segment_to failed for {:#x}",
+                page_addr
+            );
             return Err(ENOMEM);
         }
         if is_write {
@@ -819,7 +813,7 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
             Some(Some(path)) => path,
             _ => return EINVAL,
         };
-        let data = match crate::kmod::fs::read_all(&path) {
+        let data = match crate::cext::fs::read_all(&path) {
             Some(data) => data,
             None => return ENOMEM,
         };
@@ -889,14 +883,7 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
                 None => return Err(EINVAL),
             };
             let region = crate::task::MmapRegion::file_backed(
-                map_start,
-                size,
-                prot,
-                flags,
-                path,
-                data,
-                writable,
-                shared,
+                map_start, size, prot, flags, path, data, writable, shared,
             );
             if !process.add_mmap_region(region) {
                 return Err(EINVAL);
@@ -971,7 +958,7 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
                 let copy_len = core::cmp::min(4096u64, region.len() - page_off) as usize;
                 let mut page_buf = [0u8; 4096];
                 if crate::syscall::copy_from_user(page_addr, &mut page_buf[..copy_len]).is_ok() {
-                    let _ = crate::kmod::fs::write_all(&path, page_off, &page_buf[..copy_len]);
+                    let _ = crate::cext::fs::write_all(&path, page_off, &page_buf[..copy_len]);
                 }
             }
         }

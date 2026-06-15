@@ -4,10 +4,10 @@ use crate::syscall::{EINVAL, ENODATA, EPERM, SUCCESS};
 /// 入力系 syscall を呼び出せるか確認する
 ///
 ///
-/// Capability ベースで制御しつつ、既存の core/service 経路は互換のため許可する。
+/// Capability ベースで制御しつつ、Core のみ互換のため許可する。
 fn caller_has_input_capability(cap: Capability) -> bool {
     crate::syscall::security::caller_has_any_capability(&[cap])
-        || crate::syscall::security::caller_is_core_or_service()
+        || crate::syscall::security::caller_is_core()
 }
 
 /// PS/2 キーボードから rawスキャンコードを1バイト読み取り

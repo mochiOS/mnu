@@ -59,6 +59,9 @@ module cextは、起動に必須ではない機能を分離するために使用
 これにより、特定のデバイスドライバや機能が失敗しても、カーネル全体が停止しない構造にできます。
 module cextは、ロード時に署名、manifest、Capability要求を検証されます。
 許可されていないCapabilityを要求するmodule cextはロードされません。
+また、module cextのELFはCext専用の仮想アドレス範囲にのみ配置されます。
+この範囲外の `PT_LOAD` は拒否され、既存のカーネルマッピングや他のモジュール領域に対する上書きは行われません。
+ロード先のページが既にマップ済みの場合も、カーネルはそれを再利用せずエラーとして扱います。
 
 ## Cextとカーネルの境界
 
@@ -74,6 +77,7 @@ Cextはカーネルを拡張する仕組みですが、カーネル本体の責�
 - システムコール
 - IPCの基本機構
 - Capability管理
+- `memory.phys.map` / `memory.phys.translate` のような物理メモリ系 capability の最終判定
 - 割り込みの基本処理
 - 例外処理
 - カーネルログ
@@ -135,17 +139,6 @@ kernel = [
   "event"
 ]
 
-[capabilities]
-required = [
-  "ipc.create",
-  "ipc.call",
-  "ipc.recv",
-  "memory.map",
-  "memory.share",
-  "event.wait",
-  "event.signal"
-]
-
 optional = []
 
 [boot]
@@ -153,12 +146,6 @@ stage = "early"
 order = 20
 required = true
 restart = "panic"
-
-[security]
-signed = true
-allow_user_load = false
-allow_replace = false
-trusted = true
 ```
 
 ## cextセクション
@@ -276,14 +263,6 @@ dependsセクションには、そのCextが依存するものを記述します
 
 依存関係が満たされていないCextはロードされません。
 
-## capabilitiesセクション
-
-capabilitiesセクションには、そのCextが必要とするCapabilityを記述します。
-requiredには、ロードに必須のCapabilityを指定します。
-optionalには、存在すれば使用するが、なくても動作できるCapabilityを指定します。
-Cextは、cext.tomlに記述されていないCapabilityを使用できません。
-また、要求されたCapabilityが許可されない場合、そのCextはロードされません。
-
 ## bootセクション
 
 bootセクションには、Cextの起動順と失敗時の扱いを記述します。
@@ -309,35 +288,6 @@ restartには、次の値を使用します。
 built-in cextや起動に必須のCextでは、requiredをtrueにします。
 
 起動後に追加されるmodule cextでは、通常requiredをfalseにします。
-
-## securityセクション
-
-securityセクションには、Cextの署名や置き換え可否を記述します。
-
-- signed: 署名が必要かどうか
-- allow_user_load: 通常ユーザーによるロードを許可するかどうか
-- allow_replace: 既存のCextを置き換えられるかどうか
-- trusted: 信頼済みCextとして扱うかどうか
-
-built-in cextでは、通常allow_user_loadとallow_replaceをfalseにします。
-
-module cextでは、署名検証とCapability検査に通った場合のみロードを許可します。
-
-## Cextのロード手順
-
-module cextをロードするときは、次の順序で処理します。
-
-- cext.tomlを build 時に集約した manifest を読む
-- cext.idとversionを確認する
-- 署名を検証する
-- dependsを確認する
-- capabilities.requiredを確認する
-- 必要なCapabilityだけを付与する
-- entryで指定されたCextをロードする
-- Cextを初期化する
-- providesの内容を登録する
-
-この手順により、Cextは必要な権限だけを持って実行されます。
 
 ## Cextの失敗処理
 

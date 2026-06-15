@@ -1,8 +1,7 @@
 use crate::capability::{Capability, CapabilitySet};
 use crate::policy::{
-    caller_can_grant_capabilities_on_exec, caller_can_launch_service, claim_service_manager_pid,
-    release_service_manager_pid, resolve_exec_foreground, resolve_exec_priority,
-    resolve_exec_privilege,
+    caller_can_grant_capabilities_on_exec, claim_service_manager_pid, release_service_manager_pid,
+    resolve_exec_foreground, resolve_exec_priority, resolve_exec_privilege,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -145,7 +144,7 @@ fn read_nul_caps_from_user(caps_ptr: u64, caps_total_len: u64) -> Result<Vec<Str
 
 fn caller_has_process_spawn_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[Capability::ProcessSpawn])
-        || crate::syscall::security::caller_is_core_or_service()
+        || crate::syscall::security::caller_is_core()
 }
 
 fn current_process_capabilities() -> Option<CapabilitySet> {
@@ -190,17 +189,12 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
     }
     let path = provided_path.as_deref().unwrap_or("/hello.bin");
 
-    // ユーザー空間からはサービス（.serviceで終わる名前）を起動できない
-    if path.ends_with(".service") && !caller_can_launch_service() {
-        return crate::syscall::types::EPERM;
-    }
-
     let extra_args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
         Ok(v) => v,
         Err(e) => return e,
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
-    exec_internal(path, None, &extra_args, None)
+    exec_internal(path, None, &extra_args, None, None)
 }
 
 /// exec 時に capability を付与して起動する
@@ -229,10 +223,6 @@ pub fn exec_with_capabilities_syscall(
         Err(_) => return EINVAL,
     };
 
-    if path.ends_with(".service") && !caller_can_launch_service() {
-        return EPERM;
-    }
-
     // 引数は通常 exec と同じ形式
     let extra_args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
         Ok(v) => v,
@@ -259,12 +249,12 @@ pub fn exec_with_capabilities_syscall(
 
     // capability はプロセス生成時に設定する必要がある。
     // 後付けだと、スケジューラ有効時に起動直後の IPC 等が cap 無しで走り得る。
-    exec_internal(path.as_str(), None, &extra_args, Some(caps))
+    exec_internal(path.as_str(), None, &extra_args, Some(caps), None)
 }
 
 /// 名前を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
 pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
-    exec_internal(path, Some(name), &[], None)
+    exec_internal(path, Some(name), &[], None, None)
 }
 
 /// 名前と初期 capability を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
@@ -272,8 +262,15 @@ pub fn exec_kernel_with_name_and_caps(
     path: &str,
     name: &str,
     initial_caps: crate::capability::CapabilitySet,
+    requested_privilege: crate::task::PrivilegeLevel,
 ) -> u64 {
-    exec_internal(path, Some(name), &[], Some(initial_caps))
+    exec_internal(
+        path,
+        Some(name),
+        &[],
+        Some(initial_caps),
+        Some(requested_privilege),
+    )
 }
 
 fn exec_internal(
@@ -281,6 +278,7 @@ fn exec_internal(
     name_override: Option<&str>,
     args: &[&str],
     initial_caps: Option<crate::capability::CapabilitySet>,
+    requested_privilege: Option<crate::task::PrivilegeLevel>,
 ) -> u64 {
     let mut process_name = name_override
         .map(|s| s.to_string())
@@ -288,7 +286,8 @@ fn exec_internal(
     if let Some(alias) = crate::task::process::driver_alias_for_path(path) {
         process_name = alias;
     }
-    let loaded = load_exec_image(path, process_name.ends_with(".service"));
+    let is_service_exec = requested_privilege == Some(crate::task::PrivilegeLevel::Service);
+    let loaded = load_exec_image(path, is_service_exec);
     if let Some((data, source)) = loaded {
         let fingerprint = fingerprint_exec_bytes(&data);
         crate::info!(
@@ -297,7 +296,15 @@ fn exec_internal(
             source,
             data.len()
         );
-        exec_with_data(&data, &process_name, path, args, None, initial_caps)
+        exec_with_data(
+            &data,
+            &process_name,
+            path,
+            args,
+            None,
+            initial_caps,
+            requested_privilege,
+        )
     } else {
         crate::warn!("exec: file not found: {}", path);
         crate::syscall::types::ENOENT
@@ -308,7 +315,9 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
     }
-    haystack.windows(needle.len()).any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 fn fingerprint_exec_bytes(data: &[u8]) -> &'static str {
@@ -363,10 +372,6 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
         Err(_) => return crate::syscall::types::EINVAL,
     };
 
-    if path.ends_with(".service") && !caller_can_launch_service() {
-        return crate::syscall::types::EPERM;
-    }
-
     let extra_args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
         Ok(v) => v,
         Err(e) => return e,
@@ -374,7 +379,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
 
     if let Some(data) = crate::cext::fs::read_all(&path) {
-        return exec_with_data(&data, &path, &path, &extra_args, None, None);
+        return exec_with_data(&data, &path, &path, &extra_args, None, None, None);
     }
 
     crate::syscall::types::ENOENT
@@ -529,6 +534,7 @@ fn exec_with_data(
     args: &[&str],
     parent_override: Option<crate::task::ProcessId>,
     initial_caps: Option<crate::capability::CapabilitySet>,
+    requested_privilege: Option<crate::task::PrivilegeLevel>,
 ) -> u64 {
     crate::debug!("exec: name={}", process_name);
     let aslr_seed = next_aslr_seed(process_name);
@@ -671,9 +677,9 @@ fn exec_with_data(
             phdr_vaddr = load_base.saturating_add(eh.e_phoff);
         }
 
-        // __sinit は newlib (mochiOS サービス) 専用のシンボル。
-        // 外部バイナリ (BusyBox 等) はシンボルテーブルが巨大で探索コストが高いためスキップ。
-        let needs_sinit = exec_path.ends_with(".service");
+        // __sinit は Service 起動時にのみ必要なシンボル。
+        // ここでは path ではなく、呼び出し側が明示した privilege を参照する。
+        let needs_sinit = requested_privilege == Some(crate::task::PrivilegeLevel::Service);
         let mut sinit_addr: Option<u64> = None;
         if needs_sinit {
             if let Some(eh_sym) = crate::elf::parse_elf_header(data) {
@@ -975,7 +981,7 @@ fn exec_with_data(
             crate::task::current_thread_id()
                 .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
         });
-        let privilege = resolve_exec_privilege(process_name, exec_path);
+        let privilege = resolve_exec_privilege(requested_privilege);
         let priority = resolve_exec_priority(process_name, exec_path, parent_pid);
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
         let foreground = resolve_exec_foreground(process_name, exec_path, privilege, parent_pid);
@@ -1054,6 +1060,7 @@ fn exec_with_data(
             process_name,
             entry,
             initial_rsp,
+            0,
             kstack,
             kstack_size,
         );
@@ -1184,11 +1191,6 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     };
     let path = path_owned.as_str();
     let aslr_seed = next_aslr_seed(path);
-
-    // サービス起動はサービスマネージャー(Coreまたは登録PID)に限定
-    if path.ends_with(".service") && !caller_can_launch_service() {
-        return EPERM;
-    }
 
     // initfs からファイルを読み込む
     let data_vec = match crate::init::fs::read(path) {
@@ -1430,7 +1432,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     // 新しいページテーブルに切り替えてジャンプ
     unsafe {
         crate::mem::paging::switch_page_table(new_pt_phys);
-        crate::task::jump_to_usermode(entry, initial_rsp);
+        crate::task::jump_to_usermode(entry, initial_rsp, 0);
     }
 }
 
@@ -1467,6 +1469,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         &[],
         delegated_parent_pid(),
         None,
+        None,
     )
 }
 
@@ -1493,9 +1496,6 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         Ok(s) => s,
         Err(_) => return EINVAL,
     };
-    if path.ends_with(".service") && !caller_can_launch_service() {
-        return EPERM;
-    }
     let process_name = path.rsplit('/').next().unwrap_or(path.as_str());
 
     let mut owned = alloc::vec![0u8; buf_len as usize];
@@ -1509,6 +1509,7 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         path.as_str(),
         &[],
         delegated_parent_pid(),
+        None,
         None,
     )
 }
@@ -1542,9 +1543,6 @@ pub fn exec_from_buffer_named_args_syscall(
         Ok(s) => s,
         Err(_) => return EINVAL,
     };
-    if path.ends_with(".service") && !caller_can_launch_service() {
-        return EPERM;
-    }
     let process_name = path.rsplit('/').next().unwrap_or(path.as_str());
 
     let args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
@@ -1564,6 +1562,7 @@ pub fn exec_from_buffer_named_args_syscall(
         path.as_str(),
         &args_refs,
         delegated_parent_pid(),
+        None,
         None,
     )
 }
@@ -1592,9 +1591,6 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         Ok(s) => s,
         Err(_) => return EINVAL,
     };
-    if path.ends_with(".service") && !caller_can_launch_service() {
-        return EPERM;
-    }
     let process_name = path.rsplit('/').next().unwrap_or(path.as_str());
 
     let args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
@@ -1640,6 +1636,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         path.as_str(),
         &args_refs,
         parent_override.or_else(delegated_parent_pid),
+        None,
         None,
     )
 }

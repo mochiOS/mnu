@@ -31,10 +31,24 @@ pub fn caller_has_any_capability(caps: &[Capability]) -> bool {
 }
 
 #[inline]
+pub fn caller_can_access_process(pid: ProcessId) -> bool {
+    match current_process_id() {
+        Some(caller_pid) if caller_pid == pid => true,
+        Some(_) => caller_has_any_capability(&[Capability::ProcessInspect]) || caller_is_core(),
+        None => false,
+    }
+}
+
+#[inline]
 pub fn caller_has_privilege(levels: &[PrivilegeLevel]) -> bool {
     current_process_privilege()
         .map(|privilege| levels.iter().any(|level| *level == privilege))
         .unwrap_or(false)
+}
+
+#[inline]
+pub fn caller_is_core() -> bool {
+    caller_has_privilege(&[PrivilegeLevel::Core])
 }
 
 #[inline]

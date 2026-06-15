@@ -1,5 +1,0 @@
-name = "fs"
-kind = "built-in"
-version = 1
-entry = "builtin"
-type = "filesystem"

@@ -64,6 +64,8 @@ need_file "${ROOT_DIR}/scripts/rootfs.sh"
 
 mkdir -p "${TARGET_DIR}" "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}"
 
+./scripts/generate_testdata.pl
+
 # shellcheck disable=SC1090
 source "${ROOT_DIR}/scripts/cexts.sh"
 
