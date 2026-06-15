@@ -5,7 +5,7 @@ use warnings;
 
 my $out_dir = "./examples/fs";
 my $out_file = "$out_dir/testdata";
-my $size = 256 * 1024 * 1024;
+my $size = 8 * 1024 * 1024;
 my $chunk_size = 1024 * 1024;
 
 if (!-d $out_dir) {
@@ -13,8 +13,11 @@ if (!-d $out_dir) {
 }
 
 if (-e $out_file) {
-    print "test data already exists: $out_file\n";
-    exit 0;
+    if (-s $out_file == $size) {
+        print "test data already exists: $out_file\n";
+        exit 0;
+    }
+    unlink $out_file or die "failed to remove stale $out_file: $!\n";
 }
 
 open(my $fh, ">", $out_file) or die "failed to open $out_file: $!\n";

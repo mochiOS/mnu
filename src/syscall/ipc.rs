@@ -65,6 +65,13 @@ pub fn endpoint_for_thread(thread_id: u64) -> Option<IpcEndpoint> {
     })
 }
 
+/// 指定スレッドに紐づく既定 endpoint handle を返す。
+///
+/// まだ handle がなければ新規に作成する。
+pub fn ensure_endpoint_handle_for_thread(thread_id: u64) -> Option<u64> {
+    ensure_endpoint_for_thread(thread_id)
+}
+
 pub fn endpoint_is_valid(endpoint: IpcEndpoint) -> bool {
     match crate::task::thread_slot_index_and_generation_by_u64(endpoint.thread_id) {
         Some((slot, generation)) => {

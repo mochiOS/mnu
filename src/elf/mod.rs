@@ -210,7 +210,7 @@ pub fn load_elf_into(table_phys: u64, data: &[u8]) -> Result<LoadedElf> {
 pub fn spawn_service(
     path: &str,
     name: &str,
-) -> Result<(crate::task::ProcessId, crate::task::ThreadId)> {
+) -> Result<(crate::task::ProcessId, crate::task::ThreadId, u64)> {
     let data = crate::cext::fs::read_all(path)
         .or_else(|| init::fs::read(path))
         .ok_or(Kernel::InvalidParam)?;
@@ -318,7 +318,9 @@ pub fn spawn_service(
     };
 
     guard.disarm();
-    Ok((pid, thread_id))
+    let endpoint = crate::syscall::ipc::ensure_endpoint_handle_for_thread(thread_id.as_u64())
+        .ok_or(Kernel::Process(Process::MaxProcessesReached))?;
+    Ok((pid, thread_id, endpoint))
 }
 
 fn parse_header(data: &[u8]) -> Result<Elf64Ehdr> {

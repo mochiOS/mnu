@@ -87,11 +87,9 @@ env RUSTFLAGS="-C relocation-model=static -C link-arg=-T${ROOT_DIR}/examples/use
     --manifest-path "${ROOT_DIR}/examples/user/Cargo.toml"
 
 USER_BIN="${USER_BUILD_DIR}/${USER_TARGET_NAME}/release/user"
-FS_SERVICE_BIN="${USER_BUILD_DIR}/${USER_TARGET_NAME}/release/fs_service"
 CAPTEST_BIN="${USER_BUILD_DIR}/${USER_TARGET_NAME}/release/captest"
 
 need_file "${USER_BIN}"
-need_file "${FS_SERVICE_BIN}"
 need_file "${CAPTEST_BIN}"
 
 echo "[build] plugkit test"
@@ -145,7 +143,6 @@ install -m 0644 "${KERNEL_BIN}" "${ESP_DIR}/kernel"
 install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/core.service"
-install -m 0755 "${FS_SERVICE_BIN}" "${INITFS_STAGE}/fs.service"
 install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/captest.bin"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/hello.bin"
 mkdir -p "${INITFS_STAGE}/plugkit/test"

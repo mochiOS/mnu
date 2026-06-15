@@ -399,10 +399,8 @@ fn wake_parent_ipc_waiter(exited_pid: crate::task::ProcessId) {
     });
 
     if let Some(tid) = parent_tid {
-        // ゼロ長メッセージを mailbox に積んで recv_blocking が確実に戻れるようにする。
-        // wake_thread だけでは「スリープ中に Ready に変えて pending_wakeup なし」の場合、
-        // recv_blocking が yield 後に再スリープしてしまうため、必ずメッセージを使う。
-        crate::syscall::ipc::send_from_kernel(tid.as_u64(), &[]);
+        // IPC キューを汚さずに待機中スレッドだけ起こす。
+        crate::task::wake_thread(tid);
     }
 }
 

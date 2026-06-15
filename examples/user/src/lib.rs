@@ -70,8 +70,6 @@ fn alloc_error(_layout: Layout) -> ! {
     }
 }
 
-pub mod fs_service;
-
 /// kernel 側 policy に渡す launch contract の userland 側表現
 ///
 /// ここでは manifest のパースは扱わず、固定のデータ形だけを検証する。
@@ -498,7 +496,7 @@ fn file_path_bytes(path: &str) -> [u8; 96] {
     buf
 }
 
-fn file_open(path: &str, flags: u64) -> u64 {
+pub fn file_open(path: &str, flags: u64) -> u64 {
     let buf = file_path_bytes(path);
     unsafe { syscall2(SYS_FILE_OPEN, buf.as_ptr() as u64, flags) }
 }
@@ -517,19 +515,19 @@ fn file_open_at(dirfd: i64, path: &str, flags: u64, mode: u64) -> u64 {
     }
 }
 
-fn file_close(fd: u64) -> u64 {
+pub fn file_close(fd: u64) -> u64 {
     unsafe { syscall1(SYS_FILE_CLOSE, fd) }
 }
 
-fn file_read(fd: u64, buf: &mut [u8]) -> u64 {
+pub fn file_read(fd: u64, buf: &mut [u8]) -> u64 {
     unsafe { syscall3(SYS_FILE_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) }
 }
 
-fn file_write(fd: u64, buf: &[u8]) -> u64 {
+pub fn file_write(fd: u64, buf: &[u8]) -> u64 {
     unsafe { syscall3(SYS_FILE_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) }
 }
 
-fn file_seek(fd: u64, offset: i64, whence: u64) -> u64 {
+pub fn file_seek(fd: u64, offset: i64, whence: u64) -> u64 {
     unsafe { syscall3(SYS_FILE_SEEK, fd, offset as u64, whence) }
 }
 

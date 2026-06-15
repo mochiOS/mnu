@@ -44,5 +44,10 @@ mkdir -p "${INITFS_STAGE}"
 cp -a "${ROOTFS_SOURCE_DIR}/." "${ROOTFS_STAGE}/"
 cp -a "${ROOTFS_SOURCE_DIR}/." "${INITFS_STAGE}/"
 
+if [[ -f "${ROOTFS_SOURCE_DIR}/../testdata" ]]; then
+    install -m 0644 "${ROOTFS_SOURCE_DIR}/../testdata" "${ROOTFS_STAGE}/testdata"
+    install -m 0644 "${ROOTFS_SOURCE_DIR}/../testdata" "${INITFS_STAGE}/testdata"
+fi
+
 truncate -s "${ROOTFS_SIZE}" "${ROOTFS_IMG}"
 mke2fs -q -t ext2 -b "${ROOTFS_BLOCK_SIZE}" -d "${ROOTFS_STAGE}" -F "${ROOTFS_IMG}"

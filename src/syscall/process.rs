@@ -513,7 +513,7 @@ pub fn spawn(flags: u64, reserved: u64) -> u64 {
 /// サービスプロセスを起動する
 ///
 /// `path_ptr` は NUL 終端のサービス名（例: `fs.service`）を指す。
-/// 戻り値は起動したサービスの main thread ID。
+/// 戻り値は起動したサービスの endpoint handle。
 pub fn service_spawn(path_ptr: u64) -> u64 {
     if !caller_has_process_spawn_capability() {
         return crate::syscall::EPERM;
@@ -532,12 +532,13 @@ pub fn service_spawn(path_ptr: u64) -> u64 {
 
     crate::info!("service_spawn: launching {}", path);
     match crate::elf::spawn_service(&path, &path) {
-        Ok((pid, thread_id)) => {
+        Ok((pid, thread_id, endpoint)) => {
             crate::info!(
-                "service_spawn: launched {} pid={:?} tid={:?}",
+                "service_spawn: launched {} pid={:?} tid={:?} endpoint={:#x}",
                 path,
                 pid,
-                thread_id
+                thread_id,
+                endpoint
             );
             crate::info!("fs.service started pid={:?} tid={:?}", pid, thread_id);
             if let Some(current_tid) = crate::task::current_thread_id() {
@@ -570,7 +571,7 @@ pub fn service_spawn(path_ptr: u64) -> u64 {
                 }
                 crate::task::yield_now();
             }
-            thread_id.as_u64()
+            endpoint
         }
         Err(_) => ENOSYS,
     }

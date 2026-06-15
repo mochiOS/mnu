@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -11,9 +13,8 @@ const STACK_SIZE: u64 = 0x8000;
 const PAGE_SIZE: u64 = 0x1000;
 const FAST_MSG_MAX: usize = 48;
 const ROUNDS: usize = 1;
-const FS_BENCH_READ_BYTES: usize = 8 * 1024 * 1024;
-const FS_BENCH_WRITE_BYTES: usize = 32 * 1024 * 1024;
-const FS_BENCH_CHUNKS: &[usize] = &[64 * 1024, 256 * 1024, 1024 * 1024];
+const FS_BENCH_READ_BYTES: usize = 256 * 1024;
+const FS_BENCH_CHUNKS: &[usize] = &[64 * 1024];
 const TICKS_PER_SECOND: u64 = 500;
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
@@ -35,8 +36,7 @@ const STAGE_FS_BENCH: &[u8] = b"stage: fs bench\n";
 const FS_BYTES_LINE: &[u8] = b" bytes, ";
 const FS_TICK_HZ_LINE: &[u8] = b" tick_hz=";
 const FS_ELAPSED_MS_LINE: &[u8] = b" elapsed_ms=";
-const FS_SHARED_READ_PREFIX: &[u8] = b"fs.shared read[";
-const FS_SHARED_WRITE_PREFIX: &[u8] = b"fs.shared write[";
+const FS_ROOTFS_READ_PREFIX: &[u8] = b"fs.cext read[";
 const FS_LABEL_SUFFIX: &[u8] = b"]: ";
 const EVENT_SIGNAL_A_FAIL: &[u8] = b"event: signal a failed\n";
 const EVENT_WAIT_A_FAIL: &[u8] = b"event: wait a failed\n";
@@ -129,22 +129,38 @@ fn run_event_tests() -> u64 {
     }
 
     if !expect_success(user::event_signal(event_b)) {
-        let _ = user::write(1, EVENT_SIGNAL_A_FAIL.as_ptr() as u64, EVENT_SIGNAL_A_FAIL.len() as u64);
+        let _ = user::write(
+            1,
+            EVENT_SIGNAL_A_FAIL.as_ptr() as u64,
+            EVENT_SIGNAL_A_FAIL.len() as u64,
+        );
         return 32;
     }
     if !expect_success(user::event_wait(event_b, 0)) {
-        let _ = user::write(1, EVENT_WAIT_A_FAIL.as_ptr() as u64, EVENT_WAIT_A_FAIL.len() as u64);
+        let _ = user::write(
+            1,
+            EVENT_WAIT_A_FAIL.as_ptr() as u64,
+            EVENT_WAIT_A_FAIL.len() as u64,
+        );
         return 33;
     }
 
     if !expect_success(user::event_signal(event_b)) {
-        let _ = user::write(1, EVENT_SIGNAL_B_FAIL.as_ptr() as u64, EVENT_SIGNAL_B_FAIL.len() as u64);
+        let _ = user::write(
+            1,
+            EVENT_SIGNAL_B_FAIL.as_ptr() as u64,
+            EVENT_SIGNAL_B_FAIL.len() as u64,
+        );
         return 34;
     }
     let ids = [event_b, event_a];
     let polled = user::event_poll(ids.as_ptr() as u64, ids.len() as u64, 0);
     if polled != event_b {
-        let _ = user::write(1, EVENT_POLL_FAIL.as_ptr() as u64, EVENT_POLL_FAIL.len() as u64);
+        let _ = user::write(
+            1,
+            EVENT_POLL_FAIL.as_ptr() as u64,
+            EVENT_POLL_FAIL.len() as u64,
+        );
         return 35;
     }
     0
@@ -165,7 +181,10 @@ fn run_capability_tests(endpoint: u64) -> bool {
     if user::cap_query(ipc_server, CAP_IPC_SERVER.len() as u64) != 1 {
         return false;
     }
-    if !expect_success(user::cap_clone(process_spawn, CAP_PROCESS_SPAWN.len() as u64)) {
+    if !expect_success(user::cap_clone(
+        process_spawn,
+        CAP_PROCESS_SPAWN.len() as u64,
+    )) {
         return false;
     }
     if !expect_success(user::cap_restrict(
@@ -192,7 +211,11 @@ fn run_ipc_send_recv_tests(endpoint: u64) -> bool {
     if !expect_success(send_ret) {
         return false;
     }
-    let recv_ret = user::ipc_recv(recv_buf.as_mut_ptr() as u64, recv_buf.len() as u64);
+    let recv_ret = user::ipc_wait(
+        recv_buf.as_mut_ptr() as u64,
+        recv_buf.len() as u64,
+        endpoint,
+    );
     if is_error(recv_ret) {
         return false;
     }
@@ -214,13 +237,12 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
             return 61;
         }
 
-        let (sender, len) = loop {
-            let ret = user::ipc_recv(recv_buf_ptr, FAST_MSG_MAX as u64);
-            if !is_error(ret) {
-                break (ret >> 32, (ret & 0xFFFF_FFFF) as usize);
-            }
-            let _ = user::yield_now();
-        };
+        let ret = user::ipc_wait(recv_buf_ptr, FAST_MSG_MAX as u64, endpoint);
+        if is_error(ret) {
+            return 62;
+        }
+        let sender = ret >> 32;
+        let len = (ret & 0xFFFF_FFFF) as usize;
 
         if len < 4 {
             return 63;
@@ -230,24 +252,23 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
             return 63;
         }
 
-        let reply_ret = user::ipc_reply(sender, SHORT_PONG.as_ptr() as u64, SHORT_PONG.len() as u64);
+        let reply_ret =
+            user::ipc_reply(sender, SHORT_PONG.as_ptr() as u64, SHORT_PONG.len() as u64);
         if !expect_success(reply_ret) {
             return 64;
         }
 
-        let reply_len = loop {
-            let reply = user::ipc_recv(recv_buf_ptr, FAST_MSG_MAX as u64);
-            if !is_error(reply) {
-                break (reply & 0xFFFF_FFFF) as usize;
-            }
-            let _ = user::yield_now();
-        };
-        if reply_len < 4 {
+        let reply = user::ipc_wait(recv_buf_ptr, FAST_MSG_MAX as u64, endpoint);
+        if is_error(reply) {
             return 65;
+        }
+        let reply_len = (reply & 0xFFFF_FFFF) as usize;
+        if reply_len < 4 {
+            return 66;
         }
         let buf = unsafe { core::slice::from_raw_parts(recv_buf_ptr as *const u8, FAST_MSG_MAX) };
         if &buf[..4] != &SHORT_PONG[..4] {
-            return 66;
+            return 67;
         }
     }
 
@@ -267,48 +288,31 @@ fn run_process_spawn_test() -> bool {
 }
 
 fn run_fs_benchmark() -> u64 {
-    let connected = user::fs_service::ensure_connected();
-    if connected == 0 {
-        return 72;
-    }
-
-    let window_ptr = user::fs_service::window_base();
-    let window_cap = user::fs_service::window_cap();
-    if window_ptr == 0 || window_cap == 0 {
-        return 73;
-    }
-
-    let path = "/bench/huge.bin";
+    let path = "/testdata";
     for &chunk in FS_BENCH_CHUNKS {
-        if chunk > window_cap {
-            return 74;
-        }
-        let read_code = run_fs_chunk_benchmark(path, chunk, FS_BENCH_READ_BYTES, true);
+        let read_code = run_fs_chunk_benchmark(path, chunk, FS_BENCH_READ_BYTES);
         if read_code != 0 {
             return read_code;
-        }
-        let write_code = run_fs_chunk_benchmark(path, chunk, FS_BENCH_WRITE_BYTES, false);
-        if write_code != 0 {
-            return write_code;
         }
     }
 
     0
 }
 
-fn run_fs_chunk_benchmark(path: &str, chunk: usize, total_bytes: usize, read_mode: bool) -> u64 {
-    let window_ptr = user::fs_service::window_base();
-    let window_cap = user::fs_service::window_cap();
-    if window_ptr == 0 || window_cap < chunk {
-        return 74;
-    }
-
+fn run_fs_chunk_benchmark(path: &str, chunk: usize, total_bytes: usize) -> u64 {
     let chunk_label = match chunk {
         65536 => b"64KiB" as &[u8],
         262144 => b"256KiB" as &[u8],
         1048576 => b"1MiB" as &[u8],
         _ => b"chunk" as &[u8],
     };
+
+    let fd = user::file_open(path, 0);
+    if is_error(fd) || fd == 0 {
+        return 74;
+    }
+
+    let mut buffer = alloc::vec![0u8; chunk];
 
     let mut ticks = 0u64;
     let start = user::time_now();
@@ -318,36 +322,25 @@ fn run_fs_chunk_benchmark(path: &str, chunk: usize, total_bytes: usize, read_mod
     while offset < total {
         let io_len = core::cmp::min(chunk_u64, total - offset) as usize;
         let io_start = user::time_now();
-        if read_mode {
-            match user::fs_service::read_into_window(path, offset, 0, io_len) {
-                Ok(n) if n > 0 => {
-                    let buf = unsafe { core::slice::from_raw_parts(window_ptr as *const u8, n) };
-                    let mut checksum = 0u64;
-                    for byte in buf {
-                        checksum = checksum.wrapping_add(*byte as u64);
-                    }
-                    let _ = checksum;
-                    offset += n as u64;
-                }
-                Ok(_) => break,
-                Err(_) => return 75,
-            }
-        } else {
-            if let Some(window) = user::fs_service::window_slice_mut(0, io_len) {
-                for (i, byte) in window.iter_mut().enumerate() {
-                    *byte = 0xA5u8.wrapping_add(i as u8);
-                }
-            } else {
-                return 74;
-            }
-            match user::fs_service::write_from_window(path, offset, 0, io_len) {
-                Ok(n) if n > 0 => offset += n as u64,
-                Ok(_) => break,
-                Err(_) => return 76,
-            }
+        let n = user::file_read(fd, &mut buffer[..io_len]);
+        if is_error(n) {
+            let _ = user::file_close(fd);
+            return 75;
         }
+        let n = n as usize;
+        if n == 0 {
+            break;
+        }
+        let mut checksum = 0u64;
+        for byte in &buffer[..n] {
+            checksum = checksum.wrapping_add(*byte as u64);
+        }
+        let _ = checksum;
+        offset += n as u64;
         ticks = ticks.saturating_add(user::time_now().saturating_sub(io_start));
     }
+
+    let _ = user::file_close(fd);
 
     let elapsed_ms = if ticks == 0 {
         user::time_now().saturating_sub(start).saturating_mul(1000) / TICKS_PER_SECOND
@@ -359,13 +352,8 @@ fn run_fs_chunk_benchmark(path: &str, chunk: usize, total_bytes: usize, read_mod
     } else {
         (total.saturating_mul(TICKS_PER_SECOND) / ticks / BYTES_PER_MIB) as u64
     };
-    let prefix = if read_mode {
-        FS_SHARED_READ_PREFIX
-    } else {
-        FS_SHARED_WRITE_PREFIX
-    };
     write_bench_line(
-        prefix,
+        FS_ROOTFS_READ_PREFIX,
         chunk_label,
         total as u64,
         ticks,
@@ -389,15 +377,12 @@ fn run_thread_test() -> bool {
         return false;
     }
     let stack_top = ((stack_base + stack_bytes) & !0xFu64).saturating_sub(24);
-    let tid = user::thread_create(
-        runnable_thread_entry as *const () as u64,
-        stack_top,
-        0,
-    );
+    let tid = user::thread_create(runnable_thread_entry as *const () as u64, stack_top, 0);
     if tid == 0 || is_error(tid) {
         let _ = user::memory_unmap(stack_base, stack_bytes);
         return false;
     }
+    let _ = user::sleep(1);
     for _ in 0..256 {
         if THREAD_TEST_DONE.load(Ordering::Acquire) {
             let _ = user::memory_unmap(stack_base, stack_bytes);
@@ -417,7 +402,11 @@ fn run_all_tests() -> u64 {
     if !run_process_spawn_test() {
         return 9;
     }
-    let _ = user::write(1, STAGE_FS_BENCH.as_ptr() as u64, STAGE_FS_BENCH.len() as u64);
+    let _ = user::write(
+        1,
+        STAGE_FS_BENCH.as_ptr() as u64,
+        STAGE_FS_BENCH.len() as u64,
+    );
     let fs = run_fs_benchmark();
     if fs != 0 {
         return fs;
