@@ -73,6 +73,13 @@ fn kernel_main() -> ! {
 
     let mut caps = crate::capability::CapabilitySet::empty();
     for cap in crate::capability::Capability::kernel_enforced_capabilities() {
+        if matches!(
+            cap,
+            crate::capability::Capability::MemoryPhysMap
+                | crate::capability::Capability::MemoryPhysTranslate
+        ) {
+            continue;
+        }
         caps.insert(*cap);
     }
     // 最小のサービス管理プロセスを起動する。

@@ -19,6 +19,17 @@ Changes:
   when ProcessSpawn privileges were granted.
 * Fixed an issue where fork() fell back to sharing
   the parent page table if clone failed
+* Fixed a vulnerability where the Cext ELF loader
+  could overwrite existing kernel mappings or load
+  PT_LOAD segments outside the Cext-only virtual range.
+* Fixed a vulnerability where physical address
+  translation and physical page mapping were
+  permitted through Service privileges instead of
+  dedicated memory.phys.* capabilities, and target
+  process access checks were missing.
+* Updated the documentation to describe the new
+  memory.phys.* capability split and target-process
+  access requirements.
 * IPC full implementation.
 * Delete unused files.
 * Updated the documentations.

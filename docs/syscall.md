@@ -62,39 +62,41 @@ ptr        ユーザー空間ポインタ
 
 ## システムコール一覧
 
-| 分類               | syscall        |
-| ---------------- |----------------|
-| Process / Thread | process_exit   |
-| Process / Thread | process_spawn  |
-| Process / Thread | process_wait   |
-| Process / Thread | thread_create  |
-| Process / Thread | thread_exit    |
-| Process / Thread | thread_yield   |
-| Memory / VM      | memory_alloc   |
-| Memory / VM      | memory_free    |
-| Memory / VM      | memory_map     |
-| Memory / VM      | memory_unmap   |
-| Memory / VM      | memory_protect |
-| Memory / VM      | memory_share   |
-| Memory / VM      | memory_sync    |
-| IPC              | ipc_create     |
-| IPC              | ipc_send       |
-| IPC              | ipc_recv       |
-| IPC              | ipc_call       |
-| IPC              | ipc_reply      |
-| IPC              | ipc_wait       |
-| Capability       | cap_clone      |
-| Capability       | cap_drop       |
-| Capability       | cap_transfer   |
-| Capability       | cap_query      |
-| Capability       | cap_restrict   |
-| Event            | event_create   |
-| Event            | event_wait     |
-| Event            | event_signal   |
-| Event            | event_poll     |
-| Time             | time_now       |
-| Time             | sleep          |
-| I/O              | write          |
+| 分類               | syscall               |
+|------------------|-----------------------|
+| Process / Thread | process_exit          |
+| Process / Thread | process_spawn         |
+| Process / Thread | process_wait          |
+| Process / Thread | thread_create         |
+| Process / Thread | thread_exit           |
+| Process / Thread | thread_yield          |
+| Memory / VM      | memory_alloc          |
+| Memory / VM      | memory_free           |
+| Memory / VM      | memory_map            |
+| Memory / VM      | memory_unmap          |
+| Memory / VM      | memory_protect        |
+| Memory / VM      | memory_share          |
+| Memory / VM      | memory_sync           |
+| Physical Memory  | memory_phys_translate |
+| Physical Memory  | memory_phys_map       |
+| IPC              | ipc_create            |
+| IPC              | ipc_send              |
+| IPC              | ipc_recv              |
+| IPC              | ipc_call              |
+| IPC              | ipc_reply             |
+| IPC              | ipc_wait              |
+| Capability       | cap_clone             |
+| Capability       | cap_drop              |
+| Capability       | cap_transfer          |
+| Capability       | cap_query             |
+| Capability       | cap_restrict          |
+| Event            | event_create          |
+| Event            | event_wait            |
+| Event            | event_signal          |
+| Event            | event_poll            |
+| Time             | time_now              |
+| Time             | sleep                 |
+| I/O              | write                 |
 
 ## Process / Thread
 
@@ -267,6 +269,19 @@ memory_sync(addr: ptr, size: usize, flags: u64) -> isize
 将来のFS-backed mapping、GPU buffer、共有リングバッファなどの同期に使います。
 
 `flags` にはflush、invalidate、writebackなどの同期種別を指定できます。
+
+### 物理メモリ操作
+
+物理アドレスの取得や物理ページのマッピングは、一般的な `memory_map` / `memory_share` とは別に扱います。
+
+```
+memory_phys_translate(target: pid_t, vaddr: ptr) -> u64
+memory_phys_map(target: pid_t, phys: u64, size: usize, flags: u64) -> ptr
+```
+
+これらは `memory.phys.translate` / `memory.phys.map` capability を持つプロセスだけが呼び出せます。
+さらに、他プロセスを対象にする場合は、そのプロセスへアクセスする権限も必要です。
+カーネルは Service 権限だけではこれらを許可しません。
 
 ## IPC
 

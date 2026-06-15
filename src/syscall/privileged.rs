@@ -1,27 +1,27 @@
-//! 特権システムコール（Service権限プロセス専用）
+//! 特権システムコール（物理メモリ系 capability 専用）
 //!
-//! これらのsyscallはPrivilegeLevel::Serviceのプロセスのみ呼び出し可能。
+//! これらのsyscallは `memory.phys.map` / `memory.phys.translate`
+//! capability を持つプロセスだけが呼び出せる。
 //! 物理メモリ直接操作、ゼロコピーIO等の実装に使用する。
 
 use super::types::{EFAULT, EINVAL, EPERM};
-use crate::task::ids::PrivilegeLevel;
+use crate::capability::Capability;
 use alloc::vec::Vec;
 use x86_64::instructions::tlb;
 use x86_64::VirtAddr;
 
-/// 現在スレッドのプロセス権限レベルを取得
-fn current_process_privilege() -> Option<PrivilegeLevel> {
-    crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-        .and_then(|pid| crate::task::with_process(pid, |p| p.privilege()))
+fn caller_has_phys_translate_capability() -> bool {
+    crate::syscall::security::caller_has_any_capability(&[Capability::MemoryPhysTranslate])
+        || crate::syscall::security::caller_is_core()
 }
 
-/// Service権限チェック
-fn require_service_privilege() -> Result<(), u64> {
-    match current_process_privilege() {
-        Some(PrivilegeLevel::Core) | Some(PrivilegeLevel::Service) => Ok(()),
-        _ => Err(EPERM),
-    }
+fn caller_has_phys_map_capability() -> bool {
+    crate::syscall::security::caller_has_any_capability(&[Capability::MemoryPhysMap])
+        || crate::syscall::security::caller_is_core()
+}
+
+fn caller_can_access_process(pid: crate::task::ProcessId) -> bool {
+    crate::syscall::security::caller_can_access_process(pid)
 }
 
 fn deallocate_frames(phys_addrs: &[u64]) {
@@ -61,6 +61,9 @@ fn map_phys_pages_into_target(
     }
 
     let target_pid = crate::task::thread_to_process_id(target_thread_id).ok_or(EINVAL)?;
+    if !caller_can_access_process(target_pid) {
+        return Err(EPERM);
+    }
     let page_span = (phys_pages.len() as u64)
         .checked_mul(0x1000)
         .ok_or(EINVAL)?;
@@ -133,9 +136,8 @@ pub fn map_physical_pages(
     page_count: u64,
     virt_addr_hint: u64,
 ) -> u64 {
-    // 権限チェック
-    if let Err(e) = require_service_privilege() {
-        return e;
+    if !caller_has_phys_map_capability() {
+        return EPERM;
     }
 
     // パラメータ検証
@@ -164,7 +166,7 @@ pub fn map_physical_pages(
     }
 }
 
-/// 仮想アドレスから物理アドレスを取得（Service権限強化版）
+/// 仮想アドレスから物理アドレスを取得（`memory.phys.translate` 必須）
 ///
 /// # Arguments
 /// * arg0: virt_addr - 仮想アドレス
@@ -174,9 +176,8 @@ pub fn map_physical_pages(
 /// 成功時: 物理アドレス
 /// エラー時: 負のエラーコード
 pub fn get_physical_addr(virt_addr: u64, target_thread_id: u64) -> u64 {
-    // 権限チェック
-    if let Err(e) = require_service_privilege() {
-        return e;
+    if !caller_has_phys_translate_capability() {
+        return EPERM;
     }
 
     if virt_addr == 0 {
@@ -198,6 +199,10 @@ pub fn get_physical_addr(virt_addr: u64, target_thread_id: u64) -> u64 {
             None => return EINVAL,
         }
     };
+
+    if !caller_can_access_process(pid) {
+        return EPERM;
+    }
 
     let page_table = match crate::task::with_process(pid, |p| p.page_table()) {
         Some(Some(pt)) => pt,
@@ -227,9 +232,8 @@ pub fn alloc_shared_pages(
     phys_addrs_len: u64,
     virt_addr_hint: u64,
 ) -> u64 {
-    // 権限チェック
-    if let Err(e) = require_service_privilege() {
-        return e;
+    if !caller_has_phys_map_capability() {
+        return EPERM;
     }
 
     // パラメータ検証
@@ -378,9 +382,8 @@ pub fn alloc_shared_pages(
 /// 成功時: 0
 /// エラー時: 負のエラーコード
 pub fn unmap_pages(virt_addr: u64, page_count: u64, deallocate: u64) -> u64 {
-    // 権限チェック
-    if let Err(e) = require_service_privilege() {
-        return e;
+    if !caller_has_phys_map_capability() {
+        return EPERM;
     }
 
     // パラメータ検証
@@ -465,9 +468,8 @@ pub fn ipc_send_pages(
     page_count: u64,
     map_start: u64,
 ) -> u64 {
-    // 権限チェック
-    if let Err(e) = require_service_privilege() {
-        return e;
+    if !caller_has_phys_map_capability() {
+        return EPERM;
     }
 
     // パラメータ検証
@@ -484,6 +486,13 @@ pub fn ipc_send_pages(
         Some(thread_id) => thread_id,
         None => return EINVAL,
     };
+    let target_pid = match crate::task::thread_to_process_id(dest_thread_id) {
+        Some(pid) => pid,
+        None => return EINVAL,
+    };
+    if !caller_can_access_process(target_pid) {
+        return EPERM;
+    }
 
     let mut phys_pages = alloc::vec![0u64; page_count as usize];
     for i in 0..page_count as usize {

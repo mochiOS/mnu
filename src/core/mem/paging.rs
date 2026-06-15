@@ -563,60 +563,31 @@ pub fn map_and_copy_segment(
     let mut page_addr = start;
     while page_addr < end {
         let page = Page::containing_address(VirtAddr::new(page_addr));
-        let phys_frame_addr;
-
-        // Check if page is already mapped
-        let is_mapped = translate_addr(VirtAddr::new(page_addr)).is_some();
-
-        if is_mapped {
-            // Already mapped. Ensure it is writable for loading.
-            phys_frame_addr = translate_addr(VirtAddr::new(page_addr))
-                .ok_or(Kernel::Memory(Memory::InvalidAddress))?
-                .as_u64();
-
-            // Temporarily map as writable for loading, but preserve execute permission
-            // to avoid conflicts with final flags
-            let flags = PageTableFlags::PRESENT
-                | PageTableFlags::USER_ACCESSIBLE
-                | PageTableFlags::WRITABLE;
-            // Don't set NO_EXECUTE during loading - we'll set it in the final flag update if needed
-
-            if let Some(ref mut pt) = PAGE_TABLE.lock().as_mut() {
-                unsafe {
-                    // Update flags ignoring error (e.g. if already same)
-                    let _ = pt.update_flags(page, flags).map(|f| f.flush());
-                }
-            }
-
-            crate::debug!(
-                "reusing mapped page {:#x} -> phys {:#x}",
-                page_addr,
-                phys_frame_addr
-            );
-        } else {
-            // Not mapped, allocate new frame
-            let frame = frame::allocate_frame()?;
-
-            // Setup flags: PRESENT + USER + WRITABLE
-            let flags = PageTableFlags::PRESENT
-                | PageTableFlags::USER_ACCESSIBLE
-                | PageTableFlags::WRITABLE;
-
-            crate::debug!(
-                "about to map page {:#x} -> frame {:#x}, flags={:?}, writable={}",
-                page_addr,
-                frame.start_address().as_u64(),
-                flags,
-                writable
-            );
-            map_page(page, frame, flags)?;
-            phys_frame_addr = frame.start_address().as_u64();
-            crate::debug!(
-                "mapped page {:#x} -> phys {:#x}",
-                page_addr,
-                phys_frame_addr
-            );
+        if translate_addr(VirtAddr::new(page_addr)).is_some() {
+            return Err(Kernel::Memory(Memory::AlreadyMapped));
         }
+
+        // Not mapped, allocate new frame
+        let frame = frame::allocate_frame()?;
+
+        // Setup flags: PRESENT + USER + WRITABLE
+        let flags =
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
+
+        crate::debug!(
+            "about to map page {:#x} -> frame {:#x}, flags={:?}, writable={}",
+            page_addr,
+            frame.start_address().as_u64(),
+            flags,
+            writable
+        );
+        map_page(page, frame, flags)?;
+        let phys_frame_addr = frame.start_address().as_u64();
+        crate::debug!(
+            "mapped page {:#x} -> phys {:#x}",
+            page_addr,
+            phys_frame_addr
+        );
 
         let page_start = page_addr;
         let page_end = page_addr + 4096;
