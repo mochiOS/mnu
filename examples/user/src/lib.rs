@@ -1109,23 +1109,9 @@ pub fn test_syscall_list_processes_contains_at_least_one_valid_record() -> bool 
 
 fn run_restricted_probe() -> bool {
     let exec_denied = !has_capability("process.spawn");
-    write_line("rest 1");
     let list_denied = !has_capability("process.inspect");
-    write_line("rest 2");
     let ticks_denied = !has_capability("system.time.read");
-    write_line("rest 3");
     let self_ok = getpid() != 0 && gettid() != 0;
-    write_line("rest 4");
-
-    if exec_denied {
-        write_line("exec denied is true");
-    } else if ticks_denied {
-        write_line("ticks denied is true");
-    } else if ticks_denied {
-        write_line("ticks denied is true");
-    } else if self_ok {
-        write_line("self_ok is true");
-    }
 
     exec_denied && list_denied && ticks_denied && self_ok
 }
