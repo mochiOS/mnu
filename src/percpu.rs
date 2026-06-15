@@ -151,7 +151,7 @@ pub fn current_thread_raw_id() -> u64 {
 pub fn set_current_thread_raw_id(id: u64) {
     let current = current_thread_raw_id();
     if current == 2 || current == 3 || id == 2 || id == 3 {
-        crate::info!("[PERCPU] set_current_thread_raw_id {} -> {}", current, id);
+        crate::debug!("[PERCPU] set_current_thread_raw_id {} -> {}", current, id);
     }
     state_for_current_cpu()
         .current_thread_id
@@ -177,14 +177,14 @@ pub fn set_current_thread_slot(slot: Option<usize>) {
     if current == 2 || current == 3 || raw == 2 || raw == 3 || raw > 1024 {
         if current == u64::MAX {
             if raw == u64::MAX {
-                crate::info!("[PERCPU] set_current_thread_slot None -> None");
+                crate::debug!("[PERCPU] set_current_thread_slot None -> None");
             } else {
-                crate::info!("[PERCPU] set_current_thread_slot None -> {}", raw);
+                crate::debug!("[PERCPU] set_current_thread_slot None -> {}", raw);
             }
         } else if raw == u64::MAX {
-            crate::info!("[PERCPU] set_current_thread_slot {} -> None", current);
+            crate::debug!("[PERCPU] set_current_thread_slot {} -> None", current);
         } else {
-            crate::info!("[PERCPU] set_current_thread_slot {} -> {}", current, raw);
+            crate::debug!("[PERCPU] set_current_thread_slot {} -> {}", current, raw);
         }
     }
     state_for_current_cpu()

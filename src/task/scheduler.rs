@@ -288,7 +288,7 @@ pub fn yield_now() {
                 || next_id.as_u64() == 2
                 || next_id.as_u64() == 3
             {
-                crate::info!(
+                crate::debug!(
                     "[SCHED] yield current={:?} next={:?}",
                     current.map(|id| id.as_u64()),
                     next_id.as_u64()

@@ -741,7 +741,7 @@ fn send_to_thread_id(dest_thread_id: u64, sender_handle: u64, buf_ptr: u64, len:
     {
         return EAGAIN;
     }
-    crate::info!(
+    crate::debug!(
         "[IPC SEND] from={} to={} len={} data={:02x?}",
         sender_handle,
         dest_thread_id,
@@ -988,7 +988,7 @@ fn recv_from_thread_nonblocking(
             return err;
         }
     }
-    crate::info!(
+    crate::debug!(
         "[IPC RECV] tid={} from={} len={} data={:02x?}",
         receiver_thread_id,
         from,
@@ -1063,7 +1063,7 @@ fn recv_blocking_for_thread(
                         return err;
                     }
                 }
-                crate::info!(
+                crate::debug!(
                     "[IPC RECV] tid={} from={} len={} data={:02x?}",
                     receiver_thread_id,
                     from,
@@ -1114,7 +1114,7 @@ fn recv_blocking_for_thread(
                                 return err;
                             }
                         }
-                        crate::info!(
+                        crate::debug!(
                             "[IPC RECV] tid={} from={} len={} data={:02x?}",
                             receiver_thread_id,
                             from,
