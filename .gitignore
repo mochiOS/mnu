@@ -3,3 +3,6 @@
 **/memo
 *.lock
 *.log
+
+# test
+/examples/fs/testdata
