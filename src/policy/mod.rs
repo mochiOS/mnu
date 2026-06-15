@@ -72,7 +72,10 @@ pub fn service_manager_launch() -> BootLaunch {
 
 #[inline]
 fn role_is_service_like(role: ManifestRole) -> bool {
-    matches!(role, ManifestRole::CoreService | ManifestRole::Service | ManifestRole::Driver)
+    matches!(
+        role,
+        ManifestRole::CoreService | ManifestRole::Service | ManifestRole::Driver
+    )
 }
 
 #[inline]
@@ -135,10 +138,6 @@ pub fn caller_can_launch_service() -> bool {
         return true;
     };
 
-    if caller_is_core() {
-        return true;
-    }
-
     let manager_pid_raw = service_manager_pid();
     if manager_pid_raw == 0 || caller_pid.as_u64() != manager_pid_raw {
         return false;
@@ -148,7 +147,10 @@ pub fn caller_can_launch_service() -> bool {
         let state = p.state();
         let alive = state != crate::task::ProcessState::Zombie
             && state != crate::task::ProcessState::Terminated;
-        let privileged = matches!(p.privilege(), PrivilegeLevel::Service | PrivilegeLevel::Core);
+        let privileged = matches!(
+            p.privilege(),
+            PrivilegeLevel::Service | PrivilegeLevel::Core
+        );
         alive && privileged
     })
     .unwrap_or(false)
@@ -161,29 +163,16 @@ pub fn caller_can_grant_capabilities_on_exec() -> bool {
         return true;
     };
 
-    if caller_is_core() {
-        return true;
-    }
-
-    // Service 権限でも、信頼済みの実行パスに限定する。
-    // ここは必ず「カーネルが管理する exec_path」を参照して絞り込む。
     let manager_pid_raw = service_manager_pid();
-    if manager_pid_raw != 0 && caller_pid.as_u64() == manager_pid_raw {
-        return true;
-    }
-
-    crate::task::with_process(caller_pid, |p| {
-        if p.privilege() != PrivilegeLevel::Service {
-            return false;
-        }
-        !p.exe_path().is_empty()
-    })
-    .unwrap_or(false)
+    manager_pid_raw != 0 && caller_pid.as_u64() == manager_pid_raw
 }
 
 /// manifest role を privilege に落とす
 #[inline]
-pub fn resolve_launch_privilege(role: ManifestRole, _install_source: InstallSource) -> PrivilegeLevel {
+pub fn resolve_launch_privilege(
+    role: ManifestRole,
+    _install_source: InstallSource,
+) -> PrivilegeLevel {
     if role_is_service_like(role) {
         PrivilegeLevel::Service
     } else {
@@ -208,7 +197,8 @@ pub fn resolve_launch_foreground(
     privilege: PrivilegeLevel,
     _parent_pid: Option<ProcessId>,
 ) -> bool {
-    privilege == PrivilegeLevel::User && matches!(role, ManifestRole::Application | ManifestRole::Tool)
+    privilege == PrivilegeLevel::User
+        && matches!(role, ManifestRole::Application | ManifestRole::Tool)
 }
 
 /// 呼び出し元が Service/Core か
@@ -216,21 +206,13 @@ pub fn caller_is_service_or_core_process() -> bool {
     caller_is_service_or_core()
 }
 
-/// 現行の exec policy を privilege に落とす
+/// exec に対して明示された privilege を最終的に決定する
+///
+/// カーネルは path から Service 権限を推測しない。
+/// Service 権限を付与したい場合は、呼び出し側が明示的に要求する必要がある。
 #[inline]
-pub fn resolve_exec_privilege(process_name: &str, exec_path: &str) -> PrivilegeLevel {
-    let is_driver_path =
-        exec_path.starts_with("bin/drivers/") || exec_path.starts_with("/bin/drivers/");
-    let role = if process_name.ends_with(".service") || is_driver_path {
-        ManifestRole::Service
-    } else {
-        ManifestRole::Application
-    };
-    if role_is_service_like(role) {
-        PrivilegeLevel::Service
-    } else {
-        PrivilegeLevel::User
-    }
+pub fn resolve_exec_privilege(requested_privilege: Option<PrivilegeLevel>) -> PrivilegeLevel {
+    requested_privilege.unwrap_or(PrivilegeLevel::User)
 }
 
 /// 現行の exec policy を priority に落とす
@@ -298,8 +280,5 @@ pub fn resolve_exec_foreground(
     let Some(parent) = parent_pid else {
         return false;
     };
-    crate::task::with_process(parent, |process| {
-        process.is_foreground()
-    })
-    .unwrap_or(false)
+    crate::task::with_process(parent, |process| process.is_foreground()).unwrap_or(false)
 }

@@ -82,6 +82,7 @@ fn kernel_main() -> ! {
         boot_launch.exec_path,
         boot_launch.process_name,
         caps.clone(),
+        crate::task::PrivilegeLevel::Service,
     );
     crate::info!("service manager pid = {:#x}", manager_pid);
     if manager_pid != 0
@@ -128,8 +129,7 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo) -> ! {
     crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
     info!(
         "Secondary CPU entering kernel: boot_info={:#x} handoff={:#x}",
-        boot_info as *const BootInfo as u64,
-        boot_info.smp_handoff_addr
+        boot_info as *const BootInfo as u64, boot_info.smp_handoff_addr
     );
     crate::mem::gdt::init();
     info!("Secondary CPU GDT/TSS initialized");
