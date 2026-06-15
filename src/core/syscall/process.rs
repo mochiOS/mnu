@@ -307,7 +307,10 @@ pub fn fork() -> u64 {
 
     let child_pt = match crate::mem::paging::clone_user_page_table(parent_pt) {
         Ok(pt) => pt,
-        Err(_) => return ENOMEM,
+        Err(err) => {
+            crate::warn!("fork: clone_user_page_table failed: {:?}", err);
+            return ENOMEM;
+        }
     };
 
     let (user_rip, user_rsp, user_rflags, parent_fs) = crate::task::with_thread(parent_tid, |t| {

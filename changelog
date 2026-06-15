@@ -17,6 +17,8 @@ Changes:
   when using Service privileges.
 * Fixed an issue where services could be started
   when ProcessSpawn privileges were granted.
+* Fixed an issue where fork() fell back to sharing
+  the parent page table if clone failed
 * IPC full implementation.
 * Delete unused files.
 * Updated the documentations.
