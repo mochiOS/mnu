@@ -480,6 +480,10 @@ pub fn ipc_send_pages(
     if phys_pages_ptr == 0 {
         return EFAULT;
     }
+    let dest_thread_id = match crate::syscall::ipc::resolve_endpoint_handle(dest_thread_id) {
+        Some(thread_id) => thread_id,
+        None => return EINVAL,
+    };
 
     let mut phys_pages = alloc::vec![0u64; page_count as usize];
     for i in 0..page_count as usize {
