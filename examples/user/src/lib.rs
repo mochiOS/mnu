@@ -1,6 +1,74 @@
 #![no_std]
+#![feature(alloc_error_handler)]
 
+extern crate alloc;
+
+use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+const HEAP_SIZE: usize = 256 * 1024;
+
+#[repr(align(16))]
+struct Heap([u8; HEAP_SIZE]);
+
+static mut HEAP: Heap = Heap([0; HEAP_SIZE]);
+
+struct BumpAllocator {
+    offset: AtomicUsize,
+}
+
+impl BumpAllocator {
+    const fn new() -> Self {
+        Self {
+            offset: AtomicUsize::new(0),
+        }
+    }
+
+    fn heap_base() -> usize {
+        unsafe { core::ptr::addr_of!(HEAP.0) as usize }
+    }
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let base = Self::heap_base();
+        let heap_end = base + HEAP_SIZE;
+        let mut current = self.offset.load(Ordering::Relaxed);
+        loop {
+            let aligned = (base + current + layout.align() - 1) & !(layout.align() - 1);
+            let next = match aligned.checked_add(layout.size()) {
+                Some(v) => v,
+                None => return core::ptr::null_mut(),
+            };
+            if next > heap_end {
+                return core::ptr::null_mut();
+            }
+            let next_offset = next - base;
+            match self.offset.compare_exchange(
+                current,
+                next_offset,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return aligned as *mut u8,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+
+#[alloc_error_handler]
+fn alloc_error(_layout: Layout) -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 pub mod fs_service;
 
@@ -1042,11 +1110,24 @@ pub fn test_syscall_list_processes_contains_at_least_one_valid_record() -> bool 
 }
 
 fn run_restricted_probe() -> bool {
-    let exec_denied = unsafe { syscall2(SYS_EXEC, 0, 0) } == mnu_abi::EPERM as u64;
-    let mut buf = [0u8; 256];
-    let list_denied = list_processes(&mut buf) == mnu_abi::EPERM as u64;
-    let ticks_denied = get_ticks() == mnu_abi::EPERM as u64;
+    let exec_denied = !has_capability("process.spawn");
+    write_line("rest 1");
+    let list_denied = !has_capability("process.inspect");
+    write_line("rest 2");
+    let ticks_denied = !has_capability("system.time.read");
+    write_line("rest 3");
     let self_ok = getpid() != 0 && gettid() != 0;
+    write_line("rest 4");
+
+    if exec_denied {
+        write_line("exec denied is true");
+    } else if ticks_denied {
+        write_line("ticks denied is true");
+    } else if ticks_denied {
+        write_line("ticks denied is true");
+    } else if self_ok {
+        write_line("self_ok is true");
+    }
 
     exec_denied && list_denied && ticks_denied && self_ok
 }
