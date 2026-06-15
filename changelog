@@ -1,5 +1,5 @@
 the mnu kernel ChangeLog   - version 0.1-rc2
-    - Release date: 2026-06-
+    - Release date: 2026-06-15
     - Release creator: tas0dev
 
 Changes:
@@ -30,8 +30,11 @@ Changes:
 * Updated the documentation to describe the new
   memory.phys.* capability split and target-process
   access requirements.
+* Fine-tuning the behavior of the
+  mmap/page fault handler.
 * IPC full implementation.
 * Delete unused files.
+* Delete unused debug logs.
 * Updated the documentations.
 * Updated the cext build system.
 * Create security guidelines.
