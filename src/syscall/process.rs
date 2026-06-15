@@ -515,7 +515,7 @@ pub fn spawn(flags: u64, reserved: u64) -> u64 {
 /// `path_ptr` は NUL 終端のサービス名（例: `fs.service`）を指す。
 /// 戻り値は起動したサービスの endpoint handle。
 pub fn service_spawn(path_ptr: u64) -> u64 {
-    if !caller_has_process_spawn_capability() {
+    if !crate::policy::caller_can_launch_service() {
         return crate::syscall::EPERM;
     }
     if path_ptr == 0 {
