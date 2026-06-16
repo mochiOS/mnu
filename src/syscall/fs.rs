@@ -3,10 +3,14 @@
 use super::types::{
     EACCES, EBADF, EEXIST, EFAULT, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, ESRCH, SUCCESS,
 };
-use crate::task::fd_table::{FdTable, FileHandle, FileHandleCap, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS};
+use crate::capability::path::{
+    self, PathOwner, PATH_CREATE, PATH_DELETE, PATH_LIST, PATH_READ, PATH_WRITE,
+};
+use crate::task::fd_table::{
+    FdTable, FileHandle, FileHandleCap, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
+};
 use alloc::string::String;
 use alloc::string::ToString;
-use alloc::vec;
 use alloc::vec::Vec;
 
 // グローバル FD テーブルは廃止。各プロセスの Process::fd_table を使用する。
@@ -43,7 +47,8 @@ fn file_handle_cap(pid_raw: u64, fd: u64) -> Result<FileHandleCap, u64> {
     if idx >= PROCESS_MAX_FDS {
         return Err(EBADF);
     }
-    with_fd_table(pid_raw, |t| t.get(idx).map(|fh| fh.cap)).ok_or(EBADF)?
+    with_fd_table(pid_raw, |t| t.get(idx).map(|fh| fh.cap))
+        .ok_or(EBADF)?
         .ok_or(EBADF)
 }
 
@@ -85,8 +90,64 @@ fn resolve_path_at(pid_raw: u64, dirfd: i64, path_ptr: u64) -> Result<String, u6
 }
 
 pub(crate) fn ensure_fs_path_readable(path: &str) -> Result<(), u64> {
+    ensure_fs_path_access(path, PATH_READ)
+}
+
+fn ensure_fs_path_access(path: &str, needed_rights: u32) -> Result<(), u64> {
+    let Some(entry) = path::lookup_path(path) else {
+        return Ok(());
+    };
+    let Some(pid_raw) = current_process_id_raw() else {
+        return Err(EACCES);
+    };
+    if !path_owner_allows(entry.owner, pid_raw) {
+        return Err(EACCES);
+    }
+    if entry.rights.contains(needed_rights) {
+        Ok(())
+    } else {
+        Err(EACCES)
+    }
+}
+
+fn path_owner_allows(owner: PathOwner, pid_raw: u64) -> bool {
+    match owner {
+        PathOwner::Any => true,
+        PathOwner::System => crate::syscall::security::caller_is_core(),
+        PathOwner::Service(owner_pid) | PathOwner::Application(owner_pid) => owner_pid == pid_raw,
+        PathOwner::User(_) => false,
+    }
+}
+
+fn open_required_rights(path: &str, flags: u64, is_dir: bool) -> u32 {
+    const O_ACCMODE: u64 = 0o3;
+    const O_WRONLY: u64 = 0o1;
+    const O_RDWR: u64 = 0o2;
+    const O_CREAT: u64 = 0o100;
+    const O_EXCL: u64 = 0o200;
+    const O_TRUNC: u64 = 0o1000;
+    const O_APPEND: u64 = 0o2000;
     let _ = path;
-    Ok(())
+    let mut rights = if is_dir { PATH_LIST } else { PATH_READ };
+    let acc = flags & O_ACCMODE;
+    if acc == O_WRONLY || acc == O_RDWR || (flags & (O_CREAT | O_TRUNC | O_APPEND)) != 0 {
+        rights |= PATH_WRITE;
+    }
+    if (flags & O_CREAT) != 0 || (flags & O_EXCL) != 0 || (flags & O_TRUNC) != 0 {
+        rights |= PATH_CREATE;
+    }
+    rights
+}
+
+fn required_rights_for_path_op(op: &str) -> u32 {
+    match op {
+        "read" | "stat" | "readlink" => PATH_READ,
+        "write" | "truncate" => PATH_WRITE,
+        "list" | "readdir" | "chdir" => PATH_LIST,
+        "create" | "mkdir" => PATH_CREATE,
+        "delete" | "rmdir" | "unlink" | "rename" => PATH_DELETE,
+        _ => PATH_READ,
+    }
 }
 
 pub(crate) fn close_remote_fd_from_kernel(_fd_remote: u64) {}
@@ -208,6 +269,9 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     let is_dir = metadata
         .map(|(mode, _)| mode_is_directory(mode))
         .unwrap_or_else(|| crate::cext::fs::is_directory(path));
+    if let Err(errno) = ensure_fs_path_access(path, open_required_rights(path, flags, is_dir)) {
+        return errno;
+    }
 
     let acc = flags & O_ACCMODE;
     if is_dir && acc != 0 {
@@ -244,11 +308,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     let handle = alloc::boxed::Box::new(FileHandle {
         data: data_vec.into_boxed_slice(),
         pos: 0,
-        fs_path: if exists {
-            Some(path.to_string())
-        } else {
-            None
-        },
+        fs_path: if exists { Some(path.to_string()) } else { None },
         dir_path: if is_dir { Some(path.to_string()) } else { None },
         is_remote: false,
         fd_remote: 0,
@@ -413,7 +473,9 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
                 .as_deref()
                 .or(fh.fs_path.as_deref())
                 .and_then(metadata_rootfs_first);
-            let size = metadata.map(|(_, size)| size).unwrap_or(fh.data.len() as u64);
+            let size = metadata
+                .map(|(_, size)| size)
+                .unwrap_or(fh.data.len() as u64);
             let is_dir = metadata
                 .map(|(mode, _)| mode_is_directory(mode))
                 .unwrap_or(fh.dir_path.is_some());
@@ -451,7 +513,7 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(owner_pid, &path);
-    if let Err(errno) = ensure_fs_path_readable(&resolved) {
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_READ) {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
@@ -482,7 +544,7 @@ pub fn rmdir(path_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(pid, &path);
-    if let Err(errno) = ensure_fs_path_readable(&resolved) {
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_DELETE) {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
@@ -524,7 +586,7 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         _ => return EBADF,
     };
 
-    if let Err(errno) = ensure_fs_path_readable(&dir_path) {
+    if let Err(errno) = ensure_fs_path_access(&dir_path, PATH_LIST) {
         return errno;
     }
 
@@ -555,7 +617,7 @@ pub fn chdir(path_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(pid_raw, &path);
-    if let Err(errno) = ensure_fs_path_readable(&resolved) {
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_LIST) {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
@@ -688,12 +750,11 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         return errno;
     }
 
-    let (start_pos, fs_path) = match with_fd_table(pid, |t| {
-        t.get(idx).map(|fh| (fh.pos, fh.fs_path.clone()))
-    }) {
-        Some(Some(info)) => info,
-        _ => return EBADF,
-    };
+    let (start_pos, fs_path) =
+        match with_fd_table(pid, |t| t.get(idx).map(|fh| (fh.pos, fh.fs_path.clone()))) {
+            Some(Some(info)) => info,
+            _ => return EBADF,
+        };
 
     if let Some(path) = fs_path.as_deref() {
         match crate::cext::fs::write_all(path, start_pos as u64, &buf) {
@@ -1005,7 +1066,7 @@ pub fn unlink(path_ptr: u64) -> u64 {
         Err(errno) => return errno,
     };
     let resolved = resolve_path(pid, &path);
-    if let Err(errno) = ensure_fs_path_readable(&resolved) {
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_WRITE) {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
@@ -1041,10 +1102,10 @@ pub fn renameat(old_dirfd: i64, old_path_ptr: u64, new_dirfd: i64, new_path_ptr:
         Ok(path) => path,
         Err(errno) => return errno,
     };
-    if let Err(errno) = ensure_fs_path_readable(&old_path) {
+    if let Err(errno) = ensure_fs_path_access(&old_path, PATH_DELETE) {
         return errno;
     }
-    if let Err(errno) = ensure_fs_path_readable(&new_path) {
+    if let Err(errno) = ensure_fs_path_access(&new_path, PATH_CREATE) {
         return errno;
     }
     if metadata_rootfs_first(&old_path).is_none() || metadata_rootfs_first(&new_path).is_none() {
@@ -1212,7 +1273,7 @@ pub fn statfs(path_ptr: u64, buf_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(pid, &path);
-    if let Err(errno) = ensure_fs_path_readable(&resolved) {
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_READ) {
         return errno;
     }
     if metadata_rootfs_first(&resolved).is_none() {
@@ -1314,14 +1375,13 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         None => return EBADF,
     };
 
-    let (dir_path, start_pos) = match with_fd_table(pid, |t| {
-        t.get(idx).map(|fh| (fh.dir_path.clone(), fh.pos))
-    }) {
-        Some(Some((Some(p), pos))) => (p, pos),
-        _ => return EBADF,
-    };
+    let (dir_path, start_pos) =
+        match with_fd_table(pid, |t| t.get(idx).map(|fh| (fh.dir_path.clone(), fh.pos))) {
+            Some(Some((Some(p), pos))) => (p, pos),
+            _ => return EBADF,
+        };
 
-    if let Err(errno) = ensure_fs_path_readable(&dir_path) {
+    if let Err(errno) = ensure_fs_path_access(&dir_path, PATH_LIST) {
         return errno;
     }
 
@@ -1329,7 +1389,11 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         Some(e) => e
             .into_iter()
             .map(|name| {
-                let child = normalize_path(&alloc::format!("{}/{}", dir_path.trim_end_matches('/'), name));
+                let child = normalize_path(&alloc::format!(
+                    "{}/{}",
+                    dir_path.trim_end_matches('/'),
+                    name
+                ));
                 let dtype = match metadata_rootfs_first(&child) {
                     Some((mode, _)) if mode_is_directory(mode) => 4u8,
                     Some(_) => 8u8,

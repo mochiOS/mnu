@@ -395,6 +395,12 @@ fn run_thread_test() -> bool {
 }
 
 fn run_all_tests() -> u64 {
+    if !user::register_core_service_paths() {
+        return 80;
+    }
+    if !user::path_registry_self_test() {
+        return 81;
+    }
     if !user::run_self_test() {
         return 1;
     }

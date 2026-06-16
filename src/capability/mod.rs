@@ -5,7 +5,7 @@
 //! ここで変換を集中管理する。
 
 extern crate alloc;
-mod path;
+pub mod path;
 
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
@@ -169,6 +169,7 @@ pub enum UserCapability {
     AccountOtherModify,
     SettingsRead,
     SettingsWrite,
+    CapabilitiesManage,
     Unsandboxed,
     DeveloperDebug,
     DeveloperProfile,
@@ -244,6 +245,7 @@ impl UserCapability {
             AccountOtherModify => "account.other.modify",
             SettingsRead => "settings.read",
             SettingsWrite => "settings.write",
+            CapabilitiesManage => "capabilities.manage",
             Unsandboxed => "unsandboxed",
             DeveloperDebug => "developer.debug",
             DeveloperProfile => "developer.profile",
@@ -319,6 +321,7 @@ impl UserCapability {
             "account.other.modify" => Some(AccountOtherModify),
             "settings.read" => Some(SettingsRead),
             "settings.write" => Some(SettingsWrite),
+            "capabilities.manage" => Some(CapabilitiesManage),
             "unsandboxed" => Some(Unsandboxed),
             "developer.debug" => Some(DeveloperDebug),
             "developer.profile" => Some(DeveloperProfile),
@@ -439,6 +442,7 @@ pub enum Capability {
 
     SettingsRead,
     SettingsWrite,
+    CapabilitiesManage,
 
     Unsandboxed,
 
@@ -551,6 +555,7 @@ impl Capability {
 
             SettingsRead => "settings.read",
             SettingsWrite => "settings.write",
+            CapabilitiesManage => "capabilities.manage",
 
             Unsandboxed => "unsandboxed",
 
@@ -663,6 +668,7 @@ impl Capability {
 
             "settings.read" => SettingsRead,
             "settings.write" => SettingsWrite,
+            "capabilities.manage" => CapabilitiesManage,
 
             "unsandboxed" => Unsandboxed,
 
@@ -768,6 +774,7 @@ impl Capability {
             AccountOtherModify => UserCapability::AccountOtherModify,
             SettingsRead => UserCapability::SettingsRead,
             SettingsWrite => UserCapability::SettingsWrite,
+            CapabilitiesManage => UserCapability::CapabilitiesManage,
             Unsandboxed => UserCapability::Unsandboxed,
             DeveloperDebug => UserCapability::DeveloperDebug,
             DeveloperProfile => UserCapability::DeveloperProfile,
@@ -866,6 +873,7 @@ impl Capability {
             AccountOtherModify,
             SettingsRead,
             SettingsWrite,
+            CapabilitiesManage,
             Unsandboxed,
             DeveloperDebug,
             DeveloperProfile,

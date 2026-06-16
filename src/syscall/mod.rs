@@ -204,9 +204,9 @@ pub fn write_user_u16(ptr: u64, value: u16) -> Result<(), u64> {
 
 pub use types::*;
 
-use x86_64::structures::idt::InterruptStackFrame;
 use crate::info;
 use crate::syscall::syscall_entry::switch_to_current_thread_user_page_table;
+use x86_64::structures::idt::InterruptStackFrame;
 
 /// システムコールのディスパッチ
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
@@ -242,9 +242,13 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::IpcWait as u64 => ipc::wait(arg0, arg1, arg2),
         x if x == SyscallNumber::CapClone as u64 => capability::clone_capability(arg0, arg1),
         x if x == SyscallNumber::CapDrop as u64 => capability::drop_capability(arg0, arg1),
-        x if x == SyscallNumber::CapTransfer as u64 => capability::transfer_capability(arg0, arg1, arg2),
+        x if x == SyscallNumber::CapTransfer as u64 => {
+            capability::transfer_capability(arg0, arg1, arg2)
+        }
         x if x == SyscallNumber::CapQuery as u64 => capability::query(arg0, arg1),
-        x if x == SyscallNumber::CapRestrict as u64 => capability::restrict_capability(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::CapRestrict as u64 => {
+            capability::restrict_capability(arg0, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::EventCreate as u64 => event::create(arg0, arg1),
         x if x == SyscallNumber::EventWait as u64 => event::wait(arg0, arg1, arg2),
         x if x == SyscallNumber::EventSignal as u64 => event::signal(arg0, arg1, arg2),
@@ -254,6 +258,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::CheckGravityExist as u64 => io::check_gravity_exist(),
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
         x if x == SyscallNumber::ServiceSpawn as u64 => process::service_spawn(arg0),
+        x if x == SyscallNumber::PathRegister as u64 => capability::register_path(arg0, arg1, arg2),
+        x if x == SyscallNumber::PathList as u64 => capability::list_paths(arg0, arg1),
         x if x == SyscallNumber::AllocSharedPages as u64 => {
             privileged::alloc_shared_pages(arg0, arg1, arg2, arg3)
         }
@@ -455,8 +461,7 @@ extern "C" fn syscall_handler_rust(
 
 #[no_mangle]
 pub extern "sysv64" fn syscall_user_cr3_for_sysret() -> u64 {
-    syscall_entry::current_thread_user_page_table()
-        .unwrap_or(0)
+    syscall_entry::current_thread_user_page_table().unwrap_or(0)
 }
 
 /// SYSCALL 命令エントリから呼ばれる system V ABI ディスパッチ関数
