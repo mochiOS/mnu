@@ -5,6 +5,7 @@
 //! ここで変換を集中管理する。
 
 extern crate alloc;
+mod path;
 
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
