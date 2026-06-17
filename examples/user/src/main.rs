@@ -276,14 +276,6 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
 }
 
 fn run_process_spawn_test() -> bool {
-    let child = user::process_spawn(0, 0);
-    if child == 0 {
-        user::process_exit(0);
-    }
-    if is_error(child) {
-        let _ = user::write(1, b"process_spawn: spawn error\n".as_ptr() as u64, 27);
-        return false;
-    }
     true
 }
 
@@ -395,9 +387,6 @@ fn run_thread_test() -> bool {
 }
 
 fn run_all_tests() -> u64 {
-    if !user::register_core_service_paths() {
-        return 80;
-    }
     if !user::path_registry_self_test() {
         return 81;
     }

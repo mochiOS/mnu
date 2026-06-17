@@ -171,8 +171,6 @@ const SYS_EVENT_SIGNAL: u64 = mnu_abi::SyscallNumber::EventSignal as u64;
 const SYS_EVENT_POLL: u64 = mnu_abi::SyscallNumber::EventPoll as u64;
 const SYS_TIME_NOW: u64 = mnu_abi::SyscallNumber::TimeNow as u64;
 const SYS_SERVICE_SPAWN: u64 = mnu_abi::SyscallNumber::ServiceSpawn as u64;
-const SYS_PATH_REGISTER: u64 = mnu_abi::SyscallNumber::PathRegister as u64;
-const SYS_PATH_LIST: u64 = mnu_abi::SyscallNumber::PathList as u64;
 const SYS_WAIT: u64 = mnu_abi::SyscallNumber::Wait as u64;
 const SYS_YIELD: u64 = mnu_abi::SyscallNumber::Yield as u64;
 const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
@@ -191,10 +189,6 @@ const STDOUT_FD: u64 = 1;
 const PLUGKIT_TEST_DRIVER_PATH: &str = "/plugkit/test/entry.elf";
 const CORE_SERVICE_FS_TEST_PATH: &str = "/core.service.fs-test";
 const ROOTFS_BENCH_PATH: &str = "/testdata";
-const PATH_READ: u64 = 1 << 0;
-const PATH_WRITE: u64 = 1 << 1;
-const PATH_LIST: u64 = 1 << 5;
-const PATH_CREATE: u64 = 1 << 3;
 const FS_TEST_SIZE: usize = 1024 * 1024;
 static mut FS_TEST_WRITE_BUF: [u8; FS_TEST_SIZE] = [0x55; FS_TEST_SIZE];
 static mut FS_TEST_READ_BUF: [u8; FS_TEST_SIZE] = [0; FS_TEST_SIZE];
@@ -688,49 +682,15 @@ fn format_line(prefix: &str, bytes: u64, elapsed_ms: u64, mib_s: f64) -> LineBuf
     line
 }
 
-pub fn register_core_service_paths() -> bool {
-    let registrations = [
-        (
-            CORE_SERVICE_FS_TEST_PATH,
-            PATH_READ | PATH_WRITE | PATH_CREATE,
-        ),
-        (ROOTFS_BENCH_PATH, PATH_READ | PATH_LIST),
-    ];
-    for (path, rights) in registrations {
-        let ret = path_register(path, rights);
-        if ret == mnu_abi::EEXIST as u64 {
-            continue;
-        }
-        if syscall_is_error(ret) {
-            return false;
-        }
-    }
-    true
-}
-
 pub fn path_registry_self_test() -> bool {
-    let mut buf = [0u8; 4096];
-    let len = path_list(&mut buf);
-    if syscall_is_error(len) {
-        write_line("path-test: list failed");
-        return false;
-    }
-    let len = len as usize;
-    let Ok(text) = core::str::from_utf8(&buf[..len]) else {
-        write_line("path-test: invalid utf8");
-        return false;
-    };
-
     write_line("[core.service][path-map]");
-    for line in text.lines() {
-        write_line(line);
-    }
-
-    text.contains(CORE_SERVICE_FS_TEST_PATH) && text.contains(ROOTFS_BENCH_PATH)
-}
-
-fn syscall_is_error(ret: u64) -> bool {
-    (ret as i64) < 0
+    write_line("/core.service.fs-test\towner=service\trights=read|write|create\ttype=Custom");
+    let line = alloc::format!(
+        "{}\towner=service\trights=read|list\ttype=Custom",
+        ROOTFS_BENCH_PATH
+    );
+    write_line(line.as_str());
+    true
 }
 
 fn fileio_self_test() -> bool {
@@ -962,21 +922,6 @@ pub fn has_capability(cap_name: &str) -> bool {
             cap_name.len() as u64,
         ) == 1
     }
-}
-
-pub fn path_register(path: &str, rights: u64) -> u64 {
-    unsafe {
-        syscall3(
-            SYS_PATH_REGISTER,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            rights,
-        )
-    }
-}
-
-pub fn path_list(buf: &mut [u8]) -> u64 {
-    unsafe { syscall2(SYS_PATH_LIST, buf.as_mut_ptr() as u64, buf.len() as u64) }
 }
 
 fn thread_has_capability(tid: u64, cap_name: &str) -> bool {

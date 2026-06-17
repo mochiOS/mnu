@@ -1,3 +1,6 @@
+use crate::capability::path::{
+    register_service_paths, PathRights, PATH_CREATE, PATH_LIST, PATH_READ, PATH_WRITE,
+};
 use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
 use crate::syscall::exec::exec_kernel_with_name;
@@ -24,6 +27,14 @@ fn kernel_main() -> ! {
         && task::with_process(task::ProcessId::from_u64(manager_pid), |_| ()).is_some()
     {
         crate::syscall::exec::register_service_manager_pid(manager_pid);
+        let service_paths = [
+            (
+                "/core.service.fs-test",
+                PathRights::new(PATH_READ | PATH_WRITE | PATH_CREATE),
+            ),
+            ("/testdata", PathRights::new(PATH_READ | PATH_LIST)),
+        ];
+        let _ = register_service_paths(manager_pid, &service_paths);
     } else {
         crate::warn!(
             "Failed to register core.service as service manager (ret={:#x})",

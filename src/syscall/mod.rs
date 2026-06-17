@@ -258,8 +258,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::CheckGravityExist as u64 => io::check_gravity_exist(),
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
         x if x == SyscallNumber::ServiceSpawn as u64 => process::service_spawn(arg0),
-        x if x == SyscallNumber::PathRegister as u64 => capability::register_path(arg0, arg1, arg2),
-        x if x == SyscallNumber::PathList as u64 => capability::list_paths(arg0, arg1),
         x if x == SyscallNumber::AllocSharedPages as u64 => {
             privileged::alloc_shared_pages(arg0, arg1, arg2, arg3)
         }

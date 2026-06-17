@@ -270,6 +270,16 @@ pub fn register_path(
     Ok(())
 }
 
+pub fn register_service_paths(service_pid: u64, paths: &[(&str, PathRights)]) -> usize {
+    let mut registered = 0usize;
+    for (path, rights) in paths.iter().copied() {
+        if register_path(path, PathOwner::Service(service_pid), rights).is_ok() {
+            registered += 1;
+        }
+    }
+    registered
+}
+
 pub fn lookup_path(path: &str) -> Option<PathCapability> {
     let normalized = normalize_path(path)?;
     let registry = registry_mut();

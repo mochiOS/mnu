@@ -168,8 +168,6 @@ pub enum SyscallNumber {
     EventPoll = 599,
     TimeNow = 600,
     ServiceSpawn = 601,
-    PathRegister = 602,
-    PathList = 603,
     CheckGravityExist = 999,
 }
 
