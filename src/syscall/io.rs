@@ -90,88 +90,6 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     len
 }
 
-/// Writevシステムコール
-///
-/// iov 配列を順に処理し、内部的に `write` を呼び出す。
-pub fn writev(fd: u64, iov_ptr: u64, iovcnt: u64) -> u64 {
-    if iovcnt == 0 {
-        return SUCCESS;
-    }
-    if iov_ptr == 0 {
-        return EFAULT;
-    }
-    if iovcnt > iov_max() {
-        return EINVAL;
-    }
-
-    let table_bytes = match iovcnt.checked_mul(IOVEC_SIZE) {
-        Some(n) => n,
-        None => return EINVAL,
-    };
-    if !super::validate_user_ptr(iov_ptr, table_bytes) {
-        return EFAULT;
-    }
-
-    let mut total_written: u64 = 0;
-    for i in 0..iovcnt {
-        let off = match i.checked_mul(IOVEC_SIZE) {
-            Some(v) => v,
-            None => return EINVAL,
-        };
-        let entry_ptr = match iov_ptr.checked_add(off) {
-            Some(v) => v,
-            None => return EFAULT,
-        };
-
-        let mut entry = [0u8; IOVEC_SIZE as usize];
-        if let Err(err) = crate::syscall::copy_from_user(entry_ptr, &mut entry) {
-            return if total_written > 0 {
-                total_written
-            } else {
-                err
-            };
-        }
-
-        let mut base_bytes = [0u8; 8];
-        let mut len_bytes = [0u8; 8];
-        base_bytes.copy_from_slice(&entry[0..8]);
-        len_bytes.copy_from_slice(&entry[8..16]);
-        let base = u64::from_ne_bytes(base_bytes);
-        let len = u64::from_ne_bytes(len_bytes);
-
-        if len == 0 {
-            continue;
-        }
-        if base == 0 {
-            return if total_written > 0 {
-                total_written
-            } else {
-                EFAULT
-            };
-        }
-
-        let wrote = write(fd, base, len);
-        if (wrote as i64) < 0 {
-            return if total_written > 0 {
-                total_written
-            } else {
-                wrote
-            };
-        }
-
-        total_written = match total_written.checked_add(wrote) {
-            Some(v) => v,
-            None => return EINVAL,
-        };
-
-        if wrote < len {
-            break;
-        }
-    }
-
-    total_written
-}
-
 /// Readvシステムコール
 ///
 /// iov 配列を順に処理し、内部的に `read` を呼び出す。
@@ -311,7 +229,10 @@ fn read_fd(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     };
 
     let idx = fd as usize;
-    let fd_info = crate::task::with_process(pid, |p| p.fd_table().get(idx).map(|fh| (fh.pipe_id, fh.pipe_write))).flatten();
+    let fd_info = crate::task::with_process(pid, |p| {
+        p.fd_table().get(idx).map(|fh| (fh.pipe_id, fh.pipe_write))
+    })
+    .flatten();
 
     match fd_info {
         Some((Some(pipe_id), false)) => {
@@ -368,16 +289,5 @@ pub fn log(msg: u64, len: u64, level: u64) -> u64 {
         3 => debug!("{}", msg),
         _ => return EINVAL,
     }
-    SUCCESS
-}
-
-/// 重力があるかを確認します。
-///
-/// ### Return
-/// SUCCESS: 重力は存在しています。
-/// それ以外が返された場合、このPCは重力下にありません。
-///
-/// 宇宙空間で使用することは想定していません。
-pub fn check_gravity_exist() -> u64 {
     SUCCESS
 }

@@ -97,20 +97,20 @@ ptr        ユーザー空間ポインタ
 | Time             | time_now              |
 | Time             | sleep                 |
 | I/O              | write                 |
-| Filesystem*      | file_open             |
-| Filesystem*      | file_open_at          |
-| Filesystem*      | file_close            |
-| Filesystem*      | file_read             |
-| Filesystem*      | file_write            |
-| Filesystem*      | file_seek             |
-| Filesystem*      | file_stat             |
-| Filesystem*      | file_stat_at          |
-| Filesystem*      | file_fstat            |
-| Filesystem*      | file_read_dir         |
-| Filesystem*      | file_create_dir       |
-| Filesystem*      | file_remove           |
-| Filesystem*      | file_rename           |
-| Filesystem*      | file_sync             |
+| Filesystem       | file_open             |
+| Filesystem       | file_open_at          |
+| Filesystem       | file_close            |
+| Filesystem       | file_read             |
+| Filesystem       | file_write            |
+| Filesystem       | file_seek             |
+| Filesystem       | file_stat             |
+| Filesystem       | file_stat_at          |
+| Filesystem       | file_fstat            |
+| Filesystem       | file_read_dir         |
+| Filesystem       | file_create_dir       |
+| Filesystem       | file_remove           |
+| Filesystem       | file_rename           |
+| Filesystem       | file_sync             |
 
 ## Process / Thread
 
