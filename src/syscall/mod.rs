@@ -15,7 +15,6 @@ pub mod task;
 pub mod time;
 
 mod console;
-mod linux;
 mod types;
 
 use alloc::string::String;
