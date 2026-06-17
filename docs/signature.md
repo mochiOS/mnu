@@ -12,3 +12,11 @@ Signature DBの更新などに必要なケーパビリティ配下のとおり�
 - `signature.db.read`: signature DBの読み取り権限
 
 データベース登録と読み取りにはIPCを使用します。
+
+IPCメッセージの形式は次のとおりです。
+
+- `signature.db.write`
+
+```
+type: request
+```
