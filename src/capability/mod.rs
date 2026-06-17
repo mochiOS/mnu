@@ -28,6 +28,8 @@ pub enum KernelCapability {
     CextStop,
     DeviceClaim,
     KernelDebug,
+    SignatureWrite,
+    SignatureRead,
 }
 
 /// kernel が権限を結びつける対象オブジェクト
@@ -75,6 +77,8 @@ impl KernelCapability {
             CextStop => "cext.stop",
             DeviceClaim => "device.claim",
             KernelDebug => "kernel.debug",
+            SignatureWrite => "signature.db.write",
+            SignatureRead => "signature.db.read",
         }
     }
 
@@ -449,6 +453,9 @@ pub enum Capability {
     DeveloperDebug,
     DeveloperProfile,
     DeveloperTracing,
+
+    SignatureRead,
+    SignatureWrite,
 }
 
 impl Capability {
@@ -562,6 +569,9 @@ impl Capability {
             DeveloperDebug => "developer.debug",
             DeveloperProfile => "developer.profile",
             DeveloperTracing => "developer.tracing",
+
+            SignatureRead => "signature.db.read",
+            SignatureWrite => "signature.db.write",
         }
     }
 
@@ -676,6 +686,9 @@ impl Capability {
             "developer.profile" => DeveloperProfile,
             "developer.tracing" => DeveloperTracing,
 
+            "signature.db.write" => SignatureWrite,
+            "signature.db.read" => SignatureRead,
+
             _ => return None,
         };
         Some(cap)
@@ -701,6 +714,8 @@ impl Capability {
             MemoryPhysTranslate => KernelCapability::PhysTranslate,
             KernelModuleLoad => KernelCapability::CextLoad,
             KernelDebug => KernelCapability::KernelDebug,
+            SignatureRead => KernelCapability::SignatureRead,
+            SignatureWrite => KernelCapability::SignatureWrite,
             _ => return None,
         })
     }
@@ -878,6 +893,8 @@ impl Capability {
             DeveloperDebug,
             DeveloperProfile,
             DeveloperTracing,
+            SignatureRead,
+            SignatureWrite,
         ];
         KERNEL_ENFORCED
     }
