@@ -8,3 +8,4 @@ Changes:
   capabilities.manage for services,
   and exposed registered maps in
   core.service.
+* Delete old source files and syscalls.

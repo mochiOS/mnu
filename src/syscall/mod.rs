@@ -1,27 +1,18 @@
 //! システムコール
 
-pub mod block;
 pub mod capability;
 pub mod event;
 pub mod exec;
 pub mod fs;
 pub mod io;
-pub mod io_port;
 pub mod ipc;
-pub mod keyboard;
-pub mod mmio;
-pub mod mouse;
 pub mod pgroup;
-pub mod pipe;
-pub mod privileged;
 pub mod process;
 pub mod security;
 pub mod signal;
 pub mod syscall_entry;
 pub mod task;
 pub mod time;
-pub mod tty;
-pub mod vga;
 
 mod console;
 mod linux;
