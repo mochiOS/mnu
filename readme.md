@@ -20,7 +20,7 @@ cargo build
 To run the mnu kernel, you can use QEMU. After building the kernel, you can run it with the following command:
 
 ```bash
-cargo run --release
+./scripts/runner.sh
 ```
 
 ## Design Principles
