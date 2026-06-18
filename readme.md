@@ -17,11 +17,17 @@ cargo build
 ```
 
 ## Running
-To run the mnu kernel, you can use QEMU. After building the kernel, you can run it with the following command:
+The current top-level repo run path is the root `cargo run`, which builds the kernel, bootloader, and service image, then starts QEMU.
 
 ```bash
-./scripts/runner.sh
+cargo run
 ```
+
+The default run path opens a QEMU window. Use `QEMU_DISPLAY` to override it.
+
+- `QEMU_DISPLAY=gtk cargo run`
+- `QEMU_DISPLAY=sdl cargo run`
+- `QEMU_DISPLAY=none cargo run`
 
 ## Design Principles
 - The mnu kernel is not the place to directly implement OS features.
