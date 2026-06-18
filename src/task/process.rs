@@ -40,8 +40,13 @@ impl Default for ResourceLimits {
 
 #[derive(Clone, Debug)]
 pub enum MmapBacking {
+    Anonymous {
+        data: alloc::vec::Vec<u8>,
+        writable: bool,
+        shared: bool,
+    },
     File {
-        path: alloc::string::String,
+        path: String,
         data: alloc::vec::Vec<u8>,
         writable: bool,
         shared: bool,
@@ -64,7 +69,7 @@ impl MmapRegion {
         len: u64,
         prot: u64,
         flags: u64,
-        path: alloc::string::String,
+        path: String,
         data: alloc::vec::Vec<u8>,
         writable: bool,
         shared: bool,
@@ -76,6 +81,29 @@ impl MmapRegion {
             flags,
             backing: MmapBacking::File {
                 path,
+                data,
+                writable,
+                shared,
+            },
+            dirty_pages: alloc::vec::Vec::new(),
+        }
+    }
+
+    pub fn anonymous(
+        start: u64,
+        len: u64,
+        prot: u64,
+        flags: u64,
+        data: alloc::vec::Vec<u8>,
+        writable: bool,
+        shared: bool,
+    ) -> Self {
+        Self {
+            start,
+            len,
+            prot,
+            flags,
+            backing: MmapBacking::Anonymous {
                 data,
                 writable,
                 shared,
@@ -110,6 +138,25 @@ impl MmapRegion {
         &mut self.backing
     }
 
+    pub fn set_shared(&mut self, shared: bool) {
+        if shared {
+            self.flags |= 0x1;
+        } else {
+            self.flags &= !0x1;
+        }
+        match &mut self.backing {
+            MmapBacking::Anonymous { shared: s, .. } => *s = shared,
+            MmapBacking::File { shared: s, .. } => *s = shared,
+        }
+    }
+
+    pub fn set_writable(&mut self, writable: bool) {
+        match &mut self.backing {
+            MmapBacking::Anonymous { writable: w, .. } => *w = writable,
+            MmapBacking::File { writable: w, .. } => *w = writable,
+        }
+    }
+
     pub fn mark_dirty_page(&mut self, page_index: u64) {
         if !self.dirty_pages.contains(&page_index) {
             self.dirty_pages.push(page_index);
@@ -136,30 +183,35 @@ impl MmapRegion {
 impl MmapBacking {
     pub fn file_path(&self) -> &str {
         match self {
+            MmapBacking::Anonymous { .. } => "",
             MmapBacking::File { path, .. } => path.as_str(),
         }
     }
 
     pub fn file_data(&self) -> &[u8] {
         match self {
+            MmapBacking::Anonymous { data, .. } => data.as_slice(),
             MmapBacking::File { data, .. } => data.as_slice(),
         }
     }
 
     pub fn file_data_mut(&mut self) -> &mut alloc::vec::Vec<u8> {
         match self {
+            MmapBacking::Anonymous { data, .. } => data,
             MmapBacking::File { data, .. } => data,
         }
     }
 
     pub fn file_writable(&self) -> bool {
         match self {
+            MmapBacking::Anonymous { writable, .. } => *writable,
             MmapBacking::File { writable, .. } => *writable,
         }
     }
 
     pub fn file_shared(&self) -> bool {
         match self {
+            MmapBacking::Anonymous { shared, .. } => *shared,
             MmapBacking::File { shared, .. } => *shared,
         }
     }
@@ -500,7 +552,9 @@ impl Process {
     }
 
     pub fn find_mmap_region(&self, addr: u64) -> Option<&MmapRegion> {
-        self.mmap_regions.iter().find(|region| region.contains(addr))
+        self.mmap_regions
+            .iter()
+            .find(|region| region.contains(addr))
     }
 
     pub fn find_mmap_region_mut(&mut self, addr: u64) -> Option<&mut MmapRegion> {

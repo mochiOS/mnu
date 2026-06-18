@@ -7,6 +7,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::task::{PrivilegeLevel, ProcessId};
 
+pub mod signature;
+
 /// `.service` 実行を許可するサービスマネージャープロセスID
 /// 0 は未登録。
 static SERVICE_MANAGER_PID: AtomicU64 = AtomicU64::new(0);
@@ -68,14 +70,6 @@ pub fn service_manager_launch() -> BootLaunch {
         exec_path: "core.service",
         manifest_role: ManifestRole::CoreService,
     }
-}
-
-#[inline]
-fn role_is_service_like(role: ManifestRole) -> bool {
-    matches!(
-        role,
-        ManifestRole::CoreService | ManifestRole::Service | ManifestRole::Driver
-    )
 }
 
 #[inline]
@@ -170,14 +164,10 @@ pub fn caller_can_grant_capabilities_on_exec() -> bool {
 /// manifest role を privilege に落とす
 #[inline]
 pub fn resolve_launch_privilege(
-    role: ManifestRole,
+    _role: ManifestRole,
     _install_source: InstallSource,
 ) -> PrivilegeLevel {
-    if role_is_service_like(role) {
-        PrivilegeLevel::Service
-    } else {
-        PrivilegeLevel::User
-    }
+    PrivilegeLevel::User
 }
 
 /// manifest role を priority に落とす
@@ -243,7 +233,7 @@ pub fn resolve_exec_priority(
 
     if let Some(parent) = parent_pid {
         let parent_name = crate::task::with_process(parent, |process| {
-            let mut name = alloc::string::String::new();
+            let mut name = String::new();
             name.push_str(process.name());
             name
         });

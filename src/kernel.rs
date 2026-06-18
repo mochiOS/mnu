@@ -1,6 +1,9 @@
+use crate::capability::path::{
+    register_service_paths, PathRights, PATH_CREATE, PATH_LIST, PATH_READ, PATH_WRITE,
+};
 use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
-use crate::syscall::exec::exec_kernel_with_name_and_caps;
+use crate::syscall::exec::{exec_kernel_with_name, exec_kernel_with_name_and_caps};
 use crate::util::log::LogLevel;
 use crate::{debug, info};
 use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
@@ -82,6 +85,12 @@ fn kernel_main() -> ! {
         }
         caps.insert(*cap);
     }
+
+    if !crate::policy::signature::load_signature_database() {
+        crate::error!("Failed to load signature database from rootfs");
+        halt_forever();
+    }
+
     // 最小のサービス管理プロセスを起動する。
     info!("Starting service manager");
     let boot_launch = crate::policy::service_manager_launch();
@@ -96,6 +105,52 @@ fn kernel_main() -> ! {
         && task::with_process(task::ProcessId::from_u64(manager_pid), |_| ()).is_some()
     {
         crate::policy::register_service_manager_pid(manager_pid);
+        if let Some(pid) = task::with_process(task::ProcessId::from_u64(manager_pid), |proc| {
+            let spawn = proc
+                .capabilities()
+                .contains(crate::capability::Capability::ProcessSpawn);
+            let inspect = proc
+                .capabilities()
+                .contains(crate::capability::Capability::ProcessInspect);
+            (spawn, inspect)
+        }) {
+            crate::info!(
+                "service manager caps: process.spawn={} process.inspect={}",
+                pid.0,
+                pid.1
+            );
+        }
+        let service_paths = [
+            (
+                "/core.service.fs-test",
+                PathRights::new(PATH_READ | PATH_WRITE | PATH_CREATE),
+            ),
+            ("/testdata", PathRights::new(PATH_READ | PATH_LIST)),
+        ];
+        let _ = register_service_paths(manager_pid, &service_paths);
+
+        let signature_allow_pid = exec_kernel_with_name("/captest.bin", "signature-allow-test");
+        if signature_allow_pid == 0 || signature_allow_pid & (1u64 << 63) != 0 {
+            crate::error!(
+                "signature allow test failed: ret={:#x}",
+                signature_allow_pid
+            );
+        } else {
+            crate::info!(
+                "signature allow test launched pid={:#x}",
+                signature_allow_pid
+            );
+        }
+
+        let signature_deny_ret = exec_kernel_with_name("/unsigned.bin", "signature-deny-test");
+        if signature_deny_ret == 0 || signature_deny_ret & (1u64 << 63) == 0 {
+            crate::error!(
+                "signature deny test unexpectedly succeeded: ret={:#x}",
+                signature_deny_ret
+            );
+        } else {
+            crate::info!("signature deny test rejected ret={:#x}", signature_deny_ret);
+        }
     } else {
         crate::warn!(
             "Failed to register service manager (ret={:#x})",

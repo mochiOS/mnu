@@ -15,6 +15,7 @@ pub use loader::{
 
 use crate::init;
 use crate::mem::{paging, user};
+use crate::policy::caller_can_launch_service;
 use crate::result::{Kernel, Memory, Process, Result};
 use crate::task::{
     add_process, add_thread, remove_process, PrivilegeLevel, Process as TaskProcess, Thread,
@@ -211,6 +212,11 @@ pub fn spawn_service(
     path: &str,
     name: &str,
 ) -> Result<(crate::task::ProcessId, crate::task::ThreadId, u64)> {
+    if !caller_can_launch_service() {
+        return Err(Kernel::Process(Process::Service(
+            crate::result::Service::InsufficientPrivilege,
+        )));
+    }
     let data = crate::cext::fs::read_all(path)
         .or_else(|| init::fs::read(path))
         .ok_or(Kernel::InvalidParam)?;
@@ -324,7 +330,7 @@ pub fn spawn_service(
 }
 
 fn parse_header(data: &[u8]) -> Result<Elf64Ehdr> {
-    if data.len() < core::mem::size_of::<Elf64Ehdr>() {
+    if data.len() < size_of::<Elf64Ehdr>() {
         return Err(Kernel::InvalidParam);
     }
     let ptr = data.as_ptr() as *const Elf64Ehdr;
@@ -341,7 +347,7 @@ fn validate_header(header: Elf64Ehdr) -> Result<()> {
     if header.e_machine != EM_X86_64 {
         return Err(Kernel::InvalidParam);
     }
-    if header.e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
+    if header.e_phentsize as usize != size_of::<Elf64Phdr>() {
         return Err(Kernel::InvalidParam);
     }
     Ok(())
@@ -394,9 +400,9 @@ fn apply_relocations_to(
     }
 
     if let Some((dyn_off, dyn_size)) = dynamic_file_range(data, header)? {
-        let count = dyn_size / core::mem::size_of::<Elf64Dyn>();
+        let count = dyn_size / size_of::<Elf64Dyn>();
         for i in 0..count {
-            let off = dyn_off + i * core::mem::size_of::<Elf64Dyn>();
+            let off = dyn_off + i * size_of::<Elf64Dyn>();
             let dyn_ent = read_dyn(data, off)?;
             match dyn_ent.d_tag {
                 DT_NULL => break,
@@ -416,8 +422,8 @@ fn apply_relocations_to(
         Some(v) => v,
         None => return Ok(()),
     };
-    let rela_ent = rela_ent.unwrap_or(core::mem::size_of::<Elf64Rela>());
-    if rela_ent < core::mem::size_of::<Elf64Rela>() || rela_size % rela_ent != 0 {
+    let rela_ent = rela_ent.unwrap_or(size_of::<Elf64Rela>());
+    if rela_ent < size_of::<Elf64Rela>() || rela_size % rela_ent != 0 {
         return Err(Kernel::InvalidParam);
     }
 
@@ -429,7 +435,7 @@ fn apply_relocations_to(
         let r_type = (rela.r_info & 0xffffffff) as u32;
         if r_type == R_X86_64_RELATIVE {
             let reloc_vaddr = load_bias.wrapping_add(rela.r_offset);
-            let reloc_end = match reloc_vaddr.checked_add(core::mem::size_of::<u64>() as u64) {
+            let reloc_end = match reloc_vaddr.checked_add(size_of::<u64>() as u64) {
                 Some(v) => v,
                 None => return Err(Kernel::InvalidParam),
             };
@@ -499,7 +505,7 @@ fn vaddr_to_offset(data: &[u8], header: Elf64Ehdr, vaddr: u64) -> Result<usize> 
 }
 
 fn read_dyn(data: &[u8], offset: usize) -> Result<Elf64Dyn> {
-    if offset + core::mem::size_of::<Elf64Dyn>() > data.len() {
+    if offset + size_of::<Elf64Dyn>() > data.len() {
         return Err(Kernel::InvalidParam);
     }
     let ptr = unsafe { data.as_ptr().add(offset) as *const Elf64Dyn };
@@ -507,7 +513,7 @@ fn read_dyn(data: &[u8], offset: usize) -> Result<Elf64Dyn> {
 }
 
 fn read_rela(data: &[u8], offset: usize) -> Result<Elf64Rela> {
-    if offset + core::mem::size_of::<Elf64Rela>() > data.len() {
+    if offset + size_of::<Elf64Rela>() > data.len() {
         return Err(Kernel::InvalidParam);
     }
     let ptr = unsafe { data.as_ptr().add(offset) as *const Elf64Rela };
@@ -515,7 +521,7 @@ fn read_rela(data: &[u8], offset: usize) -> Result<Elf64Rela> {
 }
 
 fn read_phdr(data: &[u8], offset: usize) -> Result<Elf64Phdr> {
-    if offset + core::mem::size_of::<Elf64Phdr>() > data.len() {
+    if offset + size_of::<Elf64Phdr>() > data.len() {
         return Err(Kernel::InvalidParam);
     }
     let ptr = unsafe { data.as_ptr().add(offset) as *const Elf64Phdr };

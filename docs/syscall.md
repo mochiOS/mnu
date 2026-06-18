@@ -97,6 +97,20 @@ ptr        ユーザー空間ポインタ
 | Time             | time_now              |
 | Time             | sleep                 |
 | I/O              | write                 |
+| Filesystem       | file_open             |
+| Filesystem       | file_open_at          |
+| Filesystem       | file_close            |
+| Filesystem       | file_read             |
+| Filesystem       | file_write            |
+| Filesystem       | file_seek             |
+| Filesystem       | file_stat             |
+| Filesystem       | file_stat_at          |
+| Filesystem       | file_fstat            |
+| Filesystem       | file_read_dir         |
+| Filesystem       | file_create_dir       |
+| Filesystem       | file_remove           |
+| Filesystem       | file_rename           |
+| Filesystem       | file_sync             |
 
 ## Process / Thread
 
@@ -504,6 +518,96 @@ sleep(duration_ns: u64, flags: u64) -> isize
 write(str: &str) -> isize
 ```
 シリアルコンソールへ文字列を書き込みます。
+
+## Filesystem
+
+Filesystem は最小カーネルの例外として残します。
+高頻度のディスク入出力は cext やサービスに寄せる前提ですが、
+起動初期化や基本的なファイルアクセスのために、以下の syscall は公開します。
+
+### file_open
+
+```
+file_open(path: ptr, flags: u64) -> u64
+```
+
+### file_open_at
+
+```
+file_open_at(dirfd: i64, path: ptr, flags: u64, mode: u64) -> u64
+```
+
+### file_close
+
+```
+file_close(fd: u64) -> isize
+```
+
+### file_read
+
+```
+file_read(fd: u64, buf: ptr, len: usize) -> isize
+```
+
+### file_write
+
+```
+file_write(fd: u64, buf: ptr, len: usize) -> isize
+```
+
+### file_seek
+
+```
+file_seek(fd: u64, offset: i64, whence: u64) -> isize
+```
+
+### file_stat
+
+```
+file_stat(path: ptr, stat: ptr) -> isize
+```
+
+### file_stat_at
+
+```
+file_stat_at(dirfd: i64, path: ptr, stat: ptr, flags: u64) -> isize
+```
+
+### file_fstat
+
+```
+file_fstat(fd: u64, stat: ptr) -> isize
+```
+
+### file_read_dir
+
+```
+file_read_dir(fd: u64, buf: ptr, len: usize) -> isize
+```
+
+### file_create_dir
+
+```
+file_create_dir(path: ptr, mode: u64) -> isize
+```
+
+### file_remove
+
+```
+file_remove(path: ptr) -> isize
+```
+
+### file_rename
+
+```
+file_rename(old_dirfd: i64, old_path: ptr, new_dirfd: i64, new_path: ptr) -> isize
+```
+
+### file_sync
+
+```
+file_sync(fd: u64) -> isize
+```
 
 ## 高速IPCの扱い
 

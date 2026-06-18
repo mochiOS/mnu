@@ -1,37 +1,18 @@
-the mnu kernel ChangeLog   - version 0.1-rc2
-    - Release date: 2026-06-
+the mnu kernel ChangeLog   - version 0.1
+    - Release date: 2026-06-18
     - Release creator: tas0dev
 
 Changes:
-* Fixed an issue that occurred when user
-  copying failed while receiving an IPC external page
-* Fixed an issue where drivers would be overwritten
-  if PlugKit driver IDs were duplicated.
-* Fixed an issue where unassigned PlugKit devices
-  were being recognized as assigned.
-* Fixed some bugs in the PlugKit.
-* Fixed an issue where service permissions were
-  being granted based solely on the path or filename.
-* Fixed a vulnerability that allowed numerous
-  capabilities to be bypassed
-  when using Service privileges.
-* Fixed an issue where services could be started
-  when ProcessSpawn privileges were granted.
-* Fixed an issue where fork() fell back to sharing
-  the parent page table if clone failed
-* Fixed a vulnerability where the Cext ELF loader
-  could overwrite existing kernel mappings or load
-  PT_LOAD segments outside the Cext-only virtual range.
-* Fixed a vulnerability where physical address
-  translation and physical page mapping were
-  permitted through Service privileges instead of
-  dedicated memory.phys.* capabilities, and target
-  process access checks were missing.
-* Updated the documentation to describe the new
-  memory.phys.* capability split and target-process
-  access requirements.
-* IPC full implementation.
-* Delete unused files.
-* Updated the documentations.
-* Updated the cext build system.
-* Create security guidelines.
+* First release of the mnu kernel.
+* Added a path capability registry.
+  gated actual path registration on
+  capabilities.manage for services,
+  and exposed registered maps in
+  core.service.
+* Create a security model based on
+  binary signatures
+* Fixed some syscalls security issues.
+* Fixed many bugs / security issues.
+* Create some scripts.
+* Delete old source files and syscalls.
+* Delete unused meta files.

@@ -1,20 +1,21 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS, EPERM, SUCCESS};
+use super::types::{EFAULT, EINVAL, EIO, ENOMEM, ENOSYS, EPERM, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 fn caller_has_process_inspect_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessInspect,
-    ]) || crate::syscall::security::caller_is_core()
+    ])
 }
 
 fn caller_has_process_spawn_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessSpawn,
-    ]) || crate::syscall::security::caller_is_core()
+    ])
 }
 
 /// ユーザー空間の上限アドレス (x86-64 canonical hole 下側)
@@ -69,6 +70,56 @@ fn is_user_range(addr: u64, len: u64) -> bool {
         None => return false,
     };
     addr <= USER_SPACE_END && end <= USER_SPACE_END
+}
+
+const MEMORY_SYNC_CHUNK_BYTES: usize = 4096;
+
+fn writeback_shared_mmap_region(
+    region: &mut crate::task::MmapRegion,
+    sync_start: u64,
+    data: &[u8],
+) -> u64 {
+    if data.is_empty() {
+        return SUCCESS;
+    }
+    if !region.is_shared() || !region.is_writable() {
+        return EINVAL;
+    }
+
+    let Some(region_end) = region.end() else {
+        return EINVAL;
+    };
+    let Some(sync_end) = sync_start.checked_add(data.len() as u64) else {
+        return EINVAL;
+    };
+    if sync_start < region.start() || sync_end > region_end {
+        return EINVAL;
+    }
+
+    let backing_base = sync_start - region.start();
+    let mut offset = 0usize;
+
+    while offset < data.len() {
+        let chunk_len = core::cmp::min(MEMORY_SYNC_CHUNK_BYTES, data.len() - offset);
+        let write_off = match backing_base.checked_add(offset as u64) {
+            Some(v) => v,
+            None => return EINVAL,
+        };
+        let backing = region.backing_mut().file_data_mut();
+        let end = match (write_off as usize).checked_add(chunk_len) {
+            Some(v) => v,
+            None => return EINVAL,
+        };
+        if end > backing.len() {
+            backing.resize(end, 0);
+        }
+        backing[write_off as usize..end].copy_from_slice(&data[offset..offset + chunk_len]);
+
+        offset += chunk_len;
+    }
+
+    let _ = region.take_dirty_pages();
+    SUCCESS
 }
 
 fn register_futex_waiter(tid: ThreadId, uaddr: u64, wake_tick: u64) -> bool {
@@ -501,73 +552,6 @@ pub fn spawn(flags: u64, reserved: u64) -> u64 {
     fork()
 }
 
-/// サービスプロセスを起動する
-///
-/// `path_ptr` は NUL 終端のサービス名（例: `fs.service`）を指す。
-/// 戻り値は起動したサービスの endpoint handle。
-pub fn service_spawn(path_ptr: u64) -> u64 {
-    if !crate::policy::caller_can_launch_service() {
-        return crate::syscall::EPERM;
-    }
-    if path_ptr == 0 {
-        return EINVAL;
-    }
-
-    let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
-        Ok(s) => s,
-        Err(_) => return EINVAL,
-    };
-    if !path.ends_with(".service") {
-        return EINVAL;
-    }
-
-    crate::info!("service_spawn: launching {}", path);
-    match crate::elf::spawn_service(&path, &path) {
-        Ok((pid, thread_id, endpoint)) => {
-            crate::info!(
-                "service_spawn: launched {} pid={:?} tid={:?} endpoint={:#x}",
-                path,
-                pid,
-                thread_id,
-                endpoint
-            );
-            crate::info!("fs.service started pid={:?} tid={:?}", pid, thread_id);
-            if let Some(current_tid) = crate::task::current_thread_id() {
-                let current_slot = crate::task::current_thread_slot();
-                let next_slot = crate::task::thread_slot_index(thread_id);
-                crate::info!(
-                    "service_spawn: switching from {:?} slot={:?} to {:?} slot={:?}",
-                    current_tid,
-                    current_slot,
-                    thread_id,
-                    next_slot
-                );
-                if let Some(current_slot) = current_slot {
-                    let _ = crate::task::set_thread_state_at_slot(
-                        current_slot,
-                        crate::task::ThreadState::Ready,
-                    );
-                } else {
-                    let _ =
-                        crate::task::set_thread_state(current_tid, crate::task::ThreadState::Ready);
-                }
-                if let Some(next_slot) = next_slot {
-                    let _ = crate::task::set_thread_state_at_slot(
-                        next_slot,
-                        crate::task::ThreadState::Running,
-                    );
-                } else {
-                    let _ =
-                        crate::task::set_thread_state(thread_id, crate::task::ThreadState::Running);
-                }
-                crate::task::yield_now();
-            }
-            endpoint
-        }
-        Err(_) => ENOSYS,
-    }
-}
-
 /// Sleepシステムコール
 ///
 /// 指定されたミリ秒数の間スリープする
@@ -864,6 +848,13 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
         };
 
         if anonymous {
+            let backing = alloc::vec![0u8; size as usize];
+            let region = crate::task::MmapRegion::anonymous(
+                map_start, size, prot, flags, backing, writable, shared,
+            );
+            if !process.add_mmap_region(region) {
+                return Err(EINVAL);
+            }
             if crate::mem::paging::map_and_copy_segment_to(
                 pt_phys,
                 map_start,
@@ -947,18 +938,27 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
 
     if let Some(mut region) = backing_region {
         if region.is_shared() && region.is_writable() {
-            let path = alloc::string::String::from(region.backing().file_path());
+            let region_len = region.len();
+            let path = region.backing().file_path().to_string();
             let dirty_pages = region.take_dirty_pages();
             for page_index in dirty_pages {
                 let page_off = page_index.saturating_mul(4096);
-                if page_off >= region.len() {
+                if page_off >= region_len {
                     continue;
                 }
                 let page_addr = unmap_start + page_off;
-                let copy_len = core::cmp::min(4096u64, region.len() - page_off) as usize;
+                let copy_len = core::cmp::min(4096u64, region_len - page_off) as usize;
                 let mut page_buf = [0u8; 4096];
                 if crate::syscall::copy_from_user(page_addr, &mut page_buf[..copy_len]).is_ok() {
-                    let _ = crate::cext::fs::write_all(&path, page_off, &page_buf[..copy_len]);
+                    let backing = region.backing_mut().file_data_mut();
+                    let end = (page_off as usize).saturating_add(copy_len);
+                    if end > backing.len() {
+                        backing.resize(end, 0);
+                    }
+                    backing[page_off as usize..end].copy_from_slice(&page_buf[..copy_len]);
+                    if !path.is_empty() {
+                        let _ = crate::cext::fs::write_all(&path, page_off, &page_buf[..copy_len]);
+                    }
                 }
             }
         }
@@ -972,8 +972,7 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
 
 /// memory_share システムコール
 ///
-/// 現時点では安全な基本実装として、引数検証のみ行って成功を返す。
-/// 将来的には IPC / shared memory の実体へ接続する。
+/// 指定領域を共有可能なマッピングとして扱う。
 pub fn memory_share(addr: u64, length: u64, flags: u64) -> u64 {
     let _ = flags;
     if addr == 0 || length == 0 {
@@ -989,13 +988,37 @@ pub fn memory_share(addr: u64, length: u64, flags: u64) -> u64 {
     if !super::validate_user_ptr(addr, share_len) {
         return EFAULT;
     }
-    SUCCESS
+
+    let pid = match crate::syscall::security::current_process_id() {
+        Some(p) => p.as_u64(),
+        None => return ENOSYS,
+    };
+
+    let ok = crate::task::with_process_mut(crate::task::ids::ProcessId::from_u64(pid), |process| {
+        let region_start = addr & !4095;
+        let Some(region) = process.find_mmap_region_mut(region_start) else {
+            return false;
+        };
+        if region_start != region.start() || share_len > region.len() {
+            return false;
+        }
+        if !region.is_writable() {
+            return false;
+        }
+        region.set_shared(true);
+        true
+    })
+    .unwrap_or(false);
+    if ok {
+        SUCCESS
+    } else {
+        EINVAL
+    }
 }
 
 /// memory_sync システムコール
 ///
-/// 現時点では安全な基本実装として、引数検証のみ行って成功を返す。
-/// 将来的には shared memory / mmap / FS-backed page の同期入口として拡張する。
+/// 共有マッピングの内容を backing に同期する。
 pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
     let _ = flags;
     if addr == 0 || length == 0 {
@@ -1011,7 +1034,98 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
     if !super::validate_user_ptr(addr, sync_len) {
         return EFAULT;
     }
-    SUCCESS
+
+    let sync_start = addr & !4095;
+    let pid = match crate::syscall::security::current_process_id() {
+        Some(p) => p.as_u64(),
+        None => return ENOSYS,
+    };
+    let region_start =
+        match crate::task::with_process_mut(crate::task::ids::ProcessId::from_u64(pid), |process| {
+            let Some(region) = process.find_mmap_region_mut(sync_start) else {
+                return Err(EINVAL);
+            };
+            if sync_start < region.start() {
+                return Err(EINVAL);
+            }
+            let Some(region_end) = region.end() else {
+                return Err(EINVAL);
+            };
+            let Some(sync_end) = sync_start.checked_add(sync_len) else {
+                return Err(EINVAL);
+            };
+            if sync_end > region_end {
+                return Err(EINVAL);
+            }
+            if !region.is_shared() || !region.is_writable() {
+                return Err(EINVAL);
+            }
+            Ok(region.start())
+        }) {
+            Some(Ok(start)) => start,
+            Some(Err(e)) => return e,
+            None => return ENOMEM,
+        };
+
+    let mut copied = alloc::vec![0u8; sync_len as usize];
+    let mut offset = 0usize;
+    while offset < copied.len() {
+        let chunk_len = core::cmp::min(MEMORY_SYNC_CHUNK_BYTES, copied.len() - offset);
+        let user_addr = match addr.checked_add(offset as u64) {
+            Some(v) => v,
+            None => return EINVAL,
+        };
+        if super::copy_from_user(user_addr, &mut copied[offset..offset + chunk_len]).is_err() {
+            return EFAULT;
+        }
+        offset += chunk_len;
+    }
+
+    let backing_path =
+        match crate::task::with_process_mut(crate::task::ids::ProcessId::from_u64(pid), |process| {
+            let Some(region) = process.find_mmap_region_mut(region_start) else {
+                return Err(EINVAL);
+            };
+            Ok(region.backing().file_path().to_string())
+        }) {
+            Some(Ok(path)) => path,
+            Some(Err(e)) => return e,
+            None => return ENOMEM,
+        };
+
+    if !backing_path.is_empty() {
+        let mut written = 0usize;
+        while written < copied.len() {
+            let chunk_len = core::cmp::min(MEMORY_SYNC_CHUNK_BYTES, copied.len() - written);
+            let write_off = match (written as u64).checked_add(sync_start - region_start) {
+                Some(v) => v,
+                None => return EINVAL,
+            };
+            match crate::cext::fs::write_all(
+                &backing_path,
+                write_off,
+                &copied[written..written + chunk_len],
+            ) {
+                Some(n) if n == chunk_len => {}
+                _ => return EIO,
+            }
+            written += chunk_len;
+        }
+    }
+
+    let result =
+        crate::task::with_process_mut(crate::task::ids::ProcessId::from_u64(pid), |process| {
+            let Some(region) = process.find_mmap_region_mut(region_start) else {
+                return Err(EINVAL);
+            };
+            Ok(writeback_shared_mmap_region(region, sync_start, &copied))
+        });
+
+    match result {
+        Some(Ok(code)) => code,
+        Some(Err(e)) => e,
+        None => ENOMEM,
+    }
 }
 
 /// Futexシステムコール

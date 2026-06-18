@@ -5,6 +5,7 @@
 //! ここで変換を集中管理する。
 
 extern crate alloc;
+pub mod path;
 
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
@@ -27,6 +28,8 @@ pub enum KernelCapability {
     CextStop,
     DeviceClaim,
     KernelDebug,
+    SignatureWrite,
+    SignatureRead,
 }
 
 /// kernel が権限を結びつける対象オブジェクト
@@ -74,6 +77,8 @@ impl KernelCapability {
             CextStop => "cext.stop",
             DeviceClaim => "device.claim",
             KernelDebug => "kernel.debug",
+            SignatureWrite => "signature.db.write",
+            SignatureRead => "signature.db.read",
         }
     }
 
@@ -168,6 +173,7 @@ pub enum UserCapability {
     AccountOtherModify,
     SettingsRead,
     SettingsWrite,
+    CapabilitiesManage,
     Unsandboxed,
     DeveloperDebug,
     DeveloperProfile,
@@ -243,6 +249,7 @@ impl UserCapability {
             AccountOtherModify => "account.other.modify",
             SettingsRead => "settings.read",
             SettingsWrite => "settings.write",
+            CapabilitiesManage => "capabilities.manage",
             Unsandboxed => "unsandboxed",
             DeveloperDebug => "developer.debug",
             DeveloperProfile => "developer.profile",
@@ -318,6 +325,7 @@ impl UserCapability {
             "account.other.modify" => Some(AccountOtherModify),
             "settings.read" => Some(SettingsRead),
             "settings.write" => Some(SettingsWrite),
+            "capabilities.manage" => Some(CapabilitiesManage),
             "unsandboxed" => Some(Unsandboxed),
             "developer.debug" => Some(DeveloperDebug),
             "developer.profile" => Some(DeveloperProfile),
@@ -438,12 +446,16 @@ pub enum Capability {
 
     SettingsRead,
     SettingsWrite,
+    CapabilitiesManage,
 
     Unsandboxed,
 
     DeveloperDebug,
     DeveloperProfile,
     DeveloperTracing,
+
+    SignatureRead,
+    SignatureWrite,
 }
 
 impl Capability {
@@ -550,12 +562,16 @@ impl Capability {
 
             SettingsRead => "settings.read",
             SettingsWrite => "settings.write",
+            CapabilitiesManage => "capabilities.manage",
 
             Unsandboxed => "unsandboxed",
 
             DeveloperDebug => "developer.debug",
             DeveloperProfile => "developer.profile",
             DeveloperTracing => "developer.tracing",
+
+            SignatureRead => "signature.db.read",
+            SignatureWrite => "signature.db.write",
         }
     }
 
@@ -662,12 +678,16 @@ impl Capability {
 
             "settings.read" => SettingsRead,
             "settings.write" => SettingsWrite,
+            "capabilities.manage" => CapabilitiesManage,
 
             "unsandboxed" => Unsandboxed,
 
             "developer.debug" => DeveloperDebug,
             "developer.profile" => DeveloperProfile,
             "developer.tracing" => DeveloperTracing,
+
+            "signature.db.write" => SignatureWrite,
+            "signature.db.read" => SignatureRead,
 
             _ => return None,
         };
@@ -694,6 +714,8 @@ impl Capability {
             MemoryPhysTranslate => KernelCapability::PhysTranslate,
             KernelModuleLoad => KernelCapability::CextLoad,
             KernelDebug => KernelCapability::KernelDebug,
+            SignatureRead => KernelCapability::SignatureRead,
+            SignatureWrite => KernelCapability::SignatureWrite,
             _ => return None,
         })
     }
@@ -767,6 +789,7 @@ impl Capability {
             AccountOtherModify => UserCapability::AccountOtherModify,
             SettingsRead => UserCapability::SettingsRead,
             SettingsWrite => UserCapability::SettingsWrite,
+            CapabilitiesManage => UserCapability::CapabilitiesManage,
             Unsandboxed => UserCapability::Unsandboxed,
             DeveloperDebug => UserCapability::DeveloperDebug,
             DeveloperProfile => UserCapability::DeveloperProfile,
@@ -781,6 +804,21 @@ impl Capability {
     /// 付与・検証の最終責任を持つ。
     pub fn is_kernel_enforced(&self) -> bool {
         Self::kernel_enforced_capabilities().contains(self)
+    }
+
+    /// 他プロセスへ委譲可能かどうか。
+    ///
+    /// `Unsandboxed` や物理メモリ、プロセス生成のような強い権限は
+    /// 低い権限のプロセスへ転送しない。
+    pub fn is_delegable(&self) -> bool {
+        !matches!(
+            self,
+            Capability::Unsandboxed
+                | Capability::ProcessSpawn
+                | Capability::KernelDebug
+                | Capability::MemoryPhysMap
+                | Capability::MemoryPhysTranslate
+        )
     }
 
     /// カーネルが強制対象として扱う capability 一覧
@@ -865,10 +903,13 @@ impl Capability {
             AccountOtherModify,
             SettingsRead,
             SettingsWrite,
+            CapabilitiesManage,
             Unsandboxed,
             DeveloperDebug,
             DeveloperProfile,
             DeveloperTracing,
+            SignatureRead,
+            SignatureWrite,
         ];
         KERNEL_ENFORCED
     }

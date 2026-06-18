@@ -103,6 +103,8 @@ mnuでは、次のような方針でCapabilityを扱います。
 - 権限の付与や分類は専用サービスで管理できるようにする
 - 物理メモリの参照や物理ページのマッピングは `memory.phys.map` / `memory.phys.translate` で分離する
 - Service権限だけで物理アドレス取得や物理ページ mapping を許可しない
+- パスレベルの権限は `capabilities.manage` を持つ core.service 系の起動経路を起点に、カーネル初期登録で管理する
+- 実際のパス定義はカーネルが検証し、path registry を参照して判定する
 
 この設計により、仮にサービスの一部が侵害された場合でも、被害範囲をそのサービスが持つCapabilityの範囲に抑えることを目指します。
 

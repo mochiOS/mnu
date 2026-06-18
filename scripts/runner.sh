@@ -38,6 +38,8 @@ need_file() {
 }
 
 need_cmd cargo
+need_cmd perl
+need_cmd openssl
 need_cmd qemu-system-x86_64
 need_cmd mke2fs
 need_cmd mkfs.fat
@@ -46,7 +48,6 @@ need_cmd mcopy
 need_cmd readelf
 need_cmd strings
 need_cmd stat
-need_cmd sha256sum
 need_cmd tee
 need_cmd sed
 need_cmd wc
@@ -61,6 +62,7 @@ need_file "${ROOT_DIR}/examples/plugkit/test/Cargo.toml"
 need_file "${ROOT_DIR}/examples/plugkit/test/about.toml"
 need_file "${ROOT_DIR}/scripts/cexts.sh"
 need_file "${ROOT_DIR}/scripts/rootfs.sh"
+need_file "${ROOT_DIR}/scripts/signature_db.pl"
 
 mkdir -p "${TARGET_DIR}" "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}"
 
@@ -78,7 +80,7 @@ cargo build \
     --manifest-path "${ROOT_DIR}/Cargo.toml"
 
 echo "[build] userland"
-env RUSTFLAGS="-C relocation-model=static -C link-arg=-T${ROOT_DIR}/examples/user/linker.ld -C link-arg=-no-pie" \
+env RUSTFLAGS="-C relocation-model=static -C link-arg=-T${ROOT_DIR}/examples/user/linker.ld -C link-arg=-no-pie --cfg curve25519_dalek_backend=\"serial\"" \
     cargo build \
     --locked \
     --release \
@@ -93,7 +95,7 @@ need_file "${USER_BIN}"
 need_file "${CAPTEST_BIN}"
 
 echo "[build] plugkit test"
-env RUSTFLAGS="-C relocation-model=static -C link-arg=-T${ROOT_DIR}/examples/user/linker.ld -C link-arg=-no-pie" \
+env RUSTFLAGS="-C relocation-model=static -C link-arg=-T${ROOT_DIR}/examples/user/linker.ld -C link-arg=-no-pie --cfg curve25519_dalek_backend=\"serial\"" \
     cargo build \
     --locked \
     --release \
@@ -113,6 +115,7 @@ readelf -h "${USER_BIN}" | grep -E 'Type:|Entry point address:' || true
 echo "[check] selftest marker"
 strings "${USER_BIN}" | grep -n 'selftest: enter' || true
 
+SIGNATURE_DB_STAGE="${TARGET_DIR}/signature.db"
 echo "[build] bootloader"
 cargo build \
     --locked \
@@ -144,11 +147,26 @@ install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/core.service"
 install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/captest.bin"
+install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/unsigned.bin"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/hello.bin"
 mkdir -p "${INITFS_STAGE}/plugkit/test"
 install -m 0644 "${ROOT_DIR}/examples/plugkit/test/about.toml" "${INITFS_STAGE}/plugkit/test/about.toml"
 install -m 0755 "${PLUGKIT_TEST_BIN}" "${INITFS_STAGE}/plugkit/test/entry.elf"
 stage_module_cexts
+
+echo "[build] signature db"
+SIGNATURE_DB_ARGS=(
+    --output "${SIGNATURE_DB_STAGE}"
+    --entry "core.service=${USER_BIN}"
+    --entry "/plugkit/test/entry.elf=${PLUGKIT_TEST_BIN}"
+    --entry "/hello.bin=${USER_BIN}"
+    --entry "/captest.bin=${CAPTEST_BIN}"
+)
+while IFS= read -r -d '' module_path; do
+    module_name="$(basename "${module_path}")"
+    SIGNATURE_DB_ARGS+=(--entry "/Modules/${module_name}=${module_path}")
+done < <(find "${INITFS_STAGE}/Modules" -maxdepth 1 -type f -name '*.cext' -print0 2>/dev/null || true)
+perl "${ROOT_DIR}/scripts/signature_db.pl" "${SIGNATURE_DB_ARGS[@]}"
 
 echo "[build] rootfs"
 ROOTFS_SOURCE_DIR="${ROOT_DIR}/examples/fs/rootfs" \
@@ -156,6 +174,7 @@ INITFS_STAGE="${INITFS_STAGE}" \
 ROOTFS_STAGE="${ROOTFS_STAGE}" \
 ROOTFS_IMG="${TARGET_DIR}/rootfs.img" \
 ROOTFS_CLEAN_INITFS=0 \
+SIGNATURE_DB_SRC="${SIGNATURE_DB_STAGE}" \
 bash "${ROOT_DIR}/scripts/rootfs.sh"
 
 echo "[build] initfs"

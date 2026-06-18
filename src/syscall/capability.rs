@@ -140,6 +140,9 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
     if !crate::task::process::process_has_capability(current, cap) {
         return EACCES;
     }
+    if !cap.is_delegable() {
+        return EACCES;
+    }
 
     let dest_process = match resolve_destination_process(_dest) {
         Some(pid) => pid,
@@ -166,7 +169,12 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
     SUCCESS
 }
 
-pub fn restrict_capability(_cap_ptr: u64, _cap_len: u64, _restriction_ptr: u64, _restriction_len: u64) -> u64 {
+pub fn restrict_capability(
+    _cap_ptr: u64,
+    _cap_len: u64,
+    _restriction_ptr: u64,
+    _restriction_len: u64,
+) -> u64 {
     let current = match current_process() {
         Some(pid) => pid,
         None => return ENOSYS,
@@ -195,7 +203,8 @@ pub fn restrict_capability(_cap_ptr: u64, _cap_len: u64, _restriction_ptr: u64, 
 }
 
 fn current_process() -> Option<crate::task::ProcessId> {
-    crate::task::current_thread_id().and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
+    crate::task::current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
 }
 
 fn resolve_destination_process(dest: u64) -> Option<crate::task::ProcessId> {

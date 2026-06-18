@@ -94,26 +94,26 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
     let physical_memory_offset = boot_info.physical_memory_offset;
 
     // 現在のページテーブル情報を記録
-    let (old_l4_frame, _) = x86_64::registers::control::Cr3::read();
+    let (old_l4_frame, _) = Cr3::read();
     let old_l4_phys = old_l4_frame.start_address().as_u64();
 
-    crate::info!("Current L4 table phys: {:#x}", old_l4_phys);
+    info!("Current L4 table phys: {:#x}", old_l4_phys);
 
     // グローバル状態を設定
     *PHYS_OFFSET.lock() = Some(physical_memory_offset);
     KERNEL_L4_PHYS.store(old_l4_phys, core::sync::atomic::Ordering::Relaxed);
 
     // フレームアロケータに HHDM オフセットを伝えてフリーリストを有効化
-    super::frame::set_phys_offset(physical_memory_offset);
+    frame::set_phys_offset(physical_memory_offset);
 
-    crate::info!("Paging initialized (deferring PAGE_TABLE setup).");
+    info!("Paging initialized (deferring PAGE_TABLE setup).");
 
     Ok(())
 }
 
 /// ページテーブルを遅延初期化する
 pub fn init_page_table() -> Result<()> {
-    crate::info!("Initializing PAGE_TABLE...");
+    info!("Initializing PAGE_TABLE...");
 
     let phys_offset = *PHYS_OFFSET.lock();
     let phys_offset = match phys_offset {
@@ -124,10 +124,10 @@ pub fn init_page_table() -> Result<()> {
         }
     };
 
-    let (old_l4_frame, _) = x86_64::registers::control::Cr3::read();
+    let (old_l4_frame, _) = Cr3::read();
     let old_l4_phys = old_l4_frame.start_address().as_u64();
 
-    crate::info!("Bootloader L4 table at phys {:#x}", old_l4_phys);
+    info!("Bootloader L4 table at phys {:#x}", old_l4_phys);
 
     // 新しい L4 テーブルをメモリに割り当てる
     let new_l4_frame = {
@@ -142,7 +142,7 @@ pub fn init_page_table() -> Result<()> {
 
     let new_l4_phys = new_l4_frame.start_address().as_u64();
 
-    crate::info!("Allocated new L4 table at phys {:#x}", new_l4_phys);
+    info!("Allocated new L4 table at phys {:#x}", new_l4_phys);
 
     // ブートローダーの L4 テーブルから新しい L4 テーブルにコピー（読み込みは可能）
     unsafe {
@@ -158,14 +158,14 @@ pub fn init_page_table() -> Result<()> {
         // ページテーブルのサイズは 4KB (512 entries * 8 bytes)
         core::ptr::copy_nonoverlapping(old_l4_virt as *const u8, new_l4_virt as *mut u8, 4096);
 
-        crate::info!("L4 table copied successfully");
+        info!("L4 table copied successfully");
     }
 
     // 新しい L4 テーブルにアクティブに切り替える
     unsafe {
         let new_l4_flags = Cr3Flags::empty();
-        x86_64::registers::control::Cr3::write(new_l4_frame, new_l4_flags);
-        crate::info!("CR3 switched to new L4 table at phys {:#x}", new_l4_phys);
+        Cr3::write(new_l4_frame, new_l4_flags);
+        info!("CR3 switched to new L4 table at phys {:#x}", new_l4_phys);
     }
 
     // ブートローダーの L4 テーブルを記録
@@ -181,7 +181,7 @@ pub fn init_page_table() -> Result<()> {
     // PAGE_TABLE を設定
     *PAGE_TABLE.lock() = Some(page_table);
 
-    crate::info!("PAGE_TABLE initialized with new L4 table successfully.");
+    info!("PAGE_TABLE initialized with new L4 table successfully.");
 
     Ok(())
 }
@@ -1268,6 +1268,27 @@ pub fn map_and_copy_segment_to(
         table_phys
     );
 
+    struct TempMapGuard {
+        active: bool,
+    }
+
+    impl Drop for TempMapGuard {
+        fn drop(&mut self) {
+            if !self.active {
+                return;
+            }
+            let temp_page =
+                Page::<Size4KiB>::containing_address(VirtAddr::new(0xFFFF_8000_0000_0000u64));
+            if let Some(kernel_pt) = PAGE_TABLE.lock().as_mut() {
+                if let Ok((_, flush)) = kernel_pt.unmap(temp_page) {
+                    flush.flush();
+                }
+            }
+        }
+    }
+
+    let mut temp_map_guard = TempMapGuard { active: false };
+
     let mut page_table_lock = PAGE_TABLE.lock();
     let kernel_pt = page_table_lock
         .as_mut()
@@ -1294,6 +1315,7 @@ pub fn map_and_copy_segment_to(
             }
         }
     }
+    temp_map_guard.active = true;
     drop(page_table_lock);
     crate::debug!(
         "Using temp kernel virt {:#x} to access user L4",
@@ -1446,14 +1468,6 @@ pub fn map_and_copy_segment_to(
     // 最終的なleaf属性を明示的に再適用し、既存マッピングのNX継承を避ける。
     protect_user_range_in_table(table_phys, start, end - start, true, writable, executable)?;
 
-    // テンポラリマッピングをアンマップしてTLBフラッシュ
-    let temp_page = Page::<Size4KiB>::containing_address(VirtAddr::new(0xFFFF_8000_0000_0000u64));
-    if let Some(kernel_pt) = PAGE_TABLE.lock().as_mut() {
-        if let Ok((_, flush)) = kernel_pt.unmap(temp_page) {
-            flush.flush();
-        }
-    }
-
     Ok(())
 }
 ///
@@ -1538,6 +1552,96 @@ pub fn protect_user_range_in_table(
     }
 
     Ok(())
+}
+
+/// 指定したページテーブルで、既存マッピングの WRITABLE / NO_EXECUTE を更新する。
+/// カーネル用の範囲も扱えるが、W+X は拒否する。
+pub fn protect_range_in_table(
+    table_phys: u64,
+    addr: u64,
+    len: u64,
+    present: bool,
+    writable: bool,
+    executable: bool,
+) -> Result<()> {
+    use crate::result::{Kernel, Memory};
+    use x86_64::structures::paging::PageTableFlags as Flags;
+
+    if present && writable && executable {
+        return Err(Kernel::Memory(Memory::PermissionDenied));
+    }
+    if len == 0 {
+        return Ok(());
+    }
+
+    let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+    // Ensure SMAP/SMEP disabled while dereferencing HHDM pointers
+    let _smap_guard = crate::cpu::SmapSmepGuard::new();
+    let start = addr & !0xfffu64;
+    let end = addr
+        .checked_add(len.saturating_sub(1))
+        .ok_or(Kernel::Memory(Memory::InvalidAddress))?
+        .checked_add(0x1000)
+        .map(|v| v & !0xfffu64)
+        .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
+
+    let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
+    let mut pt = unsafe { OffsetPageTable::new(l4, VirtAddr::new(phys_off)) };
+
+    let mut page_addr = start;
+    while page_addr < end {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
+        let (_, existing_flags) = translate_addr_in_table(table_phys, VirtAddr::new(page_addr))
+            .ok_or(Kernel::Memory(Memory::NotMapped))?;
+        if !existing_flags.contains(Flags::PRESENT) {
+            return Err(Kernel::Memory(Memory::NotMapped));
+        }
+
+        let mut new_flags = existing_flags;
+        new_flags
+            .remove(Flags::PRESENT | Flags::WRITABLE | Flags::NO_EXECUTE | Flags::USER_ACCESSIBLE);
+        if present {
+            new_flags |= Flags::PRESENT;
+        }
+        if writable {
+            new_flags |= Flags::WRITABLE;
+        }
+        if !executable {
+            new_flags |= Flags::NO_EXECUTE;
+        }
+        if existing_flags.contains(Flags::USER_ACCESSIBLE) {
+            new_flags |= Flags::USER_ACCESSIBLE;
+        }
+
+        let flush = unsafe {
+            pt.update_flags(page, new_flags)
+                .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?
+        };
+        flush.ignore();
+
+        page_addr += 4096;
+    }
+
+    Ok(())
+}
+
+/// 現在のカーネルページテーブル上で、既存マッピングの属性を更新する。
+pub fn protect_current_range(
+    addr: u64,
+    len: u64,
+    present: bool,
+    writable: bool,
+    executable: bool,
+) -> Result<()> {
+    let (cr3, _) = Cr3::read();
+    protect_range_in_table(
+        cr3.start_address().as_u64(),
+        addr,
+        len,
+        present,
+        writable,
+        executable,
+    )
 }
 
 /// 指定したページテーブルでユーザー範囲をアンマップし、対応フレームを解放する
@@ -1964,6 +2068,7 @@ pub fn map_page_in_table(
     if user_accessible {
         flags |= PageTableFlags::USER_ACCESSIBLE;
     }
+    flags |= PageTableFlags::NO_EXECUTE;
     l1e.set_addr(PhysAddr::new(phys_addr), flags);
 
     Ok(())

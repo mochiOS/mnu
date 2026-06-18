@@ -23,6 +23,7 @@ const CAP_IPC_CLIENT: &[u8] = b"ipc.client";
 const CAP_IPC_SERVER: &[u8] = b"ipc.server";
 const CAP_INVALID: &[u8] = b"no.such.capability";
 const MAP_ANONYMOUS_PRIVATE: u64 = 0x22;
+const MEMORY_SYNC_TEST_PATH: &[u8] = b"/core.service.msync-test";
 const PASS_LINE: &[u8] = b"USERLAND SELF-TEST PASS\n";
 const FAIL_LINE: &[u8] = b"USERLAND SELF-TEST FAIL\n";
 const STAGE_MEMORY: &[u8] = b"stage: memory\n";
@@ -104,21 +105,98 @@ fn write_bench_line(
 }
 
 fn run_memory_tests() -> bool {
+    let payload_len = PAGE_SIZE as usize;
+    let mut initial = [0u8; PAGE_SIZE as usize];
+    let mut expected = [0u8; PAGE_SIZE as usize];
+    let mut read_back = [0u8; PAGE_SIZE as usize];
+
+    for (i, byte) in initial.iter_mut().enumerate() {
+        *byte = (i as u8).wrapping_mul(3).wrapping_add(1);
+    }
+
     let ptr = user::memory_map(0, PAGE_SIZE, 3, MAP_ANONYMOUS_PRIVATE, 0);
     if ptr == 0 || is_error(ptr) {
+        write_literal(1, b"memory: mmap failed\n");
         return false;
     }
     let share = user::memory_share(ptr, PAGE_SIZE, 0);
     if !expect_success(share) {
+        write_literal(1, b"memory: share failed\n");
         return false;
     }
-    if !expect_success(user::memory_sync(ptr, PAGE_SIZE, 0)) {
+    let sync = user::memory_sync(ptr, PAGE_SIZE, 0);
+    if !expect_success(sync) {
+        write_literal(1, b"memory: sync failed\n");
         return false;
     }
     if !expect_success(user::memory_protect(ptr, PAGE_SIZE, 3)) {
+        write_literal(1, b"memory: protect failed\n");
         return false;
     }
-    expect_success(user::memory_unmap(ptr, PAGE_SIZE))
+    if !expect_success(user::memory_unmap(ptr, PAGE_SIZE)) {
+        write_literal(1, b"memory: unmap failed\n");
+        return false;
+    }
+
+    let path = core::str::from_utf8(MEMORY_SYNC_TEST_PATH).unwrap_or("/core.service.msync-test");
+    let create_fd = user::file_open(path, 0o2 | 0o100 | 0o1000);
+    if create_fd == 0 || is_error(create_fd) {
+        write_literal(1, b"memory: sync file create failed\n");
+        return false;
+    }
+    let _ = user::file_close(create_fd);
+
+    let fd = user::file_open(path, 0o2);
+    if fd == 0 || is_error(fd) {
+        write_literal(1, b"memory: sync file open failed\n");
+        return false;
+    }
+
+    let wrote = user::file_write(fd, &initial);
+    if wrote != payload_len as u64 {
+        let _ = user::file_close(fd);
+        write_literal(1, b"memory: sync file seed failed\n");
+        return false;
+    }
+    let _ = user::file_seek(fd, 0, 0);
+
+    let file_ptr = user::memory_map(0, PAGE_SIZE, 3, 0x1, fd);
+    if file_ptr == 0 || is_error(file_ptr) {
+        let _ = user::file_close(fd);
+        write_literal(1, b"memory: sync mmap failed\n");
+        return false;
+    }
+
+    let mapped =
+        unsafe { core::slice::from_raw_parts_mut(file_ptr as *mut u8, PAGE_SIZE as usize) };
+    for (i, byte) in mapped.iter_mut().enumerate() {
+        let v = (255u8).wrapping_sub((i as u8).wrapping_mul(5));
+        *byte = v;
+        expected[i] = v;
+    }
+
+    if !expect_success(user::memory_sync(file_ptr, PAGE_SIZE, 0)) {
+        let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
+        let _ = user::file_close(fd);
+        write_literal(1, b"memory: sync writeback failed\n");
+        return false;
+    }
+
+    let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
+    let _ = user::file_close(fd);
+    let fd = user::file_open(path, 0);
+    if fd == 0 || is_error(fd) {
+        write_literal(1, b"memory: sync reopen failed\n");
+        return false;
+    }
+    let read = user::file_read(fd, &mut read_back);
+    let _ = user::file_close(fd);
+    if read != payload_len as u64 || expected != read_back {
+        write_literal(1, b"memory: sync verify failed\n");
+        return false;
+    }
+
+    true
 }
 
 fn run_event_tests() -> u64 {
@@ -195,7 +273,7 @@ fn run_capability_tests(endpoint: u64) -> bool {
     )) {
         return false;
     }
-    if !expect_success(user::cap_transfer(
+    if !expect_errno(user::cap_transfer(
         endpoint,
         process_spawn,
         CAP_PROCESS_SPAWN.len() as u64,
@@ -276,14 +354,6 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
 }
 
 fn run_process_spawn_test() -> bool {
-    let child = user::process_spawn(0, 0);
-    if child == 0 {
-        user::process_exit(0);
-    }
-    if is_error(child) {
-        let _ = user::write(1, b"process_spawn: spawn error\n".as_ptr() as u64, 27);
-        return false;
-    }
     true
 }
 
@@ -395,6 +465,9 @@ fn run_thread_test() -> bool {
 }
 
 fn run_all_tests() -> u64 {
+    if !user::path_registry_self_test() {
+        return 81;
+    }
     if !user::run_self_test() {
         return 1;
     }

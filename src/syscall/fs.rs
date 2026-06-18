@@ -1,13 +1,22 @@
 //! ファイルシステム関連のシステムコール
 
 use super::types::{
-    EACCES, EBADF, EEXIST, EFAULT, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, ESRCH, SUCCESS,
+    EACCES, EBADF, EEXIST, EFAULT, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS, ENOTDIR, ESRCH,
+    SUCCESS,
 };
-use crate::task::fd_table::{FdTable, FileHandle, FileHandleCap, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS};
+use crate::capability::path::{
+    self, PathOwner, PathType, UserPath, PATH_CREATE, PATH_DELETE, PATH_LIST, PATH_READ, PATH_WRITE,
+};
+use crate::capability::Capability;
+use crate::task::fd_table::{
+    FdTable, FileHandle, FileHandleCap, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
+};
 use alloc::string::String;
 use alloc::string::ToString;
-use alloc::vec;
 use alloc::vec::Vec;
+
+const MAX_IO_BYTES: usize = 128 * 1024 * 1024;
+const IO_CHUNK_BYTES: usize = 1 * 1024 * 1024;
 
 // グローバル FD テーブルは廃止。各プロセスの Process::fd_table を使用する。
 
@@ -43,7 +52,8 @@ fn file_handle_cap(pid_raw: u64, fd: u64) -> Result<FileHandleCap, u64> {
     if idx >= PROCESS_MAX_FDS {
         return Err(EBADF);
     }
-    with_fd_table(pid_raw, |t| t.get(idx).map(|fh| fh.cap)).ok_or(EBADF)?
+    with_fd_table(pid_raw, |t| t.get(idx).map(|fh| fh.cap))
+        .ok_or(EBADF)?
         .ok_or(EBADF)
 }
 
@@ -85,8 +95,171 @@ fn resolve_path_at(pid_raw: u64, dirfd: i64, path_ptr: u64) -> Result<String, u6
 }
 
 pub(crate) fn ensure_fs_path_readable(path: &str) -> Result<(), u64> {
+    ensure_fs_path_access(path, PATH_READ)
+}
+
+fn ensure_fs_path_access(path: &str, needed_rights: u32) -> Result<(), u64> {
+    let Some(entry) = path::lookup_path(path) else {
+        return enforce_fs_path_capability(path, needed_rights);
+    };
+    let Some(pid_raw) = current_process_id_raw() else {
+        return Err(EACCES);
+    };
+    if !path_owner_allows(entry.owner, pid_raw) {
+        return Err(EACCES);
+    }
+    if entry.rights.contains(needed_rights) {
+        Ok(())
+    } else {
+        enforce_fs_path_capability(path, needed_rights)
+    }
+}
+
+fn path_owner_allows(owner: PathOwner, pid_raw: u64) -> bool {
+    match owner {
+        PathOwner::Any => true,
+        PathOwner::System => false,
+        PathOwner::Service(owner_pid) | PathOwner::Application(owner_pid) => owner_pid == pid_raw,
+        PathOwner::User(_) => false,
+    }
+}
+
+fn caller_has_cap(cap: Capability) -> bool {
+    crate::syscall::security::caller_has_any_capability(&[cap])
+}
+
+fn cap_for_path(path_type: PathType, needed_rights: u32) -> Capability {
+    let is_write = (needed_rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) != 0;
+    let is_read = (needed_rights & PATH_READ) != 0 || (needed_rights & PATH_LIST) != 0;
+
+    match path_type {
+        PathType::Temporary => {
+            if is_write {
+                Capability::FsWriteTmp
+            } else {
+                Capability::FsReadTmp
+            }
+        }
+        PathType::User(UserPath::Documents) => {
+            if is_write {
+                Capability::FsWriteUserDocuments
+            } else {
+                Capability::FsReadUserDocuments
+            }
+        }
+        PathType::User(UserPath::Download) => {
+            if is_write {
+                Capability::FsWriteUserDownloads
+            } else {
+                Capability::FsReadUserDownloads
+            }
+        }
+        PathType::User(UserPath::Desktop) => {
+            if is_write {
+                Capability::FsWriteUserDesktop
+            } else {
+                Capability::FsReadUserDesktop
+            }
+        }
+        PathType::User(UserPath::Images) => {
+            if is_write {
+                Capability::FsWriteUserPictures
+            } else {
+                Capability::FsReadUserPictures
+            }
+        }
+        PathType::User(UserPath::Musics) => {
+            if is_write {
+                Capability::FsWriteUserMusic
+            } else {
+                Capability::FsReadUserMusic
+            }
+        }
+        PathType::User(UserPath::Movies) => {
+            if is_write {
+                Capability::FsWriteUserVideos
+            } else {
+                Capability::FsReadUserVideos
+            }
+        }
+        PathType::User(UserPath::Develop)
+        | PathType::User(UserPath::Home)
+        | PathType::User(UserPath::HomeRoot) => {
+            if is_write {
+                Capability::FsWriteUser
+            } else {
+                Capability::FsReadUser
+            }
+        }
+        PathType::Binary
+        | PathType::Libraries(_)
+        | PathType::System(_)
+        | PathType::Config
+        | PathType::Applications(_)
+        | PathType::Mount(_)
+        | PathType::Var(_)
+        | PathType::Root
+        | PathType::Custom => {
+            if is_write {
+                Capability::FsWriteAll
+            } else if is_read {
+                Capability::FsReadAll
+            } else {
+                Capability::FsReadAll
+            }
+        }
+    }
+}
+
+fn enforce_fs_path_capability(path: &str, needed_rights: u32) -> Result<(), u64> {
+    let path_type = path::classify_path(path);
+    let required = cap_for_path(path_type, needed_rights);
+    if caller_has_cap(required) {
+        return Ok(());
+    }
+    if required != Capability::FsReadAll
+        && (needed_rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) == 0
+        && caller_has_cap(Capability::FsReadAll)
+    {
+        return Ok(());
+    }
+    if (needed_rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) != 0
+        && caller_has_cap(Capability::FsWriteAll)
+    {
+        return Ok(());
+    }
+    Err(EACCES)
+}
+
+fn open_required_rights(path: &str, flags: u64, is_dir: bool) -> u32 {
+    const O_ACCMODE: u64 = 0o3;
+    const O_WRONLY: u64 = 0o1;
+    const O_RDWR: u64 = 0o2;
+    const O_CREAT: u64 = 0o100;
+    const O_EXCL: u64 = 0o200;
+    const O_TRUNC: u64 = 0o1000;
+    const O_APPEND: u64 = 0o2000;
     let _ = path;
-    Ok(())
+    let mut rights = if is_dir { PATH_LIST } else { PATH_READ };
+    let acc = flags & O_ACCMODE;
+    if acc == O_WRONLY || acc == O_RDWR || (flags & (O_CREAT | O_TRUNC | O_APPEND)) != 0 {
+        rights |= PATH_WRITE;
+    }
+    if (flags & O_CREAT) != 0 || (flags & O_EXCL) != 0 || (flags & O_TRUNC) != 0 {
+        rights |= PATH_CREATE;
+    }
+    rights
+}
+
+fn required_rights_for_path_op(op: &str) -> u32 {
+    match op {
+        "read" | "stat" | "readlink" => PATH_READ,
+        "write" | "truncate" => PATH_WRITE,
+        "list" | "readdir" | "chdir" => PATH_LIST,
+        "create" | "mkdir" => PATH_CREATE,
+        "delete" | "rmdir" | "unlink" | "rename" => PATH_DELETE,
+        _ => PATH_READ,
+    }
 }
 
 pub(crate) fn close_remote_fd_from_kernel(_fd_remote: u64) {}
@@ -186,7 +359,7 @@ fn resolve_path(pid_raw: u64, path: &str) -> String {
     } else {
         let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
         let cwd = crate::task::with_process(pid, |p| {
-            let mut s = alloc::string::String::new();
+            let mut s = String::new();
             s.push_str(p.cwd());
             s
         })
@@ -208,6 +381,9 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     let is_dir = metadata
         .map(|(mode, _)| mode_is_directory(mode))
         .unwrap_or_else(|| crate::cext::fs::is_directory(path));
+    if let Err(errno) = ensure_fs_path_access(path, open_required_rights(path, flags, is_dir)) {
+        return errno;
+    }
 
     let acc = flags & O_ACCMODE;
     if is_dir && acc != 0 {
@@ -218,7 +394,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     if !exists {
         if (flags & O_CREAT) != 0 {
             if crate::cext::fs::create(path, 0o644) != 0 {
-                return crate::syscall::types::EIO;
+                return EIO;
             }
         } else {
             return ENOENT;
@@ -228,7 +404,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
         return EEXIST;
     }
     if (flags & O_TRUNC) != 0 && crate::cext::fs::truncate(path, 0) != 0 {
-        return crate::syscall::types::EIO;
+        return EIO;
     }
 
     let data_vec = if is_dir {
@@ -244,11 +420,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     let handle = alloc::boxed::Box::new(FileHandle {
         data: data_vec.into_boxed_slice(),
         pos: 0,
-        fs_path: if exists {
-            Some(path.to_string())
-        } else {
-            None
-        },
+        fs_path: if exists { Some(path.to_string()) } else { None },
         dir_path: if is_dir { Some(path.to_string()) } else { None },
         is_remote: false,
         fd_remote: 0,
@@ -413,7 +585,9 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
                 .as_deref()
                 .or(fh.fs_path.as_deref())
                 .and_then(metadata_rootfs_first);
-            let size = metadata.map(|(_, size)| size).unwrap_or(fh.data.len() as u64);
+            let size = metadata
+                .map(|(_, size)| size)
+                .unwrap_or(fh.data.len() as u64);
             let is_dir = metadata
                 .map(|(mode, _)| mode_is_directory(mode))
                 .unwrap_or(fh.dir_path.is_some());
@@ -451,7 +625,7 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(owner_pid, &path);
-    if let Err(errno) = ensure_fs_path_readable(&resolved) {
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_READ) {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
@@ -482,7 +656,7 @@ pub fn rmdir(path_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(pid, &path);
-    if let Err(errno) = ensure_fs_path_readable(&resolved) {
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_DELETE) {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
@@ -491,7 +665,7 @@ pub fn rmdir(path_ptr: u64) -> u64 {
         None => return ENOENT,
     }
     if crate::cext::fs::remove(&resolved, true) != 0 {
-        return crate::syscall::types::EIO;
+        return EIO;
     }
     SUCCESS
 }
@@ -524,7 +698,7 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         _ => return EBADF,
     };
 
-    if let Err(errno) = ensure_fs_path_readable(&dir_path) {
+    if let Err(errno) = ensure_fs_path_access(&dir_path, PATH_LIST) {
         return errno;
     }
 
@@ -555,7 +729,7 @@ pub fn chdir(path_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(pid_raw, &path);
-    if let Err(errno) = ensure_fs_path_readable(&resolved) {
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_LIST) {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
@@ -631,30 +805,39 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         return EBADF;
     }
 
-    let local = match with_fd_table_mut(pid, |t| {
-        let fh = t.get_mut(idx)?;
-        let avail = fh.data.len().saturating_sub(fh.pos);
-        if avail == 0 {
-            return Some(Vec::new());
-        }
-        let to_read = core::cmp::min(avail, len as usize);
-        let mut data = Vec::with_capacity(to_read);
-        data.extend_from_slice(&fh.data[fh.pos..fh.pos + to_read]);
-        fh.pos += to_read;
-        Some(data)
-    }) {
-        Some(Some(v)) => v,
-        _ => return EBADF,
+    let to_copy = match usize::try_from(len) {
+        Ok(v) => v.min(MAX_IO_BYTES),
+        Err(_) => MAX_IO_BYTES,
     };
+    let mut written = 0usize;
+    let mut tmp = alloc::vec![0u8; IO_CHUNK_BYTES];
 
-    if local.is_empty() {
-        return 0;
+    while written < to_copy {
+        let chunk_len = core::cmp::min(IO_CHUNK_BYTES, to_copy - written);
+        let read_len = match with_fd_table_mut(pid, |t| {
+            let fh = t.get_mut(idx)?;
+            let avail = fh.data.len().saturating_sub(fh.pos);
+            let take = core::cmp::min(avail, chunk_len);
+            if take == 0 {
+                return Some(0usize);
+            }
+            tmp[..take].copy_from_slice(&fh.data[fh.pos..fh.pos + take]);
+            fh.pos += take;
+            Some(take)
+        }) {
+            Some(Some(v)) => v,
+            _ => return EBADF,
+        };
+        if read_len == 0 {
+            break;
+        }
+        if crate::syscall::copy_to_user(buf_ptr + written as u64, &tmp[..read_len]).is_err() {
+            return EFAULT;
+        }
+        written += read_len;
     }
 
-    if crate::syscall::copy_to_user(buf_ptr, &local).is_err() {
-        return EFAULT;
-    }
-    local.len() as u64
+    written as u64
 }
 
 /// Write: 開かれたファイルへデータを書き込む
@@ -683,42 +866,59 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         return EBADF;
     }
 
-    let mut buf = alloc::vec![0u8; len as usize];
-    if let Err(errno) = crate::syscall::copy_from_user(buf_ptr, &mut buf) {
-        return errno;
-    }
-
-    let (start_pos, fs_path) = match with_fd_table(pid, |t| {
-        t.get(idx).map(|fh| (fh.pos, fh.fs_path.clone()))
-    }) {
-        Some(Some(info)) => info,
-        _ => return EBADF,
+    let Ok(len_usize) = usize::try_from(len) else {
+        return EINVAL;
     };
-
-    if let Some(path) = fs_path.as_deref() {
-        match crate::cext::fs::write_all(path, start_pos as u64, &buf) {
-            Some(written) if written == buf.len() => {}
-            _ => return crate::syscall::types::EIO,
-        }
+    if len_usize > MAX_IO_BYTES {
+        return ENOSPC;
     }
 
-    let wrote = with_fd_table_mut(pid, |t| {
-        let fh = t.get_mut(idx).ok_or(EBADF)?;
-        let end = start_pos.checked_add(buf.len()).ok_or(EINVAL)?;
-        let mut data = fh.data.to_vec();
-        if end > data.len() {
-            data.resize(end, 0);
+    let (start_pos, fs_path) =
+        match with_fd_table(pid, |t| t.get(idx).map(|fh| (fh.pos, fh.fs_path.clone()))) {
+            Some(Some(info)) => info,
+            _ => return EBADF,
+        };
+    let mut written = 0usize;
+    let mut tmp = alloc::vec![0u8; IO_CHUNK_BYTES];
+
+    while written < len_usize {
+        let chunk_len = core::cmp::min(IO_CHUNK_BYTES, len_usize - written);
+        if let Err(errno) =
+            crate::syscall::copy_from_user(buf_ptr + written as u64, &mut tmp[..chunk_len])
+        {
+            return errno;
         }
-        data[start_pos..end].copy_from_slice(&buf);
-        fh.data = data.into_boxed_slice();
-        fh.pos = end;
-        Ok(buf.len() as u64)
-    });
-    match wrote {
-        Some(Ok(n)) => n,
-        Some(Err(errno)) => errno,
-        None => EBADF,
+
+        if let Some(path) = fs_path.as_deref() {
+            match crate::cext::fs::write_all(path, (start_pos + written) as u64, &tmp[..chunk_len])
+            {
+                Some(wrote_chunk) if wrote_chunk == chunk_len => {}
+                _ => return EIO,
+            }
+        }
+
+        let wrote = with_fd_table_mut(pid, |t| {
+            let fh = t.get_mut(idx).ok_or(EBADF)?;
+            let end = start_pos.checked_add(written + chunk_len).ok_or(EINVAL)?;
+            let mut data = fh.data.to_vec();
+            if end > data.len() {
+                data.resize(end, 0);
+            }
+            data[start_pos + written..end].copy_from_slice(&tmp[..chunk_len]);
+            fh.data = data.into_boxed_slice();
+            fh.pos = end;
+            Ok(())
+        });
+        match wrote {
+            Some(Ok(())) => {}
+            Some(Err(errno)) => return errno,
+            None => return EBADF,
+        }
+
+        written += chunk_len;
     }
+
+    written as u64
 }
 
 /// Fcntl システムコール（FD フラグ操作）
@@ -833,7 +1033,7 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
         return ENOENT;
     }
     if crate::cext::fs::truncate(&path, len) != 0 {
-        return crate::syscall::types::EIO;
+        return EIO;
     }
     SUCCESS
 }
@@ -865,7 +1065,7 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
         }
         if let Some(path) = fh.fs_path.as_deref() {
             if crate::cext::fs::truncate(path, len) != 0 {
-                return Err(crate::syscall::types::EIO);
+                return Err(EIO);
             }
         }
         let mut data = fh.data.to_vec();
@@ -1005,7 +1205,7 @@ pub fn unlink(path_ptr: u64) -> u64 {
         Err(errno) => return errno,
     };
     let resolved = resolve_path(pid, &path);
-    if let Err(errno) = ensure_fs_path_readable(&resolved) {
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_WRITE) {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
@@ -1014,7 +1214,7 @@ pub fn unlink(path_ptr: u64) -> u64 {
         None => return ENOENT,
     }
     if crate::cext::fs::remove(&resolved, false) != 0 {
-        return crate::syscall::types::EIO;
+        return EIO;
     }
     SUCCESS
 }
@@ -1041,10 +1241,10 @@ pub fn renameat(old_dirfd: i64, old_path_ptr: u64, new_dirfd: i64, new_path_ptr:
         Ok(path) => path,
         Err(errno) => return errno,
     };
-    if let Err(errno) = ensure_fs_path_readable(&old_path) {
+    if let Err(errno) = ensure_fs_path_access(&old_path, PATH_DELETE) {
         return errno;
     }
-    if let Err(errno) = ensure_fs_path_readable(&new_path) {
+    if let Err(errno) = ensure_fs_path_access(&new_path, PATH_CREATE) {
         return errno;
     }
     if metadata_rootfs_first(&old_path).is_none() || metadata_rootfs_first(&new_path).is_none() {
@@ -1212,7 +1412,7 @@ pub fn statfs(path_ptr: u64, buf_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(pid, &path);
-    if let Err(errno) = ensure_fs_path_readable(&resolved) {
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_READ) {
         return errno;
     }
     if metadata_rootfs_first(&resolved).is_none() {
@@ -1314,22 +1514,25 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         None => return EBADF,
     };
 
-    let (dir_path, start_pos) = match with_fd_table(pid, |t| {
-        t.get(idx).map(|fh| (fh.dir_path.clone(), fh.pos))
-    }) {
-        Some(Some((Some(p), pos))) => (p, pos),
-        _ => return EBADF,
-    };
+    let (dir_path, start_pos) =
+        match with_fd_table(pid, |t| t.get(idx).map(|fh| (fh.dir_path.clone(), fh.pos))) {
+            Some(Some((Some(p), pos))) => (p, pos),
+            _ => return EBADF,
+        };
 
-    if let Err(errno) = ensure_fs_path_readable(&dir_path) {
+    if let Err(errno) = ensure_fs_path_access(&dir_path, PATH_LIST) {
         return errno;
     }
 
-    let entries: Vec<(alloc::string::String, u8)> = match readdir_rootfs_first(&dir_path) {
+    let entries: Vec<(String, u8)> = match readdir_rootfs_first(&dir_path) {
         Some(e) => e
             .into_iter()
             .map(|name| {
-                let child = normalize_path(&alloc::format!("{}/{}", dir_path.trim_end_matches('/'), name));
+                let child = normalize_path(&alloc::format!(
+                    "{}/{}",
+                    dir_path.trim_end_matches('/'),
+                    name
+                ));
                 let dtype = match metadata_rootfs_first(&child) {
                     Some((mode, _)) if mode_is_directory(mode) => 4u8,
                     Some(_) => 8u8,
@@ -1346,10 +1549,10 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
 
     // "." と ".." を先頭に追加
     let dot_entries: [(&str, u8); 2] = [(".", 4u8), ("..", 4u8)];
-    let all_entries: Vec<(alloc::string::String, u8)> = {
-        let mut v: Vec<(alloc::string::String, u8)> = dot_entries
+    let all_entries: Vec<(String, u8)> = {
+        let mut v: Vec<(String, u8)> = dot_entries
             .iter()
-            .map(|(n, t)| (alloc::string::String::from(*n), *t))
+            .map(|(n, t)| (String::from(*n), *t))
             .collect();
         for (name, dtype) in &entries {
             v.push((name.clone(), *dtype));
