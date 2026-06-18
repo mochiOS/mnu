@@ -289,6 +289,10 @@ fn exec_internal(
     let is_service_exec = requested_privilege == Some(crate::task::PrivilegeLevel::Service);
     let loaded = load_exec_image(path, is_service_exec);
     if let Some((data, source)) = loaded {
+        if !crate::policy::signature::verify_exec(path, &data) {
+            crate::warn!("exec: signature verification failed for '{}'", path);
+            return crate::syscall::types::EPERM;
+        }
         let fingerprint = fingerprint_exec_bytes(&data);
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",

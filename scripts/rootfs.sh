@@ -10,6 +10,7 @@ ROOTFS_IMG="${ROOTFS_IMG:-${TARGET_DIR}/rootfs.img}"
 ROOTFS_SIZE="${ROOTFS_SIZE:-16M}"
 ROOTFS_BLOCK_SIZE="${ROOTFS_BLOCK_SIZE:-1024}"
 ROOTFS_CLEAN_INITFS="${ROOTFS_CLEAN_INITFS:-1}"
+SIGNATURE_DB_SRC="${SIGNATURE_DB_SRC:-}"
 
 die() {
     echo "fatal: $*" >&2
@@ -47,6 +48,11 @@ cp -a "${ROOTFS_SOURCE_DIR}/." "${INITFS_STAGE}/"
 if [[ -f "${ROOTFS_SOURCE_DIR}/../testdata" ]]; then
     install -m 0644 "${ROOTFS_SOURCE_DIR}/../testdata" "${ROOTFS_STAGE}/testdata"
     install -m 0644 "${ROOTFS_SOURCE_DIR}/../testdata" "${INITFS_STAGE}/testdata"
+fi
+
+if [[ -n "${SIGNATURE_DB_SRC}" ]]; then
+    need_file "${SIGNATURE_DB_SRC}"
+    install -m 0644 "${SIGNATURE_DB_SRC}" "${ROOTFS_STAGE}/signature.db"
 fi
 
 truncate -s "${ROOTFS_SIZE}" "${ROOTFS_IMG}"

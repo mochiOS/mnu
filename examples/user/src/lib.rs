@@ -188,6 +188,9 @@ const SYS_FILE_SEEK: u64 = mnu_abi::SyscallNumber::FileSeek as u64;
 const STDOUT_FD: u64 = 1;
 const PLUGKIT_TEST_DRIVER_PATH: &str = "/plugkit/test/entry.elf";
 const CORE_SERVICE_FS_TEST_PATH: &str = "/core.service.fs-test";
+const SIGNATURE_DB_PATH: &str = "/signature.db";
+const SIGNATURE_ALLOW_PATH: &str = "/captest.bin";
+const SIGNATURE_DENY_PATH: &str = "/unsigned.bin";
 const ROOTFS_BENCH_PATH: &str = "/testdata";
 const FS_TEST_SIZE: usize = 1024 * 1024;
 static mut FS_TEST_WRITE_BUF: [u8; FS_TEST_SIZE] = [0x55; FS_TEST_SIZE];
@@ -330,6 +333,22 @@ pub fn process_spawn(flags: u64, reserved: u64) -> u64 {
 
 pub fn process_wait(pid: u64, status_ptr: u64, flags: u64) -> u64 {
     unsafe { syscall3(SYS_PROCESS_WAIT, pid, status_ptr, flags) }
+}
+
+fn exec_and_wait(path: &str, caps: &[&str]) -> Option<i32> {
+    let pid = exec_with_capabilities(path, caps);
+    if pid == 0 || pid & (1u64 << 63) != 0 {
+        return None;
+    }
+
+    let mut status: i32 = i32::MIN;
+    let waited = process_wait(pid, &mut status as *mut i32 as u64, 0);
+    if waited == pid { Some(status) } else { None }
+}
+
+fn exec_should_be_denied(path: &str, caps: &[&str]) -> bool {
+    let rc = exec_with_capabilities(path, caps);
+    rc & (1u64 << 63) != 0
 }
 
 pub fn thread_create(entry: u64, stack: u64, arg0: u64) -> u64 {
@@ -993,6 +1012,57 @@ pub fn test_launch_contract_rejects_empty_identity_fields() -> bool {
     !contract.is_well_formed()
 }
 
+fn signature_db_self_test() -> bool {
+    let fd = file_open(SIGNATURE_DB_PATH, 0);
+    if fd == 0 || (fd as i64) < 0 {
+        return false;
+    }
+
+    let mut buf = alloc::vec![0u8; 4096];
+    let mut total = alloc::vec::Vec::new();
+    loop {
+        let n = file_read(fd, &mut buf);
+        if (n as i64) < 0 {
+            let _ = file_close(fd);
+            return false;
+        }
+        let n = n as usize;
+        if n == 0 {
+            break;
+        }
+        total.extend_from_slice(&buf[..n]);
+        if total.len() > 4096 {
+            let _ = file_close(fd);
+            return false;
+        }
+    }
+    let _ = file_close(fd);
+
+    let Ok(text) = core::str::from_utf8(&total) else {
+        return false;
+    };
+    text.contains("mnu-signature-db v1")
+        && text.contains("record core.service ")
+        && text.contains("record /plugkit/test/entry.elf ")
+}
+
+fn signature_exec_self_test() -> bool {
+    let allow_status = exec_and_wait(SIGNATURE_ALLOW_PATH, &[]);
+    if allow_status != Some(0) {
+        write_line("selftest: signature allow failed");
+        return false;
+    }
+    write_line("selftest: signature allow ok");
+
+    if !exec_should_be_denied(SIGNATURE_DENY_PATH, &[]) {
+        write_line("selftest: signature deny failed");
+        return false;
+    }
+    write_line("selftest: signature deny ok");
+
+    true
+}
+
 fn bytes_eq(lhs: &[u8], rhs: &[u8]) -> bool {
     if lhs.len() != rhs.len() {
         return false;
@@ -1130,7 +1200,11 @@ fn run_restricted_probe() -> bool {
 }
 
 fn test_allowed_capabilities_on_core_service() -> bool {
-    has_capability("process.spawn")
+    let spawn = has_capability("process.spawn");
+    if !spawn {
+        write_line("selftest: missing process.spawn");
+    }
+    spawn
         && has_capability("process.inspect")
         && has_capability("capabilities.manage")
         && has_capability("system.time.read")
@@ -1172,6 +1246,16 @@ pub fn run_self_test() -> bool {
     write_line("selftest: allowed-checks");
     if !test_allowed_capabilities_on_core_service() {
         write_line("selftest: capability check failed");
+        return false;
+    }
+
+    if !signature_db_self_test() {
+        write_line("selftest: signature-db failed");
+        return false;
+    }
+
+    if !signature_exec_self_test() {
+        write_line("selftest: signature-exec failed");
         return false;
     }
 
