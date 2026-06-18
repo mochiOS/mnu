@@ -10,5 +10,6 @@ Changes:
   core.service.
 * Create a security model based on
   binary signatures
+* Create some scripts.
 * Delete old source files and syscalls.
 * Delete unused meta files.

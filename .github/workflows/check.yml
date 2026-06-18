@@ -15,4 +15,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check ChangeLog
-        run: perl scripts/checkchangelog.pl changelog
+        run: |
+          perl scripts/checkchangelog.pl
+          perl scripts/checkpanic.pl
