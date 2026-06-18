@@ -82,9 +82,18 @@ pub fn endpoint_is_valid(endpoint: IpcEndpoint) -> bool {
 }
 
 pub fn endpoint_rights_for_process(_process_id: u64) -> EndpointRights {
-    // 既存の権限モデルを壊さずに移行できるよう、現時点では呼び出し元側が
-    // capability に基づいて解釈する前提のプレースホルダにしておく。
-    EndpointRights::SEND.union(EndpointRights::RECV)
+    let mut rights = EndpointRights::empty();
+    if crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::IpcClient,
+    ]) {
+        rights = rights.union(EndpointRights::SEND);
+    }
+    if crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::IpcServer,
+    ]) {
+        rights = rights.union(EndpointRights::RECV);
+    }
+    rights
 }
 
 fn with_endpoints_mut<R>(f: impl FnOnce(&mut BTreeMap<u64, EndpointRecord>) -> R) -> R {
@@ -111,6 +120,13 @@ fn endpoint_record_from_handle(handle: u64) -> Option<EndpointRecord> {
         .filter(|record| endpoint_record_is_valid(record))
 }
 
+fn endpoint_rights_for_thread(thread_id: u64) -> EndpointRights {
+    let Some(pid) = crate::task::thread_to_process_id(thread_id) else {
+        return EndpointRights::empty();
+    };
+    endpoint_rights_for_process(pid.as_u64())
+}
+
 fn endpoint_handle_for_thread(thread_id: u64) -> Option<u64> {
     let handle = with_default_endpoints_mut(|defaults| defaults.get(&thread_id).copied());
     let Some(handle) = handle else {
@@ -133,15 +149,13 @@ fn ensure_endpoint_for_thread(thread_id: u64) -> Option<u64> {
         return Some(handle);
     }
     let (slot, generation) = crate::task::thread_slot_index_and_generation_by_u64(thread_id)?;
+    let rights = endpoint_rights_for_thread(thread_id);
     let handle = NEXT_ENDPOINT_HANDLE.fetch_add(1, Ordering::Relaxed);
     let record = EndpointRecord {
         thread_id,
         slot: slot as u16,
         generation,
-        rights: EndpointRights::SEND
-            .union(EndpointRights::RECV)
-            .union(EndpointRights::CREATE)
-            .union(EndpointRights::MANAGE),
+        rights,
     };
     with_endpoints_mut(|endpoints| {
         endpoints.insert(handle, record);
@@ -661,18 +675,18 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
             msg.data[off..off + 8].copy_from_slice(&(total).to_le_bytes());
             off += 8;
             crate::debug!(
-                "[IPC KERN] map_header: magic={:#x} map_start={:#x} total={} -> msg.data[0..20]={:02x?}",
+                "[IPC KERN] map_header: magic={:#x} map_start={:#x} total={} len={}",
                 MAP_HEADER_MAGIC,
                 map_start,
                 total,
-                &msg.data[0..20]
+                off
             );
             crate::info!(
-                "[IPC KERN] send_map_header dest={} map_start=0x{:x} total={} data={:02x?}",
+                "[IPC KERN] send_map_header dest={} map_start=0x{:x} total={} len={}",
                 dest_thread_id,
                 map_start,
                 total,
-                &msg.data[0..20]
+                off
             );
             msg.len = off;
             msg.ext_pages_count = 0;
@@ -742,11 +756,10 @@ fn send_to_thread_id(dest_thread_id: u64, sender_handle: u64, buf_ptr: u64, len:
         return EAGAIN;
     }
     crate::debug!(
-        "[IPC SEND] from={} to={} len={} data={:02x?}",
+        "[IPC SEND] from={} to={} len={}",
         sender_handle,
         dest_thread_id,
-        len,
-        &data[..core::cmp::min(len, 16)]
+        len
     );
     let waiter = boxes[idx].take_waiter();
     drop(boxes);
@@ -762,16 +775,25 @@ fn send_to_thread_id(dest_thread_id: u64, sender_handle: u64, buf_ptr: u64, len:
 /// arg1: buf_ptr
 /// arg2: len
 pub fn send(dest_endpoint_handle: u64, buf_ptr: u64, len: u64) -> u64 {
-    let dest_thread_id = match resolve_endpoint_handle(dest_endpoint_handle) {
-        Some(thread_id) => thread_id,
+    let dest_record = match endpoint_record_from_handle(dest_endpoint_handle) {
+        Some(record) => record,
         None => return EINVAL,
     };
+    if !dest_record.rights.contains(EndpointRights::RECV) {
+        return EACCES;
+    }
+    let dest_thread_id = dest_record.thread_id;
     let sender = match crate::task::current_thread_id() {
         Some(id) => ensure_endpoint_for_thread(id.as_u64()).unwrap_or(EINVAL),
         None => return EINVAL,
     };
     if sender == EINVAL {
         return EINVAL;
+    }
+    if let Some(sender_record) = endpoint_record_from_handle(sender) {
+        if !sender_record.rights.contains(EndpointRights::SEND) {
+            return EACCES;
+        }
     }
 
     // capability 強制:
@@ -894,7 +916,12 @@ fn prepare_external_pages_for_user(
     if ext_pages_count == 0 {
         return Ok((copy_len, None));
     }
-    crate::debug!("[IPC RCV] prepare_external_pages_for_user receiver={} copy_len={} ext_pages_count={} data={:02x?}", receiver_tid, copy_len, ext_pages_count, &recv_buf[0..16]);
+    crate::debug!(
+        "[IPC RCV] prepare_external_pages_for_user receiver={} copy_len={} ext_pages_count={}",
+        receiver_tid,
+        copy_len,
+        ext_pages_count
+    );
     if copy_len < 16 || recv_buf.len() < 16 {
         return Err(EFAULT);
     }
@@ -989,11 +1016,10 @@ fn recv_from_thread_nonblocking(
         }
     }
     crate::debug!(
-        "[IPC RECV] tid={} from={} len={} data={:02x?}",
+        "[IPC RECV] tid={} from={} len={}",
         receiver_thread_id,
         from,
-        copy_len,
-        &recv_buf[..core::cmp::min(copy_len, 16)]
+        copy_len
     );
 
     (from << 32) | (copy_len as u64)
@@ -1115,11 +1141,10 @@ fn recv_blocking_for_thread(
                             }
                         }
                         crate::debug!(
-                            "[IPC RECV] tid={} from={} len={} data={:02x?}",
+                            "[IPC RECV] tid={} from={} len={}",
                             receiver_thread_id,
                             from,
-                            copy_len,
-                            &recv_buf[..core::cmp::min(copy_len, 16)]
+                            copy_len
                         );
                         return (from << 32) | (copy_len as u64);
                     }
@@ -1152,6 +1177,13 @@ pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
         None => return EINVAL,
     };
     let _ = ensure_endpoint_for_thread(receiver);
+    if let Some(receiver_handle) = endpoint_handle_for_thread(receiver) {
+        if let Some(record) = endpoint_record_from_handle(receiver_handle) {
+            if !record.rights.contains(EndpointRights::RECV) {
+                return EACCES;
+            }
+        }
+    }
     recv_from_thread_nonblocking(receiver, receiver, buf_ptr, max_len)
 }
 
@@ -1165,6 +1197,13 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
         None => return EINVAL,
     };
     let _ = ensure_endpoint_for_thread(receiver);
+    if let Some(receiver_handle) = endpoint_handle_for_thread(receiver) {
+        if let Some(record) = endpoint_record_from_handle(receiver_handle) {
+            if !record.rights.contains(EndpointRights::RECV) {
+                return EACCES;
+            }
+        }
+    }
     recv_blocking_for_thread(receiver, receiver, buf_ptr, max_len)
 }
 

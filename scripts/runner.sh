@@ -116,14 +116,6 @@ echo "[check] selftest marker"
 strings "${USER_BIN}" | grep -n 'selftest: enter' || true
 
 SIGNATURE_DB_STAGE="${TARGET_DIR}/signature.db"
-echo "[build] signature db"
-perl "${ROOT_DIR}/scripts/signature_db.pl" \
-    --output "${SIGNATURE_DB_STAGE}" \
-    --entry "core.service=${USER_BIN}" \
-    --entry "/plugkit/test/entry.elf=${PLUGKIT_TEST_BIN}" \
-    --entry "/hello.bin=${USER_BIN}" \
-    --entry "/captest.bin=${CAPTEST_BIN}"
-
 echo "[build] bootloader"
 cargo build \
     --locked \
@@ -161,6 +153,20 @@ mkdir -p "${INITFS_STAGE}/plugkit/test"
 install -m 0644 "${ROOT_DIR}/examples/plugkit/test/about.toml" "${INITFS_STAGE}/plugkit/test/about.toml"
 install -m 0755 "${PLUGKIT_TEST_BIN}" "${INITFS_STAGE}/plugkit/test/entry.elf"
 stage_module_cexts
+
+echo "[build] signature db"
+SIGNATURE_DB_ARGS=(
+    --output "${SIGNATURE_DB_STAGE}"
+    --entry "core.service=${USER_BIN}"
+    --entry "/plugkit/test/entry.elf=${PLUGKIT_TEST_BIN}"
+    --entry "/hello.bin=${USER_BIN}"
+    --entry "/captest.bin=${CAPTEST_BIN}"
+)
+while IFS= read -r -d '' module_path; do
+    module_name="$(basename "${module_path}")"
+    SIGNATURE_DB_ARGS+=(--entry "/Modules/${module_name}=${module_path}")
+done < <(find "${INITFS_STAGE}/Modules" -maxdepth 1 -type f -name '*.cext' -print0 2>/dev/null || true)
+perl "${ROOT_DIR}/scripts/signature_db.pl" "${SIGNATURE_DB_ARGS[@]}"
 
 echo "[build] rootfs"
 ROOTFS_SOURCE_DIR="${ROOT_DIR}/examples/fs/rootfs" \

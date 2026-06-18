@@ -15,6 +15,8 @@ struct OverlayEntry {
 
 static LOADED: AtomicBool = AtomicBool::new(true);
 static OVERLAY: Mutex<Option<BTreeMap<String, OverlayEntry>>> = Mutex::new(None);
+const MAX_OVERLAY_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+const MAX_OVERLAY_FILE_BYTES: usize = 8 * 1024 * 1024;
 
 fn with_overlay_mut<R>(f: impl FnOnce(&mut BTreeMap<String, OverlayEntry>) -> R) -> R {
     let mut guard = OVERLAY.lock();
@@ -101,6 +103,13 @@ fn effective_entry(path: &str) -> Option<OverlayEntry> {
 
 fn mode_for_file(mode: Option<u16>) -> u16 {
     mode.unwrap_or(0o100644)
+}
+
+fn overlay_total_bytes(map: &BTreeMap<String, OverlayEntry>) -> usize {
+    map.values()
+        .filter(|entry| !entry.removed)
+        .map(|entry| entry.data.len())
+        .sum()
 }
 
 pub fn is_loaded() -> bool {
@@ -230,6 +239,19 @@ pub fn write_all(path: &str, offset: u64, data: &[u8]) -> Option<usize> {
     }
     let off = usize::try_from(offset).ok()?;
     let end = off.checked_add(data.len())?;
+    if end > MAX_OVERLAY_FILE_BYTES {
+        return None;
+    }
+    let projected = with_overlay(|map| {
+        let current = map.get(&path).map(|e| e.data.len()).unwrap_or(0);
+        let total = overlay_total_bytes(map);
+        total
+            .saturating_sub(current)
+            .saturating_add(end.max(current))
+    });
+    if projected > MAX_OVERLAY_TOTAL_BYTES {
+        return None;
+    }
     if end > entry.data.len() {
         entry.data.resize(end, 0);
     }
@@ -255,6 +277,19 @@ pub fn truncate(path: &str, len: u64) -> i32 {
         Ok(v) => v,
         Err(_) => return -22,
     };
+    if new_len > MAX_OVERLAY_FILE_BYTES {
+        return -28;
+    }
+    let projected = with_overlay(|map| {
+        let current = map.get(&path).map(|e| e.data.len()).unwrap_or(0);
+        let total = overlay_total_bytes(map);
+        total
+            .saturating_sub(current)
+            .saturating_add(new_len.max(current))
+    });
+    if projected > MAX_OVERLAY_TOTAL_BYTES {
+        return -28;
+    }
     let mut data = read_all(&path).unwrap_or_default();
     data.resize(new_len, 0);
     with_overlay_mut(|map| {

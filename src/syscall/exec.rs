@@ -144,7 +144,6 @@ fn read_nul_caps_from_user(caps_ptr: u64, caps_total_len: u64) -> Result<Vec<Str
 
 fn caller_has_process_spawn_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[Capability::ProcessSpawn])
-        || crate::syscall::security::caller_is_core()
 }
 
 fn current_process_capabilities() -> Option<CapabilitySet> {
@@ -158,6 +157,9 @@ fn validate_requested_exec_capabilities(caps: &CapabilitySet) -> Result<(), u64>
     for cap in caps.iter() {
         if !cap.is_kernel_enforced() {
             return Err(EINVAL);
+        }
+        if !cap.is_delegable() {
+            return Err(EPERM);
         }
     }
 
@@ -235,9 +237,9 @@ pub fn exec_with_capabilities_syscall(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let mut caps = crate::capability::CapabilitySet::empty();
+    let mut caps = CapabilitySet::empty();
     for s in &caps_list {
-        let Some(cap) = crate::capability::Capability::from_str(s.as_str()) else {
+        let Some(cap) = Capability::from_str(s.as_str()) else {
             return EINVAL;
         };
         caps.insert(cap);
@@ -261,7 +263,7 @@ pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
 pub fn exec_kernel_with_name_and_caps(
     path: &str,
     name: &str,
-    initial_caps: crate::capability::CapabilitySet,
+    initial_caps: CapabilitySet,
     requested_privilege: crate::task::PrivilegeLevel,
 ) -> u64 {
     exec_internal(
@@ -277,7 +279,7 @@ fn exec_internal(
     path: &str,
     name_override: Option<&str>,
     args: &[&str],
-    initial_caps: Option<crate::capability::CapabilitySet>,
+    initial_caps: Option<CapabilitySet>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
 ) -> u64 {
     let mut process_name = name_override
@@ -537,7 +539,7 @@ fn exec_with_data(
     exec_path: &str,
     args: &[&str],
     parent_override: Option<crate::task::ProcessId>,
-    initial_caps: Option<crate::capability::CapabilitySet>,
+    initial_caps: Option<CapabilitySet>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
 ) -> u64 {
     crate::debug!("exec: name={}", process_name);
@@ -1010,7 +1012,7 @@ fn exec_with_data(
         // 親プロセスの CWD を子プロセスに継承する
         if let Some(ppid) = parent_pid {
             let parent_cwd = crate::task::with_process(ppid, |p| {
-                let mut s = alloc::string::String::new();
+                let mut s = String::new();
                 s.push_str(p.cwd());
                 s
             });

@@ -140,6 +140,9 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
     if !crate::task::process::process_has_capability(current, cap) {
         return EACCES;
     }
+    if !cap.is_delegable() {
+        return EACCES;
+    }
 
     let dest_process = match resolve_destination_process(_dest) {
         Some(pid) => pid,

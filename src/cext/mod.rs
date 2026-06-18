@@ -13,7 +13,6 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
-use sha2::{Digest, Sha256};
 use spin::Mutex;
 
 use crate::task::ResourceLimits;
@@ -206,35 +205,6 @@ fn parse_declared_cexts() -> Option<Vec<DeclaredCext>> {
     Some(out)
 }
 
-fn load_module_hash_manifest() -> Option<BTreeMap<String, String>> {
-    let bytes = crate::init::fs::read("/Modules/modules.sha256")?;
-    let text = core::str::from_utf8(&bytes).ok()?;
-    let mut out = BTreeMap::new();
-    for raw_line in text.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (name, hash) = line.split_once('=')?;
-        let name = name.trim();
-        let hash = hash.trim().to_ascii_lowercase();
-        if name.is_empty() || hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
-        }
-        out.insert(name.to_string(), hash);
-    }
-    Some(out)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        out.push_str(&alloc::format!("{:02x}", b));
-    }
-    out
-}
-
 struct CextHeader {
     module_version: u16,
     name_len: usize,
@@ -341,6 +311,15 @@ struct LoadedElf {
     base: u64,
     min_vaddr: u64,
     max_vaddr: u64,
+    segments: Vec<LoadedSegment>,
+}
+
+#[derive(Clone, Copy)]
+struct LoadedSegment {
+    vaddr: u64,
+    memsz: u64,
+    writable: bool,
+    executable: bool,
 }
 
 #[inline]
@@ -369,7 +348,10 @@ fn alloc_module_base(span: u64) -> Option<u64> {
 fn load_elf_symbol(elf: &[u8], symbol_name: &str) -> Option<u64> {
     let eh = crate::elf::parse_elf_header(elf)?;
     let loaded = load_elf_image(elf, &eh)?;
-    apply_relocations(elf, &eh, loaded.base, loaded.min_vaddr, loaded.max_vaddr)?;
+    let reloc_ok = apply_relocations(elf, &eh, loaded.base, loaded.min_vaddr, loaded.max_vaddr);
+    let restore_ok = finalize_loaded_elf(&loaded);
+    reloc_ok?;
+    restore_ok?;
     find_symbol_runtime_addr(elf, &eh, symbol_name, loaded.base, loaded.min_vaddr)
 }
 
@@ -407,6 +389,7 @@ fn load_elf_image(elf: &[u8], eh: &crate::elf::Elf64Ehdr) -> Option<LoadedElf> {
         return None;
     }
     let is_dyn = eh.e_type == ET_DYN;
+    let mut segments = Vec::new();
     let base = if is_dyn {
         alloc_module_base(max_vaddr.checked_sub(min_vaddr)?)?
     } else {
@@ -454,17 +437,38 @@ fn load_elf_image(elf: &[u8], eh: &crate::elf::Elf64Ehdr) -> Option<LoadedElf> {
             ph.p_filesz,
             ph.p_memsz,
             src,
-            writable,
-            executable,
+            true,
+            false,
         )
         .ok()?;
+        segments.push(LoadedSegment {
+            vaddr: seg_vaddr,
+            memsz: ph.p_memsz,
+            writable,
+            executable,
+        });
     }
 
     Some(LoadedElf {
         base,
         min_vaddr,
         max_vaddr,
+        segments,
     })
+}
+
+fn finalize_loaded_elf(loaded: &LoadedElf) -> Option<()> {
+    for segment in &loaded.segments {
+        crate::mem::paging::protect_current_range(
+            segment.vaddr,
+            segment.memsz,
+            true,
+            segment.writable,
+            segment.executable,
+        )
+        .ok()?;
+    }
+    Some(())
 }
 
 fn apply_relocations(
@@ -606,11 +610,6 @@ pub fn load_modules() {
         return;
     };
 
-    let Some(expected_hashes) = load_module_hash_manifest() else {
-        crate::warn!("cext: /Modules/modules.sha256 missing or invalid");
-        return;
-    };
-
     for entry in declared {
         match entry.kind.as_str() {
             "built-in" => {
@@ -634,24 +633,13 @@ pub fn load_modules() {
             continue;
         };
 
-        let manifest_name = alloc::format!("{}.cext", entry.name);
-        let Some(expected_hash) = expected_hashes.get(&manifest_name) else {
-            crate::warn!("cext: missing hash entry for {}", manifest_name);
-            continue;
-        };
-        let actual_hash = sha256_hex(&bytes);
-        if actual_hash != *expected_hash {
-            crate::warn!(
-                "cext: hash mismatch for {} (expected {}, got {})",
-                manifest_name,
-                expected_hash,
-                actual_hash
-            );
+        if !crate::policy::signature::verify_exec(&module_path, &bytes) {
+            crate::warn!("cext: signature verification failed for {}", module_path);
             continue;
         }
 
         let Some(meta) = parse_cext(&bytes) else {
-            crate::warn!("cext: invalid cext package {}", manifest_name);
+            crate::warn!("cext: invalid cext package {}", module_path);
             continue;
         };
         if meta.name != entry.name || meta.module_version != entry.version {

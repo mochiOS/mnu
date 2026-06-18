@@ -1,5 +1,5 @@
 the mnu kernel ChangeLog   - version 0.1-rc3
-    - Release date: 2026-06-
+    - Release date: 2026-06-18
     - Release creator: tas0dev
 
 Changes:
@@ -10,6 +10,8 @@ Changes:
   core.service.
 * Create a security model based on
   binary signatures
+* Fixed some syscalls security issues.
+* Fixed many bugs / security issues.
 * Create some scripts.
 * Delete old source files and syscalls.
 * Delete unused meta files.

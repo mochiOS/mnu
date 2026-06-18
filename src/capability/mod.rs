@@ -806,6 +806,21 @@ impl Capability {
         Self::kernel_enforced_capabilities().contains(self)
     }
 
+    /// 他プロセスへ委譲可能かどうか。
+    ///
+    /// `Unsandboxed` や物理メモリ、プロセス生成のような強い権限は
+    /// 低い権限のプロセスへ転送しない。
+    pub fn is_delegable(&self) -> bool {
+        !matches!(
+            self,
+            Capability::Unsandboxed
+                | Capability::ProcessSpawn
+                | Capability::KernelDebug
+                | Capability::MemoryPhysMap
+                | Capability::MemoryPhysTranslate
+        )
+    }
+
     /// カーネルが強制対象として扱う capability 一覧
     pub fn kernel_enforced_capabilities() -> &'static [Capability] {
         use Capability::*;

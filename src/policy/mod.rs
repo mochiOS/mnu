@@ -73,14 +73,6 @@ pub fn service_manager_launch() -> BootLaunch {
 }
 
 #[inline]
-fn role_is_service_like(role: ManifestRole) -> bool {
-    matches!(
-        role,
-        ManifestRole::CoreService | ManifestRole::Service | ManifestRole::Driver
-    )
-}
-
-#[inline]
 fn role_priority(role: ManifestRole) -> u8 {
     match role {
         ManifestRole::Application => 0,
@@ -172,14 +164,10 @@ pub fn caller_can_grant_capabilities_on_exec() -> bool {
 /// manifest role を privilege に落とす
 #[inline]
 pub fn resolve_launch_privilege(
-    role: ManifestRole,
+    _role: ManifestRole,
     _install_source: InstallSource,
 ) -> PrivilegeLevel {
-    if role_is_service_like(role) {
-        PrivilegeLevel::Service
-    } else {
-        PrivilegeLevel::User
-    }
+    PrivilegeLevel::User
 }
 
 /// manifest role を priority に落とす
@@ -245,7 +233,7 @@ pub fn resolve_exec_priority(
 
     if let Some(parent) = parent_pid {
         let parent_name = crate::task::with_process(parent, |process| {
-            let mut name = alloc::string::String::new();
+            let mut name = String::new();
             name.push_str(process.name());
             name
         });

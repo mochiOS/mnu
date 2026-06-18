@@ -20,7 +20,6 @@ stage_module_cexts() {
     local modules_dir="${initfs_stage}/Modules"
     local manifest_file="${initfs_stage}/cexts.manifest"
     mkdir -p "${modules_dir}"
-    : > "${modules_dir}/modules.sha256"
     : > "${manifest_file}"
 
     while IFS= read -r -d '' manifest; do
@@ -70,8 +69,6 @@ stage_module_cexts() {
 
         staged_path="${modules_dir}/${name}.cext"
         install -m 0644 "${artifact_path}" "${staged_path}"
-        digest="$(sha256sum "${staged_path}" | awk '{print $1}')"
-        printf '%s = %s\n' "${name}.cext" "${digest}" >> "${modules_dir}/modules.sha256"
         install -m 0644 "${manifest}" "${modules_dir}/${name}.toml"
     done < <(find "${root_dir}/examples/cexts" -mindepth 2 -maxdepth 2 -name cext.toml -print0)
 }
