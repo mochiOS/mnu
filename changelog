@@ -1,8 +1,9 @@
-the mnu kernel ChangeLog   - version 0.1-rc3
+the mnu kernel ChangeLog   - version 0.1
     - Release date: 2026-06-18
     - Release creator: tas0dev
 
 Changes:
+* First release of the mnu kernel.
 * Added a path capability registry.
   gated actual path registration on
   capabilities.manage for services,
