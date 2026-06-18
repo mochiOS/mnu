@@ -8,4 +8,7 @@ Changes:
   capabilities.manage for services,
   and exposed registered maps in
   core.service.
+* Create a security model based on
+  binary signatures
 * Delete old source files and syscalls.
+* Delete unused meta files.
