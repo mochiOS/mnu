@@ -246,6 +246,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::TimeNow as u64 => time::get_ticks(),
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
+        x if x == SyscallNumber::Dup2 as u64 => fs::dup2(arg0, arg1),
+        x if x == SyscallNumber::Execve as u64 => exec::execve_syscall(arg0, arg1, arg2),
         x if x == SyscallNumber::FileOpen as u64 => fs::file_open(arg0, arg1),
         x if x == SyscallNumber::FileOpenAt as u64 => {
             fs::file_open_at(arg0 as i64, arg1, arg2, arg3)
@@ -270,18 +272,39 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
     }
 }
 
-/// fork/clone のみ、現在スレッドへユーザーコンテキストを保存する
-#[no_mangle]
-pub extern "sysv64" fn save_user_context_for_fork(
-    num: u64,
-    user_rip: u64,
+#[repr(C)]
+pub struct SavedSyscallFrame {
     user_rsp: u64,
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    rbx: u64,
+    rbp: u64,
     user_rflags: u64,
-) {
-    let _ = num;
+    user_rip: u64,
+    arg5: u64,
+    arg4: u64,
+    arg3: u64,
+    arg2: u64,
+    arg1: u64,
+    arg0: u64,
+    num: u64,
+}
+
+/// fork/clone 用に、現在スレッドへユーザー復帰コンテキストを保存する
+#[no_mangle]
+pub extern "sysv64" fn save_user_context_for_fork(frame: *const SavedSyscallFrame) {
+    if frame.is_null() {
+        return;
+    }
+    let frame = unsafe { &*frame };
     if let Some(tid) = crate::task::current_thread_id() {
         let _ = crate::task::with_thread_mut(tid, |thread| {
-            thread.set_syscall_user_context(user_rip, user_rsp, user_rflags);
+            thread.set_syscall_user_context(frame.user_rip, frame.user_rsp, frame.user_rflags);
+            thread.set_fork_user_callee_saved(
+                frame.rbx, frame.rbp, frame.r12, frame.r13, frame.r14, frame.r15,
+            );
         });
     }
 }

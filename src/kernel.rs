@@ -1,6 +1,7 @@
 use crate::capability::path::{
     register_service_paths, PathRights, PATH_CREATE, PATH_LIST, PATH_READ, PATH_WRITE,
 };
+use crate::capability::{Capability, CapabilitySet};
 use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
 use crate::syscall::exec::{exec_kernel_with_name, exec_kernel_with_name_and_caps};
@@ -129,7 +130,14 @@ fn kernel_main() -> ! {
         ];
         let _ = register_service_paths(manager_pid, &service_paths);
 
-        let signature_allow_pid = exec_kernel_with_name("/captest.bin", "signature-allow-test");
+        let mut signature_allow_caps = CapabilitySet::empty();
+        signature_allow_caps.insert(Capability::ProcessSpawn);
+        let signature_allow_pid = exec_kernel_with_name_and_caps(
+            "/captest.bin",
+            "signature-allow-test",
+            signature_allow_caps,
+            crate::task::PrivilegeLevel::User,
+        );
         if signature_allow_pid == 0 || signature_allow_pid & (1u64 << 63) != 0 {
             crate::error!(
                 "signature allow test failed: ret={:#x}",
