@@ -41,6 +41,11 @@ fn rootfs_image() -> &'static [u8] {
     unsafe { ROOTFS_SLICE }
 }
 
+pub fn rootfs_bytes() -> Option<&'static [u8]> {
+    let image = rootfs_image();
+    if image.is_empty() { None } else { Some(image) }
+}
+
 /// スーパーブロックの構造体
 #[derive(Debug, Clone, Copy)]
 struct Superblock {
@@ -157,6 +162,10 @@ pub fn read_initfs(name: &str) -> Option<Vec<u8>> {
     read_path_in(ext2_image(), name)
 }
 
+pub fn initfs_readdir_path(path: &str) -> Option<alloc::vec::Vec<alloc::string::String>> {
+    readdir_path_in(ext2_image(), path)
+}
+
 /// カーネル内部で initfs を読むための明示的な別名
 pub fn kernel_read_initfs(name: &str) -> Option<Vec<u8>> {
     read_initfs(name)
@@ -173,6 +182,26 @@ pub fn read_rootfs(name: &str) -> Option<Vec<u8>> {
         None
     } else {
         read_path_in(rootfs_image(), name)
+    }
+}
+
+pub fn rootfs_file_metadata(path: &str) -> Option<(u16, u64)> {
+    if rootfs_image().is_empty() {
+        None
+    } else {
+        file_metadata_in(rootfs_image(), path)
+    }
+}
+
+pub fn rootfs_is_directory(path: &str) -> bool {
+    !rootfs_image().is_empty() && resolve_dir_inode_in(rootfs_image(), path).is_some()
+}
+
+pub fn rootfs_readdir_path(path: &str) -> Option<alloc::vec::Vec<alloc::string::String>> {
+    if rootfs_image().is_empty() {
+        None
+    } else {
+        readdir_path_in(rootfs_image(), path)
     }
 }
 

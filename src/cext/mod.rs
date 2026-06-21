@@ -152,11 +152,13 @@ type DiskInitFn = unsafe extern "C" fn() -> *const disk::McxDiskOps;
 fn register_disk_module(init_addr: u64, module_version: u16) -> bool {
     let init: DiskInitFn = unsafe { core::mem::transmute(init_addr) };
     let ops = unsafe { init() };
-    disk::register(ops, module_version)
+    !ops.is_null() && disk::activate_bundle(module_version)
 }
 
-fn register_fs_module(_init_addr: u64, _module_version: u16) -> bool {
-    false
+fn register_fs_module(init_addr: u64, module_version: u16) -> bool {
+    let init: FsInitFn = unsafe { core::mem::transmute(init_addr) };
+    let ops = unsafe { init() };
+    !ops.is_null() && fs::activate_bundle(module_version)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -218,6 +220,195 @@ struct CextMeta {
     deps: Vec<String>,
     module_version: u16,
     elf: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct BundleManifest {
+    id: String,
+    name: String,
+    version: u16,
+    abi: u16,
+    entry: String,
+    load_stage: String,
+    required: bool,
+    provides: Vec<String>,
+    requires: Vec<String>,
+}
+
+fn parse_array_values(value: &str) -> Option<Vec<String>> {
+    let value = value.trim();
+    let inner = value.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    for item in inner.split(',') {
+        let trimmed = item.trim();
+        let unquoted = trimmed.strip_prefix('"')?.strip_suffix('"')?;
+        out.push(unquoted.to_string());
+    }
+    Some(out)
+}
+
+fn parse_bundle_manifest(bytes: &[u8]) -> Option<BundleManifest> {
+    let text = core::str::from_utf8(bytes).ok()?;
+    let mut section = "";
+    let mut id = None;
+    let mut name = None;
+    let mut version = None;
+    let mut abi = None;
+    let mut entry = None;
+    let mut load_stage = None;
+    let mut required = None;
+    let mut provides = Vec::new();
+    let mut requires = Vec::new();
+
+    for raw in text.lines() {
+        let line = raw.split('#').next()?.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = &line[1..line.len() - 1];
+            continue;
+        }
+        let (key, value) = line.split_once('=')?;
+        let key = key.trim();
+        let value = value.trim();
+        match section {
+            "cext" => match key {
+                "id" => id = Some(value.strip_prefix('"')?.strip_suffix('"')?.to_string()),
+                "name" => name = Some(value.strip_prefix('"')?.strip_suffix('"')?.to_string()),
+                "version" => version = value.parse::<u16>().ok(),
+                "abi" => abi = value.parse::<u16>().ok(),
+                "entry" => entry = Some(value.strip_prefix('"')?.strip_suffix('"')?.to_string()),
+                _ => {}
+            },
+            "load" => match key {
+                "stage" => {
+                    load_stage = Some(value.strip_prefix('"')?.strip_suffix('"')?.to_string())
+                }
+                "required" => {
+                    required = Some(match value {
+                        "true" => true,
+                        "false" => false,
+                        _ => return None,
+                    })
+                }
+                _ => {}
+            },
+            "provides" => {
+                if key == "interfaces" {
+                    provides = parse_array_values(value)?;
+                }
+            }
+            "requires" => {
+                if key == "interfaces" {
+                    requires = parse_array_values(value)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(BundleManifest {
+        id: id?,
+        name: name?,
+        version: version?,
+        abi: abi?,
+        entry: entry?,
+        load_stage: load_stage?,
+        required: required?,
+        provides,
+        requires,
+    })
+}
+
+fn activate_builtin_bundle(manifest: &BundleManifest) -> bool {
+    match manifest.name.as_str() {
+        "disk" => disk::activate_bundle(manifest.version),
+        "ext2" => fs::activate_bundle(manifest.version),
+        _ => false,
+    }
+}
+
+fn load_bundle_directories() -> bool {
+    let Some(entries) = crate::init::fs::initfs_readdir_path("/") else {
+        return false;
+    };
+    let mut found_bundle = false;
+
+    for name in entries {
+        if !name.ends_with(".cext") {
+            continue;
+        }
+        found_bundle = true;
+        let dir_path = alloc::format!("/{}", name);
+        if !crate::init::fs::is_directory(&dir_path) {
+            crate::warn!("cext: {} is not a directory bundle", dir_path);
+            continue;
+        }
+        let manifest_path = alloc::format!("{}/manifest.toml", dir_path);
+        let entry_path_default = alloc::format!("{}/entry", dir_path);
+        let Some(manifest_bytes) = crate::init::fs::read_initfs(&manifest_path) else {
+            crate::warn!("cext: missing {}", manifest_path);
+            continue;
+        };
+        if !crate::policy::signature::verify_exec(&manifest_path, &manifest_bytes) {
+            crate::warn!("cext: signature verification failed for {}", manifest_path);
+            continue;
+        }
+        let Some(manifest) = parse_bundle_manifest(&manifest_bytes) else {
+            crate::warn!("cext: invalid manifest {}", manifest_path);
+            continue;
+        };
+        if manifest.abi != 1 {
+            crate::warn!("cext: unsupported abi {} for {}", manifest.abi, manifest.name);
+            continue;
+        }
+        if manifest.load_stage != "boot" {
+            continue;
+        }
+        let entry_path = if manifest.entry.starts_with('/') {
+            manifest.entry.clone()
+        } else {
+            alloc::format!("{}/{}", dir_path, manifest.entry)
+        };
+        let entry_path = if manifest.entry.is_empty() {
+            entry_path_default.clone()
+        } else {
+            entry_path
+        };
+        let Some(entry_bytes) = crate::init::fs::read_initfs(&entry_path) else {
+            crate::warn!("cext: missing {}", entry_path);
+            if manifest.required {
+                crate::warn!("cext: required bundle {} is incomplete", manifest.name);
+            }
+            continue;
+        };
+        if !crate::policy::signature::verify_exec(&entry_path, &entry_bytes) {
+            crate::warn!("cext: signature verification failed for {}", entry_path);
+            continue;
+        }
+        if builtin_kind(&manifest.name).is_none() {
+            crate::warn!("cext: unknown built-in bundle {}", manifest.name);
+            continue;
+        }
+        if activate_builtin_bundle(&manifest) {
+            crate::info!(
+                "cext: activated bundle {} v{} id={} provides={:?} requires={:?}",
+                manifest.name,
+                manifest.version,
+                manifest.id,
+                manifest.provides,
+                manifest.requires
+            );
+        } else {
+            crate::warn!("cext: failed to activate built-in bundle {}", manifest.name);
+        }
+    }
+
+    found_bundle
 }
 
 fn parse_cext(bytes: &[u8]) -> Option<CextMeta> {
@@ -605,6 +796,10 @@ pub fn init_runtime_config() {
 
 #[inline]
 pub fn load_modules() {
+    if load_bundle_directories() {
+        return;
+    }
+
     let Some(declared) = parse_declared_cexts() else {
         crate::warn!("cext: missing /cexts.manifest");
         return;

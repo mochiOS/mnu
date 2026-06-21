@@ -13,10 +13,14 @@ struct OverlayEntry {
     removed: bool,
 }
 
-static LOADED: AtomicBool = AtomicBool::new(true);
+static LOADED: AtomicBool = AtomicBool::new(false);
+static MOUNTED: AtomicBool = AtomicBool::new(false);
+static HAS_DISK_OPS: AtomicBool = AtomicBool::new(false);
 static OVERLAY: Mutex<Option<BTreeMap<String, OverlayEntry>>> = Mutex::new(None);
+
 const MAX_OVERLAY_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OVERLAY_FILE_BYTES: usize = 8 * 1024 * 1024;
+const EXT2_MAGIC: u16 = 0xEF53;
 
 fn with_overlay_mut<R>(f: impl FnOnce(&mut BTreeMap<String, OverlayEntry>) -> R) -> R {
     let mut guard = OVERLAY.lock();
@@ -71,20 +75,29 @@ fn entry_name(path: &str) -> Option<String> {
     }
 }
 
-fn base_metadata(path: &str) -> Option<(u16, u64)> {
-    crate::init::fs::file_metadata(path)
+fn mounted_base_metadata(path: &str) -> Option<(u16, u64)> {
+    if !MOUNTED.load(Ordering::Acquire) {
+        return None;
+    }
+    crate::init::fs::rootfs_file_metadata(path)
 }
 
-fn base_is_directory(path: &str) -> bool {
-    crate::init::fs::is_directory(path)
+fn mounted_base_is_directory(path: &str) -> bool {
+    MOUNTED.load(Ordering::Acquire) && crate::init::fs::rootfs_is_directory(path)
 }
 
-fn base_read(path: &str) -> Option<Vec<u8>> {
-    crate::init::fs::read(path)
+fn mounted_base_read(path: &str) -> Option<Vec<u8>> {
+    if !MOUNTED.load(Ordering::Acquire) {
+        return None;
+    }
+    crate::init::fs::read_rootfs(path)
 }
 
-fn base_readdir(path: &str) -> Option<Vec<String>> {
-    crate::init::fs::readdir_path(path)
+fn mounted_base_readdir(path: &str) -> Option<Vec<String>> {
+    if !MOUNTED.load(Ordering::Acquire) {
+        return None;
+    }
+    crate::init::fs::rootfs_readdir_path(path)
 }
 
 fn overlay_entry(path: &str) -> Option<OverlayEntry> {
@@ -112,15 +125,56 @@ fn overlay_total_bytes(map: &BTreeMap<String, OverlayEntry>) -> usize {
         .sum()
 }
 
+fn rootfs_has_path(path: &str) -> bool {
+    mounted_base_metadata(path).is_some() || mounted_base_is_directory(path)
+}
+
+fn validate_ext2_superblock() -> i32 {
+    let Some(rootfs) = crate::init::fs::rootfs_bytes() else {
+        return -2;
+    };
+    if rootfs.len() < 2048 {
+        return -5;
+    }
+    let magic = u16::from_le_bytes([rootfs[1024 + 56], rootfs[1024 + 57]]);
+    if magic != EXT2_MAGIC {
+        return -22;
+    }
+    0
+}
+
+pub fn activate_bundle(_version: u16) -> bool {
+    if crate::init::fs::rootfs_bytes().is_none() {
+        return false;
+    }
+    LOADED.store(true, Ordering::Release);
+    true
+}
+
 pub fn is_loaded() -> bool {
     LOADED.load(Ordering::Acquire)
 }
 
 pub fn mount(_device_id: u32) -> i32 {
+    if !LOADED.load(Ordering::Acquire) {
+        return -2;
+    }
+    if !HAS_DISK_OPS.load(Ordering::Acquire) {
+        return -6;
+    }
+    let rc = validate_ext2_superblock();
+    if rc != 0 {
+        return rc;
+    }
+    MOUNTED.store(true, Ordering::Release);
     0
 }
 
-pub fn set_disk_ops(_disk_ops: *const crate::cext::disk::McxDiskOps) -> i32 {
+pub fn set_disk_ops(disk_ops: *const crate::cext::disk::McxDiskOps) -> i32 {
+    if disk_ops.is_null() || !crate::cext::disk::is_loaded() {
+        return -22;
+    }
+    HAS_DISK_OPS.store(true, Ordering::Release);
     0
 }
 
@@ -129,7 +183,7 @@ pub fn create(path: &str, mode: u32) -> i32 {
     if path == "/" {
         return -21;
     }
-    if base_is_directory(&path) {
+    if mounted_base_is_directory(&path) {
         return -17;
     }
     with_overlay_mut(|map| {
@@ -150,7 +204,7 @@ pub fn remove(path: &str, is_dir: bool) -> i32 {
     if path == "/" {
         return -13;
     }
-    if let Some((mode, _)) = base_metadata(&path) {
+    if let Some((mode, _)) = mounted_base_metadata(&path) {
         let base_is_dir = (mode & 0xF000) == 0x4000;
         if is_dir && !base_is_dir {
             return -20;
@@ -179,8 +233,7 @@ pub fn rename(src: &str, dst: &str) -> i32 {
     if src == "/" || dst == "/" {
         return -13;
     }
-    let meta = file_metadata(&src);
-    let Some((mode, size)) = meta else {
+    let Some((mode, _)) = file_metadata(&src) else {
         return -2;
     };
     let data = read_all(&src).unwrap_or_default();
@@ -202,7 +255,6 @@ pub fn rename(src: &str, dst: &str) -> i32 {
             },
         );
     });
-    let _ = size;
     0
 }
 
@@ -211,7 +263,7 @@ pub fn read_all(path: &str) -> Option<Vec<u8>> {
     if let Some(entry) = effective_entry(&path) {
         return Some(entry.data);
     }
-    base_read(&path)
+    mounted_base_read(&path)
 }
 
 pub fn write_all(path: &str, offset: u64, data: &[u8]) -> Option<usize> {
@@ -220,9 +272,9 @@ pub fn write_all(path: &str, offset: u64, data: &[u8]) -> Option<usize> {
         return None;
     }
     let mut entry = effective_entry(&path).or_else(|| {
-        base_metadata(&path).map(|(mode, _)| OverlayEntry {
+        mounted_base_metadata(&path).map(|(mode, _)| OverlayEntry {
             mode,
-            data: base_read(&path).unwrap_or_default(),
+            data: mounted_base_read(&path).unwrap_or_default(),
             removed: false,
         })
     });
@@ -313,7 +365,7 @@ pub fn file_metadata(path: &str) -> Option<(u16, u64)> {
         }
         return Some((entry.mode, entry.data.len() as u64));
     }
-    base_metadata(&path)
+    mounted_base_metadata(&path)
 }
 
 pub fn is_directory(path: &str) -> bool {
@@ -324,11 +376,14 @@ pub fn is_directory(path: &str) -> bool {
 
 pub fn readdir_path(path: &str) -> Option<Vec<String>> {
     let path = normalize_path(path);
-    if !is_directory(&path) {
+    if !rootfs_has_path(&path) && !is_directory(&path) {
+        return None;
+    }
+    if !mounted_base_is_directory(&path) && path != "/" {
         return None;
     }
 
-    let mut names = base_readdir(&path).unwrap_or_default();
+    let mut names = mounted_base_readdir(&path).unwrap_or_default();
     with_overlay(|map| {
         for (entry_path, entry) in map.iter() {
             if entry.removed {

@@ -344,9 +344,9 @@ fn load_exec_image(path: &str, is_service: bool) -> Option<(Vec<u8>, &'static st
             .or_else(|| crate::cext::fs::read_all(path).map(|data| (data, "cext")))
             .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
     } else {
-        crate::init::fs::read_rootfs(path)
-            .map(|data| (data, "rootfs"))
-            .or_else(|| crate::cext::fs::read_all(path).map(|data| (data, "cext")))
+        crate::cext::fs::read_all(path)
+            .map(|data| (data, "cext"))
+            .or_else(|| crate::init::fs::read_rootfs(path).map(|data| (data, "rootfs")))
             .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
     }
 }
