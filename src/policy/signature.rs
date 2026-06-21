@@ -93,7 +93,9 @@ fn parse_db(bytes: &[u8]) -> Option<SignatureDatabase> {
 }
 
 fn load_db_from_rootfs() -> bool {
-    let Some(bytes) = crate::init::fs::read_rootfs(SIGNATURE_DB_PATH) else {
+    let Some(bytes) = crate::cext::fs::read_all(SIGNATURE_DB_PATH)
+        .or_else(|| crate::init::fs::read_rootfs(SIGNATURE_DB_PATH))
+    else {
         crate::warn!("signature: missing {}", SIGNATURE_DB_PATH);
         return false;
     };

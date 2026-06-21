@@ -19,5 +19,10 @@ pub fn registrations() -> Vec<ModuleRegistration> {
             version: 1,
             register: super::register_disk_module,
         },
+        ModuleRegistration {
+            name: "ext2",
+            version: 1,
+            register: super::register_fs_module,
+        },
     ]
 }

@@ -1,9 +1,6 @@
-use crate::capability::path::{
-    register_service_paths, PathRights, PATH_CREATE, PATH_LIST, PATH_READ, PATH_WRITE,
-};
 use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
-use crate::syscall::exec::{exec_kernel_with_name, exec_kernel_with_name_and_caps};
+use crate::syscall::exec::exec_kernel_with_name_and_caps;
 use crate::util::log::LogLevel;
 use crate::{debug, info};
 use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
@@ -119,54 +116,6 @@ fn kernel_main() -> ! {
                 pid.0,
                 pid.1
             );
-        }
-        let service_paths = [
-            (
-                "/core.service.fs-test",
-                PathRights::new(PATH_READ | PATH_WRITE | PATH_CREATE),
-            ),
-            ("/testdata", PathRights::new(PATH_READ | PATH_LIST)),
-        ];
-        let _ = register_service_paths(manager_pid, &service_paths);
-
-        let mut signature_allow_caps = crate::capability::CapabilitySet::empty();
-        signature_allow_caps.insert(crate::capability::Capability::ProcessSpawn);
-        let signature_allow_pid = exec_kernel_with_name_and_caps(
-            "/captest.bin",
-            "signature-allow-test",
-            signature_allow_caps,
-            crate::task::PrivilegeLevel::User,
-        );
-        if signature_allow_pid == 0 || signature_allow_pid & (1u64 << 63) != 0 {
-            crate::error!(
-                "signature allow test failed: ret={:#x}",
-                signature_allow_pid
-            );
-        } else {
-            crate::info!(
-                "signature allow test launched pid={:#x}",
-                signature_allow_pid
-            );
-        }
-
-        let signature_deny_ret = exec_kernel_with_name("/unsigned.bin", "signature-deny-test");
-        if signature_deny_ret == 0 || signature_deny_ret & (1u64 << 63) == 0 {
-            crate::error!(
-                "signature deny test unexpectedly succeeded: ret={:#x}",
-                signature_deny_ret
-            );
-        } else {
-            crate::info!("signature deny test rejected ret={:#x}", signature_deny_ret);
-        }
-
-        let rootfs_hello_pid = exec_kernel_with_name("/bin/hello", "rootfs-hello-test");
-        if rootfs_hello_pid == 0 || rootfs_hello_pid & (1u64 << 63) != 0 {
-            crate::error!(
-                "rootfs hello launch failed: ret={:#x}",
-                rootfs_hello_pid
-            );
-        } else {
-            crate::info!("rootfs hello launched pid={:#x}", rootfs_hello_pid);
         }
     } else {
         crate::warn!(

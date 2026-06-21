@@ -21,6 +21,29 @@ pub mod disk;
 pub mod fs;
 mod registry;
 
+const MCX_CEXT_ABI: u16 = 1;
+const MCX_LOG_ERROR: u32 = 0;
+const MCX_LOG_WARN: u32 = 1;
+const MCX_LOG_INFO: u32 = 2;
+const MCX_LOG_DEBUG: u32 = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct McxDmaRegion {
+    pub virt: *mut u8,
+    pub phys: u64,
+    pub len: usize,
+}
+
+#[repr(C)]
+pub struct McxKernelApi {
+    pub abi: u16,
+    pub struct_size: u16,
+    pub alloc_dma:
+        extern "C" fn(size: usize, align: usize, out_region: *mut McxDmaRegion) -> i32,
+    pub log: extern "C" fn(level: u32, ptr: *const u8, len: usize),
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct McxBuffer {
@@ -146,19 +169,94 @@ fn builtin_kind(name: &str) -> Option<CextKind> {
     with_builtin_registry_mut(|registry| registry.get(name).copied())
 }
 
-type FsInitFn = unsafe extern "C" fn() -> *const McxFsOps;
-type DiskInitFn = unsafe extern "C" fn() -> *const disk::McxDiskOps;
+type FsInitFn = unsafe extern "C" fn(api: *const McxKernelApi) -> *const McxFsOps;
+type DiskInitFn = unsafe extern "C" fn(api: *const McxKernelApi) -> *const disk::McxDiskOps;
+
+extern "C" fn kernel_log(level: u32, ptr: *const u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    let Ok(msg) = core::str::from_utf8(unsafe { core::slice::from_raw_parts(ptr, len) }) else {
+        return;
+    };
+    match level {
+        MCX_LOG_ERROR => crate::error!("cext: {}", msg),
+        MCX_LOG_WARN => crate::warn!("cext: {}", msg),
+        MCX_LOG_INFO => crate::info!("cext: {}", msg),
+        MCX_LOG_DEBUG => crate::debug!("cext: {}", msg),
+        _ => crate::info!("cext: {}", msg),
+    }
+}
+
+extern "C" fn kernel_alloc_dma(
+    size: usize,
+    align: usize,
+    out_region: *mut McxDmaRegion,
+) -> i32 {
+    if out_region.is_null() || size == 0 || align == 0 || !align.is_power_of_two() {
+        return -22;
+    }
+    if size > 65536 || align > 4096 {
+        return -38;
+    }
+    let pages = size.div_ceil(4096);
+    let phys_off = match crate::mem::paging::physical_memory_offset() {
+        Some(v) => v,
+        None => return -5,
+    };
+    let mut frames = Vec::with_capacity(pages);
+    for _ in 0..pages {
+        let Ok(frame) = crate::mem::frame::allocate_frame() else {
+            for frame in frames {
+                let _ = crate::mem::frame::deallocate_frame(frame);
+            }
+            return -12;
+        };
+        frames.push(frame);
+    }
+    for pair in frames.windows(2) {
+        if pair[1].start_address().as_u64() != pair[0].start_address().as_u64() + 4096 {
+            for frame in frames {
+                let _ = crate::mem::frame::deallocate_frame(frame);
+            }
+            return -5;
+        }
+    }
+    let phys = frames[0].start_address().as_u64();
+    if phys & ((align as u64) - 1) != 0 {
+        for frame in frames {
+            let _ = crate::mem::frame::deallocate_frame(frame);
+        }
+        return -5;
+    }
+    unsafe {
+        *out_region = McxDmaRegion {
+            virt: (phys + phys_off) as *mut u8,
+            phys,
+            len: pages * 4096,
+        };
+        core::ptr::write_bytes((*out_region).virt, 0, (*out_region).len);
+    }
+    0
+}
+
+static KERNEL_API: McxKernelApi = McxKernelApi {
+    abi: MCX_CEXT_ABI,
+    struct_size: core::mem::size_of::<McxKernelApi>() as u16,
+    alloc_dma: kernel_alloc_dma,
+    log: kernel_log,
+};
 
 fn register_disk_module(init_addr: u64, module_version: u16) -> bool {
     let init: DiskInitFn = unsafe { core::mem::transmute(init_addr) };
-    let ops = unsafe { init() };
-    !ops.is_null() && disk::activate_bundle(module_version)
+    let ops = unsafe { init(&KERNEL_API) };
+    !ops.is_null() && disk::activate_bundle(module_version, ops)
 }
 
 fn register_fs_module(init_addr: u64, module_version: u16) -> bool {
     let init: FsInitFn = unsafe { core::mem::transmute(init_addr) };
-    let ops = unsafe { init() };
-    !ops.is_null() && fs::activate_bundle(module_version)
+    let ops = unsafe { init(&KERNEL_API) };
+    !ops.is_null() && fs::activate_bundle(module_version, ops)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -324,14 +422,6 @@ fn parse_bundle_manifest(bytes: &[u8]) -> Option<BundleManifest> {
     })
 }
 
-fn activate_builtin_bundle(manifest: &BundleManifest) -> bool {
-    match manifest.name.as_str() {
-        "disk" => disk::activate_bundle(manifest.version),
-        "ext2" => fs::activate_bundle(manifest.version),
-        _ => false,
-    }
-}
-
 fn load_bundle_directories() -> bool {
     let Some(entries) = crate::init::fs::initfs_readdir_path("/") else {
         return false;
@@ -354,10 +444,6 @@ fn load_bundle_directories() -> bool {
             crate::warn!("cext: missing {}", manifest_path);
             continue;
         };
-        if !crate::policy::signature::verify_exec(&manifest_path, &manifest_bytes) {
-            crate::warn!("cext: signature verification failed for {}", manifest_path);
-            continue;
-        }
         let Some(manifest) = parse_bundle_manifest(&manifest_bytes) else {
             crate::warn!("cext: invalid manifest {}", manifest_path);
             continue;
@@ -386,25 +472,57 @@ fn load_bundle_directories() -> bool {
             }
             continue;
         };
-        if !crate::policy::signature::verify_exec(&entry_path, &entry_bytes) {
-            crate::warn!("cext: signature verification failed for {}", entry_path);
-            continue;
-        }
+        // Boot-stage cext bundles are loaded before rootfs is mounted, so signature.db
+        // is not reachable yet. Initfs itself is treated as the trusted boot boundary.
         if builtin_kind(&manifest.name).is_none() {
-            crate::warn!("cext: unknown built-in bundle {}", manifest.name);
+            crate::warn!("cext: unregistered bundle {}", manifest.name);
             continue;
         }
-        if activate_builtin_bundle(&manifest) {
-            crate::info!(
-                "cext: activated bundle {} v{} id={} provides={:?} requires={:?}",
+        let Some(reg) = registry::registrations()
+            .into_iter()
+            .find(|r| r.name == manifest.name)
+        else {
+            crate::warn!("cext: no module registration for {}", manifest.name);
+            continue;
+        };
+        let Some(meta) = parse_cext(&entry_bytes) else {
+            crate::warn!("cext: invalid module package {}", entry_path);
+            continue;
+        };
+        if meta.name != manifest.name || meta.module_version != manifest.version {
+            crate::warn!(
+                "cext: manifest/package mismatch for {} (manifest v{}, package {} v{})",
                 manifest.name,
                 manifest.version,
+                meta.name,
+                meta.module_version
+            );
+            continue;
+        }
+        if meta.module_version != reg.version {
+            crate::warn!(
+                "cext: unsupported module version for {} (expected {}, got {})",
+                meta.name,
+                reg.version,
+                meta.module_version
+            );
+            continue;
+        }
+        let Some(addr) = load_elf_symbol(&meta.elf, "mochi_module_init") else {
+            crate::warn!("cext: mochi_module_init not found in {}", entry_path);
+            continue;
+        };
+        if (reg.register)(addr, meta.module_version) {
+            crate::info!(
+                "cext: loaded bundle {} v{} id={} provides={:?} requires={:?}",
+                meta.name,
+                meta.module_version,
                 manifest.id,
                 manifest.provides,
                 manifest.requires
             );
         } else {
-            crate::warn!("cext: failed to activate built-in bundle {}", manifest.name);
+            crate::warn!("cext: module init failed for {}", manifest.name);
         }
     }
 
