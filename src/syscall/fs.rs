@@ -377,8 +377,8 @@ const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 
 fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
-    let metadata = metadata_rootfs_first(path);
-    let is_dir = metadata
+    let mut metadata = metadata_rootfs_first(path);
+    let mut is_dir = metadata
         .map(|(mode, _)| mode_is_directory(mode))
         .unwrap_or_else(|| crate::cext::fs::is_directory(path));
     if let Err(errno) = ensure_fs_path_access(path, open_required_rights(path, flags, is_dir)) {
@@ -390,11 +390,20 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
         return EISDIR;
     }
 
-    let exists = metadata.is_some() || crate::cext::fs::file_metadata(path).is_some();
+    let mut exists = metadata.is_some() || crate::cext::fs::file_metadata(path).is_some();
     if !exists {
         if (flags & O_CREAT) != 0 {
-            if crate::cext::fs::create(path, 0o644) != 0 {
-                return EIO;
+            let rc = crate::cext::fs::create(path, 0o644);
+            if rc != 0 {
+                return (-rc as i64) as u64;
+            }
+            metadata = metadata_rootfs_first(path);
+            is_dir = metadata
+                .map(|(mode, _)| mode_is_directory(mode))
+                .unwrap_or_else(|| crate::cext::fs::is_directory(path));
+            exists = metadata.is_some() || crate::cext::fs::file_metadata(path).is_some();
+            if !exists {
+                return ENOENT;
             }
         } else {
             return ENOENT;
@@ -420,7 +429,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     let handle = alloc::boxed::Box::new(FileHandle {
         data: data_vec.into_boxed_slice(),
         pos: 0,
-        fs_path: if exists { Some(path.to_string()) } else { None },
+        fs_path: if is_dir { None } else { Some(path.to_string()) },
         dir_path: if is_dir { Some(path.to_string()) } else { None },
         is_remote: false,
         fd_remote: 0,

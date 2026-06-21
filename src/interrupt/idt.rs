@@ -9,6 +9,31 @@ use x86_64::{PhysAddr, PrivilegeLevel};
 
 static IDT: Once<InterruptDescriptorTable> = Once::new();
 
+macro_rules! irq_handler {
+    ($name:ident, $irq:expr, $vector:expr) => {
+        extern "x86-interrupt" fn $name(stack_frame: InterruptStackFrame) {
+            let entered_from_user = enter_from_user(&stack_frame);
+            crate::interrupt::dispatch::dispatch($irq);
+            super::send_eoi($vector);
+            leave_to_user(entered_from_user);
+        }
+    };
+}
+
+irq_handler!(irq2_interrupt_handler, 2, 34);
+irq_handler!(irq3_interrupt_handler, 3, 35);
+irq_handler!(irq4_interrupt_handler, 4, 36);
+irq_handler!(irq5_interrupt_handler, 5, 37);
+irq_handler!(irq6_interrupt_handler, 6, 38);
+irq_handler!(irq7_interrupt_handler, 7, 39);
+irq_handler!(irq8_interrupt_handler, 8, 40);
+irq_handler!(irq9_interrupt_handler, 9, 41);
+irq_handler!(irq10_interrupt_handler, 10, 42);
+irq_handler!(irq11_interrupt_handler, 11, 43);
+irq_handler!(irq13_interrupt_handler, 13, 45);
+irq_handler!(irq14_interrupt_handler, 14, 46);
+irq_handler!(irq15_interrupt_handler, 15, 47);
+
 #[inline]
 fn enter_from_user(stack_frame: &InterruptStackFrame) -> bool {
     crate::syscall::syscall_entry::kpti_enter_for_trap(
@@ -69,12 +94,19 @@ pub fn init() {
         idt[44].set_handler_fn(mouse_interrupt_handler); // Mouse IRQ12 (PS/2 AUX)
 
         // それ以外のハードウェア割り込みはとりあえずスタブ
-        for i in 34..48 {
-            if i == 44 {
-                continue;
-            }
-            idt[i].set_handler_fn(generic_interrupt_handler);
-        }
+        idt[34].set_handler_fn(irq2_interrupt_handler);
+        idt[35].set_handler_fn(irq3_interrupt_handler);
+        idt[36].set_handler_fn(irq4_interrupt_handler);
+        idt[37].set_handler_fn(irq5_interrupt_handler);
+        idt[38].set_handler_fn(irq6_interrupt_handler);
+        idt[39].set_handler_fn(irq7_interrupt_handler);
+        idt[40].set_handler_fn(irq8_interrupt_handler);
+        idt[41].set_handler_fn(irq9_interrupt_handler);
+        idt[42].set_handler_fn(irq10_interrupt_handler);
+        idt[43].set_handler_fn(irq11_interrupt_handler);
+        idt[45].set_handler_fn(irq13_interrupt_handler);
+        idt[46].set_handler_fn(irq14_interrupt_handler);
+        idt[47].set_handler_fn(irq15_interrupt_handler);
 
         // システムコール割り込み (0x80)
         // naked functionなので、手動で設定

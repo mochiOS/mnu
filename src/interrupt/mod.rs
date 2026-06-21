@@ -3,6 +3,7 @@
 //! IDT、PIC、タイマーなどの割込み処理を管理
 
 pub mod apic;
+pub mod dispatch;
 pub mod idt;
 pub mod pic;
 pub mod spinlock;

@@ -42,6 +42,7 @@ pub struct McxKernelApi {
     pub alloc_dma:
         extern "C" fn(size: usize, align: usize, out_region: *mut McxDmaRegion) -> i32,
     pub log: extern "C" fn(level: u32, ptr: *const u8, len: usize),
+    pub register_irq: extern "C" fn(irq: u8, handler: extern "C" fn(u8)) -> i32,
 }
 
 #[repr(C)]
@@ -240,11 +241,16 @@ extern "C" fn kernel_alloc_dma(
     0
 }
 
+extern "C" fn kernel_register_irq(irq: u8, handler: extern "C" fn(u8)) -> i32 {
+    crate::interrupt::dispatch::register_handler(irq, handler)
+}
+
 static KERNEL_API: McxKernelApi = McxKernelApi {
     abi: MCX_CEXT_ABI,
     struct_size: core::mem::size_of::<McxKernelApi>() as u16,
     alloc_dma: kernel_alloc_dma,
     log: kernel_log,
+    register_irq: kernel_register_irq,
 };
 
 fn register_disk_module(init_addr: u64, module_version: u16) -> bool {

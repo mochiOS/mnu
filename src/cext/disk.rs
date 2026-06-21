@@ -5,6 +5,7 @@ pub struct McxDiskOps {
     pub probe: extern "C" fn() -> i32,
     pub read_sector: extern "C" fn(disk_id: u32, lba: u64, buf: *mut u8, buf_len: usize) -> i32,
     pub write_sector: extern "C" fn(disk_id: u32, lba: u64, buf: *const u8, buf_len: usize) -> i32,
+    pub flush: extern "C" fn(disk_id: u32) -> i32,
 }
 
 static LOADED: AtomicBool = AtomicBool::new(false);
@@ -59,4 +60,13 @@ pub fn write_sector(disk_id: u32, lba: u64, buf: &[u8]) -> i32 {
         return -38;
     }
     unsafe { ((*ops).write_sector)(disk_id, lba, buf.as_ptr(), buf.len()) }
+}
+
+#[allow(dead_code)]
+pub fn flush(disk_id: u32) -> i32 {
+    let ops = ops_ptr();
+    if ops.is_null() {
+        return -38;
+    }
+    unsafe { ((*ops).flush)(disk_id) }
 }

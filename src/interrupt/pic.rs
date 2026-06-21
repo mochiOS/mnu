@@ -126,3 +126,27 @@ pub fn send_eoi(interrupt_id: u8) {
         PIC_MASTER.end_of_interrupt();
     }
 }
+
+pub fn unmask_irq(irq: u8) -> bool {
+    unsafe {
+        use x86_64::instructions::port::Port;
+
+        if irq < 8 {
+            let mut port = Port::<u8>::new(PIC_MASTER.data);
+            let mask: u8 = port.read();
+            port.write(mask & !(1u8 << irq));
+            true
+        } else if irq < 16 {
+            let slave_irq = irq - 8;
+            let mut master = Port::<u8>::new(PIC_MASTER.data);
+            let mut slave = Port::<u8>::new(PIC_SLAVE.data);
+            let master_mask: u8 = master.read();
+            let slave_mask: u8 = slave.read();
+            master.write(master_mask & !(1u8 << 2));
+            slave.write(slave_mask & !(1u8 << slave_irq));
+            true
+        } else {
+            false
+        }
+    }
+}
