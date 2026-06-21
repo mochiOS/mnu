@@ -246,6 +246,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::TimeNow as u64 => time::get_ticks(),
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
+        x if x == SyscallNumber::Execve as u64 => exec::execve_syscall(arg0, arg1, arg2),
         x if x == SyscallNumber::FileOpen as u64 => fs::file_open(arg0, arg1),
         x if x == SyscallNumber::FileOpenAt as u64 => {
             fs::file_open_at(arg0 as i64, arg1, arg2, arg3)

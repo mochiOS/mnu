@@ -444,22 +444,34 @@ pub fn fork() -> u64 {
         parent_priv,
         parent_priority,
         parent_foreground,
+        parent_caps,
         parent_pt,
         heap_start,
         heap_end,
         stack_bottom,
         stack_top,
+        parent_cwd,
+        parent_exe_path,
+        parent_rlimits,
+        parent_pgid,
+        parent_sid,
         parent_mmap_regions,
     ) = match crate::task::with_process(parent_pid, |p| {
         (
             p.privilege(),
             p.priority(),
             p.is_foreground(),
+            p.capabilities().clone(),
             p.page_table(),
             p.heap_start(),
             p.heap_end(),
             p.stack_bottom(),
             p.stack_top(),
+            p.cwd().to_string(),
+            p.exe_path().to_string(),
+            p.resource_limits(),
+            p.pgid(),
+            p.sid(),
             p.clone_mmap_regions_for_fork(),
         )
     }) {
@@ -495,11 +507,17 @@ pub fn fork() -> u64 {
     let mut child_proc =
         crate::task::Process::new("fork", parent_priv, Some(parent_pid), parent_priority);
     child_proc.set_foreground(parent_foreground);
+    child_proc.set_capabilities_for_exec(parent_caps);
     child_proc.set_page_table(child_pt);
     child_proc.set_heap_start(heap_start);
     child_proc.set_heap_end(heap_end);
     child_proc.set_stack_bottom(stack_bottom);
     child_proc.set_stack_top(stack_top);
+    child_proc.set_cwd(&parent_cwd);
+    child_proc.set_exe_path(&parent_exe_path);
+    child_proc.set_resource_limits(parent_rlimits);
+    child_proc.set_pgid(parent_pgid);
+    child_proc.set_sid(parent_sid);
     child_proc.set_mmap_regions(parent_mmap_regions);
     crate::debug!(
         "[STACK_INIT] FORK child: stack_bottom={:#x}, stack_top={:#x}",

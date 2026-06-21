@@ -1198,11 +1198,20 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     let path = path_owned.as_str();
     let aslr_seed = next_aslr_seed(path);
 
-    // initfs からファイルを読み込む
-    let data_vec = match crate::init::fs::read(path) {
-        Some(d) => d,
+    let (data_vec, source) = match load_exec_image(path, false) {
+        Some(loaded) => loaded,
         None => return ENOENT,
     };
+    if !crate::policy::signature::verify_exec(path, &data_vec) {
+        crate::warn!("execve: signature verification failed for '{}'", path);
+        return EPERM;
+    }
+    crate::info!(
+        "execve: loaded '{}' from {} ({} bytes)",
+        path,
+        source,
+        data_vec.len()
+    );
     let data: &[u8] = &data_vec;
 
     // ELF エントリポイントとセグメントを解析
