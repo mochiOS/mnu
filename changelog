@@ -1,8 +1,21 @@
-the mnu kernel ChangeLog   - version 0.11-rc1
+the mnu kernel ChangeLog   - version 0.11
     - Release date: 2026-06-20
     - Release creator: tas0dev
 
 Changes:
-* Fix a memory address.
-* Add ServiceDelegateRegister and DriverSpawn syscalls for delegated service/driver launch control.
-* Add kernel-side spawn delegate registry for service manager governed launch delegation.
+* Add ServiceDelegateRegister and DriverSpawn syscalls
+  for delegated service/driver launch control.
+* Add kernel-side spawn delegate registry for
+  service manager governed launch delegation.
+* Add ext2 rootfs boot via cext-based
+  disk/filesystem modules.
+* Switch rootfs access and executable loading to the
+  cext-backed path.
+* Publish execve and service launch fixes needed for
+  userland spawn/exec flows.
+* Add generic IRQ dispatch support used by cext-driven
+  devices.
+* Extend kernel I/O, file, and process syscalls for
+  persistent rootfs writes.
+* Add delegated ServiceSpawn/DriverSpawn control
+  for service-manager mediated launch.
