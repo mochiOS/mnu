@@ -19,3 +19,5 @@ Changes:
   persistent rootfs writes.
 * Add delegated ServiceSpawn/DriverSpawn control
   for service-manager mediated launch.
+* Add MapPhysicalRange syscall dispatch and
+  memory.phys.map grants for USB driver MMIO access.

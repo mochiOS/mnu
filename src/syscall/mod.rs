@@ -179,6 +179,38 @@ pub fn service_delegate_register(kind_raw: u64, pid_raw: u64) -> u64 {
     SUCCESS
 }
 
+pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
+    use crate::capability::Capability;
+    use crate::syscall::types::{EACCES, EFAULT, EINVAL, ENOMEM, SUCCESS};
+
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::MemoryPhysMap]) {
+        return EACCES;
+    }
+    if virt_addr == 0 || phys_addr == 0 || size == 0 {
+        return EINVAL;
+    }
+    if (virt_addr & 0xfff) != 0 || (phys_addr & 0xfff) != 0 || (size & 0xfff) != 0 {
+        return EINVAL;
+    }
+    if !validate_user_ptr(virt_addr, size) {
+        return EFAULT;
+    }
+
+    let pt_phys = match current_user_page_table() {
+        Some(pt) => pt,
+        None => return ENOMEM,
+    };
+
+    match crate::mem::paging::map_physical_range_to_user(pt_phys, virt_addr, phys_addr, size) {
+        Ok(()) => SUCCESS,
+        Err(crate::Kernel::Memory(crate::result::Memory::OutOfMemory)) => ENOMEM,
+        Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress))
+        | Err(crate::Kernel::Memory(crate::result::Memory::PermissionDenied))
+        | Err(crate::Kernel::InvalidParam) => EINVAL,
+        Err(_) => EINVAL,
+    }
+}
+
 fn debug_serial_write_str(s: &str) {
     unsafe {
         // SAFETY: COM1 is the conventional debug serial port in this kernel,
@@ -351,6 +383,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
         x if x == SyscallNumber::PortIn as u64 => io::port_in(arg0, arg1),
         x if x == SyscallNumber::PortOut as u64 => io::port_out(arg0, arg1, arg2),
+        x if x == SyscallNumber::MapPhysicalRange as u64 => {
+            map_physical_range(arg0, arg1, arg2)
+        }
         x if x == SyscallNumber::Execve as u64 => exec::execve_syscall(arg0, arg1, arg2),
         x if x == SyscallNumber::FileOpen as u64 => fs::file_open(arg0, arg1),
         x if x == SyscallNumber::FileOpenAt as u64 => {

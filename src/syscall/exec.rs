@@ -273,6 +273,7 @@ pub fn driver_spawn_syscall(path_ptr: u64) -> u64 {
 
     let mut caps = CapabilitySet::empty();
     caps.insert(Capability::UsbAccess);
+    caps.insert(Capability::MemoryPhysMap);
 
     exec_internal(
         path.as_str(),
