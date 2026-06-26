@@ -211,6 +211,23 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
     }
 }
 
+pub fn get_physical_addr(virt_addr: u64) -> u64 {
+    use crate::capability::Capability;
+    use crate::syscall::types::{EACCES, EFAULT, ENOMEM};
+
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::MemoryPhysTranslate]) {
+        return EACCES;
+    }
+    if !validate_user_ptr(virt_addr, 1) {
+        return EFAULT;
+    }
+    let pt_phys = match current_user_page_table() {
+        Some(pt) => pt,
+        None => return ENOMEM,
+    };
+    crate::mem::paging::virt_to_phys_in_table(pt_phys, virt_addr).unwrap_or(EFAULT)
+}
+
 fn debug_serial_write_str(s: &str) {
     unsafe {
         // SAFETY: COM1 is the conventional debug serial port in this kernel,
@@ -386,6 +403,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::MapPhysicalRange as u64 => {
             map_physical_range(arg0, arg1, arg2)
         }
+        x if x == SyscallNumber::VirtToPhys as u64 => get_physical_addr(arg0),
+        x if x == SyscallNumber::GetPhysicalAddr as u64 => get_physical_addr(arg0),
         x if x == SyscallNumber::Execve as u64 => exec::execve_syscall(arg0, arg1, arg2),
         x if x == SyscallNumber::FileOpen as u64 => fs::file_open(arg0, arg1),
         x if x == SyscallNumber::FileOpenAt as u64 => {

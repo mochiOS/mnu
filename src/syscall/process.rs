@@ -844,7 +844,10 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
         let map_start = if addr != 0 {
             match page_align_up(addr) {
                 Some(v) => v,
-                None => return Err(EINVAL),
+                None => {
+                    crate::info!("process::mmap invalid addr align addr={:#x} len={:#x}", addr, size);
+                    return Err(EINVAL);
+                }
             }
         } else {
             // heap_endを mmap_base として使う（簡易実装）
@@ -852,11 +855,21 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
             let base = process.heap_end();
             match page_align_up(base) {
                 Some(v) => v,
-                None => return Err(EINVAL),
+                None => {
+                    crate::info!("process::mmap invalid heap align base={:#x} len={:#x}", base, size);
+                    return Err(EINVAL);
+                }
             }
         };
 
         if !is_user_range(map_start, size) {
+            crate::info!(
+                "process::mmap out of range start={:#x} len={:#x} heap_start={:#x} heap_end={:#x}",
+                map_start,
+                size,
+                process.heap_start(),
+                process.heap_end()
+            );
             return Err(EINVAL);
         }
 
@@ -871,6 +884,14 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
                 map_start, size, prot, flags, backing, writable, shared,
             );
             if !process.add_mmap_region(region) {
+                crate::info!(
+                    "process::mmap overlap start={:#x} len={:#x} heap_start={:#x} heap_end={:#x} regions={}",
+                    map_start,
+                    size,
+                    process.heap_start(),
+                    process.heap_end(),
+                    process.mmap_regions().len()
+                );
                 return Err(EINVAL);
             }
             if crate::mem::paging::map_and_copy_segment_to(
