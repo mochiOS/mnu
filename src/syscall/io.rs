@@ -1,6 +1,7 @@
 //! I/O関連のシステムコール
 
-use super::types::{EBADF, EFAULT, EINVAL, SUCCESS};
+use super::types::{EBADF, EFAULT, EINVAL, EPERM, SUCCESS};
+use crate::capability::Capability;
 use crate::util::console;
 use crate::{debug, error, info, warn};
 
@@ -8,6 +9,10 @@ use crate::{debug, error, info, warn};
 const STDOUT_FD: u64 = 1;
 /// 標準エラー出力のファイルディスクリプタ
 const STDERR_FD: u64 = 2;
+
+fn caller_has_usb_access() -> bool {
+    crate::syscall::security::caller_has_any_capability(&[Capability::UsbAccess])
+}
 
 /// Writeシステムコール
 ///
@@ -102,6 +107,75 @@ pub fn log(msg: u64, len: u64, level: u64) -> u64 {
         1 => warn!("{}", msg),
         2 => info!("{}", msg),
         3 => debug!("{}", msg),
+        _ => return EINVAL,
+    }
+    SUCCESS
+}
+
+fn read_port_u8(port: u16) -> u8 {
+    unsafe {
+        let mut io_port = x86_64::instructions::port::Port::<u8>::new(port);
+        io_port.read()
+    }
+}
+
+fn read_port_u16(port: u16) -> u16 {
+    unsafe {
+        let mut io_port = x86_64::instructions::port::Port::<u16>::new(port);
+        io_port.read()
+    }
+}
+
+fn read_port_u32(port: u16) -> u32 {
+    unsafe {
+        let mut io_port = x86_64::instructions::port::Port::<u32>::new(port);
+        io_port.read()
+    }
+}
+
+fn write_port_u8(port: u16, value: u8) {
+    unsafe {
+        let mut io_port = x86_64::instructions::port::Port::<u8>::new(port);
+        io_port.write(value);
+    }
+}
+
+fn write_port_u16(port: u16, value: u16) {
+    unsafe {
+        let mut io_port = x86_64::instructions::port::Port::<u16>::new(port);
+        io_port.write(value);
+    }
+}
+
+fn write_port_u32(port: u16, value: u32) {
+    unsafe {
+        let mut io_port = x86_64::instructions::port::Port::<u32>::new(port);
+        io_port.write(value);
+    }
+}
+
+pub fn port_in(port: u64, width: u64) -> u64 {
+    if !caller_has_usb_access() {
+        return EPERM;
+    }
+    let port = port as u16;
+    match width {
+        1 => read_port_u8(port) as u64,
+        2 => read_port_u16(port) as u64,
+        4 => read_port_u32(port) as u64,
+        _ => EINVAL,
+    }
+}
+
+pub fn port_out(port: u64, value: u64, width: u64) -> u64 {
+    if !caller_has_usb_access() {
+        return EPERM;
+    }
+    let port = port as u16;
+    match width {
+        1 => write_port_u8(port, value as u8),
+        2 => write_port_u16(port, value as u16),
+        4 => write_port_u32(port, value as u32),
         _ => return EINVAL,
     }
     SUCCESS

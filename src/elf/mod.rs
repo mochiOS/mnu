@@ -6,6 +6,7 @@ extern crate alloc;
 
 use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
+use alloc::string::ToString;
 
 pub mod loader;
 
@@ -39,6 +40,20 @@ const R_X86_64_RELATIVE: u32 = 8;
 const PIE_LOAD_BIAS: u64 = 0x2000_0000;
 const PIE_ASLR_WINDOW_PAGES: u64 = 0x4000; // 64MiB
 static PIE_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn debug_serial_write_str(s: &str) {
+    use x86_64::instructions::port::Port;
+
+    unsafe {
+        // SAFETY: COM1 is the kernel's debug serial port during early boot and service launch.
+        let mut lsr = Port::<u8>::new(0x3FD);
+        let mut data = Port::<u8>::new(0x3F8);
+        for byte in s.bytes() {
+            while (lsr.read() & 0x20) == 0 {}
+            data.write(byte);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct LoadedElf {
@@ -198,7 +213,8 @@ pub fn load_elf_into(table_phys: u64, data: &[u8]) -> Result<LoadedElf> {
         apply_relocations_to(table_phys, data, header, load_bias)?;
     }
 
-    let stack = user::alloc_user_stack_in_table(table_phys, 8)?;
+    let stack_pages = crate::config::kernel().exec.user_stack_size_pages as u64;
+    let stack = user::alloc_user_stack_in_table(table_phys, stack_pages)?;
 
     Ok(LoadedElf {
         entry: header.e_entry.wrapping_add(load_bias),
@@ -212,20 +228,52 @@ pub fn spawn_service(
     path: &str,
     name: &str,
 ) -> Result<(crate::task::ProcessId, crate::task::ThreadId, u64)> {
+    debug_serial_write_str("spawn_service: auth\n");
     if !caller_can_launch_service() {
         return Err(Kernel::Process(Process::Service(
             crate::result::Service::InsufficientPrivilege,
         )));
     }
-    let data = crate::cext::fs::read_all(path)
+    debug_serial_write_str("spawn_service: read\n");
+    let data = init::fs::read_initfs(path)
+        .or_else(|| init::fs::read_rootfs(path))
+        .or_else(|| crate::cext::fs::read_all(path))
         .or_else(|| init::fs::read(path))
         .ok_or(Kernel::InvalidParam)?;
+    debug_serial_write_str("spawn_service: verify\n");
+    if !crate::policy::signature::verify_exec(path, &data) {
+        return Err(Kernel::InvalidParam);
+    }
+    debug_serial_write_str("spawn_service: create_pt\n");
     let new_pt_phys = paging::create_user_page_table()?;
 
     let priority = 10;
+    let parent_pid = crate::task::current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()));
+    let inherited_caps =
+        parent_pid.and_then(|pid| crate::task::with_process(pid, |proc| proc.capabilities().clone()));
+    let inherited_cwd =
+        parent_pid.and_then(|pid| crate::task::with_process(pid, |proc| proc.cwd().to_string()));
+    let inherited_limits =
+        parent_pid.and_then(|pid| crate::task::with_process(pid, |proc| proc.resource_limits()));
+    let inherited_fd_table =
+        parent_pid.and_then(|pid| crate::task::with_process(pid, |proc| proc.clone_fd_table_for_fork()));
 
     let mut process = TaskProcess::new(name, PrivilegeLevel::Service, None, priority);
     process.set_page_table(new_pt_phys);
+    if let Some(caps) = inherited_caps {
+        process.set_capabilities_for_exec(caps);
+    }
+    if let Some(cwd) = inherited_cwd.as_deref() {
+        process.set_cwd(cwd);
+    }
+    if let Some(limits) = inherited_limits {
+        process.set_resource_limits(limits);
+    }
+    if let Some(table) = inherited_fd_table {
+        process.set_fd_table(table);
+    }
+    process.set_exe_path(path);
     let pid = process.id();
 
     if add_process(process).is_none() {
@@ -234,7 +282,13 @@ pub fn spawn_service(
     }
     let mut guard = ServiceSpawnGuard::new(pid, new_pt_phys);
 
+    debug_serial_write_str("spawn_service: load_elf\n");
     let loaded = load_elf_into(new_pt_phys, &data)?;
+    debug_serial_write_str("spawn_service: load_elf_ok\n");
+    let aslr_seed = crate::syscall::exec::next_aslr_seed(path);
+    let initial_fs_base = crate::syscall::exec::map_initial_tls(new_pt_phys, aslr_seed)
+        .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?;
+    debug_serial_write_str("spawn_service: tls_ok\n");
 
     let stack_size = (loaded.stack_top - loaded.stack_bottom) as usize;
     let kernel_stack_size = stack_size
@@ -244,16 +298,7 @@ pub fn spawn_service(
     let kernel_stack_addr = crate::task::allocate_kernel_stack(kernel_stack_size)
         .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
     guard.set_kernel_stack(kernel_stack_addr);
-
-    let mut thread = Thread::new_usermode(
-        pid,
-        name,
-        loaded.entry,
-        loaded.stack_top,
-        0,
-        kernel_stack_addr,
-        kernel_stack_size,
-    );
+    debug_serial_write_str("spawn_service: kstack_ok\n");
 
     let mut sp = loaded.stack_top;
 
@@ -270,6 +315,7 @@ pub fn spawn_service(
         return Err(err);
     }
     let argv0_addr = sp;
+    debug_serial_write_str("spawn_service: argv_ok\n");
 
     sp &= !0xF;
 
@@ -315,17 +361,28 @@ pub fn spawn_service(
     push_u64(1)?;
 
     sp &= !0xF;
+    debug_serial_write_str("spawn_service: stack_ok\n");
 
-    thread.context_mut().rsp = sp;
-    thread.context_mut().rbp = 0;
+    let mut thread = Thread::new_usermode(
+        pid,
+        name,
+        loaded.entry,
+        sp,
+        0,
+        kernel_stack_addr,
+        kernel_stack_size,
+    );
+    thread.set_fs_base(initial_fs_base);
 
     let Some(thread_id) = add_thread(thread) else {
         return Err(Kernel::Process(Process::MaxProcessesReached));
     };
+    debug_serial_write_str("spawn_service: thread_ok\n");
 
     guard.disarm();
     let endpoint = crate::syscall::ipc::ensure_endpoint_handle_for_thread(thread_id.as_u64())
         .ok_or(Kernel::Process(Process::MaxProcessesReached))?;
+    debug_serial_write_str("spawn_service: endpoint_ok\n");
     Ok((pid, thread_id, endpoint))
 }
 

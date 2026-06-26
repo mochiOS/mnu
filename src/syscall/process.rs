@@ -774,6 +774,20 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool) -> bool {
 /// マップされた仮想アドレス、またはエラーコード
 pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
     use super::types::{EINVAL, ENOMEM};
+    fn debug_serial_write_str(s: &str) {
+        use x86_64::instructions::port::Port;
+
+        unsafe {
+            let mut lsr = Port::<u8>::new(0x3FD);
+            let mut data = Port::<u8>::new(0x3F8);
+            for byte in s.bytes() {
+                while (lsr.read() & 0x20) == 0 {}
+                data.write(byte);
+            }
+        }
+    }
+
+    debug_serial_write_str("process::mmap begin\n");
 
     if length == 0 {
         return EINVAL;
@@ -912,9 +926,18 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
     });
 
     match result {
-        Some(Ok(va)) => va,
-        Some(Err(e)) => e,
-        None => ENOMEM,
+        Some(Ok(va)) => {
+            debug_serial_write_str("process::mmap ok\n");
+            va
+        }
+        Some(Err(e)) => {
+            debug_serial_write_str("process::mmap err\n");
+            e
+        }
+        None => {
+            debug_serial_write_str("process::mmap none\n");
+            ENOMEM
+        }
     }
 }
 

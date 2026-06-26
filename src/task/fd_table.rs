@@ -282,7 +282,7 @@ impl FdTable {
     /// 親子は独立したファイル位置を持つ（簡易コピーセマンティクス）。
     pub fn clone_for_fork(&self) -> Box<FdTable> {
         let mut new_table = FdTable::new_boxed();
-        for i in FD_BASE..PROCESS_MAX_FDS {
+        for i in 0..PROCESS_MAX_FDS {
             let ptr = self.entries[i];
             if ptr == 0 {
                 continue;

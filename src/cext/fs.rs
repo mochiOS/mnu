@@ -16,6 +16,19 @@ fn ops_ptr() -> *const McxFsOps {
     OPS.load(Ordering::Acquire)
 }
 
+fn debug_serial_write_str(s: &str) {
+    use x86_64::instructions::port::Port;
+
+    unsafe {
+        let mut lsr = Port::<u8>::new(0x3FD);
+        let mut data = Port::<u8>::new(0x3F8);
+        for byte in s.bytes() {
+            while (lsr.read() & 0x20) == 0 {}
+            data.write(byte);
+        }
+    }
+}
+
 fn path_arg(path: &str) -> McxPath {
     McxPath {
         ptr: path.as_ptr(),
@@ -116,6 +129,9 @@ pub fn truncate(path: &str, len: u64) -> i32 {
 }
 
 pub fn file_metadata(path: &str) -> Option<(u16, u64)> {
+    if path == "/drivers/usb" {
+        debug_serial_write_str("cext::fs::file_metadata /drivers/usb\n");
+    }
     let ops = ops_ptr();
     if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
         return None;
@@ -133,6 +149,9 @@ pub fn is_directory(path: &str) -> bool {
 }
 
 pub fn readdir_path(path: &str) -> Option<Vec<String>> {
+    if path == "/drivers/usb" {
+        debug_serial_write_str("cext::fs::readdir /drivers/usb\n");
+    }
     let ops = ops_ptr();
     if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
         return None;

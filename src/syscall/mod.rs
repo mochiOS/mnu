@@ -19,6 +19,7 @@ mod types;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use x86_64::instructions::port::Port;
 
 /// ユーザー空間ポインタの有効性を検証する
 ///
@@ -92,6 +93,59 @@ pub fn read_user_cstring(ptr: u64, max_len: usize) -> Result<String, u64> {
         bytes.push(b);
     }
     Err(EINVAL)
+}
+
+/// サービス起動システムコール
+pub fn service_spawn(path_ptr: u64) -> u64 {
+    use crate::syscall::types::{EACCES, EFAULT, EINVAL, EIO, ENOENT, ENOMEM, ENOSYS};
+
+    debug_serial_write_str("service_spawn: entry\n");
+    let path = match read_user_cstring(path_ptr, 1024) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    debug_serial_write_str("service_spawn: path ok\n");
+
+    match crate::elf::spawn_service(&path, &path) {
+        Ok((pid, _, _)) => pid.as_u64(),
+        Err(crate::Kernel::Process(crate::result::Process::Service(
+            crate::result::Service::NotFound,
+        )))
+        | Err(crate::Kernel::Process(crate::result::Process::Service(
+            crate::result::Service::Unregistered,
+        ))) => ENOENT,
+        Err(crate::Kernel::Process(crate::result::Process::Service(
+            crate::result::Service::InsufficientPrivilege,
+        ))) => EACCES,
+        Err(crate::Kernel::Process(crate::result::Process::Service(
+            crate::result::Service::StartFailure,
+        ))) => EIO,
+        Err(crate::Kernel::Process(crate::result::Process::Service(
+            crate::result::Service::InvalidState,
+        )))
+        | Err(crate::Kernel::Process(crate::result::Process::Service(
+            crate::result::Service::Conflict,
+        ))) => EINVAL,
+        Err(crate::Kernel::Memory(crate::result::Memory::OutOfMemory)) => ENOMEM,
+        Err(crate::Kernel::Memory(crate::result::Memory::PermissionDenied))
+        | Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress))
+        | Err(crate::Kernel::InvalidParam) => EFAULT,
+        Err(crate::Kernel::NotImplemented) => ENOSYS,
+        Err(_) => EINVAL,
+    }
+}
+
+fn debug_serial_write_str(s: &str) {
+    unsafe {
+        // SAFETY: COM1 is the conventional debug serial port in this kernel,
+        // and this helper is used only for temporary debugging without locks.
+        let mut data = Port::<u8>::new(0x3F8);
+        let mut line_status = Port::<u8>::new(0x3F8 + 5);
+        for byte in s.bytes() {
+            while line_status.read() & 0x20 == 0 {}
+            data.write(byte);
+        }
+    }
 }
 
 /// ユーザー空間からバイト列をコピーする（コピー先はカーネル空間）。
@@ -200,9 +254,15 @@ use x86_64::structures::idt::InterruptStackFrame;
 
 /// システムコールのディスパッチ
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
+    if num == SyscallNumber::FileOpen as u64 {
+        debug_serial_write_str("dispatch: file_open\n");
+    } else if num == SyscallNumber::FileReadDir as u64 {
+        debug_serial_write_str("dispatch: file_readdir\n");
+    }
     match num {
         x if x == SyscallNumber::ProcessExit as u64 => process::exit(arg0),
         x if x == SyscallNumber::ProcessSpawn as u64 => process::spawn(arg0, arg1),
+        x if x == SyscallNumber::ServiceSpawn as u64 => service_spawn(arg0),
         x if x == SyscallNumber::ProcessWait as u64 => process::wait(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadCreate as u64 => task::thread_create(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadExit as u64 => {
@@ -246,6 +306,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::TimeNow as u64 => time::get_ticks(),
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
+        x if x == SyscallNumber::PortIn as u64 => io::port_in(arg0, arg1),
+        x if x == SyscallNumber::PortOut as u64 => io::port_out(arg0, arg1, arg2),
         x if x == SyscallNumber::Execve as u64 => exec::execve_syscall(arg0, arg1, arg2),
         x if x == SyscallNumber::FileOpen as u64 => fs::file_open(arg0, arg1),
         x if x == SyscallNumber::FileOpenAt as u64 => {
@@ -415,6 +477,15 @@ extern "C" fn syscall_handler_rust(
     arg3: u64,
     arg4: u64,
 ) -> u64 {
+    if num == SyscallNumber::ServiceSpawn as u64 {
+        debug_serial_write_str("syscall_handler_rust: service_spawn\n");
+    } else if num == SyscallNumber::FileOpen as u64 {
+        debug_serial_write_str("syscall_handler_rust: file_open\n");
+    } else if num == SyscallNumber::FileOpenAt as u64 {
+        debug_serial_write_str("syscall_handler_rust: file_openat\n");
+    } else if num == SyscallNumber::MemoryMap as u64 {
+        debug_serial_write_str("syscall_handler_rust: mmap\n");
+    }
     crate::percpu::install_current_cpu_gs_base();
 
     let current_tid = crate::task::current_thread_id();

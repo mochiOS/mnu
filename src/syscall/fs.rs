@@ -18,6 +18,19 @@ use alloc::vec::Vec;
 const MAX_IO_BYTES: usize = 128 * 1024 * 1024;
 const IO_CHUNK_BYTES: usize = 1 * 1024 * 1024;
 
+fn debug_serial_write_str(s: &str) {
+    use x86_64::instructions::port::Port;
+
+    unsafe {
+        let mut lsr = Port::<u8>::new(0x3FD);
+        let mut data = Port::<u8>::new(0x3F8);
+        for byte in s.bytes() {
+            while (lsr.read() & 0x20) == 0 {}
+            data.write(byte);
+        }
+    }
+}
+
 // グローバル FD テーブルは廃止。各プロセスの Process::fd_table を使用する。
 
 #[inline]
@@ -377,11 +390,20 @@ const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 
 fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
+    if path == "/drivers/usb" {
+        debug_serial_write_str("fs::open /drivers/usb begin\n");
+    }
     let mut metadata = metadata_rootfs_first(path);
+    if path == "/drivers/usb" {
+        debug_serial_write_str("fs::open /drivers/usb metadata\n");
+    }
     let mut is_dir = metadata
         .map(|(mode, _)| mode_is_directory(mode))
         .unwrap_or_else(|| crate::cext::fs::is_directory(path));
     if let Err(errno) = ensure_fs_path_access(path, open_required_rights(path, flags, is_dir)) {
+        if path == "/drivers/usb" {
+            debug_serial_write_str("fs::open /drivers/usb access_err\n");
+        }
         return errno;
     }
 
@@ -448,7 +470,12 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     });
 
     match with_fd_table_mut(owner_pid, |t| t.alloc(handle, cloexec)) {
-        Some(Some(fd)) => fd as u64,
+        Some(Some(fd)) => {
+            if path == "/drivers/usb" {
+                debug_serial_write_str("fs::open /drivers/usb done\n");
+            }
+            fd as u64
+        }
         _ => ENOSYS,
     }
 }
@@ -1605,6 +1632,7 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
 }
 
 pub fn file_open(path_ptr: u64, flags: u64) -> u64 {
+    debug_serial_write_str("fs::file_open enter\n");
     open(path_ptr, flags)
 }
 

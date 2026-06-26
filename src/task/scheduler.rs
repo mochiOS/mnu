@@ -284,17 +284,6 @@ pub fn yield_now() {
     x86_64::instructions::interrupts::without_interrupts(|| {
         if let Some((next_id, next_slot, current_slot)) = schedule_with_slot() {
             let current = current_thread_id();
-            if current.is_some_and(|id| id.as_u64() == 2 || id.as_u64() == 3)
-                || next_id.as_u64() == 2
-                || next_id.as_u64() == 3
-            {
-                crate::debug!(
-                    "[SCHED] yield current={:?} next={:?}",
-                    current.map(|id| id.as_u64()),
-                    next_id.as_u64()
-                );
-            }
-
             // 次のスレッドが現在のスレッドと異なる場合のみ切り替え
             if Some(next_id) != current {
                 unsafe {

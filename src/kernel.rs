@@ -82,6 +82,7 @@ fn kernel_main() -> ! {
         }
         caps.insert(*cap);
     }
+    caps.insert(crate::capability::Capability::UsbAccess);
 
     if !crate::policy::signature::load_signature_database() {
         crate::error!("Failed to load signature database from rootfs");

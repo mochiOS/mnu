@@ -134,35 +134,10 @@ pub unsafe fn switch_to_thread_with_slots(
     next_id: ThreadId,
     next_slot: usize,
 ) {
-    if next_id.as_u64() == 2
-        || next_id.as_u64() == 3
-        || current_id.is_some_and(|id| id.as_u64() == 2 || id.as_u64() == 3)
-    {
-        crate::debug!(
-            "[CTX] enter current={:?} next={} current_slot={:?} next_slot={}",
-            current_id.map(|id| id.as_u64()),
-            next_id.as_u64(),
-            current_slot,
-            next_slot
-        );
-    }
     // コンテキストスイッチ中は割り込みを禁止する
     // ロック解放からコンテキストスイッチまでの間に割り込みが入ると不整合が起きる可能性があるため
     x86_64::instructions::interrupts::disable();
-
-    if next_id.as_u64() == 2
-        || next_id.as_u64() == 3
-        || current_id.is_some_and(|id| id.as_u64() == 2 || id.as_u64() == 3)
-    {
-        crate::debug!("[CTX] before THREAD_QUEUE.lock()");
-    }
     let mut queue = THREAD_QUEUE.lock();
-    if next_id.as_u64() == 2
-        || next_id.as_u64() == 3
-        || current_id.is_some_and(|id| id.as_u64() == 2 || id.as_u64() == 3)
-    {
-        crate::debug!("[CTX] after THREAD_QUEUE.lock()");
-    }
 
     let (old_ctx_ptr, current_process_id) = if let Some(id) = current_id {
         let current_thread = queue.get_mut(id);
@@ -206,15 +181,6 @@ pub unsafe fn switch_to_thread_with_slots(
             let pid = thread.process_id();
             let fs = thread.fs_base();
             let in_syscall = thread.in_syscall();
-            crate::debug!(
-                "[CTX] next tid={} pid={:?} rip={:#x} rsp={:#x} fs={:#x} kstack={:#x}",
-                next_id.as_u64(),
-                pid,
-                thread.context().rip,
-                thread.context().rsp,
-                fs,
-                kstack
-            );
             (ptr, kstack, pid, fs, in_syscall)
         } else {
             return; // 次のスレッドが見つからない

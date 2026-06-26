@@ -49,7 +49,7 @@ fn aslr_mix64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-fn next_aslr_seed(tag: &str) -> u64 {
+pub(crate) fn next_aslr_seed(tag: &str) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for b in tag.as_bytes() {
         hash ^= *b as u64;
@@ -391,7 +391,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     crate::syscall::types::ENOENT
 }
 
-fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u64> {
+pub(crate) fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u64> {
     let exec = crate::config::kernel().exec;
     let tls_base = exec
         .tls_base_min
@@ -988,6 +988,10 @@ fn exec_with_data(
                 .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
         });
         let privilege = resolve_exec_privilege(requested_privilege);
+        let boot_service_manager = crate::policy::service_manager_launch();
+        let is_boot_service_manager = privilege == crate::task::PrivilegeLevel::Service
+            && exec_path == boot_service_manager.exec_path
+            && process_name == boot_service_manager.process_name;
         let priority = resolve_exec_priority(process_name, exec_path, parent_pid);
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
         let foreground = resolve_exec_foreground(process_name, exec_path, privilege, parent_pid);
@@ -1029,15 +1033,12 @@ fn exec_with_data(
             Err(errno) => return errno,
         };
         let pid = proc.id();
-        if privilege == crate::task::PrivilegeLevel::Service
-            && parent_pid.is_none()
-            && !claim_service_manager_pid(pid.as_u64())
-        {
+        if is_boot_service_manager && !claim_service_manager_pid(pid.as_u64()) {
             crate::warn!("service manager is already running, rejecting duplicate launch");
             return crate::syscall::types::EINVAL;
         }
         if crate::task::add_process(proc).is_none() {
-            if privilege == crate::task::PrivilegeLevel::Service && parent_pid.is_none() {
+            if is_boot_service_manager {
                 let _ = release_service_manager_pid(pid.as_u64());
             }
             return crate::syscall::types::EINVAL;
@@ -1050,7 +1051,7 @@ fn exec_with_data(
             None => {
                 crate::warn!("Failed to allocate kernel stack for thread");
                 let _ = crate::task::remove_process(pid);
-                if privilege == crate::task::PrivilegeLevel::Service && parent_pid.is_none() {
+                if is_boot_service_manager {
                     let _ = release_service_manager_pid(pid.as_u64());
                 }
                 let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
@@ -1084,7 +1085,7 @@ fn exec_with_data(
         if add_res.is_none() {
             crate::warn!("Failed to add thread");
             let _ = crate::task::remove_process(pid);
-            if privilege == crate::task::PrivilegeLevel::Service && parent_pid.is_none() {
+            if is_boot_service_manager {
                 let _ = release_service_manager_pid(pid.as_u64());
             }
             let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
