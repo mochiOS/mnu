@@ -4,3 +4,5 @@ the mnu kernel ChangeLog   - version 0.11-rc1
 
 Changes:
 * Fix a memory address.
+* Add ServiceDelegateRegister and DriverSpawn syscalls for delegated service/driver launch control.
+* Add kernel-side spawn delegate registry for service manager governed launch delegation.

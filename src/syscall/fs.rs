@@ -1632,7 +1632,6 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
 }
 
 pub fn file_open(path_ptr: u64, flags: u64) -> u64 {
-    debug_serial_write_str("fs::file_open enter\n");
     open(path_ptr, flags)
 }
 

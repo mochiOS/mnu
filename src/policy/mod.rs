@@ -12,6 +12,15 @@ pub mod signature;
 /// `.service` 実行を許可するサービスマネージャープロセスID
 /// 0 は未登録。
 static SERVICE_MANAGER_PID: AtomicU64 = AtomicU64::new(0);
+static SERVICE_SPAWN_DELEGATE_PID: AtomicU64 = AtomicU64::new(0);
+static DRIVER_SPAWN_DELEGATE_PID: AtomicU64 = AtomicU64::new(0);
+
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnDelegateKind {
+    Service = 1,
+    Driver = 2,
+}
 
 /// manifest 上の役割
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +117,21 @@ pub fn release_service_manager_pid(pid: u64) -> bool {
         .is_ok()
 }
 
+fn delegate_slot(kind: SpawnDelegateKind) -> &'static AtomicU64 {
+    match kind {
+        SpawnDelegateKind::Service => &SERVICE_SPAWN_DELEGATE_PID,
+        SpawnDelegateKind::Driver => &DRIVER_SPAWN_DELEGATE_PID,
+    }
+}
+
+pub fn register_spawn_delegate(kind: SpawnDelegateKind, pid: u64) {
+    delegate_slot(kind).store(pid, Ordering::SeqCst);
+}
+
+pub fn spawn_delegate_pid(kind: SpawnDelegateKind) -> u64 {
+    delegate_slot(kind).load(Ordering::SeqCst)
+}
+
 fn caller_pid() -> Option<ProcessId> {
     crate::task::current_thread_id()
         .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
@@ -133,11 +157,55 @@ pub fn caller_can_launch_service() -> bool {
     };
 
     let manager_pid_raw = service_manager_pid();
-    if manager_pid_raw == 0 || caller_pid.as_u64() != manager_pid_raw {
+    if manager_pid_raw != 0 && caller_pid.as_u64() == manager_pid_raw {
+        let manager_pid = ProcessId::from_u64(manager_pid_raw);
+        return crate::task::with_process(manager_pid, |p| {
+            let state = p.state();
+            let alive = state != crate::task::ProcessState::Zombie
+                && state != crate::task::ProcessState::Terminated;
+            let privileged = matches!(
+                p.privilege(),
+                PrivilegeLevel::Service | PrivilegeLevel::Core
+            );
+            alive && privileged
+        })
+        .unwrap_or(false);
+    }
+
+    let delegate_pid_raw = spawn_delegate_pid(SpawnDelegateKind::Service);
+    if delegate_pid_raw == 0 || caller_pid.as_u64() != delegate_pid_raw {
         return false;
     }
-    let manager_pid = ProcessId::from_u64(manager_pid_raw);
-    crate::task::with_process(manager_pid, |p| {
+    let delegate_pid = ProcessId::from_u64(delegate_pid_raw);
+    crate::task::with_process(delegate_pid, |p| {
+        let state = p.state();
+        let alive = state != crate::task::ProcessState::Zombie
+            && state != crate::task::ProcessState::Terminated;
+        let privileged = matches!(
+            p.privilege(),
+            PrivilegeLevel::Service | PrivilegeLevel::Core
+        );
+        alive && privileged
+    })
+    .unwrap_or(false)
+}
+
+pub fn caller_can_launch_driver() -> bool {
+    let Some(caller_pid) = caller_pid() else {
+        return true;
+    };
+
+    let manager_pid_raw = service_manager_pid();
+    if manager_pid_raw != 0 && caller_pid.as_u64() == manager_pid_raw {
+        return true;
+    }
+
+    let delegate_pid_raw = spawn_delegate_pid(SpawnDelegateKind::Driver);
+    if delegate_pid_raw == 0 || caller_pid.as_u64() != delegate_pid_raw {
+        return false;
+    }
+    let delegate_pid = ProcessId::from_u64(delegate_pid_raw);
+    crate::task::with_process(delegate_pid, |p| {
         let state = p.state();
         let alive = state != crate::task::ProcessState::Zombie
             && state != crate::task::ProcessState::Terminated;

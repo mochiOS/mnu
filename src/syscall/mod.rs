@@ -99,12 +99,10 @@ pub fn read_user_cstring(ptr: u64, max_len: usize) -> Result<String, u64> {
 pub fn service_spawn(path_ptr: u64) -> u64 {
     use crate::syscall::types::{EACCES, EFAULT, EINVAL, EIO, ENOENT, ENOMEM, ENOSYS};
 
-    debug_serial_write_str("service_spawn: entry\n");
     let path = match read_user_cstring(path_ptr, 1024) {
         Ok(path) => path,
         Err(errno) => return errno,
     };
-    debug_serial_write_str("service_spawn: path ok\n");
 
     match crate::elf::spawn_service(&path, &path) {
         Ok((pid, _, _)) => pid.as_u64(),
@@ -133,6 +131,52 @@ pub fn service_spawn(path_ptr: u64) -> u64 {
         Err(crate::Kernel::NotImplemented) => ENOSYS,
         Err(_) => EINVAL,
     }
+}
+
+pub fn service_delegate_register(kind_raw: u64, pid_raw: u64) -> u64 {
+    use crate::policy::SpawnDelegateKind;
+    use crate::syscall::types::{EACCES, EINVAL, ESRCH, SUCCESS};
+    use crate::capability::Capability;
+
+    let caller_pid = match crate::task::current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
+    {
+        Some(pid) => pid,
+        None => return EACCES,
+    };
+    let manager_pid = crate::policy::service_manager_pid();
+    let is_manager = manager_pid != 0 && caller_pid.as_u64() == manager_pid;
+    let can_register = crate::syscall::security::caller_has_any_capability(&[
+        Capability::ServiceRegister,
+    ]);
+    if !is_manager && !can_register {
+        return EACCES;
+    }
+
+    let kind = match kind_raw {
+        1 => SpawnDelegateKind::Service,
+        2 => SpawnDelegateKind::Driver,
+        _ => return EINVAL,
+    };
+
+    let pid = crate::task::ProcessId::from_u64(pid_raw);
+    let valid = crate::task::with_process(pid, |p| {
+        let state = p.state();
+        let alive = state != crate::task::ProcessState::Zombie
+            && state != crate::task::ProcessState::Terminated;
+        let privileged = matches!(
+            p.privilege(),
+            crate::task::PrivilegeLevel::Service | crate::task::PrivilegeLevel::Core
+        );
+        alive && privileged
+    })
+    .unwrap_or(false);
+    if !valid {
+        return ESRCH;
+    }
+
+    crate::policy::register_spawn_delegate(kind, pid_raw);
+    SUCCESS
 }
 
 fn debug_serial_write_str(s: &str) {
@@ -254,15 +298,14 @@ use x86_64::structures::idt::InterruptStackFrame;
 
 /// システムコールのディスパッチ
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
-    if num == SyscallNumber::FileOpen as u64 {
-        debug_serial_write_str("dispatch: file_open\n");
-    } else if num == SyscallNumber::FileReadDir as u64 {
-        debug_serial_write_str("dispatch: file_readdir\n");
-    }
     match num {
         x if x == SyscallNumber::ProcessExit as u64 => process::exit(arg0),
         x if x == SyscallNumber::ProcessSpawn as u64 => process::spawn(arg0, arg1),
         x if x == SyscallNumber::ServiceSpawn as u64 => service_spawn(arg0),
+        x if x == SyscallNumber::ServiceDelegateRegister as u64 => {
+            service_delegate_register(arg0, arg1)
+        }
+        x if x == SyscallNumber::DriverSpawn as u64 => exec::driver_spawn_syscall(arg0),
         x if x == SyscallNumber::ProcessWait as u64 => process::wait(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadCreate as u64 => task::thread_create(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadExit as u64 => {
@@ -477,15 +520,6 @@ extern "C" fn syscall_handler_rust(
     arg3: u64,
     arg4: u64,
 ) -> u64 {
-    if num == SyscallNumber::ServiceSpawn as u64 {
-        debug_serial_write_str("syscall_handler_rust: service_spawn\n");
-    } else if num == SyscallNumber::FileOpen as u64 {
-        debug_serial_write_str("syscall_handler_rust: file_open\n");
-    } else if num == SyscallNumber::FileOpenAt as u64 {
-        debug_serial_write_str("syscall_handler_rust: file_openat\n");
-    } else if num == SyscallNumber::MemoryMap as u64 {
-        debug_serial_write_str("syscall_handler_rust: mmap\n");
-    }
     crate::percpu::install_current_cpu_gs_base();
 
     let current_tid = crate::task::current_thread_id();

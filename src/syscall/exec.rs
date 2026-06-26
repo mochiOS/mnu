@@ -254,6 +254,35 @@ pub fn exec_with_capabilities_syscall(
     exec_internal(path.as_str(), None, &extra_args, Some(caps), None)
 }
 
+pub fn driver_spawn_syscall(path_ptr: u64) -> u64 {
+    use crate::capability::{Capability, CapabilitySet};
+    use crate::syscall::types::{EACCES, EINVAL};
+
+    if !crate::policy::caller_can_launch_driver() {
+        return EACCES;
+    }
+
+    let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
+        Ok(s) => s,
+        Err(_) => return EINVAL,
+    };
+
+    if !(path.starts_with("/bin/drivers/") || path.starts_with("bin/drivers/")) {
+        return EINVAL;
+    }
+
+    let mut caps = CapabilitySet::empty();
+    caps.insert(Capability::UsbAccess);
+
+    exec_internal(
+        path.as_str(),
+        None,
+        &[],
+        Some(caps),
+        Some(crate::task::PrivilegeLevel::User),
+    )
+}
+
 /// 名前を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
 pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
     exec_internal(path, Some(name), &[], None, None)
