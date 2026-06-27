@@ -21,3 +21,9 @@ Changes:
   for service-manager mediated launch.
 * Add MapPhysicalRange syscall dispatch and
   memory.phys.map grants for USB driver MMIO access.
+* Replace raw virt-to-phys DMA setup with
+  kernel-owned DMA allocation handles, pinned contiguous
+  frames, per-process ownership tracking, and exit/exec
+  cleanup.
+* Restrict driver-side DMA/MMIO grants to the USB driver
+  launch path instead of all drivers.

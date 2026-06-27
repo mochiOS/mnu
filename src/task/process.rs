@@ -2,6 +2,7 @@ use crate::interrupt::spinlock::SpinLock;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::vec::Vec;
 
 use crate::capability::CapabilitySet;
 use crate::result::{Kernel, Process as ProcessError, Result};
@@ -61,6 +62,51 @@ pub struct MmapRegion {
     flags: u64,
     backing: MmapBacking,
     dirty_pages: alloc::vec::Vec<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DmaBuffer {
+    handle: u64,
+    virt_start: u64,
+    len: u64,
+    phys_start: u64,
+    page_count: usize,
+}
+
+impl DmaBuffer {
+    pub fn new(handle: u64, virt_start: u64, len: u64, phys_start: u64, page_count: usize) -> Self {
+        Self {
+            handle,
+            virt_start,
+            len,
+            phys_start,
+            page_count,
+        }
+    }
+
+    pub fn handle(&self) -> u64 {
+        self.handle
+    }
+
+    pub fn virt_start(&self) -> u64 {
+        self.virt_start
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn phys_start(&self) -> u64 {
+        self.phys_start
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.page_count
+    }
+
+    pub fn end(&self) -> Option<u64> {
+        self.virt_start.checked_add(self.len)
+    }
 }
 
 impl MmapRegion {
@@ -251,6 +297,10 @@ pub struct Process {
     heap_start: u64,
     /// 現在のヒープ終了アドレス (program break)
     heap_end: u64,
+    /// DMA 専用仮想アドレス領域の開始
+    dma_start: u64,
+    /// DMA 専用仮想アドレス領域の現在位置
+    dma_end: u64,
     /// ユーザースタックの現在の最低マップアドレス（下向きに伸びる）
     stack_bottom: u64,
     /// ユーザースタックのトップアドレス（初期 RSP 付近）
@@ -276,6 +326,8 @@ pub struct Process {
     fd_table: alloc::boxed::Box<FdTable>,
     /// file-backed mmap の VMA テーブル
     mmap_regions: alloc::vec::Vec<MmapRegion>,
+    /// カーネル管理 DMA バッファ
+    dma_buffers: Vec<DmaBuffer>,
     /// プロセスごとの resource limit
     resource_limits: ResourceLimits,
 }
@@ -317,6 +369,8 @@ impl Process {
             page_table_owned: true,
             heap_start,
             heap_end: heap_start,
+            dma_start: 0,
+            dma_end: 0,
             stack_bottom: 0,
             stack_top: 0,
             cwd: {
@@ -334,6 +388,7 @@ impl Process {
             signal_state: alloc::boxed::Box::new(SignalState::new()),
             fd_table: FdTable::new_boxed(),
             mmap_regions: alloc::vec::Vec::new(),
+            dma_buffers: Vec::new(),
             resource_limits: ResourceLimits::default(),
         }
     }
@@ -466,6 +521,23 @@ impl Process {
         self.heap_start = addr;
     }
 
+    pub fn dma_end(&self) -> u64 {
+        self.dma_end
+    }
+
+    pub fn set_dma_start(&mut self, addr: u64) {
+        self.dma_start = addr;
+    }
+
+    pub fn set_dma_end(&mut self, addr: u64) {
+        self.dma_end = addr;
+    }
+
+    pub fn reset_dma_arena(&mut self) {
+        self.dma_start = 0;
+        self.dma_end = 0;
+    }
+
     pub fn stack_bottom(&self) -> u64 {
         self.stack_bottom
     }
@@ -579,6 +651,61 @@ impl Process {
 
     pub fn clone_mmap_regions_for_fork(&self) -> alloc::vec::Vec<MmapRegion> {
         self.mmap_regions.clone()
+    }
+
+    pub fn dma_buffers(&self) -> &[DmaBuffer] {
+        &self.dma_buffers
+    }
+
+    pub fn add_dma_buffer(&mut self, buffer: DmaBuffer) -> bool {
+        let Some(buffer_end) = buffer.end() else {
+            return false;
+        };
+        let dma_overlap = self.dma_buffers.iter().any(|existing| {
+            let Some(existing_end) = existing.end() else {
+                return true;
+            };
+            buffer.virt_start < existing_end && existing.virt_start < buffer_end
+        });
+        if dma_overlap {
+            return false;
+        }
+        let mmap_overlap = self.mmap_regions.iter().any(|region| {
+            let Some(region_end) = region.end() else {
+                return true;
+            };
+            buffer.virt_start < region_end && region.start() < buffer_end
+        });
+        if mmap_overlap {
+            return false;
+        }
+        if self.heap_start != 0 && self.heap_end != 0 && buffer.virt_start < self.heap_end && self.heap_start < buffer_end {
+            return false;
+        }
+        if self.stack_bottom != 0 && self.stack_top != 0 && buffer.virt_start < self.stack_top && self.stack_bottom < buffer_end {
+            return false;
+        }
+        self.dma_buffers.push(buffer);
+        true
+    }
+
+    pub fn remove_dma_buffer(&mut self, handle: u64) -> Option<DmaBuffer> {
+        let idx = self.dma_buffers.iter().position(|buf| buf.handle == handle)?;
+        Some(self.dma_buffers.remove(idx))
+    }
+
+    pub fn take_dma_buffers(&mut self) -> Vec<DmaBuffer> {
+        core::mem::take(&mut self.dma_buffers)
+    }
+
+    pub fn find_dma_buffer_by_addr(&self, addr: u64, len: u64) -> Option<&DmaBuffer> {
+        let end = addr.checked_add(len)?;
+        self.dma_buffers.iter().find(|buf| {
+            let Some(buf_end) = buf.end() else {
+                return false;
+            };
+            addr < buf_end && buf.virt_start < end
+        })
     }
 
     /// FD テーブルを差し替える（fork の子プロセス初期化で使用）
@@ -819,7 +946,7 @@ impl ProcessTable {
         &mut self,
         parent: ProcessId,
         target: Option<ProcessId>,
-    ) -> Option<(ProcessId, u64, Option<u64>)> {
+    ) -> Option<(ProcessId, u64, Option<u64>, Vec<DmaBuffer>)> {
         for slot in &mut self.processes {
             let should_reap = slot.as_ref().is_some_and(|proc| {
                 Self::is_child_match(proc, parent, target) && proc.state() == ProcessState::Zombie
@@ -836,8 +963,9 @@ impl ProcessTable {
                 } else {
                     None
                 };
+                let dma_buffers = proc.dma_buffers;
                 self.count = self.count.saturating_sub(1);
-                return Some((pid, exit_code, page_table));
+                return Some((pid, exit_code, page_table, dma_buffers));
             }
         }
         None
@@ -886,6 +1014,7 @@ pub fn add_process(process: Process) -> Option<ProcessId> {
 
 /// プロセスを削除
 pub fn remove_process(id: ProcessId) -> Option<Process> {
+    release_process_dma_buffers(id);
     PROCESS_TABLE.lock().remove(id)
 }
 
@@ -942,7 +1071,26 @@ pub fn reap_zombie_child_process(
     parent: ProcessId,
     target: Option<ProcessId>,
 ) -> Option<(ProcessId, u64)> {
-    let (pid, exit_code, page_table) = PROCESS_TABLE.lock().reap_zombie_child(parent, target)?;
+    let (pid, exit_code, page_table, dma_buffers) =
+        PROCESS_TABLE.lock().reap_zombie_child(parent, target)?;
+    if let Some(table_phys) = page_table {
+        for dma in &dma_buffers {
+            let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
+                table_phys,
+                dma.virt_start(),
+                dma.len(),
+            );
+        }
+    }
+    for dma in dma_buffers {
+        for page_index in 0..dma.page_count() {
+            let phys = dma.phys_start() + (page_index as u64) * 4096;
+            let frame = x86_64::structures::paging::PhysFrame::containing_address(
+                x86_64::PhysAddr::new(phys),
+            );
+            let _ = crate::mem::frame::deallocate_frame(frame);
+        }
+    }
     if let Some(table_phys) = page_table {
         if let Err(e) = crate::mem::paging::destroy_user_page_table(table_phys) {
             crate::warn!(
@@ -953,6 +1101,38 @@ pub fn reap_zombie_child_process(
         }
     }
     Some((pid, exit_code))
+}
+
+pub fn release_process_dma_buffers(pid: ProcessId) {
+    let (page_table, dma_buffers) = match with_process_mut(pid, |proc| {
+        let page_table = proc.page_table();
+        let dma_buffers = proc.take_dma_buffers();
+        proc.reset_dma_arena();
+        (page_table, dma_buffers)
+    }) {
+        Some((page_table, dma_buffers)) => (page_table, dma_buffers),
+        None => return,
+    };
+
+    if let Some(table_phys) = page_table {
+        for dma in &dma_buffers {
+            let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
+                table_phys,
+                dma.virt_start(),
+                dma.len(),
+            );
+        }
+    }
+
+    for dma in dma_buffers {
+        for page_index in 0..dma.page_count() {
+            let phys = dma.phys_start() + (page_index as u64) * 4096;
+            let frame = x86_64::structures::paging::PhysFrame::containing_address(
+                x86_64::PhysAddr::new(phys),
+            );
+            let _ = crate::mem::frame::deallocate_frame(frame);
+        }
+    }
 }
 
 /// 現在のプロセス数を取得

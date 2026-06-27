@@ -75,6 +75,8 @@ fn kernel_main() -> ! {
     for cap in crate::capability::Capability::kernel_enforced_capabilities() {
         if matches!(
             cap,
+            crate::capability::Capability::DmaAllocate
+                |
             crate::capability::Capability::MemoryPhysMap
                 | crate::capability::Capability::MemoryPhysTranslate
         ) {

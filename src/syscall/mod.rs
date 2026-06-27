@@ -1,6 +1,7 @@
 //! システムコール
 
 pub mod capability;
+pub mod dma;
 pub mod event;
 pub mod exec;
 pub mod fs;
@@ -355,6 +356,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
             service_delegate_register(arg0, arg1)
         }
         x if x == SyscallNumber::DriverSpawn as u64 => exec::driver_spawn_syscall(arg0),
+        x if x == SyscallNumber::DmaAlloc as u64 => dma::alloc(arg0, arg1),
+        x if x == SyscallNumber::DmaFree as u64 => dma::free(arg0),
         x if x == SyscallNumber::ProcessWait as u64 => process::wait(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadCreate as u64 => task::thread_create(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadExit as u64 => {

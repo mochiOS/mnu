@@ -207,6 +207,32 @@ impl BitmapFrameAllocator {
         let mask = align - 1;
         value.saturating_add(mask) & !mask
     }
+
+    fn reserve_contiguous_region(&mut self, page_count: usize) -> Option<PhysFrame> {
+        if page_count == 0 {
+            return None;
+        }
+        let min_phys = (self.next_frame as u64).saturating_mul(4096);
+        let bytes = (page_count as u64).saturating_mul(4096);
+        for region in self.memory_map.iter() {
+            if region.region_type != MemoryType::Usable || region.len < bytes {
+                continue;
+            }
+            let region_start = Self::align_up(region.start, 4096);
+            let region_end = region.start.saturating_add(region.len) & !0xfffu64;
+            if region_end <= region_start {
+                continue;
+            }
+            let phys_addr = core::cmp::max(region_start, min_phys);
+            let end = phys_addr.checked_add(bytes)?;
+            if end > region_end {
+                continue;
+            }
+            self.next_frame = (end / 4096) as usize;
+            return Some(PhysFrame::containing_address(PhysAddr::new(phys_addr)));
+        }
+        None
+    }
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
@@ -294,6 +320,14 @@ pub fn allocate_frame() -> Result<PhysFrame> {
         .lock()
         .as_mut()
         .and_then(|a| a.allocate_frame())
+        .ok_or(Kernel::Memory(Memory::OutOfMemory))
+}
+
+pub fn allocate_contiguous_frames(page_count: usize) -> Result<PhysFrame> {
+    FRAME_ALLOCATOR
+        .lock()
+        .as_mut()
+        .and_then(|a| a.reserve_contiguous_region(page_count))
         .ok_or(Kernel::Memory(Memory::OutOfMemory))
 }
 

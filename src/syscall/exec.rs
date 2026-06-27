@@ -272,9 +272,11 @@ pub fn driver_spawn_syscall(path_ptr: u64) -> u64 {
     }
 
     let mut caps = CapabilitySet::empty();
-    caps.insert(Capability::UsbAccess);
-    caps.insert(Capability::MemoryPhysMap);
-    caps.insert(Capability::MemoryPhysTranslate);
+    if path.starts_with("/bin/drivers/usb/") || path.starts_with("bin/drivers/usb/") {
+        caps.insert(Capability::UsbAccess);
+        caps.insert(Capability::MemoryPhysMap);
+        caps.insert(Capability::DmaAllocate);
+    }
 
     exec_internal(
         path.as_str(),
@@ -1448,6 +1450,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         Some(p) => p,
         None => return EINVAL,
     };
+    crate::task::release_process_dma_buffers(pid);
     crate::task::with_thread_mut(current_tid, |t| t.set_fs_base(initial_fs_base));
     let old_pt_phys = crate::task::with_process_mut(pid, |p| {
         let prev = p.page_table();

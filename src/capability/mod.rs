@@ -21,6 +21,7 @@ pub enum KernelCapability {
     VmMap,
     VmUnmap,
     MmioMap,
+    DmaAllocate,
     PhysMap,
     PhysTranslate,
     IrqBind,
@@ -70,6 +71,7 @@ impl KernelCapability {
             VmMap => "vm.map",
             VmUnmap => "vm.unmap",
             MmioMap => "mmio.map",
+            DmaAllocate => "dma.allocate",
             PhysMap => "memory.phys.map",
             PhysTranslate => "memory.phys.translate",
             IrqBind => "irq.bind",
@@ -93,6 +95,7 @@ impl KernelCapability {
             "vm.map" => Some(VmMap),
             "vm.unmap" => Some(VmUnmap),
             "mmio.map" => Some(MmioMap),
+            "dma.allocate" => Some(DmaAllocate),
             "memory.phys.map" => Some(PhysMap),
             "memory.phys.translate" => Some(PhysTranslate),
             "irq.bind" => Some(IrqBind),
@@ -427,6 +430,7 @@ pub enum Capability {
     VmCreate,
     VmControl,
 
+    DmaAllocate,
     MemoryPhysMap,
     MemoryPhysTranslate,
 
@@ -543,6 +547,7 @@ impl Capability {
             VmCreate => "vm.create",
             VmControl => "vm.control",
 
+            DmaAllocate => "dma.allocate",
             MemoryPhysMap => "memory.phys.map",
             MemoryPhysTranslate => "memory.phys.translate",
 
@@ -659,6 +664,7 @@ impl Capability {
             "vm.create" => VmCreate,
             "vm.control" => VmControl,
 
+            "dma.allocate" => DmaAllocate,
             "memory.phys.map" => MemoryPhysMap,
             "memory.phys.translate" => MemoryPhysTranslate,
 
@@ -710,6 +716,7 @@ impl Capability {
             IpcClient => KernelCapability::IpcEndpointSend,
             IpcServer => KernelCapability::IpcEndpointRecv,
             VmCreate | VmControl => KernelCapability::VmMap,
+            DmaAllocate => KernelCapability::DmaAllocate,
             MemoryPhysMap => KernelCapability::PhysMap,
             MemoryPhysTranslate => KernelCapability::PhysTranslate,
             KernelModuleLoad => KernelCapability::CextLoad,
@@ -816,6 +823,7 @@ impl Capability {
             Capability::Unsandboxed
                 | Capability::ProcessSpawn
                 | Capability::KernelDebug
+                | Capability::DmaAllocate
                 | Capability::MemoryPhysMap
                 | Capability::MemoryPhysTranslate
         )
@@ -888,6 +896,7 @@ impl Capability {
             ServiceControl,
             VmCreate,
             VmControl,
+            DmaAllocate,
             MemoryPhysMap,
             MemoryPhysTranslate,
             KernelModuleLoad,

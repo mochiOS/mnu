@@ -170,7 +170,18 @@ pub enum SyscallNumber {
     ServiceSpawn = 601,
     ServiceDelegateRegister = 602,
     DriverSpawn = 603,
+    DmaAlloc = 604,
+    DmaFree = 605,
     CheckGravityExist = 999,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DmaAllocation {
+    pub handle: u64,
+    pub virt_addr: u64,
+    pub phys_addr: u64,
+    pub len: u64,
 }
 
 /// 成功

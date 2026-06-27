@@ -433,6 +433,7 @@ pub fn exit_current_task(exit_code: u64) -> ! {
                 }
             });
             if !has_other_live_threads {
+                crate::task::release_process_dma_buffers(pid);
                 crate::task::mark_process_exited(pid, exit_code);
                 // 親プロセスが IPC でブロックしている可能性があるので起床させる
                 wake_parent_ipc_waiter(pid);

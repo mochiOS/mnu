@@ -456,6 +456,7 @@ pub fn fork() -> u64 {
         parent_pgid,
         parent_sid,
         parent_mmap_regions,
+        parent_dma_buffers,
     ) = match crate::task::with_process(parent_pid, |p| {
         (
             p.privilege(),
@@ -473,6 +474,7 @@ pub fn fork() -> u64 {
             p.pgid(),
             p.sid(),
             p.clone_mmap_regions_for_fork(),
+            p.dma_buffers().to_vec(),
         )
     }) {
         Some(v) => v,
@@ -490,6 +492,13 @@ pub fn fork() -> u64 {
             return ENOMEM;
         }
     };
+    for dma in &parent_dma_buffers {
+        let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
+            child_pt,
+            dma.virt_start(),
+            dma.len(),
+        );
+    }
 
     let (user_rip, user_rsp, user_rflags, parent_fs) = crate::task::with_thread(parent_tid, |t| {
         let (rip, rsp, rflags) = t.syscall_user_context();
@@ -845,7 +854,7 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
             match page_align_up(addr) {
                 Some(v) => v,
                 None => {
-                    crate::info!("process::mmap invalid addr align addr={:#x} len={:#x}", addr, size);
+                    crate::debug!("process::mmap invalid addr align");
                     return Err(EINVAL);
                 }
             }
@@ -856,20 +865,14 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
             match page_align_up(base) {
                 Some(v) => v,
                 None => {
-                    crate::info!("process::mmap invalid heap align base={:#x} len={:#x}", base, size);
+                    crate::debug!("process::mmap invalid heap align");
                     return Err(EINVAL);
                 }
             }
         };
 
         if !is_user_range(map_start, size) {
-            crate::info!(
-                "process::mmap out of range start={:#x} len={:#x} heap_start={:#x} heap_end={:#x}",
-                map_start,
-                size,
-                process.heap_start(),
-                process.heap_end()
-            );
+            crate::debug!("process::mmap out of range");
             return Err(EINVAL);
         }
 
@@ -884,14 +887,7 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
                 map_start, size, prot, flags, backing, writable, shared,
             );
             if !process.add_mmap_region(region) {
-                crate::info!(
-                    "process::mmap overlap start={:#x} len={:#x} heap_start={:#x} heap_end={:#x} regions={}",
-                    map_start,
-                    size,
-                    process.heap_start(),
-                    process.heap_end(),
-                    process.mmap_regions().len()
-                );
+                crate::debug!("process::mmap overlap");
                 return Err(EINVAL);
             }
             if crate::mem::paging::map_and_copy_segment_to(
@@ -969,6 +965,14 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
         Some(p) => p,
         None => return ENOSYS,
     };
+
+    let overlaps_dma = crate::task::with_process(pid, |process| {
+        process.find_dma_buffer_by_addr(unmap_start, unmap_len).is_some()
+    })
+    .unwrap_or(false);
+    if overlaps_dma {
+        return EPERM;
+    }
 
     let backing_region = crate::task::with_process_mut(pid, |process| {
         process.remove_mmap_region(unmap_start, unmap_len)
