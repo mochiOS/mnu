@@ -172,6 +172,7 @@ pub enum SyscallNumber {
     DriverSpawn = 603,
     DmaAlloc = 604,
     DmaFree = 605,
+    ExecManifest = 606,
     CheckGravityExist = 999,
 }
 

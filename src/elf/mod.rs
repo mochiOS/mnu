@@ -6,7 +6,6 @@ extern crate alloc;
 
 use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
-use alloc::string::ToString;
 
 pub mod loader;
 
@@ -16,11 +15,7 @@ pub use loader::{
 
 use crate::init;
 use crate::mem::{paging, user};
-use crate::policy::caller_can_launch_service;
-use crate::result::{Kernel, Memory, Process, Result};
-use crate::task::{
-    add_process, add_thread, remove_process, PrivilegeLevel, Process as TaskProcess, Thread,
-};
+use crate::result::{Kernel, Memory, Result};
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const PT_DYNAMIC: u32 = 2;
@@ -61,45 +56,6 @@ pub struct LoadedElf {
     pub load_bias: u64,
     pub stack_top: u64,
     pub stack_bottom: u64,
-}
-
-struct ServiceSpawnGuard {
-    pid: crate::task::ProcessId,
-    page_table: u64,
-    kernel_stack: Option<u64>,
-    disarmed: bool,
-}
-
-impl ServiceSpawnGuard {
-    fn new(pid: crate::task::ProcessId, page_table: u64) -> Self {
-        Self {
-            pid,
-            page_table,
-            kernel_stack: None,
-            disarmed: false,
-        }
-    }
-
-    fn set_kernel_stack(&mut self, kernel_stack: u64) {
-        self.kernel_stack = Some(kernel_stack);
-    }
-
-    fn disarm(&mut self) {
-        self.disarmed = true;
-    }
-}
-
-impl Drop for ServiceSpawnGuard {
-    fn drop(&mut self) {
-        if self.disarmed {
-            return;
-        }
-        if let Some(stack) = self.kernel_stack {
-            crate::task::free_kernel_stack(stack);
-        }
-        let _ = remove_process(self.pid);
-        let _ = paging::destroy_user_page_table(self.page_table);
-    }
 }
 
 #[inline]
@@ -222,156 +178,6 @@ pub fn load_elf_into(table_phys: u64, data: &[u8]) -> Result<LoadedElf> {
         stack_top: stack.top,
         stack_bottom: stack.bottom,
     })
-}
-
-pub fn spawn_service(
-    path: &str,
-    name: &str,
-) -> Result<(crate::task::ProcessId, crate::task::ThreadId, u64)> {
-    if !caller_can_launch_service() {
-        return Err(Kernel::Process(Process::Service(
-            crate::result::Service::InsufficientPrivilege,
-        )));
-    }
-    let data = init::fs::read_initfs(path)
-        .or_else(|| init::fs::read_rootfs(path))
-        .or_else(|| crate::cext::fs::read_all(path))
-        .or_else(|| init::fs::read(path))
-        .ok_or(Kernel::InvalidParam)?;
-    if !crate::policy::signature::verify_exec(path, &data) {
-        return Err(Kernel::InvalidParam);
-    }
-    let new_pt_phys = paging::create_user_page_table()?;
-
-    let priority = 10;
-    let parent_pid = crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()));
-    let inherited_caps =
-        parent_pid.and_then(|pid| crate::task::with_process(pid, |proc| proc.capabilities().clone()));
-    let inherited_cwd =
-        parent_pid.and_then(|pid| crate::task::with_process(pid, |proc| proc.cwd().to_string()));
-    let inherited_limits =
-        parent_pid.and_then(|pid| crate::task::with_process(pid, |proc| proc.resource_limits()));
-    let inherited_fd_table =
-        parent_pid.and_then(|pid| crate::task::with_process(pid, |proc| proc.clone_fd_table_for_fork()));
-
-    let mut process = TaskProcess::new(name, PrivilegeLevel::Service, None, priority);
-    process.set_page_table(new_pt_phys);
-    if let Some(caps) = inherited_caps {
-        process.set_capabilities_for_exec(caps);
-    }
-    if let Some(cwd) = inherited_cwd.as_deref() {
-        process.set_cwd(cwd);
-    }
-    if let Some(limits) = inherited_limits {
-        process.set_resource_limits(limits);
-    }
-    if let Some(table) = inherited_fd_table {
-        process.set_fd_table(table);
-    }
-    process.set_exe_path(path);
-    let pid = process.id();
-
-    if add_process(process).is_none() {
-        let _ = paging::destroy_user_page_table(new_pt_phys);
-        return Err(Kernel::Process(Process::MaxProcessesReached));
-    }
-    let mut guard = ServiceSpawnGuard::new(pid, new_pt_phys);
-
-    let loaded = load_elf_into(new_pt_phys, &data)?;
-    let aslr_seed = crate::syscall::exec::next_aslr_seed(path);
-    let initial_fs_base = crate::syscall::exec::map_initial_tls(new_pt_phys, aslr_seed)
-        .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?;
-
-    let stack_size = (loaded.stack_top - loaded.stack_bottom) as usize;
-    let kernel_stack_size = stack_size
-        .checked_add(4095)
-        .map(|v| v & !4095usize)
-        .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-    let kernel_stack_addr = crate::task::allocate_kernel_stack(kernel_stack_size)
-        .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-    guard.set_kernel_stack(kernel_stack_addr);
-
-    let mut sp = loaded.stack_top;
-
-    let argv0 = path.as_bytes();
-    sp = sp.saturating_sub((argv0.len() + 1) as u64);
-    if let Err(err) = write_user_bytes_in_table(new_pt_phys, sp, argv0) {
-        let _ = remove_process(pid);
-        let _ = paging::destroy_user_page_table(new_pt_phys);
-        return Err(err);
-    }
-    if let Err(err) = write_user_bytes_in_table(new_pt_phys, sp + argv0.len() as u64, &[0]) {
-        let _ = remove_process(pid);
-        let _ = paging::destroy_user_page_table(new_pt_phys);
-        return Err(err);
-    }
-    let argv0_addr = sp;
-
-    sp &= !0xF;
-
-    const AT_NULL: u64 = 0;
-    const AT_PHDR: u64 = 3;
-    const AT_PHENT: u64 = 4;
-    const AT_PHNUM: u64 = 5;
-    const AT_PAGESZ: u64 = 6;
-    const AT_ENTRY: u64 = 9;
-
-    let header = parse_header(&data)?;
-    let load_bias = loaded.load_bias;
-    let at_phdr = load_bias.wrapping_add(header.e_phoff);
-    let at_phent = header.e_phentsize as u64;
-    let at_phnum = header.e_phnum as u64;
-
-    let mut push_u64 = |val: u64| -> Result<()> {
-        let new_sp = sp
-            .checked_sub(8)
-            .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
-        if new_sp < loaded.stack_bottom {
-            return Err(Kernel::Memory(Memory::InvalidAddress));
-        }
-        sp = new_sp;
-        write_user_u64_in_table(new_pt_phys, sp, val)
-    };
-
-    push_u64(0)?;
-    push_u64(AT_NULL)?;
-    push_u64(loaded.entry)?;
-    push_u64(AT_ENTRY)?;
-    push_u64(4096)?;
-    push_u64(AT_PAGESZ)?;
-    push_u64(at_phnum)?;
-    push_u64(AT_PHNUM)?;
-    push_u64(at_phent)?;
-    push_u64(AT_PHENT)?;
-    push_u64(at_phdr)?;
-    push_u64(AT_PHDR)?;
-    push_u64(0)?;
-    push_u64(0)?;
-    push_u64(argv0_addr)?;
-    push_u64(1)?;
-
-    sp &= !0xF;
-
-    let mut thread = Thread::new_usermode(
-        pid,
-        name,
-        loaded.entry,
-        sp,
-        0,
-        kernel_stack_addr,
-        kernel_stack_size,
-    );
-    thread.set_fs_base(initial_fs_base);
-
-    let Some(thread_id) = add_thread(thread) else {
-        return Err(Kernel::Process(Process::MaxProcessesReached));
-    };
-
-    guard.disarm();
-    let endpoint = crate::syscall::ipc::ensure_endpoint_handle_for_thread(thread_id.as_u64())
-        .ok_or(Kernel::Process(Process::MaxProcessesReached))?;
-    Ok((pid, thread_id, endpoint))
 }
 
 fn parse_header(data: &[u8]) -> Result<Elf64Ehdr> {

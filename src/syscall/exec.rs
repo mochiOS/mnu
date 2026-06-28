@@ -1,7 +1,7 @@
 use crate::capability::{Capability, CapabilitySet};
 use crate::policy::{
     caller_can_grant_capabilities_on_exec, claim_service_manager_pid, release_service_manager_pid,
-    resolve_exec_foreground, resolve_exec_priority, resolve_exec_privilege,
+    resolve_exec_foreground, resolve_exec_priority, resolve_exec_privilege, ManifestRole,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -174,6 +174,18 @@ fn validate_requested_exec_capabilities(caps: &CapabilitySet) -> Result<(), u64>
     }
 }
 
+fn parse_manifest_role(raw: u64) -> Option<ManifestRole> {
+    match raw {
+        1 => Some(ManifestRole::CoreService),
+        2 => Some(ManifestRole::Service),
+        3 => Some(ManifestRole::Application),
+        4 => Some(ManifestRole::Driver),
+        5 => Some(ManifestRole::Tool),
+        6 => Some(ManifestRole::Unknown),
+        _ => None,
+    }
+}
+
 /// カーネル内から実行可能ファイルを読み込み実行するシステムコール
 /// args_ptr: ヌル区切り引数文字列へのポインタ（"arg1\0arg2\0\0"形式）、0 なら引数なし
 pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
@@ -196,7 +208,7 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
-    exec_internal(path, None, &extra_args, None, None)
+    exec_internal(path, None, &extra_args, None, None, None)
 }
 
 /// exec 時に capability を付与して起動する
@@ -251,14 +263,30 @@ pub fn exec_with_capabilities_syscall(
 
     // capability はプロセス生成時に設定する必要がある。
     // 後付けだと、スケジューラ有効時に起動直後の IPC 等が cap 無しで走り得る。
-    exec_internal(path.as_str(), None, &extra_args, Some(caps), None)
+    exec_internal(path.as_str(), None, &extra_args, Some(caps), None, None)
 }
 
-pub fn driver_spawn_syscall(path_ptr: u64) -> u64 {
-    use crate::capability::{Capability, CapabilitySet};
-    use crate::syscall::types::{EACCES, EINVAL};
+pub fn exec_manifest_syscall(
+    path_ptr: u64,
+    args_ptr: u64,
+    caps_ptr: u64,
+    caps_total_len: u64,
+    role_raw: u64,
+) -> u64 {
+    use crate::syscall::types::{EACCES, EINVAL, EPERM};
 
-    if !crate::policy::caller_can_launch_driver() {
+    let Some(role) = parse_manifest_role(role_raw) else {
+        return EINVAL;
+    };
+
+    let allowed = match role {
+        ManifestRole::CoreService | ManifestRole::Service => crate::policy::caller_can_launch_service(),
+        ManifestRole::Driver => crate::policy::caller_can_launch_driver(),
+        ManifestRole::Application | ManifestRole::Tool | ManifestRole::Unknown => {
+            caller_has_process_spawn_capability()
+        }
+    };
+    if !allowed {
         return EACCES;
     }
 
@@ -267,29 +295,48 @@ pub fn driver_spawn_syscall(path_ptr: u64) -> u64 {
         Err(_) => return EINVAL,
     };
 
-    if !(path.starts_with("/bin/drivers/") || path.starts_with("bin/drivers/")) {
-        return EINVAL;
+    let extra_args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
+
+    if !caller_can_grant_capabilities_on_exec() {
+        return EPERM;
+    }
+    let caps_list = match read_nul_caps_from_user(caps_ptr, caps_total_len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let mut caps = CapabilitySet::empty();
+    for s in &caps_list {
+        let Some(cap) = Capability::from_str(s.as_str()) else {
+            return EINVAL;
+        };
+        caps.insert(cap);
+    }
+    if let Err(errno) = validate_requested_exec_capabilities(&caps) {
+        return errno;
     }
 
-    let mut caps = CapabilitySet::empty();
-    if path.starts_with("/bin/drivers/usb/") || path.starts_with("bin/drivers/usb/") {
-        caps.insert(Capability::UsbAccess);
-        caps.insert(Capability::MemoryPhysMap);
-        caps.insert(Capability::DmaAllocate);
-    }
+    let requested_privilege = match role {
+        ManifestRole::CoreService | ManifestRole::Service => Some(crate::task::PrivilegeLevel::Service),
+        _ => Some(crate::task::PrivilegeLevel::User),
+    };
 
     exec_internal(
         path.as_str(),
         None,
-        &[],
+        &extra_args,
         Some(caps),
-        Some(crate::task::PrivilegeLevel::User),
+        requested_privilege,
+        Some(role),
     )
 }
 
 /// 名前を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
 pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
-    exec_internal(path, Some(name), &[], None, None)
+    exec_internal(path, Some(name), &[], None, None, None)
 }
 
 /// 名前と初期 capability を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
@@ -299,12 +346,18 @@ pub fn exec_kernel_with_name_and_caps(
     initial_caps: CapabilitySet,
     requested_privilege: crate::task::PrivilegeLevel,
 ) -> u64 {
+    let manifest_role = match requested_privilege {
+        crate::task::PrivilegeLevel::Core => Some(ManifestRole::CoreService),
+        crate::task::PrivilegeLevel::Service => Some(ManifestRole::Service),
+        _ => Some(ManifestRole::Unknown),
+    };
     exec_internal(
         path,
         Some(name),
         &[],
         Some(initial_caps),
         Some(requested_privilege),
+        manifest_role,
     )
 }
 
@@ -314,6 +367,7 @@ fn exec_internal(
     args: &[&str],
     initial_caps: Option<CapabilitySet>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
+    manifest_role: Option<ManifestRole>,
 ) -> u64 {
     let mut process_name = name_override
         .map(|s| s.to_string())
@@ -321,8 +375,8 @@ fn exec_internal(
     if let Some(alias) = crate::task::process::driver_alias_for_path(path) {
         process_name = alias;
     }
-    let is_service_exec = requested_privilege == Some(crate::task::PrivilegeLevel::Service);
-    let loaded = load_exec_image(path, is_service_exec);
+    let role = manifest_role.unwrap_or(ManifestRole::Unknown);
+    let loaded = load_exec_image(path, role);
     if let Some((data, source)) = loaded {
         if !crate::policy::signature::verify_exec(path, &data) {
             crate::warn!("exec: signature verification failed for '{}'", path);
@@ -369,8 +423,8 @@ fn fingerprint_exec_bytes(data: &[u8]) -> &'static str {
     }
 }
 
-fn load_exec_image(path: &str, is_service: bool) -> Option<(Vec<u8>, &'static str)> {
-    if is_service {
+fn load_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static str)> {
+    if matches!(role, ManifestRole::CoreService | ManifestRole::Service) {
         crate::init::fs::read_initfs(path)
             .map(|data| (data, "initfs"))
             .or_else(|| crate::init::fs::read_rootfs(path).map(|data| (data, "rootfs")))
@@ -1025,9 +1079,10 @@ fn exec_with_data(
         let is_boot_service_manager = privilege == crate::task::PrivilegeLevel::Service
             && exec_path == boot_service_manager.exec_path
             && process_name == boot_service_manager.process_name;
-        let priority = resolve_exec_priority(process_name, exec_path, parent_pid);
+        let priority = resolve_exec_priority(ManifestRole::Unknown, parent_pid);
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
-        let foreground = resolve_exec_foreground(process_name, exec_path, privilege, parent_pid);
+        let foreground =
+            resolve_exec_foreground(ManifestRole::Unknown, privilege, parent_pid);
         proc.set_foreground(foreground);
         if let Some(caps) = initial_caps {
             // capability はプロセス開始前にセットする必要がある。
@@ -1232,7 +1287,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     let path = path_owned.as_str();
     let aslr_seed = next_aslr_seed(path);
 
-    let (data_vec, source) = match load_exec_image(path, false) {
+    let (data_vec, source) = match load_exec_image(path, ManifestRole::Unknown) {
         Some(loaded) => loaded,
         None => return ENOENT,
     };

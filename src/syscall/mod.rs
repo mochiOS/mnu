@@ -96,44 +96,6 @@ pub fn read_user_cstring(ptr: u64, max_len: usize) -> Result<String, u64> {
     Err(EINVAL)
 }
 
-/// サービス起動システムコール
-pub fn service_spawn(path_ptr: u64) -> u64 {
-    use crate::syscall::types::{EACCES, EFAULT, EINVAL, EIO, ENOENT, ENOMEM, ENOSYS};
-
-    let path = match read_user_cstring(path_ptr, 1024) {
-        Ok(path) => path,
-        Err(errno) => return errno,
-    };
-
-    match crate::elf::spawn_service(&path, &path) {
-        Ok((pid, _, _)) => pid.as_u64(),
-        Err(crate::Kernel::Process(crate::result::Process::Service(
-            crate::result::Service::NotFound,
-        )))
-        | Err(crate::Kernel::Process(crate::result::Process::Service(
-            crate::result::Service::Unregistered,
-        ))) => ENOENT,
-        Err(crate::Kernel::Process(crate::result::Process::Service(
-            crate::result::Service::InsufficientPrivilege,
-        ))) => EACCES,
-        Err(crate::Kernel::Process(crate::result::Process::Service(
-            crate::result::Service::StartFailure,
-        ))) => EIO,
-        Err(crate::Kernel::Process(crate::result::Process::Service(
-            crate::result::Service::InvalidState,
-        )))
-        | Err(crate::Kernel::Process(crate::result::Process::Service(
-            crate::result::Service::Conflict,
-        ))) => EINVAL,
-        Err(crate::Kernel::Memory(crate::result::Memory::OutOfMemory)) => ENOMEM,
-        Err(crate::Kernel::Memory(crate::result::Memory::PermissionDenied))
-        | Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress))
-        | Err(crate::Kernel::InvalidParam) => EFAULT,
-        Err(crate::Kernel::NotImplemented) => ENOSYS,
-        Err(_) => EINVAL,
-    }
-}
-
 pub fn service_delegate_register(kind_raw: u64, pid_raw: u64) -> u64 {
     use crate::policy::SpawnDelegateKind;
     use crate::syscall::types::{EACCES, EINVAL, ESRCH, SUCCESS};
@@ -351,13 +313,16 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
     match num {
         x if x == SyscallNumber::ProcessExit as u64 => process::exit(arg0),
         x if x == SyscallNumber::ProcessSpawn as u64 => process::spawn(arg0, arg1),
-        x if x == SyscallNumber::ServiceSpawn as u64 => service_spawn(arg0),
+        x if x == SyscallNumber::ServiceSpawn as u64 => ENOSYS,
         x if x == SyscallNumber::ServiceDelegateRegister as u64 => {
             service_delegate_register(arg0, arg1)
         }
-        x if x == SyscallNumber::DriverSpawn as u64 => exec::driver_spawn_syscall(arg0),
+        x if x == SyscallNumber::DriverSpawn as u64 => ENOSYS,
         x if x == SyscallNumber::DmaAlloc as u64 => dma::alloc(arg0, arg1),
         x if x == SyscallNumber::DmaFree as u64 => dma::free(arg0),
+        x if x == SyscallNumber::ExecManifest as u64 => {
+            exec::exec_manifest_syscall(arg0, arg1, arg2, arg3, arg4)
+        }
         x if x == SyscallNumber::ProcessWait as u64 => process::wait(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadCreate as u64 => task::thread_create(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadExit as u64 => {

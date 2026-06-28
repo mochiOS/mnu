@@ -220,13 +220,7 @@ pub fn caller_can_launch_driver() -> bool {
 
 /// exec 時に capability を付与できるか
 pub fn caller_can_grant_capabilities_on_exec() -> bool {
-    let Some(caller_pid) = caller_pid() else {
-        // カーネルコンテキストは許可
-        return true;
-    };
-
-    let manager_pid_raw = service_manager_pid();
-    manager_pid_raw != 0 && caller_pid.as_u64() == manager_pid_raw
+    caller_pid().is_none() || caller_is_service_or_core()
 }
 
 /// manifest role を privilege に落とす
@@ -276,67 +270,19 @@ pub fn resolve_exec_privilege(requested_privilege: Option<PrivilegeLevel>) -> Pr
 /// 現行の exec policy を priority に落とす
 #[inline]
 pub fn resolve_exec_priority(
-    process_name: &str,
-    exec_path: &str,
-    parent_pid: Option<ProcessId>,
+    role: ManifestRole,
+    _parent_pid: Option<ProcessId>,
 ) -> u8 {
-    let is_driver_path =
-        exec_path.starts_with("/bin/drivers/") || exec_path.starts_with("bin/drivers/");
-    let is_application_path =
-        exec_path.starts_with("/applications/") || exec_path.starts_with("applications/");
-    let is_regular_bin_path = exec_path.starts_with("/bin/") || exec_path.starts_with("bin/");
-
-    if is_application_path {
-        return 0;
-    }
-    if is_regular_bin_path && !is_driver_path {
-        return 2;
-    }
-    if is_driver_path {
-        return 160;
-    }
-    if process_name.ends_with(".service") {
-        return 64;
-    }
-
-    if let Some(parent) = parent_pid {
-        let parent_name = crate::task::with_process(parent, |process| {
-            let mut name = String::new();
-            name.push_str(process.name());
-            name
-        });
-        if parent_name.is_some() {
-            return 8;
-        }
-    }
-
-    8
+    role_priority(role)
 }
 
 /// 現行の exec policy を foreground 判定に落とす
 #[inline]
 pub fn resolve_exec_foreground(
-    process_name: &str,
-    exec_path: &str,
+    role: ManifestRole,
     privilege: PrivilegeLevel,
-    parent_pid: Option<ProcessId>,
+    _parent_pid: Option<ProcessId>,
 ) -> bool {
-    if privilege != PrivilegeLevel::User {
-        return false;
-    }
-
-    let is_application_path =
-        exec_path.starts_with("/applications/") || exec_path.starts_with("applications/");
-    let is_regular_bin_path = (exec_path.starts_with("/bin/") || exec_path.starts_with("bin/"))
-        && !exec_path.starts_with("/bin/drivers/")
-        && !exec_path.starts_with("bin/drivers/");
-
-    if is_application_path || is_regular_bin_path {
-        return true;
-    }
-
-    let Some(parent) = parent_pid else {
-        return false;
-    };
-    crate::task::with_process(parent, |process| process.is_foreground()).unwrap_or(false)
+    privilege == PrivilegeLevel::User
+        && matches!(role, ManifestRole::Application | ManifestRole::Tool)
 }
