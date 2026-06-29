@@ -14,6 +14,13 @@ fn caller_has_usb_access() -> bool {
     crate::syscall::security::caller_has_any_capability(&[Capability::UsbAccess])
 }
 
+fn caller_has_port_io_access() -> bool {
+    crate::syscall::security::caller_has_any_capability(&[
+        Capability::UsbAccess,
+        Capability::DeviceInput,
+    ])
+}
+
 /// Writeシステムコール
 ///
 /// # 引数
@@ -155,7 +162,7 @@ fn write_port_u32(port: u16, value: u32) {
 }
 
 pub fn port_in(port: u64, width: u64) -> u64 {
-    if !caller_has_usb_access() {
+    if !caller_has_port_io_access() {
         return EPERM;
     }
     let port = port as u16;
@@ -168,7 +175,7 @@ pub fn port_in(port: u64, width: u64) -> u64 {
 }
 
 pub fn port_out(port: u64, value: u64, width: u64) -> u64 {
-    if !caller_has_usb_access() {
+    if !caller_has_port_io_access() {
         return EPERM;
     }
     let port = port as u16;

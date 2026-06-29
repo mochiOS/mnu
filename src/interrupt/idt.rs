@@ -1044,11 +1044,6 @@ extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFram
 /// OS全体が停止する (C-2修正)。このハンドラはスキャンコードを読み捨て EOI を送る。
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let entered_from_user = enter_from_user(&_stack_frame);
-    let scancode: u8 = unsafe {
-        let mut port = x86_64::instructions::port::Port::<u8>::new(0x60);
-        port.read()
-    };
-    crate::util::ps2kbd::push_scancode(scancode);
     // マスターPICにEOIを送信 (IRQ1はマスターPICが担当)
     unsafe {
         super::pic::PIC_MASTER.end_of_interrupt();
@@ -1059,11 +1054,6 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 /// マウス割り込みハンドラ (IRQ12 / ベクタ 44)
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let entered_from_user = enter_from_user(&_stack_frame);
-    let byte: u8 = unsafe {
-        let mut port = x86_64::instructions::port::Port::<u8>::new(0x60);
-        port.read()
-    };
-    crate::util::ps2mouse::push_byte(byte);
     // IRQ12 はスレーブPIC配下なので、スレーブ→マスターの順でEOIを送る
     super::send_eoi(44);
     leave_to_user(entered_from_user);

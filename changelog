@@ -3,6 +3,13 @@ the mnu kernel ChangeLog   - version 0.11
     - Release creator: tas0dev
 
 Changes:
+* Remove kernel-side PS/2 data consumption and
+  hand ownership of the i8042 controller to a
+  user-space driver.
+* Replace path/suffix based exec classification with
+  manifest role based launch policy.
+* Remove dedicated ServiceSpawn/DriverSpawn handling
+  in favor of manifest-based generic exec.
 * Add ServiceDelegateRegister and DriverSpawn syscalls
   for delegated service/driver launch control.
 * Add kernel-side spawn delegate registry for

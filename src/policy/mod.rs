@@ -149,6 +149,16 @@ fn caller_is_service_or_core() -> bool {
         .is_some_and(|lvl| matches!(lvl, PrivilegeLevel::Core | PrivilegeLevel::Service))
 }
 
+fn caller_has_process_spawn_capability() -> bool {
+    caller_pid().is_some_and(|pid| {
+        crate::task::with_process(pid, |p| {
+            p.capabilities()
+                .contains(crate::capability::Capability::ProcessSpawn)
+        })
+        .unwrap_or(false)
+    })
+}
+
 /// `.service` 実行を許可するか
 pub fn caller_can_launch_service() -> bool {
     let Some(caller_pid) = caller_pid() else {
@@ -174,7 +184,7 @@ pub fn caller_can_launch_service() -> bool {
 
     let delegate_pid_raw = spawn_delegate_pid(SpawnDelegateKind::Service);
     if delegate_pid_raw == 0 || caller_pid.as_u64() != delegate_pid_raw {
-        return false;
+        return caller_is_service_or_core() && caller_has_process_spawn_capability();
     }
     let delegate_pid = ProcessId::from_u64(delegate_pid_raw);
     crate::task::with_process(delegate_pid, |p| {
@@ -202,7 +212,7 @@ pub fn caller_can_launch_driver() -> bool {
 
     let delegate_pid_raw = spawn_delegate_pid(SpawnDelegateKind::Driver);
     if delegate_pid_raw == 0 || caller_pid.as_u64() != delegate_pid_raw {
-        return false;
+        return caller_is_service_or_core() && caller_has_process_spawn_capability();
     }
     let delegate_pid = ProcessId::from_u64(delegate_pid_raw);
     crate::task::with_process(delegate_pid, |p| {

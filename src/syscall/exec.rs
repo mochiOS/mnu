@@ -158,9 +158,6 @@ fn validate_requested_exec_capabilities(caps: &CapabilitySet) -> Result<(), u64>
         if !cap.is_kernel_enforced() {
             return Err(EINVAL);
         }
-        if !cap.is_delegable() {
-            return Err(EPERM);
-        }
     }
 
     let Some(caller_caps) = current_process_capabilities() else {
@@ -278,6 +275,12 @@ pub fn exec_manifest_syscall(
     let Some(role) = parse_manifest_role(role_raw) else {
         return EINVAL;
     };
+    crate::warn!(
+        "exec_manifest entry role={:?} caller.service_or_core={} caller.process.spawn={}",
+        role,
+        crate::policy::caller_is_service_or_core_process(),
+        caller_has_process_spawn_capability()
+    );
 
     let allowed = match role {
         ManifestRole::CoreService | ManifestRole::Service => crate::policy::caller_can_launch_service(),
@@ -287,6 +290,12 @@ pub fn exec_manifest_syscall(
         }
     };
     if !allowed {
+        crate::warn!(
+            "exec_manifest denied role={:?} caller.service_or_core={} caller.process.spawn={}",
+            role,
+            crate::policy::caller_is_service_or_core_process(),
+            caller_has_process_spawn_capability()
+        );
         return EACCES;
     }
 
@@ -302,6 +311,12 @@ pub fn exec_manifest_syscall(
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
 
     if !caller_can_grant_capabilities_on_exec() {
+        crate::warn!(
+            "exec_manifest capability grant denied role={:?} caller.service_or_core={} caller.process.spawn={}",
+            role,
+            crate::policy::caller_is_service_or_core_process(),
+            caller_has_process_spawn_capability()
+        );
         return EPERM;
     }
     let caps_list = match read_nul_caps_from_user(caps_ptr, caps_total_len) {
@@ -316,6 +331,11 @@ pub fn exec_manifest_syscall(
         caps.insert(cap);
     }
     if let Err(errno) = validate_requested_exec_capabilities(&caps) {
+        crate::warn!(
+            "exec_manifest capability validation failed requested_caps={} caller_caps={}",
+            caps.len(),
+            current_process_capabilities().map(|c| c.len()).unwrap_or(0)
+        );
         return errno;
     }
 
