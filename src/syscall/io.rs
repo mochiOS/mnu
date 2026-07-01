@@ -61,6 +61,10 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         }
     });
 
+    if let Ok(text) = core::str::from_utf8(&buf) {
+        crate::util::vga::print(format_args!("{}", text));
+    }
+
     len
 }
 
