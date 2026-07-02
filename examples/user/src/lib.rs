@@ -192,6 +192,7 @@ const SIGNATURE_DB_PATH: &str = "/signature.db";
 const SIGNATURE_ALLOW_PATH: &str = "/captest.bin";
 const SIGNATURE_DENY_PATH: &str = "/unsigned.bin";
 const ROOTFS_BENCH_PATH: &str = "/testdata";
+const MEMORY_PHYS_MAP_CAP: &str = "memory.phys.map";
 const FS_TEST_SIZE: usize = 1024 * 1024;
 static mut FS_TEST_WRITE_BUF: [u8; FS_TEST_SIZE] = [0x55; FS_TEST_SIZE];
 static mut FS_TEST_READ_BUF: [u8; FS_TEST_SIZE] = [0; FS_TEST_SIZE];
@@ -1199,6 +1200,31 @@ fn run_restricted_probe() -> bool {
     exec_denied && list_denied && ticks_denied && self_ok
 }
 
+fn capability_restrict_regression_self_test() -> bool {
+    if has_capability(MEMORY_PHYS_MAP_CAP) {
+        write_line("selftest: unexpected phys map cap");
+        return false;
+    }
+
+    let rc = cap_restrict(
+        MEMORY_PHYS_MAP_CAP.as_ptr() as u64,
+        MEMORY_PHYS_MAP_CAP.len() as u64,
+        MEMORY_PHYS_MAP_CAP.as_ptr() as u64,
+        MEMORY_PHYS_MAP_CAP.len() as u64,
+    );
+    if rc == 0 {
+        write_line("selftest: cap restrict escalation allowed");
+        return false;
+    }
+
+    if has_capability(MEMORY_PHYS_MAP_CAP) {
+        write_line("selftest: cap restrict escalation persisted");
+        return false;
+    }
+
+    true
+}
+
 fn test_allowed_capabilities_on_core_service() -> bool {
     let spawn = has_capability("process.spawn");
     if !spawn {
@@ -1213,6 +1239,7 @@ fn test_allowed_capabilities_on_core_service() -> bool {
 
 pub fn run_restricted_self_test() -> bool {
     run_restricted_probe()
+        && capability_restrict_regression_self_test()
 }
 
 pub fn run_self_test() -> bool {
@@ -1246,6 +1273,10 @@ pub fn run_self_test() -> bool {
     write_line("selftest: allowed-checks");
     if !test_allowed_capabilities_on_core_service() {
         write_line("selftest: capability check failed");
+        return false;
+    }
+
+    if !capability_restrict_regression_self_test() {
         return false;
     }
 

@@ -187,19 +187,26 @@ pub fn restrict_capability(
         Ok(cap) => cap,
         Err(e) => return e,
     };
+    if !crate::task::process::process_has_capability(current, cap) {
+        return EACCES;
+    }
     if !crate::capability::capability_implies(cap, restriction) {
         return EACCES;
     }
-    if !crate::task::with_process_mut(current, |proc| {
+    if crate::task::with_process_mut(current, |proc| {
         let caps = proc.capabilities_mut();
-        let _ = caps.remove(cap);
+        if !caps.remove(cap) {
+            return false;
+        }
         caps.insert(restriction);
+        true
     })
-    .is_some()
+    .unwrap_or(false)
     {
+        return SUCCESS;
+    } else {
         return ENOSYS;
     }
-    SUCCESS
 }
 
 fn current_process() -> Option<crate::task::ProcessId> {
