@@ -454,6 +454,7 @@ pub fn fork() -> u64 {
         parent_priority,
         parent_foreground,
         parent_caps,
+        parent_kernel_authorities,
         parent_pt,
         heap_start,
         heap_end,
@@ -472,6 +473,7 @@ pub fn fork() -> u64 {
             p.priority(),
             p.is_foreground(),
             p.capabilities().clone(),
+            p.clone_kernel_authorities_for_fork(),
             p.page_table(),
             p.heap_start(),
             p.heap_end(),
@@ -526,6 +528,7 @@ pub fn fork() -> u64 {
         crate::task::Process::new("fork", parent_priv, Some(parent_pid), parent_priority);
     child_proc.set_foreground(parent_foreground);
     child_proc.set_capabilities_for_exec(parent_caps);
+    child_proc.set_kernel_authorities_for_exec(parent_kernel_authorities);
     child_proc.set_page_table(child_pt);
     child_proc.set_heap_start(heap_start);
     child_proc.set_heap_end(heap_end);

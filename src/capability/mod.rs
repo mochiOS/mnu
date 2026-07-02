@@ -9,6 +9,7 @@ pub mod path;
 
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 /// kernel が直接強制する低レベル権限
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -56,6 +57,60 @@ pub struct KernelAuthority {
 impl KernelAuthority {
     pub const fn new(capability: KernelCapability, object: KernelObjectRef) -> Self {
         Self { capability, object }
+    }
+}
+
+fn parse_u64_component(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        trimmed.parse::<u64>().ok()
+    }
+}
+
+pub fn parse_kernel_authority_spec(spec: &str) -> Option<KernelAuthority> {
+    let phys = spec.strip_prefix("memory.phys.map@")?;
+    let (base_raw, size_raw) = phys.split_once(':')?;
+    let base = parse_u64_component(base_raw)?;
+    let size = parse_u64_component(size_raw)?;
+    if size == 0 {
+        return None;
+    }
+    Some(KernelAuthority::new(
+        KernelCapability::PhysMap,
+        KernelObjectRef::MmioRegion { base, size },
+    ))
+}
+
+pub fn kernel_authority_implies(parent: &KernelAuthority, child: &KernelAuthority) -> bool {
+    if parent.capability != child.capability {
+        return false;
+    }
+
+    match (parent.object, child.object) {
+        (
+            KernelObjectRef::MmioRegion {
+                base: parent_base,
+                size: parent_size,
+            },
+            KernelObjectRef::MmioRegion {
+                base: child_base,
+                size: child_size,
+            },
+        ) => {
+            let Some(parent_end) = parent_base.checked_add(parent_size) else {
+                return false;
+            };
+            let Some(child_end) = child_base.checked_add(child_size) else {
+                return false;
+            };
+            child_base >= parent_base && child_end <= parent_end
+        }
+        _ => parent.object == child.object,
     }
 }
 
@@ -1001,6 +1056,11 @@ pub struct CapabilitySet {
     caps: BTreeSet<Capability>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct KernelAuthoritySet {
+    authorities: Vec<KernelAuthority>,
+}
+
 /// capability 文字列の解析エラー
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CapabilityParseError {
@@ -1076,5 +1136,63 @@ impl CapabilitySet {
     /// この集合が `other` に含まれるか（階層継承を考慮）
     pub fn is_subset_of(&self, other: &CapabilitySet) -> bool {
         self.iter().all(|cap| other.implies(cap))
+    }
+}
+
+impl KernelAuthoritySet {
+    pub fn empty() -> Self {
+        Self {
+            authorities: Vec::new(),
+        }
+    }
+
+    pub fn insert(&mut self, authority: KernelAuthority) {
+        if !self.authorities.contains(&authority) {
+            self.authorities.push(authority);
+        }
+    }
+
+    pub fn remove_exact(&mut self, authority: &KernelAuthority) -> bool {
+        let Some(index) = self
+            .authorities
+            .iter()
+            .position(|existing| existing == authority)
+        else {
+            return false;
+        };
+        self.authorities.remove(index);
+        true
+    }
+
+    pub fn len(&self) -> usize {
+        self.authorities.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.authorities.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &KernelAuthority> {
+        self.authorities.iter()
+    }
+
+    pub fn contains_exact(&self, authority: &KernelAuthority) -> bool {
+        self.authorities.contains(authority)
+    }
+
+    pub fn implies(&self, authority: &KernelAuthority) -> bool {
+        self.authorities
+            .iter()
+            .any(|parent| kernel_authority_implies(parent, authority))
+    }
+
+    pub fn contains_capability(&self, capability: KernelCapability) -> bool {
+        self.authorities
+            .iter()
+            .any(|authority| authority.capability == capability)
+    }
+
+    pub fn is_subset_of(&self, other: &KernelAuthoritySet) -> bool {
+        self.iter().all(|authority| other.implies(authority))
     }
 }

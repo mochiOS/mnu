@@ -7,11 +7,21 @@
 
 extern crate alloc;
 
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::capability::Capability;
+use crate::capability::{
+    kernel_authority_implies, parse_kernel_authority_spec, Capability, KernelAuthority,
+    KernelCapability,
+};
 use crate::syscall::copy_from_user;
 use crate::syscall::types::{EACCES, EFAULT, EINVAL, ENOSYS, SUCCESS};
+
+#[derive(Clone, Copy)]
+enum CapabilityToken {
+    Plain(Capability),
+    Authority(KernelAuthority),
+}
 
 /// 指定スレッドが capability を持つか確認する
 ///
@@ -46,17 +56,25 @@ pub fn check_thread_capability(thread_id: u64, cap_ptr: u64, cap_len: u64) -> u6
     let Ok(name) = core::str::from_utf8(&buf) else {
         return EINVAL;
     };
-    let Some(cap) = Capability::from_str(name) else {
-        return EINVAL;
-    };
-
     let Some(pid) = crate::task::thread_to_process_id(thread_id) else {
         return 0;
     };
-    if crate::task::process::process_has_capability(pid, cap) {
-        1
-    } else {
-        0
+    match parse_capability_token(name) {
+        Some(CapabilityToken::Plain(cap)) => {
+            if crate::task::process::process_has_capability(pid, cap) {
+                1
+            } else {
+                0
+            }
+        }
+        Some(CapabilityToken::Authority(authority)) => {
+            if crate::task::process::process_has_kernel_authority(pid, &authority) {
+                1
+            } else {
+                0
+            }
+        }
+        None => EINVAL,
     }
 }
 
@@ -84,14 +102,31 @@ pub fn query(cap_ptr: u64, cap_len: u64) -> u64 {
     let Ok(name) = core::str::from_utf8(&buf) else {
         return EINVAL;
     };
-    let Some(cap) = Capability::from_str(name) else {
-        return EINVAL;
+    let Some(pid) = current_process() else {
+        return ENOSYS;
     };
-
-    if crate::syscall::security::caller_has_any_capability(&[cap]) {
-        1
-    } else {
-        0
+    match parse_capability_token(name) {
+        Some(CapabilityToken::Plain(cap)) => {
+            if crate::task::process::process_has_capability(pid, cap)
+                || (matches!(cap, Capability::MemoryPhysMap)
+                    && crate::task::process::process_has_kernel_capability_authority(
+                        pid,
+                        KernelCapability::PhysMap,
+                    ))
+            {
+                1
+            } else {
+                0
+            }
+        }
+        Some(CapabilityToken::Authority(authority)) => {
+            if crate::task::process::process_has_kernel_authority(pid, &authority) {
+                1
+            } else {
+                0
+            }
+        }
+        None => EINVAL,
     }
 }
 
@@ -100,14 +135,25 @@ pub fn clone_capability(_cap_ptr: u64, _cap_len: u64) -> u64 {
         Some(pid) => pid,
         None => return ENOSYS,
     };
-    let cap = match read_cap_from_user(_cap_ptr, _cap_len) {
+    let cap = match read_capability_token_from_user(_cap_ptr, _cap_len) {
         Ok(cap) => cap,
         Err(e) => return e,
     };
-    if crate::task::process::process_has_capability(current, cap) {
-        SUCCESS
-    } else {
-        EACCES
+    match cap {
+        CapabilityToken::Plain(cap) => {
+            if crate::task::process::process_has_capability(current, cap) {
+                SUCCESS
+            } else {
+                EACCES
+            }
+        }
+        CapabilityToken::Authority(authority) => {
+            if crate::task::process::process_has_kernel_authority(current, &authority) {
+                SUCCESS
+            } else {
+                EACCES
+            }
+        }
     }
 }
 
@@ -116,13 +162,18 @@ pub fn drop_capability(_cap_ptr: u64, _cap_len: u64) -> u64 {
         Some(pid) => pid,
         None => return ENOSYS,
     };
-    let cap = match read_cap_from_user(_cap_ptr, _cap_len) {
+    let cap = match read_capability_token_from_user(_cap_ptr, _cap_len) {
         Ok(cap) => cap,
         Err(e) => return e,
     };
-    if !crate::task::with_process_mut(current, |proc| proc.capabilities_mut().remove(cap))
-        .unwrap_or(false)
-    {
+    let removed = crate::task::with_process_mut(current, |proc| match cap {
+        CapabilityToken::Plain(cap) => proc.capabilities_mut().remove(cap),
+        CapabilityToken::Authority(authority) => {
+            proc.kernel_authorities_mut().remove_exact(&authority)
+        }
+    })
+    .unwrap_or(false);
+    if !removed {
         return EACCES;
     }
     SUCCESS
@@ -133,15 +184,24 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
         Some(pid) => pid,
         None => return ENOSYS,
     };
-    let cap = match read_cap_from_user(_cap_ptr, _cap_len) {
+    let cap = match read_capability_token_from_user(_cap_ptr, _cap_len) {
         Ok(cap) => cap,
         Err(e) => return e,
     };
-    if !crate::task::process::process_has_capability(current, cap) {
-        return EACCES;
-    }
-    if !cap.is_delegable() {
-        return EACCES;
+    match cap {
+        CapabilityToken::Plain(capability) => {
+            if !crate::task::process::process_has_capability(current, capability) {
+                return EACCES;
+            }
+            if !capability.is_delegable() {
+                return EACCES;
+            }
+        }
+        CapabilityToken::Authority(authority) => {
+            if !crate::task::process::process_has_kernel_authority(current, &authority) {
+                return EACCES;
+            }
+        }
     }
 
     let dest_process = match resolve_destination_process(_dest) {
@@ -152,17 +212,22 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
         return SUCCESS;
     }
 
-    if !crate::task::with_process_mut(current, |proc| proc.capabilities_mut().remove(cap))
-        .unwrap_or(false)
-    {
+    let removed = crate::task::with_process_mut(current, |proc| match cap {
+        CapabilityToken::Plain(capability) => proc.capabilities_mut().remove(capability),
+        CapabilityToken::Authority(authority) => {
+            proc.kernel_authorities_mut().remove_exact(&authority)
+        }
+    })
+    .unwrap_or(false);
+    if !removed {
         return EACCES;
     }
 
-    if crate::task::with_process_mut(dest_process, |proc| {
-        proc.capabilities_mut().insert(cap);
-    })
-    .is_none()
-    {
+    let inserted = crate::task::with_process_mut(dest_process, |proc| match cap {
+        CapabilityToken::Plain(capability) => proc.capabilities_mut().insert(capability),
+        CapabilityToken::Authority(authority) => proc.kernel_authorities_mut().insert(authority),
+    });
+    if inserted.is_none() {
         return ENOSYS;
     }
 
@@ -179,33 +244,66 @@ pub fn restrict_capability(
         Some(pid) => pid,
         None => return ENOSYS,
     };
-    let cap = match read_cap_from_user(_cap_ptr, _cap_len) {
+    let cap = match read_capability_token_from_user(_cap_ptr, _cap_len) {
         Ok(cap) => cap,
         Err(e) => return e,
     };
-    let restriction = match read_cap_from_user(_restriction_ptr, _restriction_len) {
+    let restriction = match read_capability_token_from_user(_restriction_ptr, _restriction_len) {
         Ok(cap) => cap,
         Err(e) => return e,
     };
-    if !crate::task::process::process_has_capability(current, cap) {
-        return EACCES;
-    }
-    if !crate::capability::capability_implies(cap, restriction) {
-        return EACCES;
-    }
-    if crate::task::with_process_mut(current, |proc| {
-        let caps = proc.capabilities_mut();
-        if !caps.remove(cap) {
-            return false;
+    match (cap, restriction) {
+        (CapabilityToken::Plain(cap), CapabilityToken::Plain(restriction)) => {
+            if !crate::task::with_process(current, |proc| proc.capabilities().contains_exact(cap))
+                .unwrap_or(false)
+            {
+                return EACCES;
+            }
+            if !crate::capability::capability_implies(cap, restriction) {
+                return EACCES;
+            }
+            if crate::task::with_process_mut(current, |proc| {
+                let caps = proc.capabilities_mut();
+                if !caps.remove(cap) {
+                    return false;
+                }
+                caps.insert(restriction);
+                true
+            })
+            .unwrap_or(false)
+            {
+                SUCCESS
+            } else {
+                ENOSYS
+            }
         }
-        caps.insert(restriction);
-        true
-    })
-    .unwrap_or(false)
-    {
-        return SUCCESS;
-    } else {
-        return ENOSYS;
+        (CapabilityToken::Authority(cap), CapabilityToken::Authority(restriction)) => {
+            if !crate::task::with_process(current, |proc| {
+                proc.kernel_authorities().contains_exact(&cap)
+            })
+            .unwrap_or(false)
+            {
+                return EACCES;
+            }
+            if !kernel_authority_implies(&cap, &restriction) {
+                return EACCES;
+            }
+            if crate::task::with_process_mut(current, |proc| {
+                let authorities = proc.kernel_authorities_mut();
+                if !authorities.remove_exact(&cap) {
+                    return false;
+                }
+                authorities.insert(restriction);
+                true
+            })
+            .unwrap_or(false)
+            {
+                SUCCESS
+            } else {
+                ENOSYS
+            }
+        }
+        _ => EINVAL,
     }
 }
 
@@ -224,7 +322,7 @@ fn resolve_destination_process(dest: u64) -> Option<crate::task::ProcessId> {
     None
 }
 
-fn read_cap_from_user(cap_ptr: u64, cap_len: u64) -> Result<Capability, u64> {
+fn read_capability_spec_from_user(cap_ptr: u64, cap_len: u64) -> Result<String, u64> {
     let max_cap_name_len = crate::config::kernel().capability.max_name_len;
     if cap_ptr == 0 || cap_len == 0 {
         return Err(EINVAL);
@@ -239,5 +337,17 @@ fn read_cap_from_user(cap_ptr: u64, cap_len: u64) -> Result<Capability, u64> {
         return Err(EFAULT);
     }
     let name = core::str::from_utf8(&buf).map_err(|_| EINVAL)?;
-    Capability::from_str(name).ok_or(EINVAL)
+    Ok(name.to_string())
+}
+
+fn parse_capability_token(spec: &str) -> Option<CapabilityToken> {
+    if let Some(authority) = parse_kernel_authority_spec(spec) {
+        return Some(CapabilityToken::Authority(authority));
+    }
+    Capability::from_str(spec).map(CapabilityToken::Plain)
+}
+
+fn read_capability_token_from_user(cap_ptr: u64, cap_len: u64) -> Result<CapabilityToken, u64> {
+    let spec = read_capability_spec_from_user(cap_ptr, cap_len)?;
+    parse_capability_token(spec.as_str()).ok_or(EINVAL)
 }

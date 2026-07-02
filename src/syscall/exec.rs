@@ -1,4 +1,6 @@
-use crate::capability::{Capability, CapabilitySet};
+use crate::capability::{
+    parse_kernel_authority_spec, Capability, CapabilitySet, KernelAuthoritySet,
+};
 use crate::policy::{
     caller_can_grant_capabilities_on_exec, claim_service_manager_pid, release_service_manager_pid,
     resolve_exec_foreground, resolve_exec_priority, resolve_exec_privilege, ManifestRole,
@@ -151,7 +153,38 @@ fn current_process_capabilities() -> Option<CapabilitySet> {
     crate::task::with_process(pid, |proc| proc.capabilities().clone())
 }
 
-fn validate_requested_exec_capabilities(caps: &CapabilitySet) -> Result<(), u64> {
+fn current_process_kernel_authorities() -> Option<KernelAuthoritySet> {
+    let pid = crate::syscall::security::current_process_id()?;
+    crate::task::with_process(pid, |proc| proc.kernel_authorities().clone())
+}
+
+fn parse_requested_exec_grants(
+    caps_list: &[String],
+) -> Result<(CapabilitySet, KernelAuthoritySet), u64> {
+    use crate::syscall::types::EINVAL;
+
+    let mut caps = CapabilitySet::empty();
+    let mut authorities = KernelAuthoritySet::empty();
+    for spec in caps_list {
+        if let Some(authority) = parse_kernel_authority_spec(spec.as_str()) {
+            authorities.insert(authority);
+            continue;
+        }
+        let Some(cap) = Capability::from_str(spec.as_str()) else {
+            return Err(EINVAL);
+        };
+        if matches!(cap, Capability::MemoryPhysMap) {
+            return Err(EINVAL);
+        }
+        caps.insert(cap);
+    }
+    Ok((caps, authorities))
+}
+
+fn validate_requested_exec_capabilities(
+    caps: &CapabilitySet,
+    authorities: &KernelAuthoritySet,
+) -> Result<(), u64> {
     use crate::syscall::types::{EINVAL, EPERM};
 
     for cap in caps.iter() {
@@ -163,12 +196,15 @@ fn validate_requested_exec_capabilities(caps: &CapabilitySet) -> Result<(), u64>
     let Some(caller_caps) = current_process_capabilities() else {
         return Ok(());
     };
+    let caller_authorities = current_process_kernel_authorities().unwrap_or_default();
 
-    if caps.is_subset_of(&caller_caps) {
-        Ok(())
-    } else {
-        Err(EPERM)
+    if !caps.is_subset_of(&caller_caps) {
+        return Err(EPERM);
     }
+    if !authorities.is_subset_of(&caller_authorities) {
+        return Err(EPERM);
+    }
+    Ok(())
 }
 
 fn parse_manifest_role(raw: u64) -> Option<ManifestRole> {
@@ -205,7 +241,7 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
-    exec_internal(path, None, &extra_args, None, None, None)
+    exec_internal(path, None, &extra_args, None, None, None, None)
 }
 
 /// exec 時に capability を付与して起動する
@@ -246,21 +282,26 @@ pub fn exec_with_capabilities_syscall(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let mut caps = CapabilitySet::empty();
-    for s in &caps_list {
-        let Some(cap) = Capability::from_str(s.as_str()) else {
-            return EINVAL;
-        };
-        caps.insert(cap);
-    }
+    let (caps, authorities) = match parse_requested_exec_grants(&caps_list) {
+        Ok(grants) => grants,
+        Err(errno) => return errno,
+    };
 
-    if let Err(errno) = validate_requested_exec_capabilities(&caps) {
+    if let Err(errno) = validate_requested_exec_capabilities(&caps, &authorities) {
         return errno;
     }
 
     // capability はプロセス生成時に設定する必要がある。
     // 後付けだと、スケジューラ有効時に起動直後の IPC 等が cap 無しで走り得る。
-    exec_internal(path.as_str(), None, &extra_args, Some(caps), None, None)
+    exec_internal(
+        path.as_str(),
+        None,
+        &extra_args,
+        Some(caps),
+        Some(authorities),
+        None,
+        None,
+    )
 }
 
 pub fn exec_manifest_syscall(
@@ -325,18 +366,19 @@ pub fn exec_manifest_syscall(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let mut caps = CapabilitySet::empty();
-    for s in &caps_list {
-        let Some(cap) = Capability::from_str(s.as_str()) else {
-            return EINVAL;
-        };
-        caps.insert(cap);
-    }
-    if let Err(errno) = validate_requested_exec_capabilities(&caps) {
+    let (caps, authorities) = match parse_requested_exec_grants(&caps_list) {
+        Ok(grants) => grants,
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = validate_requested_exec_capabilities(&caps, &authorities) {
         crate::warn!(
-            "exec_manifest capability validation failed requested_caps={} caller_caps={}",
+            "exec_manifest capability validation failed requested_caps={} requested_authorities={} caller_caps={} caller_authorities={}",
             caps.len(),
-            current_process_capabilities().map(|c| c.len()).unwrap_or(0)
+            authorities.len(),
+            current_process_capabilities().map(|c| c.len()).unwrap_or(0),
+            current_process_kernel_authorities()
+                .map(|a| a.len())
+                .unwrap_or(0)
         );
         return errno;
     }
@@ -353,6 +395,7 @@ pub fn exec_manifest_syscall(
         None,
         &extra_args,
         Some(caps),
+        Some(authorities),
         requested_privilege,
         Some(role),
     )
@@ -360,7 +403,7 @@ pub fn exec_manifest_syscall(
 
 /// 名前を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
 pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
-    exec_internal(path, Some(name), &[], None, None, None)
+    exec_internal(path, Some(name), &[], None, None, None, None)
 }
 
 /// 名前と初期 capability を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
@@ -380,6 +423,7 @@ pub fn exec_kernel_with_name_and_caps(
         Some(name),
         &[],
         Some(initial_caps),
+        Some(KernelAuthoritySet::empty()),
         Some(requested_privilege),
         manifest_role,
     )
@@ -390,6 +434,7 @@ fn exec_internal(
     name_override: Option<&str>,
     args: &[&str],
     initial_caps: Option<CapabilitySet>,
+    initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     manifest_role: Option<ManifestRole>,
 ) -> u64 {
@@ -420,6 +465,7 @@ fn exec_internal(
             args,
             None,
             initial_caps,
+            initial_kernel_authorities,
             requested_privilege,
         )
     } else {
@@ -496,7 +542,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
 
     if let Some(data) = crate::cext::fs::read_all(&path) {
-        return exec_with_data(&data, &path, &path, &extra_args, None, None, None);
+        return exec_with_data(&data, &path, &path, &extra_args, None, None, None, None);
     }
 
     crate::syscall::types::ENOENT
@@ -651,6 +697,7 @@ fn exec_with_data(
     args: &[&str],
     parent_override: Option<crate::task::ProcessId>,
     initial_caps: Option<CapabilitySet>,
+    initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
 ) -> u64 {
     crate::debug!("exec: name={}", process_name);
@@ -1112,6 +1159,9 @@ fn exec_with_data(
             // スケジューラが有効だと `add_thread()` の直後に動き出すため、
             // syscall 後付けだと競合して「cap不足」になる。
             proc.set_capabilities_for_exec(caps);
+        }
+        if let Some(authorities) = initial_kernel_authorities {
+            proc.set_kernel_authorities_for_exec(authorities);
         }
         proc.set_page_table(new_pt_phys);
         proc.set_stack_bottom(stack_base_vaddr);
@@ -1599,6 +1649,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         delegated_parent_pid(),
         None,
         None,
+        None,
     )
 }
 
@@ -1638,6 +1689,7 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         path.as_str(),
         &[],
         delegated_parent_pid(),
+        None,
         None,
         None,
     )
@@ -1691,6 +1743,7 @@ pub fn exec_from_buffer_named_args_syscall(
         path.as_str(),
         &args_refs,
         delegated_parent_pid(),
+        None,
         None,
         None,
     )
@@ -1765,6 +1818,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         path.as_str(),
         &args_refs,
         parent_override.or_else(delegated_parent_pid),
+        None,
         None,
         None,
     )

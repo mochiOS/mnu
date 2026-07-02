@@ -18,7 +18,7 @@ pub mod time;
 mod console;
 mod types;
 
-use crate::capability::Capability;
+use crate::capability::{KernelAuthority, KernelCapability, KernelObjectRef};
 use alloc::string::String;
 use alloc::vec::Vec;
 use x86_64::instructions::port::Port;
@@ -160,10 +160,6 @@ pub fn service_delegate_register(kind_raw: u64, pid_raw: u64) -> u64 {
 
 pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
     use crate::syscall::types::{EACCES, EINVAL, ENOMEM, EPERM, SUCCESS};
-
-    if !crate::syscall::security::caller_has_any_capability(&[Capability::MemoryPhysMap]) {
-        return EACCES;
-    }
     if virt_addr == 0
         || size == 0
         || (virt_addr & 0xfff) != 0
@@ -187,6 +183,16 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
         Some(pid) => pid,
         None => return ENOMEM,
     };
+    let requested_authority = KernelAuthority::new(
+        KernelCapability::PhysMap,
+        KernelObjectRef::MmioRegion {
+            base: phys_addr,
+            size,
+        },
+    );
+    if !crate::task::process_has_kernel_authority(pid, &requested_authority) {
+        return EACCES;
+    }
     let pt_phys = match crate::task::with_process(pid, |proc| proc.page_table()).flatten() {
         Some(pt) => pt,
         None => return ENOMEM,

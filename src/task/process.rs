@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use crate::capability::CapabilitySet;
+use crate::capability::{CapabilitySet, KernelAuthority, KernelAuthoritySet, KernelCapability};
 use crate::result::{Kernel, Process as ProcessError, Result};
 
 use super::fd_table::FdTable;
@@ -326,6 +326,8 @@ pub struct Process {
     /// ユーザープロセスが自分で capability を増やせると sandbox を回避できるため、
     /// 変更は信頼済みの起動経路からのみ行う。
     capabilities: CapabilitySet,
+    /// object-scoped kernel authority
+    kernel_authorities: KernelAuthoritySet,
     /// 親プロセスID（存在する場合）
     parent_id: Option<ProcessId>,
     /// ページテーブルのアドレス（メモリ空間）。Noneの場合はカーネル空間を共有。
@@ -405,6 +407,7 @@ impl Process {
             state: ProcessState::Running,
             privilege,
             capabilities: CapabilitySet::empty(),
+            kernel_authorities: KernelAuthoritySet::empty(),
             parent_id,
             page_table: None, // TODO: ページテーブル実装後に設定
             page_table_owned: true,
@@ -460,9 +463,17 @@ impl Process {
         &self.capabilities
     }
 
+    pub fn kernel_authorities(&self) -> &KernelAuthoritySet {
+        &self.kernel_authorities
+    }
+
     /// capability 集合を可変取得（kernel 内部用）
     pub(crate) fn capabilities_mut(&mut self) -> &mut CapabilitySet {
         &mut self.capabilities
+    }
+
+    pub(crate) fn kernel_authorities_mut(&mut self) -> &mut KernelAuthoritySet {
+        &mut self.kernel_authorities
     }
 
     /// exec 経路でプロセス生成時に capability を設定する（カーネル内部用）
@@ -471,6 +482,10 @@ impl Process {
     /// capability は sandbox の根幹なので、ユーザー空間へ公開しないこと。
     pub(crate) fn set_capabilities_for_exec(&mut self, caps: CapabilitySet) {
         self.capabilities = caps;
+    }
+
+    pub(crate) fn set_kernel_authorities_for_exec(&mut self, authorities: KernelAuthoritySet) {
+        self.kernel_authorities = authorities;
     }
 
     /// プロセス名を取得
@@ -705,6 +720,18 @@ impl Process {
 
     pub fn clone_mmap_regions_for_fork(&self) -> alloc::vec::Vec<MmapRegion> {
         self.mmap_regions.clone()
+    }
+
+    pub fn clone_kernel_authorities_for_fork(&self) -> KernelAuthoritySet {
+        self.kernel_authorities.clone()
+    }
+
+    pub fn has_kernel_authority(&self, authority: &KernelAuthority) -> bool {
+        self.kernel_authorities.implies(authority)
+    }
+
+    pub fn has_kernel_capability_authority(&self, capability: KernelCapability) -> bool {
+        self.kernel_authorities.contains_capability(capability)
     }
 
     pub fn mmio_mappings(&self) -> &[MmioMapping] {
@@ -1345,4 +1372,18 @@ pub fn set_process_capabilities(pid: ProcessId, caps: CapabilitySet) -> Result<(
 /// プロセスが指定 capability を持つか（階層継承を含む）
 pub fn process_has_capability(pid: ProcessId, cap: crate::capability::Capability) -> bool {
     with_process(pid, |proc| proc.capabilities.contains(cap)).unwrap_or(false)
+}
+
+pub fn process_has_kernel_authority(
+    pid: ProcessId,
+    authority: &crate::capability::KernelAuthority,
+) -> bool {
+    with_process(pid, |proc| proc.has_kernel_authority(authority)).unwrap_or(false)
+}
+
+pub fn process_has_kernel_capability_authority(
+    pid: ProcessId,
+    capability: crate::capability::KernelCapability,
+) -> bool {
+    with_process(pid, |proc| proc.has_kernel_capability_authority(capability)).unwrap_or(false)
 }
