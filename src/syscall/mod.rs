@@ -444,6 +444,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
             fs::file_rename(arg0 as i64, arg1, arg2 as i64, arg3)
         }
         x if x == SyscallNumber::FileSync as u64 => fs::file_sync(arg0),
+        x if x == SyscallNumber::Chdir as u64 => fs::chdir(arg0),
+        x if x == SyscallNumber::Getcwd as u64 => fs::getcwd(arg0, arg1),
         _ => ENOSYS,
     }
 }
