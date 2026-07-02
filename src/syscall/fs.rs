@@ -673,9 +673,27 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
     }
 }
 
-/// Mkdirシステムコール（読み取り専用ファイルシステムのため未実装）
-pub fn mkdir(_path_ptr: u64, _mode: u64) -> u64 {
-    ENOSYS
+/// Mkdirシステムコール
+pub fn mkdir(path_ptr: u64, mode: u64) -> u64 {
+    if path_ptr == 0 {
+        return EINVAL;
+    }
+    let pid = match current_process_id_raw() {
+        Some(p) => p,
+        None => return EBADF,
+    };
+    let path = match read_cstring(path_ptr) {
+        Ok(s) => s,
+        Err(errno) => return errno,
+    };
+    let resolved = resolve_path(pid, &path);
+    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_CREATE) {
+        return errno;
+    }
+    if crate::cext::fs::create(&resolved, mode as u32) != 0 {
+        return EIO;
+    }
+    SUCCESS
 }
 
 /// Rmdirシステムコール
