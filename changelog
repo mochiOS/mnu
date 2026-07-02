@@ -1,5 +1,5 @@
-the mnu kernel ChangeLog   - version 0.11
-    - Release date: 2026-06-20
+the mnu kernel ChangeLog   - version 0.12-rc1
+    - Release date: 2026-07-02
     - Release creator: tas0dev
 
 Changes:
@@ -18,6 +18,19 @@ Changes:
   disk/filesystem modules.
 * Switch rootfs access and executable loading to the
   cext-backed path.
+* Fixed MOC-SA-2026-0702-0001: In the mnu kernel's
+  capability restriction processing,
+  it is possible to add a restricted capability without
+  verifying whether the caller actually possesses
+  the parent capability.
+* Fixed MOC-SA-2026-0702-0002: In the mnu kernel's
+  physical memory mapping process,
+  a physical address range specified by a user process
+  can be mapped into user space without sufficient
+  validation.
+* Fixed MOC-SA-2026-0702-0003: In the SYSCALL entry
+  handling of the mnu kernel, Rust functions or kernel
+  metadata are accessed before switching to the kernel CR3.
 * Publish execve and service launch fixes needed for
   userland spawn/exec flows.
 * Add generic IRQ dispatch support used by cext-driven
@@ -34,3 +47,4 @@ Changes:
   cleanup.
 * Restrict driver-side DMA/MMIO grants to the USB driver
   launch path instead of all drivers.
+* Update security policy guidlines.
