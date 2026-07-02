@@ -10,6 +10,10 @@
 //!   R11 = ユーザーの RFLAGS (SYSCALL が自動保存)
 //!   RSP = まだユーザースタック
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+static PRE_RUST_ENTRY_CHECK_LOGGED: AtomicBool = AtomicBool::new(false);
+
 /// SYSCALL/SYSRET に必要な MSR を初期化する
 ///
 /// カーネル GDT 構成 (x86_64-unknown-uefi / MS ABI):
@@ -169,6 +173,26 @@ pub fn kpti_leave_after_trap(entered_from_user: bool) {
     }
 }
 
+pub fn verify_kernel_page_table_before_rust() {
+    let kernel_cr3 = crate::percpu::kernel_cr3();
+    if kernel_cr3 == 0 {
+        return;
+    }
+
+    let (current_cr3, _) = x86_64::registers::control::Cr3::read();
+    let current = current_cr3.start_address().as_u64();
+    if current != kernel_cr3 {
+        panic!(
+            "SYSCALL entry reached Rust before switching to kernel CR3: current={:#x} kernel={:#x}",
+            current, kernel_cr3
+        );
+    }
+
+    if !PRE_RUST_ENTRY_CHECK_LOGGED.swap(true, Ordering::AcqRel) {
+        crate::info!("SYSCALL entry pre-Rust CR3 check passed");
+    }
+}
+
 /// SYSCALL エントリポイント (naked function)
 ///
 /// 呼ばれた時点:
@@ -225,6 +249,16 @@ pub unsafe extern "C" fn syscall_entry() {
         "push r14",
         "push r15",
         "push qword ptr gs:[{user_rsp_tmp_off}]",
+
+        // Switch to the kernel page table before the first Rust call.
+        "mov rax, cr3",
+        "mov r10, qword ptr gs:[{kernel_cr3_off}]",
+        "test r10, r10",
+        "jz 3f",
+        "cmp rax, r10",
+        "je 3f",
+        "mov cr3, r10",
+        "3:",
 
         // カーネルデータセグメント
         "mov ax, 0x10",
@@ -342,6 +376,7 @@ pub unsafe extern "C" fn syscall_entry() {
         "call {kill_fn}",
 
         sys_rsp_off = const crate::percpu::GS_SYSCALL_KERNEL_RSP_OFFSET,
+        kernel_cr3_off = const crate::percpu::GS_KERNEL_CR3_OFFSET,
         user_rsp_tmp_off = const crate::percpu::GS_SYSCALL_USER_RSP_TMP_OFFSET,
         save_user_context_for_fork = sym crate::syscall::save_user_context_for_fork,
         fs_base_fn = sym current_thread_fs_base_for_sysret,

@@ -383,6 +383,7 @@ pub extern "sysv64" fn save_user_context_for_fork(
     user_rsp: u64,
     user_rflags: u64,
 ) {
+    crate::syscall::syscall_entry::verify_kernel_page_table_before_rust();
     let _ = num;
     if let Some(tid) = crate::task::current_thread_id() {
         let _ = crate::task::with_thread_mut(tid, |thread| {

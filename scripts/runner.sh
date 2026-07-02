@@ -231,13 +231,17 @@ cleanup() {
 trap cleanup EXIT
 
 PASS_FOUND=0
+KPTI_ENTRY_CHECK_FOUND=0
 NEXT_LINE=1
 
 for _ in $(seq 1 600); do
     while IFS= read -r line; do
         if [[ "$line" == *"USERLAND SELF-TEST PASS"* ]]; then
             PASS_FOUND=1
-            break
+        fi
+
+        if [[ "$line" == *"SYSCALL entry pre-Rust CR3 check passed"* ]]; then
+            KPTI_ENTRY_CHECK_FOUND=1
         fi
 
         if [[ "$line" == *"USERLAND SELF-TEST FAIL"* ]]; then
@@ -253,7 +257,7 @@ for _ in $(seq 1 600); do
 
     NEXT_LINE="$(($(wc -l < "${SERIAL_LOG}") + 1))"
 
-    if [[ "${PASS_FOUND}" -eq 1 ]]; then
+    if [[ "${PASS_FOUND}" -eq 1 && "${KPTI_ENTRY_CHECK_FOUND}" -eq 1 ]]; then
         break
     fi
 
@@ -266,6 +270,12 @@ done
 
 if [[ "${PASS_FOUND}" -ne 1 ]]; then
     echo "fatal: userland self-test did not report PASS" >&2
+    echo "serial log: ${SERIAL_LOG}" >&2
+    exit 1
+fi
+
+if [[ "${KPTI_ENTRY_CHECK_FOUND}" -ne 1 ]]; then
+    echo "fatal: syscall entry KPTI regression check did not report PASS" >&2
     echo "serial log: ${SERIAL_LOG}" >&2
     exit 1
 fi

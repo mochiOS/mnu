@@ -3,13 +3,12 @@
 //! APIC ID をキーに CPU ローカルスロットを選択する。
 
 use core::arch::asm;
+use core::mem::offset_of;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::registers::control::Cr3;
 
 const MAX_CPUS: usize = 64;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
-pub const GS_SYSCALL_KERNEL_RSP_OFFSET: usize = 8;
-pub const GS_SYSCALL_USER_RSP_TMP_OFFSET: usize = 24;
 
 #[repr(C)]
 struct PerCpuState {
@@ -19,6 +18,10 @@ struct PerCpuState {
     current_thread_slot: AtomicU64,
     syscall_user_rsp_tmp: AtomicU64,
 }
+
+pub const GS_KERNEL_CR3_OFFSET: usize = offset_of!(PerCpuState, kernel_cr3);
+pub const GS_SYSCALL_KERNEL_RSP_OFFSET: usize = offset_of!(PerCpuState, syscall_kernel_rsp);
+pub const GS_SYSCALL_USER_RSP_TMP_OFFSET: usize = offset_of!(PerCpuState, syscall_user_rsp_tmp);
 
 impl PerCpuState {
     const fn new() -> Self {
