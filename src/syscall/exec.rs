@@ -638,7 +638,7 @@ fn build_initial_user_stack(
 
     let string_area_len = string_block.len();
     let pointers_bytes =
-        8 + (argv.len() * 8) + 8 + (envp.len() * 8) + 8 + (auxv_entries.len() * 16);
+        8 + (argv.len() * 8) + 8 + (envp.len() * 8) + 8 + (auxv_entries.len() * 16) + 16;
     let total_data_needed = string_area_len + pointers_bytes;
     let padding_len = (16 - (total_data_needed % 16)) % 16;
     let total_size = total_data_needed + padding_len;
@@ -684,6 +684,8 @@ fn build_initial_user_stack(
         page_data.extend_from_slice(&key.to_ne_bytes());
         page_data.extend_from_slice(&resolved_value.to_ne_bytes());
     }
+    page_data.extend_from_slice(&0u64.to_ne_bytes());
+    page_data.extend_from_slice(&0u64.to_ne_bytes());
 
     page_data.resize(page_data.len() + padding_len, 0);
     page_data.extend_from_slice(&string_block);
