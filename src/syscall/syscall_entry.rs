@@ -212,9 +212,9 @@ pub unsafe extern "C" fn syscall_entry() {
         // user GS -> kernel GS
         "swapgs",
 
-        // ユーザーRSPを退避し、カーネルスタックへ切り替える
+        // ユーザーRSPを退避し、専用の trampoline stack へ切り替える
         "mov qword ptr gs:[{user_rsp_tmp_off}], rsp",
-        "mov rsp, qword ptr gs:[{sys_rsp_off}]",
+        "mov rsp, qword ptr gs:[{trampoline_rsp_off}]",
 
         // 保存順:
         // [rsp+120] syscall num / return value
@@ -259,6 +259,16 @@ pub unsafe extern "C" fn syscall_entry() {
         "je 3f",
         "mov cr3, r10",
         "3:",
+
+        // ここからは kernel CR3。実カーネルスタックへ切り替え、保存済みレジスタをコピーする。
+        "mov r11, rsp",
+        "mov rsp, qword ptr gs:[{sys_rsp_off}]",
+        "sub rsp, 128",
+        "mov rdi, rsp",
+        "mov rsi, r11",
+        "mov ecx, 16",
+        "cld",
+        "rep movsq",
 
         // カーネルデータセグメント
         "mov ax, 0x10",
@@ -378,6 +388,7 @@ pub unsafe extern "C" fn syscall_entry() {
         sys_rsp_off = const crate::percpu::GS_SYSCALL_KERNEL_RSP_OFFSET,
         kernel_cr3_off = const crate::percpu::GS_KERNEL_CR3_OFFSET,
         user_rsp_tmp_off = const crate::percpu::GS_SYSCALL_USER_RSP_TMP_OFFSET,
+        trampoline_rsp_off = const crate::percpu::GS_SYSCALL_TRAMPOLINE_RSP_OFFSET,
         save_user_context_for_fork = sym crate::syscall::save_user_context_for_fork,
         fs_base_fn = sym current_thread_fs_base_for_sysret,
         dispatch = sym super::syscall_dispatch_sysv,

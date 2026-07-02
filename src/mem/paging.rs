@@ -873,6 +873,8 @@ pub fn create_user_page_table() -> Result<u64> {
         );
     }
 
+    crate::percpu::map_syscall_shared_region_in_table(new_l4_phys)?;
+
     Ok(new_l4_phys)
 }
 

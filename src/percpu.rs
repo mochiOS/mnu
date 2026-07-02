@@ -6,9 +6,13 @@ use core::arch::asm;
 use core::mem::offset_of;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
+use x86_64::{PhysAddr, VirtAddr};
 
 const MAX_CPUS: usize = 64;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+pub const SYSCALL_SHARED_BASE: u64 = 0x0000_7fff_0000_0000;
+pub const SYSCALL_SHARED_STACK_BASE: u64 = SYSCALL_SHARED_BASE + (MAX_CPUS as u64) * 4096;
 
 #[repr(C)]
 struct PerCpuState {
@@ -19,9 +23,20 @@ struct PerCpuState {
     syscall_user_rsp_tmp: AtomicU64,
 }
 
-pub const GS_KERNEL_CR3_OFFSET: usize = offset_of!(PerCpuState, kernel_cr3);
-pub const GS_SYSCALL_KERNEL_RSP_OFFSET: usize = offset_of!(PerCpuState, syscall_kernel_rsp);
-pub const GS_SYSCALL_USER_RSP_TMP_OFFSET: usize = offset_of!(PerCpuState, syscall_user_rsp_tmp);
+#[repr(C)]
+struct SyscallPerCpuState {
+    kernel_cr3: AtomicU64,
+    syscall_kernel_rsp: AtomicU64,
+    syscall_user_rsp_tmp: AtomicU64,
+    syscall_trampoline_rsp: AtomicU64,
+}
+
+pub const GS_KERNEL_CR3_OFFSET: usize = offset_of!(SyscallPerCpuState, kernel_cr3);
+pub const GS_SYSCALL_KERNEL_RSP_OFFSET: usize = offset_of!(SyscallPerCpuState, syscall_kernel_rsp);
+pub const GS_SYSCALL_USER_RSP_TMP_OFFSET: usize =
+    offset_of!(SyscallPerCpuState, syscall_user_rsp_tmp);
+pub const GS_SYSCALL_TRAMPOLINE_RSP_OFFSET: usize =
+    offset_of!(SyscallPerCpuState, syscall_trampoline_rsp);
 
 impl PerCpuState {
     const fn new() -> Self {
@@ -35,7 +50,15 @@ impl PerCpuState {
     }
 }
 
+impl SyscallPerCpuState {
+    fn at_vaddr(vaddr: u64) -> &'static Self {
+        unsafe { &*(vaddr as *const Self) }
+    }
+}
+
 static CPU_STATES: [PerCpuState; MAX_CPUS] = [const { PerCpuState::new() }; MAX_CPUS];
+static SYSCALL_STATE_PHYS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static SYSCALL_STACK_PHYS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 #[inline]
 fn state_for_current_cpu() -> &'static PerCpuState {
@@ -61,6 +84,108 @@ unsafe fn write_kernel_gs_base(base: u64) {
         in("edx") hi,
         options(nomem, nostack)
     );
+}
+
+#[inline]
+fn syscall_state_vaddr_for_cpu(cpu_id: usize) -> u64 {
+    SYSCALL_SHARED_BASE + (cpu_id as u64) * 4096
+}
+
+#[inline]
+fn syscall_stack_vaddr_for_cpu(cpu_id: usize) -> u64 {
+    SYSCALL_SHARED_STACK_BASE + (cpu_id as u64) * 4096
+}
+
+pub fn current_cpu_syscall_state_vaddr() -> u64 {
+    syscall_state_vaddr_for_cpu(current_cpu_id())
+}
+
+fn map_syscall_page(cpu_id: usize, vaddr: u64, phys: u64) {
+    if crate::mem::paging::translate_addr(VirtAddr::new(vaddr)).is_some() {
+        return;
+    }
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(vaddr));
+    let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+    if let Err(err) = crate::mem::paging::map_page(page, frame, flags) {
+        panic!(
+            "failed to map syscall shared page for cpu {} at {:#x}: {:?}",
+            cpu_id, vaddr, err
+        );
+    }
+}
+
+fn ensure_syscall_shared_region_for_cpu(cpu_id: usize) {
+    if SYSCALL_STATE_PHYS[cpu_id].load(Ordering::SeqCst) != 0
+        && SYSCALL_STACK_PHYS[cpu_id].load(Ordering::SeqCst) != 0
+    {
+        return;
+    }
+
+    let state_frame = crate::mem::frame::allocate_frame().unwrap_or_else(|_| {
+        panic!(
+            "failed to allocate syscall shared state page for cpu {}",
+            cpu_id
+        )
+    });
+    let stack_frame = crate::mem::frame::allocate_frame().unwrap_or_else(|_| {
+        panic!(
+            "failed to allocate syscall shared stack page for cpu {}",
+            cpu_id
+        )
+    });
+    let state_phys = state_frame.start_address().as_u64();
+    let stack_phys = stack_frame.start_address().as_u64();
+
+    let phys_off = crate::mem::paging::physical_memory_offset()
+        .unwrap_or_else(|| panic!("physical memory offset unavailable for syscall shared region"));
+    unsafe {
+        core::ptr::write_bytes((state_phys + phys_off) as *mut u8, 0, 4096);
+        core::ptr::write_bytes((stack_phys + phys_off) as *mut u8, 0, 4096);
+    }
+
+    map_syscall_page(cpu_id, syscall_state_vaddr_for_cpu(cpu_id), state_phys);
+    map_syscall_page(cpu_id, syscall_stack_vaddr_for_cpu(cpu_id), stack_phys);
+
+    SYSCALL_STATE_PHYS[cpu_id].store(state_phys, Ordering::SeqCst);
+    SYSCALL_STACK_PHYS[cpu_id].store(stack_phys, Ordering::SeqCst);
+
+    let syscall_state = SyscallPerCpuState::at_vaddr(syscall_state_vaddr_for_cpu(cpu_id));
+    syscall_state
+        .syscall_trampoline_rsp
+        .store(syscall_stack_vaddr_for_cpu(cpu_id) + 4096, Ordering::SeqCst);
+}
+
+pub fn map_syscall_shared_region_in_table(table_phys: u64) -> crate::result::Result<()> {
+    for cpu_id in 0..MAX_CPUS {
+        let state_phys = SYSCALL_STATE_PHYS[cpu_id].load(Ordering::SeqCst);
+        let stack_phys = SYSCALL_STACK_PHYS[cpu_id].load(Ordering::SeqCst);
+        if state_phys == 0 || stack_phys == 0 {
+            continue;
+        }
+        crate::mem::paging::map_page_in_table(
+            table_phys,
+            syscall_state_vaddr_for_cpu(cpu_id),
+            state_phys,
+            true,
+            false,
+        )?;
+        crate::mem::paging::map_page_in_table(
+            table_phys,
+            syscall_stack_vaddr_for_cpu(cpu_id),
+            stack_phys,
+            true,
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+#[inline]
+fn syscall_state_for_current_cpu() -> &'static SyscallPerCpuState {
+    let cpu_id = current_cpu_id();
+    ensure_syscall_shared_region_for_cpu(cpu_id);
+    SyscallPerCpuState::at_vaddr(syscall_state_vaddr_for_cpu(cpu_id))
 }
 
 #[inline]
@@ -115,6 +240,17 @@ pub fn init_current_cpu(syscall_kernel_rsp: u64) {
     state.current_thread_id.store(0, Ordering::SeqCst);
     state.current_thread_slot.store(u64::MAX, Ordering::SeqCst);
     state.syscall_user_rsp_tmp.store(0, Ordering::SeqCst);
+    ensure_syscall_shared_region_for_cpu(slot);
+    let syscall_state = SyscallPerCpuState::at_vaddr(syscall_state_vaddr_for_cpu(slot));
+    syscall_state
+        .kernel_cr3
+        .store(cr3.start_address().as_u64(), Ordering::SeqCst);
+    syscall_state
+        .syscall_kernel_rsp
+        .store(syscall_kernel_rsp, Ordering::SeqCst);
+    syscall_state
+        .syscall_user_rsp_tmp
+        .store(0, Ordering::SeqCst);
     install_current_cpu_gs_base();
 }
 
@@ -123,7 +259,9 @@ pub fn init_boot_cpu(syscall_kernel_rsp: u64) {
 }
 
 pub fn install_current_cpu_gs_base() {
-    let state = state_for_current_cpu() as *const PerCpuState as u64;
+    let cpu_id = current_cpu_id();
+    ensure_syscall_shared_region_for_cpu(cpu_id);
+    let state = syscall_state_vaddr_for_cpu(cpu_id);
     unsafe {
         write_kernel_gs_base(state);
     }
@@ -135,6 +273,9 @@ pub fn kernel_cr3() -> u64 {
 
 pub fn set_syscall_kernel_rsp(rsp: u64) {
     state_for_current_cpu()
+        .syscall_kernel_rsp
+        .store(rsp, Ordering::SeqCst);
+    syscall_state_for_current_cpu()
         .syscall_kernel_rsp
         .store(rsp, Ordering::SeqCst);
 }
