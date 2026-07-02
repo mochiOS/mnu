@@ -73,6 +73,14 @@ pub struct DmaBuffer {
     page_count: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct MmioMapping {
+    virt_start: u64,
+    len: u64,
+    phys_start: u64,
+    writable: bool,
+}
+
 impl DmaBuffer {
     pub fn new(handle: u64, virt_start: u64, len: u64, phys_start: u64, page_count: usize) -> Self {
         Self {
@@ -102,6 +110,37 @@ impl DmaBuffer {
 
     pub fn page_count(&self) -> usize {
         self.page_count
+    }
+
+    pub fn end(&self) -> Option<u64> {
+        self.virt_start.checked_add(self.len)
+    }
+}
+
+impl MmioMapping {
+    pub fn new(virt_start: u64, len: u64, phys_start: u64, writable: bool) -> Self {
+        Self {
+            virt_start,
+            len,
+            phys_start,
+            writable,
+        }
+    }
+
+    pub fn virt_start(&self) -> u64 {
+        self.virt_start
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn phys_start(&self) -> u64 {
+        self.phys_start
+    }
+
+    pub fn writable(&self) -> bool {
+        self.writable
     }
 
     pub fn end(&self) -> Option<u64> {
@@ -326,6 +365,8 @@ pub struct Process {
     fd_table: alloc::boxed::Box<FdTable>,
     /// file-backed mmap の VMA テーブル
     mmap_regions: alloc::vec::Vec<MmapRegion>,
+    /// 借用 MMIO マッピング
+    mmio_mappings: Vec<MmioMapping>,
     /// カーネル管理 DMA バッファ
     dma_buffers: Vec<DmaBuffer>,
     /// プロセスごとの resource limit
@@ -388,6 +429,7 @@ impl Process {
             signal_state: alloc::boxed::Box::new(SignalState::new()),
             fd_table: FdTable::new_boxed(),
             mmap_regions: alloc::vec::Vec::new(),
+            mmio_mappings: Vec::new(),
             dma_buffers: Vec::new(),
             resource_limits: ResourceLimits::default(),
         }
@@ -619,6 +661,18 @@ impl Process {
         if overlaps {
             return false;
         }
+        let mmio_overlap = self.mmio_mappings.iter().any(|existing| {
+            let Some(existing_end) = existing.end() else {
+                return true;
+            };
+            let Some(region_end) = region.end() else {
+                return true;
+            };
+            region.start() < existing_end && existing.virt_start() < region_end
+        });
+        if mmio_overlap {
+            return false;
+        }
         self.mmap_regions.push(region);
         true
     }
@@ -653,6 +707,90 @@ impl Process {
         self.mmap_regions.clone()
     }
 
+    pub fn mmio_mappings(&self) -> &[MmioMapping] {
+        &self.mmio_mappings
+    }
+
+    pub fn mmio_mapping_count(&self) -> usize {
+        self.mmio_mappings.len()
+    }
+
+    pub fn has_mmio_mappings(&self) -> bool {
+        !self.mmio_mappings.is_empty()
+    }
+
+    pub fn add_mmio_mapping(&mut self, mapping: MmioMapping) -> bool {
+        let Some(mapping_end) = mapping.end() else {
+            return false;
+        };
+        let mmio_overlap = self.mmio_mappings.iter().any(|existing| {
+            let Some(existing_end) = existing.end() else {
+                return true;
+            };
+            mapping.virt_start() < existing_end && existing.virt_start() < mapping_end
+        });
+        if mmio_overlap {
+            return false;
+        }
+        let mmap_overlap = self.mmap_regions.iter().any(|region| {
+            let Some(region_end) = region.end() else {
+                return true;
+            };
+            mapping.virt_start() < region_end && region.start() < mapping_end
+        });
+        if mmap_overlap {
+            return false;
+        }
+        let dma_overlap = self.dma_buffers.iter().any(|existing| {
+            let Some(existing_end) = existing.end() else {
+                return true;
+            };
+            mapping.virt_start() < existing_end && existing.virt_start() < mapping_end
+        });
+        if dma_overlap {
+            return false;
+        }
+        if self.heap_start != 0
+            && self.heap_end != 0
+            && mapping.virt_start() < self.heap_end
+            && self.heap_start < mapping_end
+        {
+            return false;
+        }
+        if self.stack_bottom != 0
+            && self.stack_top != 0
+            && mapping.virt_start() < self.stack_top
+            && self.stack_bottom < mapping_end
+        {
+            return false;
+        }
+        self.mmio_mappings.push(mapping);
+        true
+    }
+
+    pub fn remove_mmio_mapping(&mut self, start: u64, len: u64) -> Option<MmioMapping> {
+        let end = start.checked_add(len)?;
+        let idx = self
+            .mmio_mappings
+            .iter()
+            .position(|mapping| mapping.virt_start() == start && mapping.end() == Some(end))?;
+        Some(self.mmio_mappings.remove(idx))
+    }
+
+    pub fn find_mmio_mapping_by_addr(&self, addr: u64, len: u64) -> Option<&MmioMapping> {
+        let end = addr.checked_add(len)?;
+        self.mmio_mappings.iter().find(|mapping| {
+            let Some(mapping_end) = mapping.end() else {
+                return false;
+            };
+            addr < mapping_end && mapping.virt_start() < end
+        })
+    }
+
+    pub fn take_mmio_mappings(&mut self) -> Vec<MmioMapping> {
+        core::mem::take(&mut self.mmio_mappings)
+    }
+
     pub fn dma_buffers(&self) -> &[DmaBuffer] {
         &self.dma_buffers
     }
@@ -679,10 +817,18 @@ impl Process {
         if mmap_overlap {
             return false;
         }
-        if self.heap_start != 0 && self.heap_end != 0 && buffer.virt_start < self.heap_end && self.heap_start < buffer_end {
+        if self.heap_start != 0
+            && self.heap_end != 0
+            && buffer.virt_start < self.heap_end
+            && self.heap_start < buffer_end
+        {
             return false;
         }
-        if self.stack_bottom != 0 && self.stack_top != 0 && buffer.virt_start < self.stack_top && self.stack_bottom < buffer_end {
+        if self.stack_bottom != 0
+            && self.stack_top != 0
+            && buffer.virt_start < self.stack_top
+            && self.stack_bottom < buffer_end
+        {
             return false;
         }
         self.dma_buffers.push(buffer);
@@ -690,7 +836,10 @@ impl Process {
     }
 
     pub fn remove_dma_buffer(&mut self, handle: u64) -> Option<DmaBuffer> {
-        let idx = self.dma_buffers.iter().position(|buf| buf.handle == handle)?;
+        let idx = self
+            .dma_buffers
+            .iter()
+            .position(|buf| buf.handle == handle)?;
         Some(self.dma_buffers.remove(idx))
     }
 
@@ -946,7 +1095,13 @@ impl ProcessTable {
         &mut self,
         parent: ProcessId,
         target: Option<ProcessId>,
-    ) -> Option<(ProcessId, u64, Option<u64>, Vec<DmaBuffer>)> {
+    ) -> Option<(
+        ProcessId,
+        u64,
+        Option<u64>,
+        Vec<MmioMapping>,
+        Vec<DmaBuffer>,
+    )> {
         for slot in &mut self.processes {
             let should_reap = slot.as_ref().is_some_and(|proc| {
                 Self::is_child_match(proc, parent, target) && proc.state() == ProcessState::Zombie
@@ -963,9 +1118,10 @@ impl ProcessTable {
                 } else {
                     None
                 };
+                let mmio_mappings = proc.mmio_mappings;
                 let dma_buffers = proc.dma_buffers;
                 self.count = self.count.saturating_sub(1);
-                return Some((pid, exit_code, page_table, dma_buffers));
+                return Some((pid, exit_code, page_table, mmio_mappings, dma_buffers));
             }
         }
         None
@@ -1014,6 +1170,7 @@ pub fn add_process(process: Process) -> Option<ProcessId> {
 
 /// プロセスを削除
 pub fn remove_process(id: ProcessId) -> Option<Process> {
+    release_process_mmio_mappings(id);
     release_process_dma_buffers(id);
     PROCESS_TABLE.lock().remove(id)
 }
@@ -1071,9 +1228,16 @@ pub fn reap_zombie_child_process(
     parent: ProcessId,
     target: Option<ProcessId>,
 ) -> Option<(ProcessId, u64)> {
-    let (pid, exit_code, page_table, dma_buffers) =
+    let (pid, exit_code, page_table, mmio_mappings, dma_buffers) =
         PROCESS_TABLE.lock().reap_zombie_child(parent, target)?;
     if let Some(table_phys) = page_table {
+        for mmio in &mmio_mappings {
+            let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
+                table_phys,
+                mmio.virt_start(),
+                mmio.len(),
+            );
+        }
         for dma in &dma_buffers {
             let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
                 table_phys,
@@ -1101,6 +1265,27 @@ pub fn reap_zombie_child_process(
         }
     }
     Some((pid, exit_code))
+}
+
+pub fn release_process_mmio_mappings(pid: ProcessId) {
+    let (page_table, mmio_mappings) = match with_process_mut(pid, |proc| {
+        let page_table = proc.page_table();
+        let mmio_mappings = proc.take_mmio_mappings();
+        (page_table, mmio_mappings)
+    }) {
+        Some((page_table, mmio_mappings)) => (page_table, mmio_mappings),
+        None => return,
+    };
+
+    if let Some(table_phys) = page_table {
+        for mmio in &mmio_mappings {
+            let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
+                table_phys,
+                mmio.virt_start(),
+                mmio.len(),
+            );
+        }
+    }
 }
 
 pub fn release_process_dma_buffers(pid: ProcessId) {

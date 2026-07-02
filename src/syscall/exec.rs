@@ -283,7 +283,9 @@ pub fn exec_manifest_syscall(
     );
 
     let allowed = match role {
-        ManifestRole::CoreService | ManifestRole::Service => crate::policy::caller_can_launch_service(),
+        ManifestRole::CoreService | ManifestRole::Service => {
+            crate::policy::caller_can_launch_service()
+        }
         ManifestRole::Driver => crate::policy::caller_can_launch_driver(),
         ManifestRole::Application | ManifestRole::Tool | ManifestRole::Unknown => {
             caller_has_process_spawn_capability()
@@ -340,7 +342,9 @@ pub fn exec_manifest_syscall(
     }
 
     let requested_privilege = match role {
-        ManifestRole::CoreService | ManifestRole::Service => Some(crate::task::PrivilegeLevel::Service),
+        ManifestRole::CoreService | ManifestRole::Service => {
+            Some(crate::task::PrivilegeLevel::Service)
+        }
         _ => Some(crate::task::PrivilegeLevel::User),
     };
 
@@ -1101,8 +1105,7 @@ fn exec_with_data(
             && process_name == boot_service_manager.process_name;
         let priority = resolve_exec_priority(ManifestRole::Unknown, parent_pid);
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
-        let foreground =
-            resolve_exec_foreground(ManifestRole::Unknown, privilege, parent_pid);
+        let foreground = resolve_exec_foreground(ManifestRole::Unknown, privilege, parent_pid);
         proc.set_foreground(foreground);
         if let Some(caps) = initial_caps {
             // capability はプロセス開始前にセットする必要がある。
@@ -1525,6 +1528,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         Some(p) => p,
         None => return EINVAL,
     };
+    crate::task::release_process_mmio_mappings(pid);
     crate::task::release_process_dma_buffers(pid);
     crate::task::with_thread_mut(current_tid, |t| t.set_fs_base(initial_fs_base));
     let old_pt_phys = crate::task::with_process_mut(pid, |p| {

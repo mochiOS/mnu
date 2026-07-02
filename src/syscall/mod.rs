@@ -18,6 +18,7 @@ pub mod time;
 mod console;
 mod types;
 
+use crate::capability::Capability;
 use alloc::string::String;
 use alloc::vec::Vec;
 use x86_64::instructions::port::Port;
@@ -76,6 +77,22 @@ fn current_user_page_table() -> Option<u64> {
         .flatten()
 }
 
+fn is_canonical_user_range(addr: u64, len: u64) -> bool {
+    const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
+    if addr == 0 || addr > USER_SPACE_END {
+        return false;
+    }
+    let end_inclusive = if len == 0 {
+        addr
+    } else {
+        match addr.checked_add(len - 1) {
+            Some(end) => end,
+            None => return false,
+        }
+    };
+    end_inclusive <= USER_SPACE_END
+}
+
 /// ユーザー空間の null 終端文字列を最大長付きで読み取り、カーネル所有の `String` を返す。
 pub fn read_user_cstring(ptr: u64, max_len: usize) -> Result<String, u64> {
     if ptr == 0 || max_len == 0 {
@@ -97,9 +114,9 @@ pub fn read_user_cstring(ptr: u64, max_len: usize) -> Result<String, u64> {
 }
 
 pub fn service_delegate_register(kind_raw: u64, pid_raw: u64) -> u64 {
+    use crate::capability::Capability;
     use crate::policy::SpawnDelegateKind;
     use crate::syscall::types::{EACCES, EINVAL, ESRCH, SUCCESS};
-    use crate::capability::Capability;
 
     let caller_pid = match crate::task::current_thread_id()
         .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
@@ -109,9 +126,8 @@ pub fn service_delegate_register(kind_raw: u64, pid_raw: u64) -> u64 {
     };
     let manager_pid = crate::policy::service_manager_pid();
     let is_manager = manager_pid != 0 && caller_pid.as_u64() == manager_pid;
-    let can_register = crate::syscall::security::caller_has_any_capability(&[
-        Capability::ServiceRegister,
-    ]);
+    let can_register =
+        crate::syscall::security::caller_has_any_capability(&[Capability::ServiceRegister]);
     if !is_manager && !can_register {
         return EACCES;
     }
@@ -143,12 +159,65 @@ pub fn service_delegate_register(kind_raw: u64, pid_raw: u64) -> u64 {
 }
 
 pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
-    let _ = (virt_addr, phys_addr, size);
-    crate::audit::log(
-        crate::audit::AuditEventKind::Policy,
-        "MapPhysicalRange is disabled until range-scoped capabilities and VMA ownership tracking are implemented",
-    );
-    crate::syscall::types::ENOSYS
+    use crate::syscall::types::{EACCES, EINVAL, ENOMEM, EPERM, SUCCESS};
+
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::MemoryPhysMap]) {
+        return EACCES;
+    }
+    if virt_addr == 0
+        || size == 0
+        || (virt_addr & 0xfff) != 0
+        || (phys_addr & 0xfff) != 0
+        || (size & 0xfff) != 0
+    {
+        return EINVAL;
+    }
+    if !is_canonical_user_range(virt_addr, size) {
+        return EINVAL;
+    }
+    if !crate::mem::frame::is_allowed_mmio_range(phys_addr, size) {
+        crate::audit::log(
+            crate::audit::AuditEventKind::Policy,
+            "MapPhysicalRange rejected non-MMIO or allocator-owned physical range",
+        );
+        return EPERM;
+    }
+
+    let pid = match crate::syscall::security::current_process_id() {
+        Some(pid) => pid,
+        None => return ENOMEM,
+    };
+    let pt_phys = match crate::task::with_process(pid, |proc| proc.page_table()).flatten() {
+        Some(pt) => pt,
+        None => return ENOMEM,
+    };
+
+    let writable = true;
+    let mapping = crate::task::MmioMapping::new(virt_addr, size, phys_addr, writable);
+    let admitted = crate::task::with_process_mut(pid, |proc| {
+        if proc.mmio_mapping_count() >= proc.resource_limits().max_mmio_ranges {
+            return Err(ENOMEM);
+        }
+        if !proc.add_mmio_mapping(mapping.clone()) {
+            return Err(EINVAL);
+        }
+        Ok(())
+    });
+    match admitted {
+        Some(Ok(())) => {}
+        Some(Err(errno)) => return errno,
+        None => return ENOMEM,
+    }
+
+    if crate::mem::paging::map_physical_range_to_user(pt_phys, virt_addr, phys_addr, size).is_err()
+    {
+        let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(pt_phys, virt_addr, size);
+        let _ =
+            crate::task::with_process_mut(pid, |proc| proc.remove_mmio_mapping(virt_addr, size));
+        return ENOMEM;
+    }
+
+    SUCCESS
 }
 
 pub fn get_physical_addr(virt_addr: u64) -> u64 {
@@ -345,9 +414,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
         x if x == SyscallNumber::PortIn as u64 => io::port_in(arg0, arg1),
         x if x == SyscallNumber::PortOut as u64 => io::port_out(arg0, arg1, arg2),
-        x if x == SyscallNumber::MapPhysicalRange as u64 => {
-            map_physical_range(arg0, arg1, arg2)
-        }
+        x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
         x if x == SyscallNumber::VirtToPhys as u64 => get_physical_addr(arg0),
         x if x == SyscallNumber::GetPhysicalAddr as u64 => get_physical_addr(arg0),
         x if x == SyscallNumber::Execve as u64 => exec::execve_syscall(arg0, arg1, arg2),

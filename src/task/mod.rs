@@ -16,9 +16,9 @@ pub use fd_table::{FdTable, FileHandle, FileHandleCap, FD_BASE, PROCESS_MAX_FDS}
 pub use ids::{PrivilegeLevel, ProcessId, ProcessState, SchedulingClass, ThreadId, ThreadState};
 pub use process::{
     add_process, find_process_id_by_name, for_each_process, has_child_process, mark_process_exited,
-    process_count, reap_zombie_child_process, release_process_dma_buffers, remove_process,
-    with_process, with_process_mut, DmaBuffer, MmapBacking, MmapRegion, Process, ProcessTable,
-    ResourceLimits,
+    process_count, reap_zombie_child_process, release_process_dma_buffers,
+    release_process_mmio_mappings, remove_process, with_process, with_process_mut, DmaBuffer,
+    MmapBacking, MmapRegion, MmioMapping, Process, ProcessTable, ResourceLimits,
 };
 pub use scheduler::{
     block_current_thread, disable_scheduler, enable_scheduler, exit_current_task, init_scheduler,

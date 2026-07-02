@@ -439,6 +439,15 @@ pub fn fork() -> u64 {
         Some(pid) => pid,
         None => return ENOSYS,
     };
+    let parent_has_mmio =
+        crate::task::with_process(parent_pid, |p| p.has_mmio_mappings()).unwrap_or(false);
+    if parent_has_mmio {
+        crate::audit::log(
+            crate::audit::AuditEventKind::Policy,
+            "fork rejected while borrowed MMIO mappings are active",
+        );
+        return EPERM;
+    }
 
     let (
         parent_priv,
@@ -967,11 +976,38 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
     };
 
     let overlaps_dma = crate::task::with_process(pid, |process| {
-        process.find_dma_buffer_by_addr(unmap_start, unmap_len).is_some()
+        process
+            .find_dma_buffer_by_addr(unmap_start, unmap_len)
+            .is_some()
     })
     .unwrap_or(false);
     if overlaps_dma {
         return EPERM;
+    }
+
+    let mmio_mapping = crate::task::with_process_mut(pid, |process| {
+        process.remove_mmio_mapping(unmap_start, unmap_len)
+    })
+    .flatten();
+    if let Some(_mapping) = mmio_mapping {
+        return match crate::mem::paging::unmap_range_in_table_preserve_frames(
+            pt_phys,
+            unmap_start,
+            unmap_len,
+        ) {
+            Ok(()) => SUCCESS,
+            Err(_) => EINVAL,
+        };
+    }
+
+    let overlaps_mmio = crate::task::with_process(pid, |process| {
+        process
+            .find_mmio_mapping_by_addr(unmap_start, unmap_len)
+            .is_some()
+    })
+    .unwrap_or(false);
+    if overlaps_mmio {
+        return EINVAL;
     }
 
     let backing_region = crate::task::with_process_mut(pid, |process| {
