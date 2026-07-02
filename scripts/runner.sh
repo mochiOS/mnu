@@ -73,7 +73,6 @@ source "${ROOT_DIR}/scripts/cexts.sh"
 
 echo "[build] kernel"
 cargo build \
-    --locked \
     --release \
     --target "${KERNEL_TARGET_NAME}" \
     --features kernel-bin \
@@ -82,7 +81,6 @@ cargo build \
 echo "[build] userland"
 env RUSTFLAGS="-C relocation-model=static -C link-arg=-T${ROOT_DIR}/examples/user/linker.ld -C link-arg=-no-pie --cfg curve25519_dalek_backend=\"serial\"" \
     cargo build \
-    --locked \
     --release \
     --target "${USER_TARGET_NAME}" \
     --target-dir "${USER_BUILD_DIR}" \
@@ -97,7 +95,6 @@ need_file "${CAPTEST_BIN}"
 echo "[build] plugkit test"
 env RUSTFLAGS="-C relocation-model=static -C link-arg=-T${ROOT_DIR}/examples/user/linker.ld -C link-arg=-no-pie --cfg curve25519_dalek_backend=\"serial\"" \
     cargo build \
-    --locked \
     --release \
     --target "${USER_TARGET_NAME}" \
     --target-dir "${PLUGKIT_BUILD_DIR}" \
@@ -118,7 +115,6 @@ strings "${USER_BIN}" | grep -n 'selftest: enter' || true
 SIGNATURE_DB_STAGE="${TARGET_DIR}/signature.db"
 echo "[build] bootloader"
 cargo build \
-    --locked \
     --release \
     --target x86_64-unknown-uefi \
     --target-dir "${BOOT_BUILD_DIR}" \
