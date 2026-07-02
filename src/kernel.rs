@@ -1,6 +1,5 @@
 use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
-use crate::syscall::exec::exec_kernel_with_name_and_caps;
 use crate::util::log::LogLevel;
 use crate::{debug, info};
 use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
@@ -76,8 +75,7 @@ fn kernel_main() -> ! {
         if matches!(
             cap,
             crate::capability::Capability::DmaAllocate
-                |
-            crate::capability::Capability::MemoryPhysMap
+                | crate::capability::Capability::MemoryPhysMap
                 | crate::capability::Capability::MemoryPhysTranslate
         ) {
             continue;
@@ -85,6 +83,14 @@ fn kernel_main() -> ! {
         caps.insert(*cap);
     }
     caps.insert(crate::capability::Capability::UsbAccess);
+    let mut kernel_authorities = crate::capability::KernelAuthoritySet::empty();
+    kernel_authorities.insert(crate::capability::KernelAuthority::new(
+        crate::capability::KernelCapability::PhysMap,
+        crate::capability::KernelObjectRef::MmioRegion {
+            base: 0,
+            size: u64::MAX - 0xfff,
+        },
+    ));
 
     if !crate::policy::signature::load_signature_database() {
         crate::error!("Failed to load signature database from rootfs");
@@ -94,10 +100,11 @@ fn kernel_main() -> ! {
     // 最小のサービス管理プロセスを起動する。
     info!("Starting service manager");
     let boot_launch = crate::policy::service_manager_launch();
-    let manager_pid = exec_kernel_with_name_and_caps(
+    let manager_pid = crate::syscall::exec::exec_kernel_with_name_caps_and_authorities(
         boot_launch.exec_path,
         boot_launch.process_name,
         caps.clone(),
+        kernel_authorities,
         crate::task::PrivilegeLevel::Service,
     );
     crate::info!("service manager pid = {:#x}", manager_pid);

@@ -377,6 +377,16 @@ Capability要求には、少なくとも次の情報を持たせます。
 
 したがって、実際の付与Capabilityは、要求Capability、システムポリシー、起動元の保有Capabilityの共通部分となります。
 
+`memory.phys.map` のようなカーネル object-scoped authority も同様です。
+
+たとえば起動元が `memory.phys.map@0xfebf0000:0x10000` を持つ場合でも、
+子へ渡せるのはその範囲以下の authority だけです。
+署名済み manifest が広い範囲を要求していても、起動元が持たない範囲は付与されません。
+
+初期 authority の入口は initfs の `core.service` に限定し、
+以後のドライバ起動では `core.service` が `cap_restrict` / `cap_transfer` により
+必要最小限の範囲へ絞って委譲します。
+
 署名済みであることだけを理由に、カーネルが新しいCapabilityを生成してはいけません。
 
 ## 12. データモデル

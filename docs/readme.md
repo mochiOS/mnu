@@ -102,9 +102,16 @@ mnuでは、次のような方針でCapabilityを扱います。
 - カーネルは重要な操作の前にCapabilityを検査する
 - 権限の付与や分類は専用サービスで管理できるようにする
 - 物理メモリの参照や物理ページのマッピングは `memory.phys.map` / `memory.phys.translate` で分離する
+- `memory.phys.map` は単なる全体権限ではなく、`memory.phys.map@0xBASE:0xSIZE` のような物理範囲付き authority として扱う
 - Service権限だけで物理アドレス取得や物理ページ mapping を許可しない
 - パスレベルの権限は `capabilities.manage` を持つ core.service 系の起動経路を起点に、カーネル初期登録で管理する
 - 実際のパス定義はカーネルが検証し、path registry を参照して判定する
+
+初期の range-scoped authority は initfs の `core.service` だけが持ちます。
+`core.service` はユーザー空間起動の入口として、対象デバイスの MMIO 範囲へ authority を縮小してから
+各ドライバやサービスへ委譲します。
+
+このため、一般アプリケーションや通常サービスが広域の物理メモリ権限を直接保持する設計にはしません。
 
 この設計により、仮にサービスの一部が侵害された場合でも、被害範囲をそのサービスが持つCapabilityの範囲に抑えることを目指します。
 

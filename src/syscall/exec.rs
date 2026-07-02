@@ -413,6 +413,22 @@ pub fn exec_kernel_with_name_and_caps(
     initial_caps: CapabilitySet,
     requested_privilege: crate::task::PrivilegeLevel,
 ) -> u64 {
+    exec_kernel_with_name_caps_and_authorities(
+        path,
+        name,
+        initial_caps,
+        KernelAuthoritySet::empty(),
+        requested_privilege,
+    )
+}
+
+pub fn exec_kernel_with_name_caps_and_authorities(
+    path: &str,
+    name: &str,
+    initial_caps: CapabilitySet,
+    initial_kernel_authorities: KernelAuthoritySet,
+    requested_privilege: crate::task::PrivilegeLevel,
+) -> u64 {
     let manifest_role = match requested_privilege {
         crate::task::PrivilegeLevel::Core => Some(ManifestRole::CoreService),
         crate::task::PrivilegeLevel::Service => Some(ManifestRole::Service),
@@ -423,7 +439,7 @@ pub fn exec_kernel_with_name_and_caps(
         Some(name),
         &[],
         Some(initial_caps),
-        Some(KernelAuthoritySet::empty()),
+        Some(initial_kernel_authorities),
         Some(requested_privilege),
         manifest_role,
     )

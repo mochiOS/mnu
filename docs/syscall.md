@@ -293,8 +293,37 @@ memory_phys_translate(target: pid_t, vaddr: ptr) -> u64
 memory_phys_map(target: pid_t, phys: u64, size: usize, flags: u64) -> ptr
 ```
 
-これらは `memory.phys.translate` / `memory.phys.map` capability を持つプロセスだけが呼び出せます。
-さらに、他プロセスを対象にする場合は、そのプロセスへアクセスする権限も必要です。
+`memory.phys.translate` は通常の名前付き capability です。
+
+一方、`memory.phys.map` は広域の名前付き capability ではなく、物理範囲付き authority として扱います。
+
+文字列表現は次の形式です。
+
+```text
+memory.phys.map@0xBASE:0xSIZE
+```
+
+例:
+
+```text
+memory.phys.map@0xfebf0000:0x10000
+```
+
+`memory_phys_map` は、呼び出し元が指定した `phys..phys+size` を完全に包含する authority を持つ場合だけ成功します。
+
+さらにカーネルは、authority を持っていても次を満たさない要求を拒否します。
+
+- アドレスとサイズが 4KiB 境界に揃っていること
+- ユーザー仮想アドレスがユーザー空間に収まること
+- 物理範囲が allocator 管理中の通常RAMではなく、許可された MMIO 領域であること
+
+初期 authority は initfs の `core.service` にのみ与えます。
+
+`core.service` はすべてのユーザー空間起動の入口として振る舞い、ドライバやサービスを起動する際に
+`cap_restrict` / `cap_transfer` を使って必要な物理範囲だけへ絞った authority を子プロセスへ渡します。
+
+したがって、通常のアプリケーションや一般サービスは `memory.phys.map` を直接保持しません。
+また、他プロセスを対象にする場合は、そのプロセスへアクセスする権限も必要です。
 カーネルは Service 権限だけではこれらを許可しません。
 
 ## IPC
@@ -411,6 +440,11 @@ cap_transfer(target_cap: cap_t, cap: cap_t, flags: u64) -> isize
 
 実際の転送方法はIPCメッセージと組み合わせて使います。
 
+範囲付き authority も同じ syscall で移譲します。
+
+たとえば `memory.phys.map@0xfebf0000:0x10000` を持つプロセスは、その部分範囲だけを
+別プロセスへ移譲できます。
+
 ### cap_query
 
 Capabilityの種類と権限を取得します。
@@ -420,6 +454,8 @@ cap_query(cap: cap_t, info_ptr: ptr, info_len: usize) -> isize
 ```
 
 `info_ptr` へCapability種別、許可操作、属性などを書き込みます。
+
+現在の実装では、文字列で問い合わせた capability または authority を caller が保持しているかを判定します。
 
 ### cap_restrict
 
@@ -432,6 +468,12 @@ cap_restrict(cap: cap_t, rights: u64, flags: u64) -> cap_t
 元Capabilityより強い権限を作ってはいけません。
 
 権限を追加しようとした場合は `EPERM` を返します。
+
+範囲付き authority の場合、`cap_restrict` は親 authority に完全一致で存在する範囲だけを縮小できます。
+
+たとえば `memory.phys.map@0xfebf0000:0x10000` から
+`memory.phys.map@0xfebf4000:0x1000` を作ることはできますが、
+親範囲の外へ広げることはできません。
 
 ## Event
 
