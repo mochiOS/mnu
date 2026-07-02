@@ -143,35 +143,12 @@ pub fn service_delegate_register(kind_raw: u64, pid_raw: u64) -> u64 {
 }
 
 pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
-    use crate::capability::Capability;
-    use crate::syscall::types::{EACCES, EFAULT, EINVAL, ENOMEM, SUCCESS};
-
-    if !crate::syscall::security::caller_has_any_capability(&[Capability::MemoryPhysMap]) {
-        return EACCES;
-    }
-    if virt_addr == 0 || phys_addr == 0 || size == 0 {
-        return EINVAL;
-    }
-    if (virt_addr & 0xfff) != 0 || (phys_addr & 0xfff) != 0 || (size & 0xfff) != 0 {
-        return EINVAL;
-    }
-    if !validate_user_ptr(virt_addr, size) {
-        return EFAULT;
-    }
-
-    let pt_phys = match current_user_page_table() {
-        Some(pt) => pt,
-        None => return ENOMEM,
-    };
-
-    match crate::mem::paging::map_physical_range_to_user(pt_phys, virt_addr, phys_addr, size) {
-        Ok(()) => SUCCESS,
-        Err(crate::Kernel::Memory(crate::result::Memory::OutOfMemory)) => ENOMEM,
-        Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress))
-        | Err(crate::Kernel::Memory(crate::result::Memory::PermissionDenied))
-        | Err(crate::Kernel::InvalidParam) => EINVAL,
-        Err(_) => EINVAL,
-    }
+    let _ = (virt_addr, phys_addr, size);
+    crate::audit::log(
+        crate::audit::AuditEventKind::Policy,
+        "MapPhysicalRange is disabled until range-scoped capabilities and VMA ownership tracking are implemented",
+    );
+    crate::syscall::types::ENOSYS
 }
 
 pub fn get_physical_addr(virt_addr: u64) -> u64 {

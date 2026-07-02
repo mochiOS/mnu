@@ -151,6 +151,7 @@ const SYS_MEMORY_UNMAP: u64 = mnu_abi::SyscallNumber::MemoryUnmap as u64;
 const SYS_MEMORY_PROTECT: u64 = mnu_abi::SyscallNumber::MemoryProtect as u64;
 const SYS_MEMORY_SHARE: u64 = mnu_abi::SyscallNumber::MemoryShare as u64;
 const SYS_MEMORY_SYNC: u64 = mnu_abi::SyscallNumber::MemorySync as u64;
+const SYS_MAP_PHYSICAL_RANGE: u64 = mnu_abi::SyscallNumber::MapPhysicalRange as u64;
 const SYS_IPC_CREATE: u64 = mnu_abi::SyscallNumber::IpcCreate as u64;
 const SYS_IPC_CALL: u64 = mnu_abi::SyscallNumber::IpcCall as u64;
 const SYS_IPC_REPLY: u64 = mnu_abi::SyscallNumber::IpcReply as u64;
@@ -397,6 +398,10 @@ pub fn memory_share(addr: u64, len: u64, flags: u64) -> u64 {
 
 pub fn memory_sync(addr: u64, len: u64, flags: u64) -> u64 {
     unsafe { syscall3(SYS_MEMORY_SYNC, addr, len, flags) }
+}
+
+pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
+    unsafe { syscall3(SYS_MAP_PHYSICAL_RANGE, virt_addr, phys_addr, size) }
 }
 
 pub fn ipc_create(flags: u64) -> u64 {
@@ -1225,6 +1230,24 @@ fn capability_restrict_regression_self_test() -> bool {
     true
 }
 
+fn physical_map_regression_self_test() -> bool {
+    let addr = memory_map(0, 4096, 3, 0x22, 0);
+    if addr == 0 || (addr as i64) < 0 {
+        write_line("selftest: phys map setup failed");
+        return false;
+    }
+
+    let rc = map_physical_range(addr, 0x1000, 0x1000);
+    let _ = memory_unmap(addr, 4096);
+
+    if rc == 0 {
+        write_line("selftest: phys map unexpectedly enabled");
+        return false;
+    }
+
+    true
+}
+
 fn test_allowed_capabilities_on_core_service() -> bool {
     let spawn = has_capability("process.spawn");
     if !spawn {
@@ -1240,6 +1263,7 @@ fn test_allowed_capabilities_on_core_service() -> bool {
 pub fn run_restricted_self_test() -> bool {
     run_restricted_probe()
         && capability_restrict_regression_self_test()
+        && physical_map_regression_self_test()
 }
 
 pub fn run_self_test() -> bool {
@@ -1277,6 +1301,10 @@ pub fn run_self_test() -> bool {
     }
 
     if !capability_restrict_regression_self_test() {
+        return false;
+    }
+
+    if !physical_map_regression_self_test() {
         return false;
     }
 
