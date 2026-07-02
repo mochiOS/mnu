@@ -4,3 +4,4 @@ the mnu kernel ChangeLog   - version 0.12-rc2
 
 Changes:
 * Fixed a bug in the filesystem syscall.
+* Moved executable signature policy out of the kernel.

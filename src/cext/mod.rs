@@ -952,11 +952,6 @@ pub fn load_modules() {
             continue;
         };
 
-        if !crate::policy::signature::verify_exec(&module_path, &bytes) {
-            crate::warn!("cext: signature verification failed for {}", module_path);
-            continue;
-        }
-
         let Some(meta) = parse_cext(&bytes) else {
             crate::warn!("cext: invalid cext package {}", module_path);
             continue;

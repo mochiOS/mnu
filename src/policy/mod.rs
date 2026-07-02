@@ -7,8 +7,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::task::{PrivilegeLevel, ProcessId};
 
-pub mod signature;
-
 /// `.service` 実行を許可するサービスマネージャープロセスID
 /// 0 は未登録。
 static SERVICE_MANAGER_PID: AtomicU64 = AtomicU64::new(0);

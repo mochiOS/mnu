@@ -463,10 +463,6 @@ fn exec_internal(
     let role = manifest_role.unwrap_or(ManifestRole::Unknown);
     let loaded = load_exec_image(path, role);
     if let Some((data, source)) = loaded {
-        if !crate::policy::signature::verify_exec(path, &data) {
-            crate::warn!("exec: signature verification failed for '{}'", path);
-            return crate::syscall::types::EPERM;
-        }
         let fingerprint = fingerprint_exec_bytes(&data);
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",
@@ -1382,10 +1378,6 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         Some(loaded) => loaded,
         None => return ENOENT,
     };
-    if !crate::policy::signature::verify_exec(path, &data_vec) {
-        crate::warn!("execve: signature verification failed for '{}'", path);
-        return EPERM;
-    }
     crate::info!(
         "execve: loaded '{}' from {} ({} bytes)",
         path,

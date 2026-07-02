@@ -188,16 +188,23 @@ pub fn call(
     reply_ptr: u64,
     reply_len: u64,
 ) -> u64 {
-    let sent = send(dest_thread_id, req_ptr, req_len);
-    if sent != 0 {
-        return sent;
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::IpcClient,
+        crate::capability::Capability::IpcServer,
+    ]) {
+        return EACCES;
     }
     let caller = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
         None => return EINVAL,
     };
-    if ensure_endpoint_for_thread(caller).is_none() {
-        return EINVAL;
+    let sender = match ensure_endpoint_for_thread(caller) {
+        Some(handle) => handle,
+        None => return EINVAL,
+    };
+    let sent = send_to_thread_id(dest_thread_id, sender, req_ptr, req_len);
+    if sent != 0 {
+        return sent;
     }
     recv_blocking_for_thread(caller, caller, reply_ptr, reply_len)
 }

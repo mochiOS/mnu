@@ -92,11 +92,6 @@ fn kernel_main() -> ! {
         },
     ));
 
-    if !crate::policy::signature::load_signature_database() {
-        crate::error!("Failed to load signature database from rootfs");
-        halt_forever();
-    }
-
     // 最小のサービス管理プロセスを起動する。
     info!("Starting service manager");
     let boot_launch = crate::policy::service_manager_launch();
