@@ -184,8 +184,8 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
         Some(pid) => pid,
         None => return ENOSYS,
     };
-    let cap = match read_capability_token_from_user(_cap_ptr, _cap_len) {
-        Ok(cap) => cap,
+    let spec = match read_capability_spec_from_user(_cap_ptr, _cap_len) {
+        Ok(spec) => spec,
         Err(e) => return e,
     };
     let dest_process = match resolve_destination_process(_dest) {
@@ -197,6 +197,18 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
         crate::task::process::process_has_capability(current, Capability::CapabilitiesManage);
 
     if can_manage_capabilities {
+        let Some((cap_spec, claimed_exe_path)) = spec.split_once('\x1f') else {
+            return EACCES;
+        };
+        if !crate::task::with_process(dest_process, |proc| proc.exe_path() == claimed_exe_path)
+            .unwrap_or(false)
+        {
+            return EACCES;
+        }
+        let cap = match parse_capability_token(cap_spec) {
+            Some(cap) => cap,
+            None => return EINVAL,
+        };
         match cap {
             CapabilityToken::Plain(capability) => {
                 if capability.class() != CapabilityClass::UserGrantable {
@@ -210,6 +222,11 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
             CapabilityToken::Authority(_) => return EACCES,
         }
     }
+
+    let cap = match parse_capability_token(spec.as_str()) {
+        Some(cap) => cap,
+        None => return EINVAL,
+    };
 
     match cap {
         CapabilityToken::Plain(capability) => {

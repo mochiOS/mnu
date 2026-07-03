@@ -136,7 +136,7 @@ impl Default for KernelConfig {
                 max_sectors_per_call: 128,
             },
             io: IoConfig { max_iov: 1024 },
-            capability: CapabilityConfig { max_name_len: 128 },
+            capability: CapabilityConfig { max_name_len: 512 },
             exec: ExecConfig {
                 stack_top_base: 0x0000_7FFF_FFF0_0000,
                 stack_aslr_max_pages: 4096,
