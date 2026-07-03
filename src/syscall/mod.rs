@@ -376,6 +376,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
             exec::exec_manifest_syscall(arg0, arg1, arg2, arg3, arg4)
         }
         x if x == SyscallNumber::ProcessWait as u64 => process::wait(arg0, arg1, arg2),
+        x if x == SyscallNumber::FindProcessByName as u64 => {
+            process::find_process_by_name(arg0, arg1)
+        }
         x if x == SyscallNumber::ThreadCreate as u64 => task::thread_create(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadExit as u64 => {
             if let Some(id) = crate::task::current_thread_id() {

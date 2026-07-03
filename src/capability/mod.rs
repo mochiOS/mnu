@@ -400,6 +400,14 @@ pub enum CapabilityKind {
     User,
 }
 
+/// capability の公開レベル
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CapabilityClass {
+    UserGrantable,
+    Privileged,
+    SystemOnly,
+}
+
 /// capability（権限）
 ///
 /// 文字列名は `Capability::as_str()` / `Capability::from_str()` で相互変換する。
@@ -518,6 +526,99 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// ユーザーへ昇格要求を許してよいかを分類する
+    pub fn class(&self) -> CapabilityClass {
+        use Capability::*;
+        match self {
+            FsReadUserDocuments
+            | FsWriteUserDocuments
+            | FsReadUserDownloads
+            | FsWriteUserDownloads
+            | FsReadUserDesktop
+            | FsWriteUserDesktop
+            | FsReadUserPictures
+            | FsWriteUserPictures
+            | FsReadUserMusic
+            | FsWriteUserMusic
+            | FsReadUserVideos
+            | FsWriteUserVideos
+            | FsReadUser
+            | FsWriteUser
+            | FsReadTmp
+            | FsWriteTmp
+            | FsReadRemovable
+            | FsWriteRemovable
+            | NetConnect
+            | NetListen
+            | WindowCreate
+            | WindowOverlay
+            | DisplayRead
+            | InputKeyboard
+            | InputPointer
+            | AudioPlayback
+            | AudioRecord
+            | ClipboardRead
+            | ClipboardWrite
+            | NotificationSend
+            | SystemTimeRead
+            | SystemInfoRead
+            | SystemLogsRead
+            | AccountSelfRead
+            | AccountSelfModify
+            | SettingsRead => CapabilityClass::UserGrantable,
+            FsReadAll
+            | FsWriteAll
+            | NetRaw
+            | WindowCapture
+            | DisplayCapture
+            | InputKeyboardGlobal
+            | InputPointerGlobal
+            | InputGamepad
+            | CameraAccess
+            | MicrophoneAccess
+            | LocationAccess
+            | BluetoothAccess
+            | UsbAccess
+            | SerialAccess
+            | PowerShutdown
+            | PowerReboot
+            | PowerSuspend
+            | SystemTimeSet
+            | PackageInstall
+            | PackageRemove
+            | PackageUpdate
+            | ServiceRegister
+            | ServiceControl
+            | VmCreate
+            | VmControl
+            | DeviceGpu
+            | DeviceAudio
+            | DeviceInput
+            | DeviceStorage
+            | DeviceNet
+            | AccountOtherRead
+            | AccountOtherModify
+            | SettingsWrite => CapabilityClass::Privileged,
+            ProcessSpawn
+            | ProcessInspect
+            | ProcessKill
+            | IpcClient
+            | IpcServer
+            | DmaAllocate
+            | MemoryPhysMap
+            | MemoryPhysTranslate
+            | KernelModuleLoad
+            | KernelDebug
+            | CapabilitiesManage
+            | Unsandboxed
+            | DeveloperDebug
+            | DeveloperProfile
+            | DeveloperTracing
+            | SignatureRead
+            | SignatureWrite => CapabilityClass::SystemOnly,
+        }
+    }
+
     /// 文字列名へ変換する
     pub fn as_str(&self) -> &'static str {
         use Capability::*;

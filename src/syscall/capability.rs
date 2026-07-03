@@ -11,7 +11,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::capability::{
-    kernel_authority_implies, parse_kernel_authority_spec, Capability, KernelAuthority,
+    kernel_authority_implies, parse_kernel_authority_spec, Capability, CapabilityClass, KernelAuthority,
     KernelCapability,
 };
 use crate::syscall::copy_from_user;
@@ -188,6 +188,29 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
         Ok(cap) => cap,
         Err(e) => return e,
     };
+    let dest_process = match resolve_destination_process(_dest) {
+        Some(pid) => pid,
+        None => return EINVAL,
+    };
+
+    let can_manage_capabilities =
+        crate::task::process::process_has_capability(current, Capability::CapabilitiesManage);
+
+    if can_manage_capabilities {
+        match cap {
+            CapabilityToken::Plain(capability) => {
+                if capability.class() != CapabilityClass::UserGrantable {
+                    return EACCES;
+                }
+                let inserted = crate::task::with_process_mut(dest_process, |proc| {
+                    proc.capabilities_mut().insert(capability)
+                });
+                return if inserted.is_some() { SUCCESS } else { ENOSYS };
+            }
+            CapabilityToken::Authority(_) => return EACCES,
+        }
+    }
+
     match cap {
         CapabilityToken::Plain(capability) => {
             if !crate::task::process::process_has_capability(current, capability) {
@@ -203,11 +226,6 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
             }
         }
     }
-
-    let dest_process = match resolve_destination_process(_dest) {
-        Some(pid) => pid,
-        None => return EINVAL,
-    };
     if dest_process == current {
         return SUCCESS;
     }
@@ -313,6 +331,10 @@ fn current_process() -> Option<crate::task::ProcessId> {
 }
 
 fn resolve_destination_process(dest: u64) -> Option<crate::task::ProcessId> {
+    let pid = crate::task::ProcessId::from_u64(dest);
+    if crate::task::with_process(pid, |_| ()).is_some() {
+        return Some(pid);
+    }
     if let Some(pid) = crate::task::thread_to_process_id(dest) {
         return Some(pid);
     }

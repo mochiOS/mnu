@@ -441,7 +441,10 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     let data_vec = if is_dir {
         Vec::new()
     } else {
-        match crate::cext::fs::read_all(path) {
+        match crate::cext::fs::read_all(path)
+            .or_else(|| crate::init::fs::read_rootfs(path))
+            .or_else(|| crate::init::fs::read(path))
+        {
             Some(d) => d,
             None => return ENOENT,
         }
