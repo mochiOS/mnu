@@ -152,8 +152,9 @@ pub unsafe fn jump_to_usermode_fork_child(
     }
     asm!(
         "cli",
-        // FS ベースを IA32_FS_BASE MSR 経由で設定
-        "mov ecx, 0xC0000100",
+        // FS ベースを IA32_FS_BASE MSR 経由で設定。
+        // ECX を明示入力にしないと、復帰先 RIP operand が RCX に割り当てられた場合に
+        // 0xC0000100 へ iretq してしまう。
         "wrmsr",
         // データセグメントをユーザーセグメントに設定
         "mov ax, {ss:x}",
@@ -173,6 +174,7 @@ pub unsafe fn jump_to_usermode_fork_child(
         rflags = in(reg) (user_rflags | 0x200),
         cs     = in(reg) user_cs,
         rip    = in(reg) entry,
+        in("ecx") 0xC000_0100u32,
         in("eax") fs_lo,
         in("edx") fs_hi,
         options(noreturn)
