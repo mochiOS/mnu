@@ -199,6 +199,8 @@ pub const EIO: u64 = (-5i64) as u64;
 pub const ENXIO: u64 = (-6i64) as u64;
 /// 不正なファイルディスクリプタ
 pub const EBADF: u64 = (-9i64) as u64;
+/// 子プロセスが存在しない
+pub const ECHILD: u64 = (-10i64) as u64;
 /// 受信/送信できない（キュー空/満杯）
 pub const EAGAIN: u64 = (-11i64) as u64;
 /// メモリ不足

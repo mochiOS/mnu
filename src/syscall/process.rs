@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{EFAULT, EINVAL, EIO, ENOMEM, ENOSYS, EPERM, SUCCESS};
+use super::types::{ECHILD, EFAULT, EINVAL, EIO, ENOMEM, ENOSYS, EPERM, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
 use alloc::string::ToString;
@@ -20,8 +20,6 @@ fn caller_has_process_spawn_capability() -> bool {
 
 /// ユーザー空間の上限アドレス (x86-64 canonical hole 下側)
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
-/// Linux互換: 子プロセスが存在しない
-const ECHILD: u64 = (-10i64) as u64;
 /// Linux互換: 操作がタイムアウトした
 const ETIMEDOUT: u64 = (-110i64) as u64;
 use crate::task::{current_thread_id, exit_current_task};
@@ -511,12 +509,11 @@ pub fn fork() -> u64 {
         );
     }
 
-    let (user_rip, user_rsp, user_rflags, parent_fs) = crate::task::with_thread(parent_tid, |t| {
-        let (rip, rsp, rflags) = t.syscall_user_context();
-        (rip, rsp, rflags, t.fs_base())
+    let (user_context, parent_fs) = crate::task::with_thread(parent_tid, |t| {
+        (t.syscall_user_context(), t.fs_base())
     })
-    .unwrap_or((0, 0, 0, 0));
-    if user_rip == 0 || user_rsp == 0 {
+        .unwrap_or((crate::task::thread::SyscallUserContext::empty(), 0));
+    if user_context.rip == 0 || user_context.rsp == 0 {
         let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOSYS;
     }
@@ -566,9 +563,7 @@ pub fn fork() -> u64 {
     };
     let child_thread = crate::task::Thread::new_fork_child(
         child_pid,
-        user_rip,
-        user_rsp,
-        user_rflags,
+        user_context,
         parent_fs,
         kstack,
         kstack_size,

@@ -1,6 +1,7 @@
 //! ユーザーモード実行サポート
 
 use crate::mem::gdt;
+use crate::task::thread::SyscallUserContext;
 use core::arch::asm;
 
 /// ユーザーモードでコードを実行する
@@ -134,9 +135,7 @@ fn read_gdtr() -> (u64, u16) {
 /// # Safety
 /// `entry`/`stack`/`user_rflags`/`fs_base` は子プロセスの有効な復帰コンテキストである必要がある。
 pub unsafe fn jump_to_usermode_fork_child(
-    entry: u64,
-    stack: u64,
-    user_rflags: u64,
+    context: SyscallUserContext,
     fs_base: u64,
 ) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3;
@@ -166,14 +165,26 @@ pub unsafe fn jump_to_usermode_fork_child(
         "push {rflags}",
         "push {cs}",
         "push {rip}",
+    "mov rbp, {rbp}",
+    "mov rbx, {rbx}",
+    "mov r12, {r12}",
+    "mov r13, {r13}",
+    "mov r14, {r14}",
+    "mov r15, {r15}",
         // fork 子プロセスは rax=0 を返す
         "xor eax, eax",
         "iretq",
         ss     = in(reg) user_ss,
-        rsp    = in(reg) stack,
-        rflags = in(reg) (user_rflags | 0x200),
+    rsp = in(reg) context.rsp,
+    rflags = in(reg) (context.rflags | 0x200),
         cs     = in(reg) user_cs,
-        rip    = in(reg) entry,
+    rip = in(reg) context.rip,
+    rbp = in(reg) context.rbp,
+    rbx = in(reg) context.rbx,
+    r12 = in(reg) context.r12,
+    r13 = in(reg) context.r13,
+    r14 = in(reg) context.r14,
+    r15 = in(reg) context.r15,
         in("ecx") 0xC000_0100u32,
         in("eax") fs_lo,
         in("edx") fs_hi,

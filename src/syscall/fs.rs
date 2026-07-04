@@ -1,8 +1,8 @@
 //! ファイルシステム関連のシステムコール
 
 use super::types::{
-    EACCES, EBADF, EEXIST, EFAULT, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS, ENOTDIR, ESRCH,
-    SUCCESS,
+    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS, ENOTDIR,
+    EPIPE, ESRCH, SUCCESS,
 };
 use crate::capability::path::{
     self, PathOwner, PathType, UserPath, PATH_CREATE, PATH_DELETE, PATH_LIST, PATH_READ, PATH_WRITE,
@@ -17,6 +17,61 @@ use alloc::vec::Vec;
 
 const MAX_IO_BYTES: usize = 128 * 1024 * 1024;
 const IO_CHUNK_BYTES: usize = 1 * 1024 * 1024;
+const MAX_PIPES: usize = 64;
+const PIPE_BUFFER_CAP: usize = 64 * 1024;
+
+struct PipeState {
+    data: Vec<u8>,
+    readers: usize,
+    writers: usize,
+}
+
+static PIPE_TABLE: crate::interrupt::spinlock::SpinLock<[Option<PipeState>; MAX_PIPES]> =
+    crate::interrupt::spinlock::SpinLock::new([const { None }; MAX_PIPES]);
+
+fn alloc_pipe_state() -> Option<usize> {
+    let mut table = PIPE_TABLE.lock();
+    for (index, slot) in table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(PipeState {
+                data: Vec::new(),
+                readers: 1,
+                writers: 1,
+            });
+            return Some(index);
+        }
+    }
+    None
+}
+
+pub fn clone_pipe_endpoint_from_kernel(pipe_id: usize, write_end: bool) {
+    let mut table = PIPE_TABLE.lock();
+    if let Some(Some(pipe)) = table.get_mut(pipe_id) {
+        if write_end {
+            pipe.writers = pipe.writers.saturating_add(1);
+        } else {
+            pipe.readers = pipe.readers.saturating_add(1);
+        }
+    }
+}
+
+pub fn close_pipe_endpoint_from_kernel(pipe_id: usize, write_end: bool) {
+    let mut table = PIPE_TABLE.lock();
+    let Some(slot) = table.get_mut(pipe_id) else {
+        return;
+    };
+    let Some(pipe) = slot.as_mut() else {
+        return;
+    };
+    if write_end {
+        pipe.writers = pipe.writers.saturating_sub(1);
+    } else {
+        pipe.readers = pipe.readers.saturating_sub(1);
+    }
+    if pipe.readers == 0 && pipe.writers == 0 {
+        *slot = None;
+    }
+}
 
 fn debug_serial_write_str(s: &str) {
     use x86_64::instructions::port::Port;
@@ -862,6 +917,14 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
+    let pipe_id = match with_fd_table(pid, |t| t.get(idx).and_then(|fh| fh.pipe_id)) {
+        Some(Some(id)) => Some(id),
+        Some(None) => None,
+        None => return EBADF,
+    };
+    if let Some(pipe_id) = pipe_id {
+        return read_pipe(pipe_id, buf_ptr, len);
+    }
 
     let to_copy = match usize::try_from(len) {
         Ok(v) => v.min(MAX_IO_BYTES),
@@ -898,6 +961,50 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     written as u64
 }
 
+fn read_pipe(pipe_id: usize, buf_ptr: u64, len: u64) -> u64 {
+    let target_len = match usize::try_from(len) {
+        Ok(v) => v.min(MAX_IO_BYTES),
+        Err(_) => MAX_IO_BYTES,
+    };
+    let mut copied = 0usize;
+    while copied < target_len {
+        let mut chunk = Vec::new();
+        let mut should_wait = false;
+        {
+            let mut table = PIPE_TABLE.lock();
+            let Some(Some(pipe)) = table.get_mut(pipe_id) else {
+                return if copied == 0 { EBADF } else { copied as u64 };
+            };
+            if pipe.data.is_empty() {
+                if pipe.writers == 0 {
+                    return copied as u64;
+                }
+                should_wait = true;
+            } else {
+                let take = core::cmp::min(pipe.data.len(), target_len - copied);
+                chunk.extend_from_slice(&pipe.data[..take]);
+            }
+        }
+        if should_wait {
+            crate::task::yield_now();
+            continue;
+        }
+        if chunk.is_empty() {
+            break;
+        }
+        if crate::syscall::copy_to_user(buf_ptr + copied as u64, &chunk).is_err() {
+            return EFAULT;
+        }
+        let mut table = PIPE_TABLE.lock();
+        let Some(Some(pipe)) = table.get_mut(pipe_id) else {
+            return if copied == 0 { EBADF } else { copied as u64 };
+        };
+        pipe.data.drain(0..chunk.len());
+        copied += chunk.len();
+    }
+    copied as u64
+}
+
 /// Write: 開かれたファイルへデータを書き込む
 pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if buf_ptr == 0 {
@@ -922,6 +1029,14 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     let idx = fd as usize;
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
+    }
+    let pipe_id = match with_fd_table(pid, |t| t.get(idx).and_then(|fh| fh.pipe_id)) {
+        Some(Some(id)) => Some(id),
+        Some(None) => None,
+        None => return EBADF,
+    };
+    if let Some(pipe_id) = pipe_id {
+        return write_pipe(pipe_id, buf_ptr, len);
     }
 
     let Ok(len_usize) = usize::try_from(len) else {
@@ -977,6 +1092,31 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     }
 
     written as u64
+}
+
+fn write_pipe(pipe_id: usize, buf_ptr: u64, len: u64) -> u64 {
+    let Ok(len_usize) = usize::try_from(len) else {
+        return EINVAL;
+    };
+    if len_usize > PIPE_BUFFER_CAP {
+        return EAGAIN;
+    }
+    let mut tmp = alloc::vec![0u8; len_usize];
+    if let Err(errno) = crate::syscall::copy_from_user(buf_ptr, &mut tmp) {
+        return errno;
+    }
+    let mut table = PIPE_TABLE.lock();
+    let Some(Some(pipe)) = table.get_mut(pipe_id) else {
+        return EBADF;
+    };
+    if pipe.readers == 0 {
+        return EPIPE;
+    }
+    if pipe.data.len().saturating_add(tmp.len()) > PIPE_BUFFER_CAP {
+        return EAGAIN;
+    }
+    pipe.data.extend_from_slice(&tmp);
+    len
 }
 
 /// Fcntl システムコール（FD フラグ操作）
@@ -1141,6 +1281,61 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
     }
 }
 
+pub fn pipe2(fds_ptr: u64, flags: u64) -> u64 {
+    if fds_ptr == 0 || !crate::syscall::validate_user_ptr(fds_ptr, 8) {
+        return EFAULT;
+    }
+    const PIPE_ALLOWED_FLAGS: u64 = O_CLOEXEC;
+    if flags & !PIPE_ALLOWED_FLAGS != 0 {
+        return EINVAL;
+    }
+    let pid = match current_process_id_raw() {
+        Some(p) => p,
+        None => return EBADF,
+    };
+    let Some(pipe_id) = alloc_pipe_state() else {
+        return ENOSPC;
+    };
+    let cloexec = (flags & O_CLOEXEC) != 0;
+    let allocated = with_fd_table_mut(pid, |t| {
+        let read_fd = match t.alloc(alloc::boxed::Box::new(FileHandle::new_pipe_read(pipe_id)), cloexec) {
+            Some(fd) => fd,
+            None => return Err(ENOSPC),
+        };
+        let write_fd = match t.alloc(alloc::boxed::Box::new(FileHandle::new_pipe_write(pipe_id)), cloexec) {
+            Some(fd) => fd,
+            None => {
+                let _ = t.take(read_fd);
+                return Err(ENOSPC);
+            }
+        };
+        Ok((read_fd, write_fd))
+    });
+    let (read_fd, write_fd) = match allocated {
+        Some(Ok(fds)) => fds,
+        _ => {
+            close_pipe_endpoint_from_kernel(pipe_id, false);
+            close_pipe_endpoint_from_kernel(pipe_id, true);
+            return ENOSPC;
+        }
+    };
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(&(read_fd as i32).to_ne_bytes());
+    out[4..].copy_from_slice(&(write_fd as i32).to_ne_bytes());
+    if let Err(errno) = crate::syscall::copy_to_user(fds_ptr, &out) {
+        let _ = with_fd_table_mut(pid, |t| {
+            let _ = t.take(read_fd);
+            let _ = t.take(write_fd);
+        });
+        return errno;
+    }
+    SUCCESS
+}
+
+pub fn pipe(fds_ptr: u64) -> u64 {
+    pipe2(fds_ptr, 0)
+}
+
 /// Dup システムコール: FD を複製して最小の空き番号に割り当てる
 pub fn dup(fd: u64) -> u64 {
     if fd < FD_BASE as u64 {
@@ -1158,6 +1353,9 @@ pub fn dup(fd: u64) -> u64 {
     // 既存エントリをクローンして新しい FD を割り当てる
     let cloned = with_fd_table(pid, |t| {
         t.get(idx).map(|fh| {
+            if let Some(pipe_id) = fh.pipe_id {
+                clone_pipe_endpoint_from_kernel(pipe_id, fh.pipe_write);
+            }
             alloc::boxed::Box::new(FileHandle {
                 data: fh.data.clone(),
                 pos: fh.pos,
@@ -1219,6 +1417,9 @@ pub fn dup2(old_fd: u64, new_fd: u64) -> u64 {
     }
     let new_handle = match with_fd_table(pid, |t| {
         t.get(old_idx).map(|fh| {
+            if let Some(pipe_id) = fh.pipe_id {
+                clone_pipe_endpoint_from_kernel(pipe_id, fh.pipe_write);
+            }
             alloc::boxed::Box::new(FileHandle {
                 data: fh.data.clone(),
                 pos: fh.pos,

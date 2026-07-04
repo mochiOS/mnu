@@ -149,6 +149,9 @@ impl FileHandle {
 
 impl Drop for FileHandle {
     fn drop(&mut self) {
+        if let Some(pipe_id) = self.pipe_id {
+            crate::syscall::fs::close_pipe_endpoint_from_kernel(pipe_id, self.pipe_write);
+        }
         if !self.is_remote {
             return;
         }
@@ -288,6 +291,9 @@ impl FdTable {
                 continue;
             }
             let fh = unsafe { &*(ptr as *const FileHandle) };
+            if let Some(pipe_id) = fh.pipe_id {
+                crate::syscall::fs::clone_pipe_endpoint_from_kernel(pipe_id, fh.pipe_write);
+            }
             let new_fh = Box::new(FileHandle {
                 data: fh.data.clone(),
                 pos: fh.pos,

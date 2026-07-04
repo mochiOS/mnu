@@ -397,6 +397,13 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::MemoryMap as u64 => process::mmap(arg0, arg1, arg2, arg3, arg4),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryProtect as u64 => pgroup::mprotect(arg0, arg1, arg2),
+        x if x == SyscallNumber::Pipe as u64 => fs::pipe(arg0),
+        x if x == SyscallNumber::Pipe2 as u64 => fs::pipe2(arg0, arg1),
+        x if x == SyscallNumber::Close as u64 => fs::close(arg0),
+        x if x == SyscallNumber::Dup as u64 => fs::dup(arg0),
+        x if x == SyscallNumber::Dup2 as u64 => fs::dup2(arg0, arg1),
+        x if x == SyscallNumber::Fcntl as u64 => fs::fcntl(arg0, arg1, arg2),
+        x if x == SyscallNumber::Read as u64 => fs::read(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcCreate as u64 => ipc::create(arg0, arg1),
@@ -453,19 +460,31 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
     }
 }
 
-/// fork/clone のみ、現在スレッドへユーザーコンテキストを保存する
+/// fork/clone のため、現在スレッドへユーザーコンテキストを保存する
 #[no_mangle]
-pub extern "sysv64" fn save_user_context_for_fork(
-    num: u64,
-    user_rip: u64,
-    user_rsp: u64,
-    user_rflags: u64,
-) {
+pub extern "sysv64" fn save_user_context_for_fork(saved_frame: u64) {
     crate::syscall::syscall_entry::verify_kernel_page_table_before_rust();
-    let _ = num;
+    if saved_frame == 0 {
+        return;
+    }
+
+    // Layout is defined by syscall_entry's push order.
+    let read = |offset: usize| unsafe { *((saved_frame + offset as u64) as *const u64) };
+    let context = crate::task::thread::SyscallUserContext {
+        rsp: read(0),
+        r15: read(8),
+        r14: read(16),
+        r13: read(24),
+        r12: read(32),
+        rbx: read(40),
+        rbp: read(48),
+        rflags: read(56),
+        rip: read(64),
+    };
+
     if let Some(tid) = crate::task::current_thread_id() {
         let _ = crate::task::with_thread_mut(tid, |thread| {
-            thread.set_syscall_user_context(user_rip, user_rsp, user_rflags);
+            thread.set_syscall_user_context(context);
         });
     }
 }

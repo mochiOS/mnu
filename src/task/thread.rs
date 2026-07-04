@@ -4,6 +4,35 @@ use x86_64::VirtAddr;
 use super::context::Context;
 use super::ids::{ProcessId, ThreadId, ThreadState};
 
+#[derive(Debug, Clone, Copy)]
+pub struct SyscallUserContext {
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub rbp: u64,
+    pub rbx: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+}
+
+impl SyscallUserContext {
+    pub const fn empty() -> Self {
+        Self {
+            rip: 0,
+            rsp: 0,
+            rflags: 0,
+            rbp: 0,
+            rbx: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+        }
+    }
+}
+
 // L4 風の short IPC を register 相当で運ぶための上限。
 // ここを少し広げると、小さめの RPC が slow path に落ちにくくなる。
 const FAST_IPC_MAX_BYTES: usize = 128;
@@ -208,12 +237,8 @@ pub struct Thread {
     in_syscall: bool,
     /// KPTI 復帰用のユーザーCR3
     syscall_user_cr3: u64,
-    /// 直近の SYSCALL 入口で保存したユーザー RIP
-    syscall_user_rip: u64,
-    /// 直近の SYSCALL 入口で保存したユーザー RSP
-    syscall_user_rsp: u64,
-    /// 直近の SYSCALL 入口で保存したユーザー RFLAGS
-    syscall_user_rflags: u64,
+    /// 直近の SYSCALL 入口で保存した fork 復帰用ユーザー文脈
+    syscall_user_context: SyscallUserContext,
     /// futex wait timeout で起床したことを示すフラグ
     futex_timed_out: bool,
     /// IPC受信などで眠る前に起床要求が来たことを示すフラグ
@@ -497,9 +522,7 @@ impl Thread {
             fs_base: 0,
             in_syscall: false,
             syscall_user_cr3: 0,
-            syscall_user_rip: 0,
-            syscall_user_rsp: 0,
-            syscall_user_rflags: 0,
+            syscall_user_context: SyscallUserContext::empty(),
             futex_timed_out: false,
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
@@ -616,9 +639,7 @@ impl Thread {
             fs_base: 0,
             in_syscall: false,
             syscall_user_cr3: 0,
-            syscall_user_rip: 0,
-            syscall_user_rsp: 0,
-            syscall_user_rflags: 0,
+            syscall_user_context: SyscallUserContext::empty(),
             futex_timed_out: false,
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
@@ -656,9 +677,7 @@ impl Thread {
     /// 子スレッドはユーザー空間で fork() の戻り値として 0 を返す
     pub fn new_fork_child(
         process_id: ProcessId,
-        user_rip: u64,
-        user_rsp: u64,
-        user_rflags: u64,
+        user_context: SyscallUserContext,
         fs_base: u64,
         kernel_stack: u64,
         kernel_stack_size: usize,
@@ -685,13 +704,8 @@ impl Thread {
                     crate::task::exit_current_task(crate::syscall::EINVAL);
                 }
             };
-            let (entry, stack, rflags, fs) = match with_thread(tid, |thread| {
-                (
-                    thread.user_entry(),
-                    thread.user_stack(),
-                    thread.fork_user_rflags(),
-                    thread.fs_base(),
-                )
+            let (context, fs) = match with_thread(tid, |thread| {
+                (thread.syscall_user_context(), thread.fs_base())
             }) {
                 Some(v) => v,
                 None => {
@@ -704,7 +718,7 @@ impl Thread {
                 }
             };
             unsafe {
-                crate::task::usermode::jump_to_usermode_fork_child(entry, stack, rflags, fs);
+                crate::task::usermode::jump_to_usermode_fork_child(context, fs);
             }
         }
 
@@ -723,16 +737,14 @@ impl Thread {
             context,
             kernel_stack,
             kernel_stack_size,
-            user_entry: user_rip,
-            user_stack: user_rsp,
+            user_entry: user_context.rip,
+            user_stack: user_context.rsp,
             user_arg0: 0,
-            fork_user_rflags: user_rflags,
+            fork_user_rflags: user_context.rflags,
             fs_base,
             in_syscall: false,
             syscall_user_cr3: 0,
-            syscall_user_rip: user_rip,
-            syscall_user_rsp: user_rsp,
-            syscall_user_rflags: user_rflags,
+            syscall_user_context: user_context,
             futex_timed_out: false,
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
@@ -763,18 +775,12 @@ impl Thread {
         self.syscall_user_cr3 = cr3;
     }
 
-    pub fn syscall_user_context(&self) -> (u64, u64, u64) {
-        (
-            self.syscall_user_rip,
-            self.syscall_user_rsp,
-            self.syscall_user_rflags,
-        )
+    pub fn syscall_user_context(&self) -> SyscallUserContext {
+        self.syscall_user_context
     }
 
-    pub fn set_syscall_user_context(&mut self, rip: u64, rsp: u64, rflags: u64) {
-        self.syscall_user_rip = rip;
-        self.syscall_user_rsp = rsp;
-        self.syscall_user_rflags = rflags;
+    pub fn set_syscall_user_context(&mut self, context: SyscallUserContext) {
+        self.syscall_user_context = context;
     }
 
     pub fn set_futex_timed_out(&mut self, timed_out: bool) {
