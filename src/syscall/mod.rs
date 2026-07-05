@@ -243,6 +243,91 @@ pub fn get_physical_addr(virt_addr: u64) -> u64 {
     crate::mem::paging::virt_to_phys_in_table(pt_phys, virt_addr).unwrap_or(EFAULT)
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserFramebufferInfo {
+    addr: u64,
+    size: u64,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+}
+
+pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
+    use crate::syscall::types::{EFAULT, ENXIO, SUCCESS};
+
+    let Some(info) = crate::util::vga::get_info() else {
+        return ENXIO;
+    };
+    let Some(row_bytes) = info.stride.checked_mul(4) else {
+        return EFAULT;
+    };
+    let Some(size) = row_bytes.checked_mul(info.height) else {
+        return EFAULT;
+    };
+    let out = UserFramebufferInfo {
+        addr: info.addr,
+        size: size as u64,
+        width: info.width as u32,
+        height: info.height as u32,
+        stride: info.stride as u32,
+        format: 1,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&out as *const UserFramebufferInfo).cast::<u8>(),
+            core::mem::size_of::<UserFramebufferInfo>(),
+        )
+    };
+    match copy_to_user(out_ptr, bytes) {
+        Ok(()) => SUCCESS,
+        Err(err) => err,
+    }
+}
+
+pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
+    use crate::capability::Capability;
+    use crate::syscall::types::{EACCES, EINVAL, ENOMEM, ENXIO, SUCCESS};
+
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
+        return EACCES;
+    }
+    if virt_addr == 0 || size == 0 || (virt_addr & 0xfff) != 0 || (size & 0xfff) != 0 {
+        return EINVAL;
+    }
+    let Some(info) = crate::util::vga::get_info() else {
+        return ENXIO;
+    };
+    let Some(row_bytes) = info.stride.checked_mul(4) else {
+        return EINVAL;
+    };
+    let Some(fb_size) = row_bytes.checked_mul(info.height) else {
+        return EINVAL;
+    };
+    let fb_base = info.addr & !0xfff;
+    let fb_offset = info.addr - fb_base;
+    let required = match (fb_size as u64).checked_add(fb_offset) {
+        Some(v) => (v + 0xfff) & !0xfff,
+        None => return EINVAL,
+    };
+    if size < required {
+        return EINVAL;
+    }
+    let Some(pid) = crate::syscall::security::current_process_id() else {
+        return ENOMEM;
+    };
+    let Some(pt_phys) = crate::task::with_process(pid, |proc| proc.page_table()).flatten() else {
+        return ENOMEM;
+    };
+    if crate::mem::paging::map_physical_range_to_user(pt_phys, virt_addr, fb_base, required)
+        .is_err()
+    {
+        return ENOMEM;
+    }
+    SUCCESS
+}
+
 fn debug_serial_write_str(s: &str) {
     unsafe {
         // SAFETY: COM1 is the conventional debug serial port in this kernel,
@@ -395,6 +480,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::MemoryAlloc as u64 => process::mmap(0, arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::MemoryFree as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryMap as u64 => process::mmap(arg0, arg1, arg2, arg3, arg4),
+        x if x == SyscallNumber::GetFramebufferInfo as u64 => get_framebuffer_info(arg0),
+        x if x == SyscallNumber::MapFramebuffer as u64 => map_framebuffer(arg0, arg1),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryProtect as u64 => pgroup::mprotect(arg0, arg1, arg2),
         x if x == SyscallNumber::Pipe as u64 => fs::pipe(arg0),
