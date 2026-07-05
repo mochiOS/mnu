@@ -202,11 +202,37 @@ pub fn call(
         Some(handle) => handle,
         None => return EINVAL,
     };
+    let saved_reply_to = {
+        let mut boxes = MAILBOXES.lock();
+        let (idx, _) = match crate::task::thread_slot_index_and_generation_by_u64(caller) {
+            Some(v) => v,
+            None => return EINVAL,
+        };
+        if idx >= MAX_THREADS {
+            return EINVAL;
+        }
+        let saved = boxes[idx].reply_to;
+        boxes[idx].reply_to = 0;
+        saved
+    };
     let sent = send_to_thread_id(dest_thread_id, sender, req_ptr, req_len);
     if sent != 0 {
+        let mut boxes = MAILBOXES.lock();
+        if let Some((idx, _)) = crate::task::thread_slot_index_and_generation_by_u64(caller) {
+            if idx < MAX_THREADS {
+                boxes[idx].reply_to = saved_reply_to;
+            }
+        }
         return sent;
     }
-    recv_blocking_for_thread(caller, caller, reply_ptr, reply_len)
+    let result = recv_blocking_for_thread(caller, caller, reply_ptr, reply_len);
+    let mut boxes = MAILBOXES.lock();
+    if let Some((idx, _)) = crate::task::thread_slot_index_and_generation_by_u64(caller) {
+        if idx < MAX_THREADS {
+            boxes[idx].reply_to = saved_reply_to;
+        }
+    }
+    result
 }
 
 pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
