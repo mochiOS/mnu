@@ -11,6 +11,8 @@ static FB_INFO: Once<FramebufferInfo> = Once::new();
 pub struct FramebufferInfo {
     /// アドレス
     pub addr: u64,
+    /// フレームバッファサイズ
+    pub size: usize,
     ///　横幅
     pub width: usize,
     /// 高さ
@@ -257,9 +259,10 @@ pub fn get_info() -> Option<FramebufferInfo> {
 }
 
 /// フレームバッファを初期化
-pub fn init(addr: u64, width: usize, height: usize, stride: usize) {
+pub fn init(addr: u64, size: usize, width: usize, height: usize, stride: usize) {
     FB_INFO.call_once(|| FramebufferInfo {
         addr,
+        size,
         width,
         height,
         stride,

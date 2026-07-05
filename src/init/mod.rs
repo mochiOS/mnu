@@ -8,6 +8,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     util::console::init();
     util::vga::init(
         boot_info.framebuffer_addr,
+        boot_info.framebuffer_size,
         boot_info.screen_width,
         boot_info.screen_height,
         boot_info.stride,

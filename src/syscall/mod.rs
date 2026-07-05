@@ -255,20 +255,14 @@ struct UserFramebufferInfo {
 }
 
 pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
-    use crate::syscall::types::{EFAULT, ENXIO, SUCCESS};
+    use crate::syscall::types::{ENXIO, SUCCESS};
 
     let Some(info) = crate::util::vga::get_info() else {
         return ENXIO;
     };
-    let Some(row_bytes) = info.stride.checked_mul(4) else {
-        return EFAULT;
-    };
-    let Some(size) = row_bytes.checked_mul(info.height) else {
-        return EFAULT;
-    };
     let out = UserFramebufferInfo {
         addr: info.addr,
-        size: size as u64,
+        size: info.size as u64,
         width: info.width as u32,
         height: info.height as u32,
         stride: info.stride as u32,
@@ -299,15 +293,9 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     let Some(info) = crate::util::vga::get_info() else {
         return ENXIO;
     };
-    let Some(row_bytes) = info.stride.checked_mul(4) else {
-        return EINVAL;
-    };
-    let Some(fb_size) = row_bytes.checked_mul(info.height) else {
-        return EINVAL;
-    };
     let fb_base = info.addr & !0xfff;
     let fb_offset = info.addr - fb_base;
-    let required = match (fb_size as u64).checked_add(fb_offset) {
+    let required = match (info.size as u64).checked_add(fb_offset) {
         Some(v) => (v + 0xfff) & !0xfff,
         None => return EINVAL,
     };
