@@ -134,10 +134,7 @@ fn read_gdtr() -> (u64, u16) {
 ///
 /// # Safety
 /// `entry`/`stack`/`user_rflags`/`fs_base` は子プロセスの有効な復帰コンテキストである必要がある。
-pub unsafe fn jump_to_usermode_fork_child(
-    context: SyscallUserContext,
-    fs_base: u64,
-) -> ! {
+pub unsafe fn jump_to_usermode_fork_child(context: SyscallUserContext, fs_base: u64) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3;
     let user_ss = gdt::user_data_selector() as u64 | 3;
     let user_cr3 = crate::task::current_thread_id()

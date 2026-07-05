@@ -1298,11 +1298,17 @@ pub fn pipe2(fds_ptr: u64, flags: u64) -> u64 {
     };
     let cloexec = (flags & O_CLOEXEC) != 0;
     let allocated = with_fd_table_mut(pid, |t| {
-        let read_fd = match t.alloc(alloc::boxed::Box::new(FileHandle::new_pipe_read(pipe_id)), cloexec) {
+        let read_fd = match t.alloc(
+            alloc::boxed::Box::new(FileHandle::new_pipe_read(pipe_id)),
+            cloexec,
+        ) {
             Some(fd) => fd,
             None => return Err(ENOSPC),
         };
-        let write_fd = match t.alloc(alloc::boxed::Box::new(FileHandle::new_pipe_write(pipe_id)), cloexec) {
+        let write_fd = match t.alloc(
+            alloc::boxed::Box::new(FileHandle::new_pipe_write(pipe_id)),
+            cloexec,
+        ) {
             Some(fd) => fd,
             None => {
                 let _ = t.take(read_fd);

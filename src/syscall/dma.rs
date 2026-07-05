@@ -89,9 +89,8 @@ pub fn alloc(length: u64, out_ptr: u64) -> u64 {
         Ok(v) => v,
         Err(errno) => {
             for idx in 0..page_count {
-                let frame = PhysFrame::containing_address(PhysAddr::new(
-                    phys_start + (idx as u64) * 4096,
-                ));
+                let frame =
+                    PhysFrame::containing_address(PhysAddr::new(phys_start + (idx as u64) * 4096));
                 let _ = crate::mem::frame::deallocate_frame(frame);
             }
             return errno;
@@ -99,14 +98,14 @@ pub fn alloc(length: u64, out_ptr: u64) -> u64 {
     };
 
     let buffer = DmaBuffer::new(handle, virt_start, size, phys_start, page_count);
-    let reserved = crate::task::with_process_mut(pid, |process| process.add_dma_buffer(buffer.clone()))
-        .unwrap_or(false);
+    let reserved =
+        crate::task::with_process_mut(pid, |process| process.add_dma_buffer(buffer.clone()))
+            .unwrap_or(false);
     if !reserved {
         let _ = crate::task::with_process_mut(pid, |process| process.set_dma_end(old_dma_end));
         for idx in 0..page_count {
-            let frame = PhysFrame::containing_address(PhysAddr::new(
-                phys_start + (idx as u64) * 4096,
-            ));
+            let frame =
+                PhysFrame::containing_address(PhysAddr::new(phys_start + (idx as u64) * 4096));
             let _ = crate::mem::frame::deallocate_frame(frame);
         }
         return EINVAL;
@@ -171,20 +170,20 @@ pub fn free(handle: u64) -> u64 {
         Some(v) => v,
         None => return ENOMEM,
     };
-    let buffer = match crate::task::with_process_mut(pid, |process| process.remove_dma_buffer(handle)) {
-        Some(Some(buffer)) => buffer,
-        Some(None) => return EINVAL,
-        None => return ENOMEM,
-    };
+    let buffer =
+        match crate::task::with_process_mut(pid, |process| process.remove_dma_buffer(handle)) {
+            Some(Some(buffer)) => buffer,
+            Some(None) => return EINVAL,
+            None => return ENOMEM,
+        };
     let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
         pt_phys,
         buffer.virt_start(),
         buffer.len(),
     );
     for idx in 0..buffer.page_count() {
-        let frame = PhysFrame::containing_address(PhysAddr::new(
-            buffer.phys_start() + (idx as u64) * 4096,
-        ));
+        let frame =
+            PhysFrame::containing_address(PhysAddr::new(buffer.phys_start() + (idx as u64) * 4096));
         let _ = crate::mem::frame::deallocate_frame(frame);
     }
     SUCCESS

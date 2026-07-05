@@ -10,7 +10,11 @@ pub fn register_handler(irq: u8, handler: IrqHandler) -> i32 {
     }
     let mut handlers = IRQ_HANDLERS.lock();
     handlers[irq as usize] = Some(handler);
-    if super::pic::unmask_irq(irq) { 0 } else { -22 }
+    if super::pic::unmask_irq(irq) {
+        0
+    } else {
+        -22
+    }
 }
 
 pub fn dispatch(irq: u8) {

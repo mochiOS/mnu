@@ -11,8 +11,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::capability::{
-    kernel_authority_implies, parse_kernel_authority_spec, Capability, CapabilityClass, KernelAuthority,
-    KernelCapability,
+    kernel_authority_implies, parse_kernel_authority_spec, Capability, CapabilityClass,
+    KernelAuthority, KernelCapability,
 };
 use crate::syscall::copy_from_user;
 use crate::syscall::types::{EACCES, EFAULT, EINVAL, ENOSYS, SUCCESS};

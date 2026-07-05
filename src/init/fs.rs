@@ -43,7 +43,11 @@ fn rootfs_image() -> &'static [u8] {
 
 pub fn rootfs_bytes() -> Option<&'static [u8]> {
     let image = rootfs_image();
-    if image.is_empty() { None } else { Some(image) }
+    if image.is_empty() {
+        None
+    } else {
+        Some(image)
+    }
 }
 
 /// スーパーブロックの構造体

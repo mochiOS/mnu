@@ -277,10 +277,7 @@ pub fn resolve_exec_privilege(requested_privilege: Option<PrivilegeLevel>) -> Pr
 
 /// 現行の exec policy を priority に落とす
 #[inline]
-pub fn resolve_exec_priority(
-    role: ManifestRole,
-    _parent_pid: Option<ProcessId>,
-) -> u8 {
+pub fn resolve_exec_priority(role: ManifestRole, _parent_pid: Option<ProcessId>) -> u8 {
     role_priority(role)
 }
 

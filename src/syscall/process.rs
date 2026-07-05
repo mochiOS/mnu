@@ -509,10 +509,9 @@ pub fn fork() -> u64 {
         );
     }
 
-    let (user_context, parent_fs) = crate::task::with_thread(parent_tid, |t| {
-        (t.syscall_user_context(), t.fs_base())
-    })
-        .unwrap_or((crate::task::thread::SyscallUserContext::empty(), 0));
+    let (user_context, parent_fs) =
+        crate::task::with_thread(parent_tid, |t| (t.syscall_user_context(), t.fs_base()))
+            .unwrap_or((crate::task::thread::SyscallUserContext::empty(), 0));
     if user_context.rip == 0 || user_context.rsp == 0 {
         let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOSYS;

@@ -7,9 +7,7 @@
 #![deny(clippy::panic)]
 
 #[cfg(test)]
-compile_error!(
-    "cargo test is disabled for this crate; use the QEMU/kernel self-test path instead"
-);
+compile_error!("cargo test is disabled for this crate; use the QEMU/kernel self-test path instead");
 
 #[cfg(feature = "kcfi")]
 compile_error!(
@@ -96,10 +94,10 @@ pub mod cpu;
 /// per-CPU状態管理
 pub mod percpu;
 #[cfg(not(test))]
+mod plugkit;
+#[cfg(not(test))]
 /// SMP/マルチコアの共有ハンドオフ
 pub mod smp;
-#[cfg(not(test))]
-mod plugkit;
 
 pub const MAX_CPU_IDS: usize = 64;
 

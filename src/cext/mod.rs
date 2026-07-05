@@ -39,8 +39,7 @@ pub struct McxDmaRegion {
 pub struct McxKernelApi {
     pub abi: u16,
     pub struct_size: u16,
-    pub alloc_dma:
-        extern "C" fn(size: usize, align: usize, out_region: *mut McxDmaRegion) -> i32,
+    pub alloc_dma: extern "C" fn(size: usize, align: usize, out_region: *mut McxDmaRegion) -> i32,
     pub log: extern "C" fn(level: u32, ptr: *const u8, len: usize),
     pub register_irq: extern "C" fn(irq: u8, handler: extern "C" fn(u8)) -> i32,
 }
@@ -189,11 +188,7 @@ extern "C" fn kernel_log(level: u32, ptr: *const u8, len: usize) {
     }
 }
 
-extern "C" fn kernel_alloc_dma(
-    size: usize,
-    align: usize,
-    out_region: *mut McxDmaRegion,
-) -> i32 {
+extern "C" fn kernel_alloc_dma(size: usize, align: usize, out_region: *mut McxDmaRegion) -> i32 {
     if out_region.is_null() || size == 0 || align == 0 || !align.is_power_of_two() {
         return -22;
     }
@@ -455,7 +450,11 @@ fn load_bundle_directories() -> bool {
             continue;
         };
         if manifest.abi != 1 {
-            crate::warn!("cext: unsupported abi {} for {}", manifest.abi, manifest.name);
+            crate::warn!(
+                "cext: unsupported abi {} for {}",
+                manifest.abi,
+                manifest.name
+            );
             continue;
         }
         if manifest.load_stage != "boot" {

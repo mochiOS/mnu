@@ -530,92 +530,26 @@ impl Capability {
     pub fn class(&self) -> CapabilityClass {
         use Capability::*;
         match self {
-            FsReadUserDocuments
-            | FsWriteUserDocuments
-            | FsReadUserDownloads
-            | FsWriteUserDownloads
-            | FsReadUserDesktop
-            | FsWriteUserDesktop
-            | FsReadUserPictures
-            | FsWriteUserPictures
-            | FsReadUserMusic
-            | FsWriteUserMusic
-            | FsReadUserVideos
-            | FsWriteUserVideos
-            | FsReadUser
-            | FsWriteUser
-            | FsReadTmp
-            | FsWriteTmp
-            | FsReadRemovable
-            | FsWriteRemovable
-            | NetConnect
-            | NetListen
-            | WindowCreate
-            | WindowOverlay
-            | DisplayRead
-            | InputKeyboard
-            | InputPointer
-            | AudioPlayback
-            | AudioRecord
-            | ClipboardRead
-            | ClipboardWrite
-            | NotificationSend
-            | SystemTimeRead
-            | SystemInfoRead
-            | SystemLogsRead
-            | AccountSelfRead
-            | AccountSelfModify
-            | SettingsRead => CapabilityClass::UserGrantable,
-            FsReadAll
-            | FsWriteAll
-            | NetRaw
-            | WindowCapture
-            | DisplayCapture
-            | InputKeyboardGlobal
-            | InputPointerGlobal
-            | InputGamepad
-            | CameraAccess
-            | MicrophoneAccess
-            | LocationAccess
-            | BluetoothAccess
-            | UsbAccess
-            | SerialAccess
-            | PowerShutdown
-            | PowerReboot
-            | PowerSuspend
-            | SystemTimeSet
-            | PackageInstall
-            | PackageRemove
-            | PackageUpdate
-            | ServiceRegister
-            | ServiceControl
-            | VmCreate
-            | VmControl
-            | DeviceGpu
-            | DeviceAudio
-            | DeviceInput
-            | DeviceStorage
-            | DeviceNet
-            | AccountOtherRead
-            | AccountOtherModify
-            | SettingsWrite => CapabilityClass::Privileged,
-            ProcessSpawn
-            | ProcessInspect
-            | ProcessKill
-            | IpcClient
-            | IpcServer
-            | DmaAllocate
-            | MemoryPhysMap
-            | MemoryPhysTranslate
-            | KernelModuleLoad
-            | KernelDebug
-            | CapabilitiesManage
-            | Unsandboxed
-            | DeveloperDebug
-            | DeveloperProfile
-            | DeveloperTracing
-            | SignatureRead
-            | SignatureWrite => CapabilityClass::SystemOnly,
+            FsReadUserDocuments | FsWriteUserDocuments | FsReadUserDownloads
+            | FsWriteUserDownloads | FsReadUserDesktop | FsWriteUserDesktop
+            | FsReadUserPictures | FsWriteUserPictures | FsReadUserMusic | FsWriteUserMusic
+            | FsReadUserVideos | FsWriteUserVideos | FsReadUser | FsWriteUser | FsReadTmp
+            | FsWriteTmp | FsReadRemovable | FsWriteRemovable | NetConnect | NetListen
+            | WindowCreate | WindowOverlay | DisplayRead | InputKeyboard | InputPointer
+            | AudioPlayback | AudioRecord | ClipboardRead | ClipboardWrite | NotificationSend
+            | SystemTimeRead | SystemInfoRead | SystemLogsRead | AccountSelfRead
+            | AccountSelfModify | SettingsRead => CapabilityClass::UserGrantable,
+            FsReadAll | FsWriteAll | NetRaw | WindowCapture | DisplayCapture
+            | InputKeyboardGlobal | InputPointerGlobal | InputGamepad | CameraAccess
+            | MicrophoneAccess | LocationAccess | BluetoothAccess | UsbAccess | SerialAccess
+            | PowerShutdown | PowerReboot | PowerSuspend | SystemTimeSet | PackageInstall
+            | PackageRemove | PackageUpdate | ServiceRegister | ServiceControl | VmCreate
+            | VmControl | DeviceGpu | DeviceAudio | DeviceInput | DeviceStorage | DeviceNet
+            | AccountOtherRead | AccountOtherModify | SettingsWrite => CapabilityClass::Privileged,
+            ProcessSpawn | ProcessInspect | ProcessKill | IpcClient | IpcServer | DmaAllocate
+            | MemoryPhysMap | MemoryPhysTranslate | KernelModuleLoad | KernelDebug
+            | CapabilitiesManage | Unsandboxed | DeveloperDebug | DeveloperProfile
+            | DeveloperTracing | SignatureRead | SignatureWrite => CapabilityClass::SystemOnly,
         }
     }
 
