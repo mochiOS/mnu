@@ -96,6 +96,9 @@ pub fn read_all(path: &str) -> Option<Vec<u8>> {
     if rc != 0 {
         return None;
     }
+    if read != data.len() {
+        return None;
+    }
     data.truncate(read);
     Some(data)
 }
