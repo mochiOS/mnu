@@ -375,21 +375,6 @@ pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
             crate::audit::AuditEventKind::Usercopy,
             "copy_to_user rejected unmapped or unwritable range",
         );
-        let tid = crate::task::current_thread_id();
-        let proc_name = tid
-            .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-            .and_then(|pid| {
-                crate::task::with_process(pid, |p| alloc::string::String::from(p.name()))
-            })
-            .unwrap_or_else(|| alloc::string::String::from("<unknown>"));
-        crate::warn!(
-            "copy_to_user failed tid={:?} process={} ptr={:#x} len={} pt={:#x}",
-            tid,
-            proc_name,
-            dst_ptr,
-            src.len(),
-            user_pt
-        );
         match err {
             crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => EFAULT,
             crate::Kernel::Memory(crate::result::Memory::PermissionDenied) => EFAULT,
