@@ -133,7 +133,7 @@ pub enum SyscallNumber {
     AllocSharedPages = 548,
     UnmapPages = 549,
     IpcSendPages = 550,
-    Reserved551 = 551,
+    IpcEndpointAlive = 551,
     ListProcesses = 552,
     CheckThreadCapability = 553,
     ExecWithCapabilities = 554,

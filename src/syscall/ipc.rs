@@ -120,6 +120,14 @@ fn endpoint_record_from_handle(handle: u64) -> Option<EndpointRecord> {
         .filter(|record| endpoint_record_is_valid(record))
 }
 
+pub fn endpoint_alive(handle: u64) -> u64 {
+    if handle != 0 && endpoint_record_from_handle(handle).is_some() {
+        super::SUCCESS
+    } else {
+        super::EINVAL
+    }
+}
+
 fn endpoint_rights_for_thread(thread_id: u64) -> EndpointRights {
     let Some(pid) = crate::task::thread_to_process_id(thread_id) else {
         return EndpointRights::empty();
