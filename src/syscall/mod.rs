@@ -302,6 +302,9 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     if size < required {
         return EINVAL;
     }
+    if !crate::mem::frame::is_allowed_mmio_range(fb_base, required) {
+        return EACCES;
+    }
     let Some(pid) = crate::syscall::security::current_process_id() else {
         return ENOMEM;
     };
@@ -371,6 +374,13 @@ pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
         crate::audit::log(
             crate::audit::AuditEventKind::Usercopy,
             "copy_to_user rejected unmapped or unwritable range",
+        );
+        crate::warn!(
+            "copy_to_user failed tid={:?} ptr={:#x} len={} pt={:#x}",
+            crate::task::current_thread_id(),
+            dst_ptr,
+            src.len(),
+            user_pt
         );
         match err {
             crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => EFAULT,
