@@ -874,18 +874,41 @@ pub fn send_pages(
     let Ok(page_count) = usize::try_from(page_count_raw) else {
         return EINVAL;
     };
-    let bytes_len = match page_count_raw.checked_mul(8) {
-        Some(v) => v,
-        None => return EINVAL,
-    };
-    if phys_pages_ptr == 0 || !crate::syscall::validate_user_ptr(phys_pages_ptr, bytes_len) {
-        return EFAULT;
-    }
     let mut pages = [0u64; MAX_EXT_PAGES];
-    let pages_bytes =
-        unsafe { core::slice::from_raw_parts_mut(pages.as_mut_ptr().cast::<u8>(), page_count * 8) };
-    if let Err(errno) = crate::syscall::copy_from_user(phys_pages_ptr, pages_bytes) {
-        return errno;
+    if phys_pages_ptr == 0 {
+        if (local_base & 0xfff) != 0 {
+            return EINVAL;
+        }
+        let pt_phys = match crate::syscall::security::current_process_id()
+            .and_then(|pid| crate::task::with_process(pid, |process| process.page_table()))
+            .flatten()
+        {
+            Some(pt) => pt,
+            None => return EFAULT,
+        };
+        for (index, page) in pages.iter_mut().take(page_count).enumerate() {
+            let Some(virt) = local_base.checked_add((index as u64) * 4096) else {
+                return EINVAL;
+            };
+            let Some(phys) = crate::mem::paging::virt_to_phys_in_table(pt_phys, virt) else {
+                return EFAULT;
+            };
+            *page = phys & !0xfffu64;
+        }
+    } else {
+        let bytes_len = match page_count_raw.checked_mul(8) {
+            Some(v) => v,
+            None => return EINVAL,
+        };
+        if !crate::syscall::validate_user_ptr(phys_pages_ptr, bytes_len) {
+            return EFAULT;
+        }
+        let pages_bytes = unsafe {
+            core::slice::from_raw_parts_mut(pages.as_mut_ptr().cast::<u8>(), page_count * 8)
+        };
+        if let Err(errno) = crate::syscall::copy_from_user(phys_pages_ptr, pages_bytes) {
+            return errno;
+        }
     }
     let total = match page_count_raw.checked_mul(4096) {
         Some(v) => v,

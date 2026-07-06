@@ -1101,7 +1101,7 @@ pub fn alloc_shared_pages(
     flags: u64,
 ) -> u64 {
     let _ = flags;
-    if page_count_raw == 0 || phys_pages_ptr == 0 || phys_page_count_raw < page_count_raw {
+    if page_count_raw == 0 || (phys_pages_ptr != 0 && phys_page_count_raw < page_count_raw) {
         return EINVAL;
     }
     let Ok(page_count) = usize::try_from(page_count_raw) else {
@@ -1114,7 +1114,7 @@ pub fn alloc_shared_pages(
         Some(v) => v,
         None => return EINVAL,
     };
-    if !super::validate_user_ptr(phys_pages_ptr, out_len) {
+    if phys_pages_ptr != 0 && !super::validate_user_ptr(phys_pages_ptr, out_len) {
         return EFAULT;
     }
 
@@ -1204,19 +1204,22 @@ pub fn alloc_shared_pages(
         mapped += 1;
     }
 
-    let bytes =
-        unsafe { core::slice::from_raw_parts(phys_pages.as_ptr().cast::<u8>(), page_count * 8) };
-    if let Err(errno) = super::copy_to_user(phys_pages_ptr, bytes) {
-        rollback_shared_pages(
-            pid,
-            pt_phys,
-            virt_start,
-            old_heap_end,
-            &phys_pages,
-            allocated,
-            mapped,
-        );
-        return errno;
+    if phys_pages_ptr != 0 {
+        let bytes = unsafe {
+            core::slice::from_raw_parts(phys_pages.as_ptr().cast::<u8>(), page_count * 8)
+        };
+        if let Err(errno) = super::copy_to_user(phys_pages_ptr, bytes) {
+            rollback_shared_pages(
+                pid,
+                pt_phys,
+                virt_start,
+                old_heap_end,
+                &phys_pages,
+                allocated,
+                mapped,
+            );
+            return errno;
+        }
     }
     virt_start
 }
