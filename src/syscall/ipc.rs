@@ -853,21 +853,20 @@ pub fn send_pages(
     ]) {
         return EACCES;
     }
-    let dest_thread_id = match endpoint_record_from_handle(dest_endpoint_handle) {
-        Some(record) => {
-            if !record.rights.contains(EndpointRights::RECV) {
-                return EACCES;
-            }
-            record.thread_id
-        }
-        None => {
-            if crate::task::thread_slot_index_and_generation_by_u64(dest_endpoint_handle).is_none()
-            {
-                return EINVAL;
-            }
+    let dest_thread_id =
+        if crate::task::thread_slot_index_and_generation_by_u64(dest_endpoint_handle).is_some() {
             dest_endpoint_handle
-        }
-    };
+        } else {
+            match endpoint_record_from_handle(dest_endpoint_handle) {
+                Some(record) => {
+                    if !record.rights.contains(EndpointRights::RECV) {
+                        return EACCES;
+                    }
+                    record.thread_id
+                }
+                None => return EINVAL,
+            }
+        };
     if page_count_raw == 0 || page_count_raw as usize > ipc_max_external_pages() {
         return EINVAL;
     }
