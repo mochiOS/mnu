@@ -481,8 +481,12 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Read as u64 => fs::read(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
+        x if x == SyscallNumber::AllocSharedPages as u64 => {
+            process::alloc_shared_pages(arg0, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::IpcCreate as u64 => ipc::create(arg0, arg1),
         x if x == SyscallNumber::IpcSend as u64 => ipc::send(arg0, arg1, arg2),
+        x if x == SyscallNumber::IpcSendPages as u64 => ipc::send_pages(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::IpcRecv as u64 => ipc::recv(arg0, arg1),
         x if x == SyscallNumber::IpcCall as u64 => ipc::call(arg0, arg1, arg2, arg3, arg4),
         x if x == SyscallNumber::IpcReply as u64 => ipc::reply(arg0, arg1, arg2),

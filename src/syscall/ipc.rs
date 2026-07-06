@@ -841,6 +841,63 @@ pub fn send(dest_endpoint_handle: u64, buf_ptr: u64, len: u64) -> u64 {
     send_to_thread_id(dest_thread_id, sender, buf_ptr, len)
 }
 
+pub fn send_pages(
+    dest_endpoint_handle: u64,
+    phys_pages_ptr: u64,
+    page_count_raw: u64,
+    local_base: u64,
+) -> u64 {
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::IpcClient,
+        crate::capability::Capability::IpcServer,
+    ]) {
+        return EACCES;
+    }
+    let dest_thread_id = match endpoint_record_from_handle(dest_endpoint_handle) {
+        Some(record) => {
+            if !record.rights.contains(EndpointRights::RECV) {
+                return EACCES;
+            }
+            record.thread_id
+        }
+        None => {
+            if crate::task::thread_slot_index_and_generation_by_u64(dest_endpoint_handle).is_none()
+            {
+                return EINVAL;
+            }
+            dest_endpoint_handle
+        }
+    };
+    if page_count_raw == 0 || page_count_raw as usize > ipc_max_external_pages() {
+        return EINVAL;
+    }
+    let Ok(page_count) = usize::try_from(page_count_raw) else {
+        return EINVAL;
+    };
+    let bytes_len = match page_count_raw.checked_mul(8) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    if phys_pages_ptr == 0 || !crate::syscall::validate_user_ptr(phys_pages_ptr, bytes_len) {
+        return EFAULT;
+    }
+    let mut pages = [0u64; MAX_EXT_PAGES];
+    let pages_bytes =
+        unsafe { core::slice::from_raw_parts_mut(pages.as_mut_ptr().cast::<u8>(), page_count * 8) };
+    if let Err(errno) = crate::syscall::copy_from_user(phys_pages_ptr, pages_bytes) {
+        return errno;
+    }
+    let total = match page_count_raw.checked_mul(4096) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    if send_pages_from_kernel(dest_thread_id, local_base, total, &pages[..page_count]) {
+        0
+    } else {
+        EAGAIN
+    }
+}
+
 fn map_external_pages_for_receiver(
     receiver_tid: u64,
     map_start_hint: u64,
@@ -888,7 +945,7 @@ fn map_external_pages_for_receiver(
     for i in 0..(ext_pages_count as usize) {
         let target_virt = virt_addr + (i as u64 * 0x1000);
         let phys_addr = ext_pages[i];
-        if crate::mem::paging::map_page_in_table(page_table, target_virt, phys_addr, true, false)
+        if crate::mem::paging::map_page_in_table(page_table, target_virt, phys_addr, true, true)
             .is_err()
         {
             for j in 0..i {

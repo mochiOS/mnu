@@ -5,6 +5,8 @@ use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
 use alloc::string::ToString;
 use alloc::vec::Vec;
+use x86_64::structures::paging::PhysFrame;
+use x86_64::PhysAddr;
 
 fn caller_has_process_inspect_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
@@ -1090,6 +1092,157 @@ pub fn memory_share(addr: u64, length: u64, flags: u64) -> u64 {
     } else {
         EINVAL
     }
+}
+
+pub fn alloc_shared_pages(
+    page_count_raw: u64,
+    phys_pages_ptr: u64,
+    phys_page_count_raw: u64,
+    flags: u64,
+) -> u64 {
+    let _ = flags;
+    if page_count_raw == 0 || phys_pages_ptr == 0 || phys_page_count_raw < page_count_raw {
+        return EINVAL;
+    }
+    let Ok(page_count) = usize::try_from(page_count_raw) else {
+        return EINVAL;
+    };
+    if page_count > 128 {
+        return EINVAL;
+    }
+    let out_len = match page_count_raw.checked_mul(8) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    if !super::validate_user_ptr(phys_pages_ptr, out_len) {
+        return EFAULT;
+    }
+
+    let pid = match crate::syscall::security::current_process_id() {
+        Some(pid) => pid,
+        None => return ENOSYS,
+    };
+    let pt_phys = match crate::task::with_process(pid, |process| process.page_table()).flatten() {
+        Some(pt) => pt,
+        None => return ENOMEM,
+    };
+    let map_len = match page_count_raw.checked_mul(4096) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    let (virt_start, old_heap_end) = match crate::task::with_process_mut(pid, |process| {
+        let base = if process.heap_end() < 0x7200_0000_0000u64 {
+            0x7200_0000_0000u64
+        } else {
+            process.heap_end()
+        };
+        let virt_start = base
+            .checked_add(0xfff)
+            .map(|v| v & !0xfffu64)
+            .ok_or(EINVAL)?;
+        let new_heap_end = virt_start.checked_add(map_len).ok_or(EINVAL)?;
+        let old_heap_end = process.heap_end();
+        process.set_heap_end(new_heap_end);
+        Ok((virt_start, old_heap_end))
+    }) {
+        Some(Ok(v)) => v,
+        Some(Err(errno)) => return errno,
+        None => return ENOMEM,
+    };
+
+    let phys_off = match crate::mem::paging::physical_memory_offset() {
+        Some(offset) => offset,
+        None => {
+            let _ = crate::task::with_process_mut(pid, |process| {
+                if process.heap_end() >= virt_start {
+                    process.set_heap_end(old_heap_end);
+                }
+            });
+            return ENOMEM;
+        }
+    };
+    let mut phys_pages = [0u64; 128];
+    let mut allocated = 0usize;
+    let mut mapped = 0usize;
+    for index in 0..page_count {
+        let frame = match crate::mem::frame::allocate_frame() {
+            Ok(frame) => frame,
+            Err(_) => {
+                rollback_shared_pages(
+                    pid,
+                    pt_phys,
+                    virt_start,
+                    old_heap_end,
+                    &phys_pages,
+                    allocated,
+                    mapped,
+                );
+                return ENOMEM;
+            }
+        };
+        let phys = frame.start_address().as_u64();
+        phys_pages[index] = phys;
+        allocated += 1;
+        if let Some(ptr) = phys.checked_add(phys_off) {
+            unsafe {
+                core::ptr::write_bytes(ptr as *mut u8, 0, 4096);
+            }
+        }
+        let virt = virt_start + (index as u64) * 4096;
+        if crate::mem::paging::map_page_in_table(pt_phys, virt, phys, true, true).is_err() {
+            rollback_shared_pages(
+                pid,
+                pt_phys,
+                virt_start,
+                old_heap_end,
+                &phys_pages,
+                allocated,
+                mapped,
+            );
+            return ENOMEM;
+        }
+        mapped += 1;
+    }
+
+    let bytes =
+        unsafe { core::slice::from_raw_parts(phys_pages.as_ptr().cast::<u8>(), page_count * 8) };
+    if let Err(errno) = super::copy_to_user(phys_pages_ptr, bytes) {
+        rollback_shared_pages(
+            pid,
+            pt_phys,
+            virt_start,
+            old_heap_end,
+            &phys_pages,
+            allocated,
+            mapped,
+        );
+        return errno;
+    }
+    virt_start
+}
+
+fn rollback_shared_pages(
+    pid: crate::task::ProcessId,
+    pt_phys: u64,
+    virt_start: u64,
+    old_heap_end: u64,
+    phys_pages: &[u64; 128],
+    allocated: usize,
+    mapped: usize,
+) {
+    for index in 0..mapped {
+        let _ =
+            crate::mem::paging::unmap_page_in_table(pt_phys, virt_start + (index as u64) * 4096);
+    }
+    for phys in phys_pages.iter().take(allocated) {
+        let frame = PhysFrame::containing_address(PhysAddr::new(*phys));
+        let _ = crate::mem::frame::deallocate_frame(frame);
+    }
+    let _ = crate::task::with_process_mut(pid, |process| {
+        if process.heap_end() >= virt_start {
+            process.set_heap_end(old_heap_end);
+        }
+    });
 }
 
 /// memory_sync システムコール
