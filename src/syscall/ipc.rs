@@ -210,6 +210,15 @@ pub fn call(
         Some(handle) => handle,
         None => return EINVAL,
     };
+    crate::warn!(
+        "ipc.call tid={} dest={} req_ptr={:#x} req_len={} reply_ptr={:#x} reply_len={}",
+        caller,
+        dest_thread_id,
+        req_ptr,
+        req_len,
+        reply_ptr,
+        reply_len
+    );
     let saved_reply_to = {
         let mut boxes = MAILBOXES.lock();
         let (idx, _) = match crate::task::thread_slot_index_and_generation_by_u64(caller) {
