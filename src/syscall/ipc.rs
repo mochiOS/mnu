@@ -190,7 +190,7 @@ pub fn create(flags: u64, _reserved: u64) -> u64 {
 }
 
 pub fn call(
-    dest_thread_id: u64,
+    dest_endpoint_or_thread: u64,
     req_ptr: u64,
     req_len: u64,
     reply_ptr: u64,
@@ -205,6 +205,19 @@ pub fn call(
     let caller = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
         None => return EINVAL,
+    };
+    let dest_thread_id = if let Some(record) = endpoint_record_from_handle(dest_endpoint_or_thread)
+    {
+        if !record.rights.contains(EndpointRights::RECV) {
+            return EACCES;
+        }
+        record.thread_id
+    } else if crate::task::thread_slot_index_and_generation_by_u64(dest_endpoint_or_thread)
+        .is_some()
+    {
+        dest_endpoint_or_thread
+    } else {
+        return EINVAL;
     };
     let sender = match ensure_endpoint_for_thread(caller) {
         Some(handle) => handle,

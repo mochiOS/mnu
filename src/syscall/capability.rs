@@ -56,7 +56,14 @@ pub fn check_thread_capability(thread_id: u64, cap_ptr: u64, cap_len: u64) -> u6
     let Ok(name) = core::str::from_utf8(&buf) else {
         return EINVAL;
     };
-    let Some(pid) = crate::task::thread_to_process_id(thread_id) else {
+    let resolved_thread = match crate::syscall::ipc::resolve_endpoint_handle(thread_id) {
+        Some(thread_id) => thread_id,
+        None if crate::task::thread_slot_index_and_generation_by_u64(thread_id).is_some() => {
+            thread_id
+        }
+        None => return 0,
+    };
+    let Some(pid) = crate::task::thread_to_process_id(resolved_thread) else {
         return 0;
     };
     match parse_capability_token(name) {
@@ -348,15 +355,15 @@ fn current_process() -> Option<crate::task::ProcessId> {
 }
 
 fn resolve_destination_process(dest: u64) -> Option<crate::task::ProcessId> {
+    if let Some(thread_id) = crate::syscall::ipc::resolve_endpoint_handle(dest) {
+        return crate::task::thread_to_process_id(thread_id);
+    }
     let pid = crate::task::ProcessId::from_u64(dest);
     if crate::task::with_process(pid, |_| ()).is_some() {
         return Some(pid);
     }
     if let Some(pid) = crate::task::thread_to_process_id(dest) {
         return Some(pid);
-    }
-    if let Some(thread_id) = crate::syscall::ipc::resolve_endpoint_handle(dest) {
-        return crate::task::thread_to_process_id(thread_id);
     }
     None
 }

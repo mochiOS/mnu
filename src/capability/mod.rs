@@ -191,6 +191,7 @@ pub enum UserCapability {
     NetRaw,
     WindowCreate,
     WindowOverlay,
+    WindowDecorate,
     WindowCapture,
     DisplayRead,
     DisplayCapture,
@@ -267,6 +268,7 @@ impl UserCapability {
             NetRaw => "net.raw",
             WindowCreate => "window.create",
             WindowOverlay => "window.overlay",
+            WindowDecorate => "window.decorate",
             WindowCapture => "window.capture",
             DisplayRead => "display.read",
             DisplayCapture => "display.capture",
@@ -343,6 +345,7 @@ impl UserCapability {
             "net.raw" => Some(NetRaw),
             "window.create" => Some(WindowCreate),
             "window.overlay" => Some(WindowOverlay),
+            "window.decorate" => Some(WindowDecorate),
             "window.capture" => Some(WindowCapture),
             "display.read" => Some(DisplayRead),
             "display.capture" => Some(DisplayCapture),
@@ -447,6 +450,7 @@ pub enum Capability {
 
     WindowCreate,
     WindowOverlay,
+    WindowDecorate,
     WindowCapture,
 
     DisplayRead,
@@ -539,7 +543,7 @@ impl Capability {
             | AudioPlayback | AudioRecord | ClipboardRead | ClipboardWrite | NotificationSend
             | SystemTimeRead | SystemInfoRead | SystemLogsRead | AccountSelfRead
             | AccountSelfModify | SettingsRead => CapabilityClass::UserGrantable,
-            FsReadAll | FsWriteAll | NetRaw | WindowCapture | DisplayCapture
+            FsReadAll | FsWriteAll | NetRaw | WindowDecorate | WindowCapture | DisplayCapture
             | InputKeyboardGlobal | InputPointerGlobal | InputGamepad | CameraAccess
             | MicrophoneAccess | LocationAccess | BluetoothAccess | UsbAccess | SerialAccess
             | PowerShutdown | PowerReboot | PowerSuspend | SystemTimeSet | PackageInstall
@@ -591,6 +595,7 @@ impl Capability {
 
             WindowCreate => "window.create",
             WindowOverlay => "window.overlay",
+            WindowDecorate => "window.decorate",
             WindowCapture => "window.capture",
 
             DisplayRead => "display.read",
@@ -708,6 +713,7 @@ impl Capability {
 
             "window.create" => WindowCreate,
             "window.overlay" => WindowOverlay,
+            "window.decorate" => WindowDecorate,
             "window.capture" => WindowCapture,
 
             "display.read" => DisplayRead,
@@ -845,6 +851,7 @@ impl Capability {
             NetRaw => UserCapability::NetRaw,
             WindowCreate => UserCapability::WindowCreate,
             WindowOverlay => UserCapability::WindowOverlay,
+            WindowDecorate => UserCapability::WindowDecorate,
             WindowCapture => UserCapability::WindowCapture,
             DisplayRead => UserCapability::DisplayRead,
             DisplayCapture => UserCapability::DisplayCapture,
@@ -953,6 +960,7 @@ impl Capability {
             ProcessKill,
             WindowCreate,
             WindowOverlay,
+            WindowDecorate,
             WindowCapture,
             DisplayRead,
             DisplayCapture,
