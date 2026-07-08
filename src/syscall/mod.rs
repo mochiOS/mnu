@@ -453,6 +453,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         }
         x if x == SyscallNumber::ProcessWait as u64 => process::wait(arg0, arg1, arg2),
         x if x == SyscallNumber::GetPid as u64 => process::getpid(),
+        x if x == SyscallNumber::GetTid as u64 => process::gettid(),
         x if x == SyscallNumber::FindProcessByName as u64 => {
             process::find_process_by_name(arg0, arg1)
         }
