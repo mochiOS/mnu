@@ -1598,6 +1598,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         p.set_heap_end(heap_base + heap_map_size);
         p.set_stack_bottom(stack_base_vaddr);
         p.set_stack_top(stack_end_vaddr + 4096);
+        p.set_exe_path(path);
         crate::debug!(
             "[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}",
             p.name(),
