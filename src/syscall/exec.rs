@@ -22,6 +22,12 @@ struct InitialUserStack {
     page_data: Vec<u8>,
 }
 
+struct LoadedExec {
+    data: Vec<u8>,
+    source: &'static str,
+    exec_path: String,
+}
+
 struct UserPageTableGuard(Option<u64>);
 
 impl UserPageTableGuard {
@@ -462,18 +468,23 @@ fn exec_internal(
     }
     let role = manifest_role.unwrap_or(ManifestRole::Unknown);
     let loaded = load_exec_image(path, role);
-    if let Some((data, source)) = loaded {
+    if let Some(LoadedExec {
+        data,
+        source,
+        exec_path,
+    }) = loaded
+    {
         let fingerprint = fingerprint_exec_bytes(&data);
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",
-            path,
+            exec_path,
             source,
             data.len()
         );
         exec_with_data(
             &data,
             &process_name,
-            path,
+            &exec_path,
             args,
             None,
             initial_caps,
@@ -505,7 +516,16 @@ fn fingerprint_exec_bytes(data: &[u8]) -> &'static str {
     }
 }
 
-fn load_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static str)> {
+fn load_exec_image(path: &str, role: ManifestRole) -> Option<LoadedExec> {
+    let exec_path = resolve_app_bundle_entry(path).unwrap_or_else(|| path.to_string());
+    load_regular_exec_image(&exec_path, role).map(|(data, source)| LoadedExec {
+        data,
+        source,
+        exec_path,
+    })
+}
+
+fn load_regular_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static str)> {
     if matches!(role, ManifestRole::CoreService | ManifestRole::Service) {
         crate::init::fs::read_initfs(path)
             .map(|data| (data, "initfs"))
@@ -518,6 +538,69 @@ fn load_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static 
             .or_else(|| crate::init::fs::read_rootfs(path).map(|data| (data, "rootfs")))
             .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
     }
+}
+
+fn resolve_app_bundle_entry(path: &str) -> Option<String> {
+    let app_root = path.trim_end_matches('/');
+    if !app_root.ends_with(".app") {
+        return None;
+    }
+
+    let about_path = alloc::format!("{}/about.toml", app_root);
+    let manifest_path = alloc::format!("{}/manifest.toml", app_root);
+    let about = read_exec_text(&about_path)?;
+    let manifest = read_exec_text(&manifest_path)?;
+    let entry = parse_toml_string_field(&about, "entry")
+        .or_else(|| parse_toml_string_field(&manifest, "path"))?;
+    if entry.starts_with('/') {
+        Some(entry)
+    } else {
+        Some(alloc::format!("{}/{}", app_root, entry))
+    }
+}
+
+fn read_exec_text(path: &str) -> Option<String> {
+    let bytes = crate::cext::fs::read_all(path)
+        .or_else(|| crate::init::fs::read_rootfs(path))
+        .or_else(|| crate::init::fs::read(path))?;
+    String::from_utf8(bytes).ok()
+}
+
+fn parse_toml_string_field(content: &str, key: &str) -> Option<String> {
+    for line in content.lines() {
+        let Some((field, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        if field.trim() != key {
+            continue;
+        }
+        return parse_toml_string_literal(value);
+    }
+    None
+}
+
+fn parse_toml_string_literal(value: &str) -> Option<String> {
+    let value = value.trim();
+    if !value.starts_with('"') {
+        return None;
+    }
+    let mut output = String::new();
+    let mut chars = value[1..].chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => return Some(output),
+            '\\' => match chars.next()? {
+                '"' => output.push('"'),
+                '\\' => output.push('\\'),
+                'n' => output.push('\n'),
+                'r' => output.push('\r'),
+                't' => output.push('\t'),
+                other => output.push(other),
+            },
+            other => output.push(other),
+        }
+    }
+    None
 }
 
 fn derive_process_name(path: &str) -> String {
@@ -1372,15 +1455,19 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         Err(_) => return EINVAL,
     };
     let path = path_owned.as_str();
-    let aslr_seed = next_aslr_seed(path);
 
-    let (data_vec, source) = match load_exec_image(path, ManifestRole::Unknown) {
+    let LoadedExec {
+        data: data_vec,
+        source,
+        exec_path,
+    } = match load_exec_image(path, ManifestRole::Unknown) {
         Some(loaded) => loaded,
         None => return ENOENT,
     };
+    let aslr_seed = next_aslr_seed(&exec_path);
     crate::info!(
         "execve: loaded '{}' from {} ({} bytes)",
-        path,
+        exec_path,
         source,
         data_vec.len()
     );
@@ -1516,13 +1603,8 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         stack_end_vaddr,
         initial_rsp,
         page_data,
-    } = match build_initial_user_stack(
-        aslr_seed,
-        &argv_refs,
-        &envp_refs,
-        &path_owned,
-        &auxv_entries,
-    ) {
+    } = match build_initial_user_stack(aslr_seed, &argv_refs, &envp_refs, &exec_path, &auxv_entries)
+    {
         Ok(stack) => stack,
         Err(errno) => return errno,
     };
@@ -1598,7 +1680,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         p.set_heap_end(heap_base + heap_map_size);
         p.set_stack_bottom(stack_base_vaddr);
         p.set_stack_top(stack_end_vaddr + 4096);
-        p.set_exe_path(path);
+        p.set_exe_path(&exec_path);
         crate::debug!(
             "[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}",
             p.name(),
