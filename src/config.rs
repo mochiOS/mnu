@@ -126,7 +126,7 @@ impl Default for KernelConfig {
             ipc: IpcConfig {
                 mailbox_cap: 64,
                 max_msg_size: 4128,
-                max_external_pages: 128,
+                max_external_pages: 262_144,
             },
             fs: FsConfig {
                 service_retry_count: 3,

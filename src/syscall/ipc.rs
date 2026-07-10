@@ -9,7 +9,8 @@ use super::{EACCES, EAGAIN, EFAULT, EINVAL};
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
 const MAX_MSG_SIZE: usize = 4128; // FsResponse(4112) / DiskBulkResponse(2064) を収容
-const MAX_EXT_PAGES: usize = 128;
+const MAX_EXT_PAGES: usize = 262_144;
+const MAX_INLINE_EXT_PAGES: usize = 16;
 
 /// endpoint ベース IPC への移行用ハンドル
 ///
@@ -543,6 +544,33 @@ fn ipc_max_external_pages() -> usize {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct ExternalPages {
+    count: u32,
+    total: u64,
+    source_page_table: u64,
+    source_base: u64,
+    inline_pages_count: u16,
+    inline_pages: [u64; MAX_INLINE_EXT_PAGES],
+}
+
+impl ExternalPages {
+    const fn empty() -> Self {
+        Self {
+            count: 0,
+            total: 0,
+            source_page_table: 0,
+            source_base: 0,
+            inline_pages_count: 0,
+            inline_pages: [0; MAX_INLINE_EXT_PAGES],
+        }
+    }
+
+    const fn is_empty(self) -> bool {
+        self.count == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct Message {
     from: u64,
     to: u64,
@@ -551,8 +579,7 @@ pub struct Message {
     is_reply: bool,
     len: usize,
     data: [u8; MAX_MSG_SIZE],
-    ext_pages_count: u16,
-    ext_pages: [u64; MAX_EXT_PAGES],
+    ext_pages: ExternalPages,
 }
 
 impl Message {
@@ -565,8 +592,7 @@ impl Message {
             is_reply: false,
             len: 0,
             data: [0; MAX_MSG_SIZE],
-            ext_pages_count: 0,
-            ext_pages: [0; MAX_EXT_PAGES],
+            ext_pages: ExternalPages::empty(),
         }
     }
 }
@@ -684,7 +710,7 @@ impl Mailbox {
         msg.to_generation = to_generation;
         msg.is_reply = is_reply;
         msg.len = data.len();
-        msg.ext_pages_count = 0;
+        msg.ext_pages = ExternalPages::empty();
         if !data.is_empty() {
             msg.data[..data.len()].copy_from_slice(data);
         }
@@ -701,7 +727,7 @@ impl Mailbox {
         receiver_slot: u16,
         receiver_generation: u64,
         out: &mut [u8],
-    ) -> Option<(u64, usize, u16, [u64; MAX_EXT_PAGES])> {
+    ) -> Option<(u64, usize, ExternalPages)> {
         while let Some(slot_idx) = self.dequeue_slot() {
             let msg = &self.slots[slot_idx];
             if msg.to == receiver
@@ -709,25 +735,23 @@ impl Mailbox {
                 && msg.to_generation == receiver_generation
             {
                 let copy_len = core::cmp::min(msg.len, out.len());
-                if msg.ext_pages_count > 0 && msg.len == 0 {
+                if !msg.ext_pages.is_empty() && msg.len == 0 {
                     let from = msg.from;
-                    let ext_pages_count = msg.ext_pages_count;
                     let ext_pages = msg.ext_pages;
                     if !self.free_slot(slot_idx) {
                         return None;
                     }
-                    return Some((from, 0usize, ext_pages_count, ext_pages));
+                    return Some((from, 0usize, ext_pages));
                 }
                 if copy_len > 0 {
                     out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
                 }
                 let from = msg.from;
-                let ext_pages_count = msg.ext_pages_count;
                 let ext_pages = msg.ext_pages;
                 if !self.free_slot(slot_idx) {
                     return None;
                 }
-                return Some((from, copy_len, ext_pages_count, ext_pages));
+                return Some((from, copy_len, ext_pages));
             }
             // 古い宛先のメッセージは破棄
             if !self.free_slot(slot_idx) {
@@ -873,18 +897,14 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
     })
 }
 
-/// Kernel -> recipient: send a message that carries physical page frame addresses
-/// Pages are explicit physical frame addresses (one per 4KiB page). Up to 128 entries supported.
+/// Kernel -> recipient: send a message that carries explicit physical page frame addresses.
 pub fn send_pages_from_kernel(
     dest_thread_id: u64,
     map_start: u64,
     total: u64,
     pages: &[u64],
 ) -> bool {
-    // Keep original behaviour as fallback: send explicit page list when provided.
-    // This function will continue to work for up to 128 pages.
-
-    if pages.len() > ipc_max_external_pages() {
+    if pages.len() > MAX_INLINE_EXT_PAGES || pages.len() > ipc_max_external_pages() {
         return false;
     }
     let (idx, dest_generation) =
@@ -919,11 +939,78 @@ pub fn send_pages_from_kernel(
             msg.data[off..off + 8].copy_from_slice(&(total).to_le_bytes());
             off += 8;
             msg.len = off;
-            msg.ext_pages_count = pages.len() as u16;
-            for i in 0..pages.len() {
-                msg.ext_pages[i] = pages[i];
+            msg.ext_pages = ExternalPages::empty();
+            msg.ext_pages.count = pages.len() as u32;
+            msg.ext_pages.total = total;
+            msg.ext_pages.inline_pages_count = pages.len() as u16;
+            for (index, page) in pages.iter().enumerate() {
+                msg.ext_pages.inline_pages[index] = *page;
             }
             // enqueue
+            if mb.enqueue_slot(slot_idx).is_err() {
+                let _ = mb.free_slot(slot_idx);
+                return false;
+            }
+            let waiter = mb.take_waiter();
+            if waiter != 0 {
+                crate::task::wake_thread(crate::task::ThreadId::from_u64(waiter));
+            }
+            true
+        } else {
+            false
+        }
+    })
+}
+
+fn send_virtual_pages_from_kernel(
+    dest_thread_id: u64,
+    map_start: u64,
+    total: u64,
+    page_count: usize,
+    source_page_table: u64,
+    source_base: u64,
+) -> bool {
+    if page_count == 0 || page_count > ipc_max_external_pages() {
+        return false;
+    }
+    let Ok(count) = u32::try_from(page_count) else {
+        return false;
+    };
+    let (idx, dest_generation) =
+        match crate::task::thread_slot_index_and_generation_by_u64(dest_thread_id) {
+            Some(v) => v,
+            None => return false,
+        };
+    if idx >= MAX_THREADS {
+        return false;
+    }
+    let sender = crate::task::current_thread_id()
+        .and_then(|t| ensure_endpoint_for_thread(t.as_u64()))
+        .unwrap_or(0);
+    let mut boxes = MAILBOXES.lock();
+    boxes.get_mut(idx).map_or(false, |mb| {
+        if let Some(slot_idx) = mb.alloc_slot() {
+            let msg = &mut mb.slots[slot_idx];
+            msg.from = sender;
+            msg.to = dest_thread_id;
+            msg.to_slot = idx as u16;
+            msg.to_generation = dest_generation;
+            msg.is_reply = false;
+            if 16 > ipc_max_msg_size() {
+                let _ = mb.free_slot(slot_idx);
+                return false;
+            }
+            msg.data[0..8].copy_from_slice(&map_start.to_le_bytes());
+            msg.data[8..16].copy_from_slice(&total.to_le_bytes());
+            msg.len = 16;
+            msg.ext_pages = ExternalPages {
+                count,
+                total,
+                source_page_table,
+                source_base,
+                inline_pages_count: 0,
+                inline_pages: [0; MAX_INLINE_EXT_PAGES],
+            };
             if mb.enqueue_slot(slot_idx).is_err() {
                 let _ = mb.free_slot(slot_idx);
                 return false;
@@ -989,7 +1076,7 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
                 off
             );
             msg.len = off;
-            msg.ext_pages_count = 0;
+            msg.ext_pages = ExternalPages::empty();
             // enqueue
             if mb.enqueue_slot(slot_idx).is_err() {
                 let _ = mb.free_slot(slot_idx);
@@ -1150,28 +1237,37 @@ pub fn send_pages(
     let Ok(page_count) = usize::try_from(page_count_raw) else {
         return EINVAL;
     };
-    let mut pages = [0u64; MAX_EXT_PAGES];
+    let total = match page_count_raw.checked_mul(4096) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
     if phys_pages_ptr == 0 {
         if (local_base & 0xfff) != 0 {
             return EINVAL;
         }
-        let pt_phys = match crate::syscall::security::current_process_id()
+        let source_page_table = match crate::syscall::security::current_process_id()
             .and_then(|pid| crate::task::with_process(pid, |process| process.page_table()))
             .flatten()
         {
             Some(pt) => pt,
             None => return EFAULT,
         };
-        for (index, page) in pages.iter_mut().take(page_count).enumerate() {
-            let Some(virt) = local_base.checked_add((index as u64) * 4096) else {
-                return EINVAL;
-            };
-            let Some(phys) = crate::mem::paging::virt_to_phys_in_table(pt_phys, virt) else {
-                return EFAULT;
-            };
-            *page = phys & !0xfffu64;
+        if send_virtual_pages_from_kernel(
+            dest_thread_id,
+            local_base,
+            total,
+            page_count,
+            source_page_table,
+            local_base,
+        ) {
+            return 0;
         }
+        return EAGAIN;
     } else {
+        if page_count > MAX_INLINE_EXT_PAGES {
+            return EINVAL;
+        }
+        let mut pages = [0u64; MAX_INLINE_EXT_PAGES];
         let bytes_len = match page_count_raw.checked_mul(8) {
             Some(v) => v,
             None => return EINVAL,
@@ -1185,15 +1281,11 @@ pub fn send_pages(
         if let Err(errno) = crate::syscall::copy_from_user(phys_pages_ptr, pages_bytes) {
             return errno;
         }
-    }
-    let total = match page_count_raw.checked_mul(4096) {
-        Some(v) => v,
-        None => return EINVAL,
-    };
-    if send_pages_from_kernel(dest_thread_id, local_base, total, &pages[..page_count]) {
-        0
-    } else {
-        EAGAIN
+        if send_pages_from_kernel(dest_thread_id, local_base, total, &pages[..page_count]) {
+            0
+        } else {
+            EAGAIN
+        }
     }
 }
 
@@ -1201,22 +1293,31 @@ fn map_external_pages_for_receiver(
     receiver_tid: u64,
     map_start_hint: u64,
     total: u64,
-    ext_pages_count: u16,
-    ext_pages: &[u64; MAX_EXT_PAGES],
+    ext_pages: ExternalPages,
 ) -> Result<ExternalPageMapping, u64> {
-    if ext_pages_count == 0 || ext_pages_count as usize > ext_pages.len() {
+    if ext_pages.count == 0 || ext_pages.count as usize > ipc_max_external_pages() {
+        return Err(EINVAL);
+    }
+    if ext_pages.source_page_table == 0
+        && (ext_pages.inline_pages_count == 0
+            || ext_pages.inline_pages_count as u32 != ext_pages.count
+            || ext_pages.inline_pages_count as usize > MAX_INLINE_EXT_PAGES)
+    {
         return Err(EINVAL);
     }
     if total == 0 {
         return Err(EINVAL);
     }
-    let max_bytes = (ext_pages_count as u64).saturating_mul(0x1000);
+    if ext_pages.total != 0 && total > ext_pages.total {
+        return Err(EINVAL);
+    }
+    let max_bytes = (ext_pages.count as u64).saturating_mul(0x1000);
     if total > max_bytes {
         return Err(EINVAL);
     }
 
     let target_pid = crate::task::thread_to_process_id(receiver_tid).ok_or(EINVAL)?;
-    let page_span = (ext_pages_count as u64).saturating_mul(0x1000);
+    let page_span = (ext_pages.count as u64).saturating_mul(0x1000);
 
     let _ = map_start_hint; // 受信側の安全のためヒントは無視して自動配置する
     let (virt_addr, page_table, reserved_heap_old, reserved_heap_new) =
@@ -1241,9 +1342,22 @@ fn map_external_pages_for_receiver(
             None => return Err(EINVAL),
         };
 
-    for i in 0..(ext_pages_count as usize) {
+    for i in 0..(ext_pages.count as usize) {
         let target_virt = virt_addr + (i as u64 * 0x1000);
-        let phys_addr = ext_pages[i];
+        let phys_addr = if ext_pages.source_page_table != 0 {
+            let Some(source_virt) = ext_pages.source_base.checked_add((i as u64) * 0x1000) else {
+                return Err(EINVAL);
+            };
+            match crate::mem::paging::virt_to_phys_in_table(
+                ext_pages.source_page_table,
+                source_virt,
+            ) {
+                Some(phys) => phys & !0xfffu64,
+                None => return Err(EFAULT),
+            }
+        } else {
+            ext_pages.inline_pages[i]
+        };
         if crate::mem::paging::map_page_in_table(page_table, target_virt, phys_addr, true, true)
             .is_err()
         {
@@ -1268,7 +1382,7 @@ fn map_external_pages_for_receiver(
         virt_addr,
         old_end: reserved_heap_old.unwrap_or(0),
         new_end: reserved_heap_new.unwrap_or(0),
-        page_count: ext_pages_count as usize,
+        page_count: ext_pages.count as usize,
     })
 }
 
@@ -1299,17 +1413,16 @@ fn prepare_external_pages_for_user(
     receiver_tid: u64,
     recv_buf: &mut [u8],
     copy_len: usize,
-    ext_pages_count: u16,
-    ext_pages: &[u64; MAX_EXT_PAGES],
+    ext_pages: ExternalPages,
 ) -> Result<(usize, Option<ExternalPageMapping>), u64> {
-    if ext_pages_count == 0 {
+    if ext_pages.is_empty() {
         return Ok((copy_len, None));
     }
     crate::debug!(
         "[IPC RCV] prepare_external_pages_for_user receiver={} copy_len={} ext_pages_count={}",
         receiver_tid,
         copy_len,
-        ext_pages_count
+        ext_pages.count
     );
     if copy_len < 16 || recv_buf.len() < 16 {
         return Err(EFAULT);
@@ -1334,13 +1447,8 @@ fn prepare_external_pages_for_user(
         recv_buf[14],
         recv_buf[15],
     ]);
-    let mapped_addr = map_external_pages_for_receiver(
-        receiver_tid,
-        map_start_hint,
-        total,
-        ext_pages_count,
-        ext_pages,
-    )?;
+    let mapped_addr =
+        map_external_pages_for_receiver(receiver_tid, map_start_hint, total, ext_pages)?;
     recv_buf[0..8].copy_from_slice(&mapped_addr.virt_addr.to_le_bytes());
     recv_buf[8..16].copy_from_slice(&total.to_le_bytes());
     Ok((16, Some(mapped_addr)))
@@ -1364,7 +1472,7 @@ fn recv_from_thread_nonblocking(
 
     let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
     let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
-    let (from, copy_len, ext_pages_count, ext_pages) = {
+    let (from, copy_len, ext_pages) = {
         let mut boxes = MAILBOXES.lock();
         match boxes[idx].pop_valid_for_receiver_copy(
             receiver_thread_id,
@@ -1389,8 +1497,7 @@ fn recv_from_thread_nonblocking(
         receiver_thread_id,
         &mut recv_buf,
         copy_len,
-        ext_pages_count,
-        &ext_pages,
+        ext_pages,
     ) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1459,13 +1566,12 @@ fn recv_blocking_for_thread(
         };
 
         match recv {
-            Some((from, copy_len, ext_pages_count, ext_pages)) => {
+            Some((from, copy_len, ext_pages)) => {
                 let (copy_len, mapping) = match prepare_external_pages_for_user(
                     receiver_thread_id,
                     &mut recv_buf,
                     copy_len,
-                    ext_pages_count,
-                    &ext_pages,
+                    ext_pages,
                 ) {
                     Ok(v) => v,
                     Err(e) => return e,
@@ -1490,7 +1596,7 @@ fn recv_blocking_for_thread(
             None => {
                 {
                     let mut boxes = MAILBOXES.lock();
-                    if let Some((from, copy_len, ext_pages_count, ext_pages)) = boxes[idx]
+                    if let Some((from, copy_len, ext_pages)) = boxes[idx]
                         .pop_valid_for_receiver_copy(
                             receiver_thread_id,
                             idx as u16,
@@ -1513,8 +1619,7 @@ fn recv_blocking_for_thread(
                             receiver_thread_id,
                             &mut recv_buf,
                             copy_len,
-                            ext_pages_count,
-                            &ext_pages,
+                            ext_pages,
                         ) {
                             Ok(v) => v,
                             Err(e) => return e,

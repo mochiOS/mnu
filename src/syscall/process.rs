@@ -1107,7 +1107,7 @@ pub fn alloc_shared_pages(
     let Ok(page_count) = usize::try_from(page_count_raw) else {
         return EINVAL;
     };
-    if page_count > 128 {
+    if page_count > 262_144 {
         return EINVAL;
     }
     let out_len = match page_count_raw.checked_mul(8) {
@@ -1161,7 +1161,16 @@ pub fn alloc_shared_pages(
             return ENOMEM;
         }
     };
-    let mut phys_pages = [0u64; 128];
+    let mut phys_pages = Vec::new();
+    if phys_pages.try_reserve_exact(page_count).is_err() {
+        let _ = crate::task::with_process_mut(pid, |process| {
+            if process.heap_end() >= virt_start {
+                process.set_heap_end(old_heap_end);
+            }
+        });
+        return ENOMEM;
+    }
+    phys_pages.resize(page_count, 0);
     let mut allocated = 0usize;
     let mut mapped = 0usize;
     for index in 0..page_count {
@@ -1229,7 +1238,7 @@ fn rollback_shared_pages(
     pt_phys: u64,
     virt_start: u64,
     old_heap_end: u64,
-    phys_pages: &[u64; 128],
+    phys_pages: &[u64],
     allocated: usize,
     mapped: usize,
 ) {
