@@ -370,7 +370,17 @@ pub fn init_heap(
 
 #[alloc_error_handler]
 fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
-    crate::warn!("allocation error: {:?}", layout);
+    let (syscall_num, syscall_args) = crate::syscall::last_syscall_snapshot();
+    crate::warn!(
+        "allocation error: {:?} last_syscall={} args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
+        layout,
+        syscall_num,
+        syscall_args[0],
+        syscall_args[1],
+        syscall_args[2],
+        syscall_args[3],
+        syscall_args[4]
+    );
     // スケジューラが動作中でカレントスレッドがあれば、そのプロセスを終了して回復を試みる
     if crate::task::scheduler::is_scheduler_enabled() && crate::task::current_thread_id().is_some()
     {

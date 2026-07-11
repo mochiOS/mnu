@@ -58,7 +58,6 @@ pub enum PathType {
     Temporary,
     System(SystemPath),
     Config,
-    Applications(ApplicationPath),
     Mount(MountPath),
     Var(VarPath),
     Custom,
@@ -101,11 +100,6 @@ pub enum LibraryPath {
     Runtime,
     Frameworks,
     PlugKit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ApplicationPath {
-    Root,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -176,9 +170,6 @@ pub fn classify_path(path: &str) -> PathType {
     }
     if path == "/config" || path.starts_with("/config/") {
         return PathType::Config;
-    }
-    if path == "/applications" || path.starts_with("/applications/") {
-        return PathType::Applications(ApplicationPath::Root);
     }
     if path == "/mount" || path.starts_with("/mount/") {
         return PathType::Mount(MountPath::Root);

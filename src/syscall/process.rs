@@ -795,6 +795,7 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
     if length == 0 {
         return EINVAL;
     }
+    const MAX_MMAP_BACKING_BYTES: u64 = 16 * 1024 * 1024;
 
     // MAP_ANONYMOUS (0x20) は従来通りサポートする。
     const MAP_ANONYMOUS: u64 = 0x20;
@@ -814,6 +815,14 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
         Some(v) if v > 0 => v,
         _ => return EINVAL,
     };
+    if size > MAX_MMAP_BACKING_BYTES {
+        crate::warn!(
+            "process::mmap refusing oversized mapping length={:#x} aligned={:#x}",
+            length,
+            size
+        );
+        return ENOMEM;
+    }
 
     let writable = (prot & 0x2) != 0;
     let shared = (flags & 0x1) != 0;
@@ -832,7 +841,9 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
             Some(Some(path)) => path,
             _ => return EINVAL,
         };
-        let data = match crate::cext::fs::read_all(&path) {
+        let data = match crate::init::fs::read_rootfs(&path)
+            .or_else(|| crate::cext::fs::read_all(&path))
+        {
             Some(data) => data,
             None => return ENOMEM,
         };
@@ -890,7 +901,13 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
         };
 
         if anonymous {
-            let backing = alloc::vec![0u8; size as usize];
+            let backing_len = match usize::try_from(size) {
+                Ok(len) => len,
+                Err(_) => return Err(ENOMEM),
+            };
+            let mut backing = alloc::vec::Vec::new();
+            backing.try_reserve_exact(backing_len).map_err(|_| ENOMEM)?;
+            backing.resize(backing_len, 0);
             let region = crate::task::MmapRegion::anonymous(
                 map_start, size, prot, flags, backing, writable, shared,
             );

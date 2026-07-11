@@ -434,10 +434,41 @@ pub use types::*;
 
 use crate::info;
 use crate::syscall::syscall_entry::switch_to_current_thread_user_page_table;
+use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::structures::idt::InterruptStackFrame;
+
+static LAST_SYSCALL_NUM: AtomicU64 = AtomicU64::new(0);
+static LAST_SYSCALL_ARG0: AtomicU64 = AtomicU64::new(0);
+static LAST_SYSCALL_ARG1: AtomicU64 = AtomicU64::new(0);
+static LAST_SYSCALL_ARG2: AtomicU64 = AtomicU64::new(0);
+static LAST_SYSCALL_ARG3: AtomicU64 = AtomicU64::new(0);
+static LAST_SYSCALL_ARG4: AtomicU64 = AtomicU64::new(0);
+
+fn record_syscall(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) {
+    LAST_SYSCALL_ARG0.store(arg0, Ordering::Relaxed);
+    LAST_SYSCALL_ARG1.store(arg1, Ordering::Relaxed);
+    LAST_SYSCALL_ARG2.store(arg2, Ordering::Relaxed);
+    LAST_SYSCALL_ARG3.store(arg3, Ordering::Relaxed);
+    LAST_SYSCALL_ARG4.store(arg4, Ordering::Relaxed);
+    LAST_SYSCALL_NUM.store(num, Ordering::Relaxed);
+}
+
+pub fn last_syscall_snapshot() -> (u64, [u64; 5]) {
+    (
+        LAST_SYSCALL_NUM.load(Ordering::Relaxed),
+        [
+            LAST_SYSCALL_ARG0.load(Ordering::Relaxed),
+            LAST_SYSCALL_ARG1.load(Ordering::Relaxed),
+            LAST_SYSCALL_ARG2.load(Ordering::Relaxed),
+            LAST_SYSCALL_ARG3.load(Ordering::Relaxed),
+            LAST_SYSCALL_ARG4.load(Ordering::Relaxed),
+        ],
+    )
+}
 
 /// システムコールのディスパッチ
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
+    record_syscall(num, arg0, arg1, arg2, arg3, arg4);
     match num {
         x if x == SyscallNumber::ProcessExit as u64 => process::exit(arg0),
         x if x == SyscallNumber::ProcessSpawn as u64 => process::spawn(arg0, arg1),

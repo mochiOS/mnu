@@ -7,12 +7,12 @@ use core::any::type_name;
 
 pub use plugkit_macros::driver;
 pub use plugkit_sys::{
-    device_exists, emit_event, log_error, log_info, log_warn, register_device, register_interface,
-    take_events, take_logs, unregister_device, unregister_interface, DeviceBus, DeviceBytes, DeviceClass,
-    DeviceId, DeviceName, DevicePath, DeviceProperty, DeviceSpec, DeviceString, DmaBuffer,
-    DmaHandle, DriverDescriptor, InterfaceHandle, Irq, IrqEvent, Mmio,
-    MmioHandle, PciConfig, PciConfigHandle, PlugKitDevice, PlugKitError, PlugKitEvent, PlugKitResources,
-    PlugKitResult, ProbeResult,
+    DeviceBus, DeviceBytes, DeviceClass, DeviceId, DeviceName, DevicePath, DeviceProperty,
+    DeviceSpec, DeviceString, DmaBuffer, DmaHandle, DriverDescriptor, InterfaceHandle, Irq,
+    IrqEvent, Mmio, MmioHandle, PciConfig, PciConfigHandle, PlugKitDevice, PlugKitError,
+    PlugKitEvent, PlugKitResources, PlugKitResult, ProbeResult, device_exists, emit_event,
+    log_error, log_info, log_warn, register_device, register_interface, take_events, take_logs,
+    unregister_device, unregister_interface,
 };
 
 pub trait PlugKitDriver {
@@ -35,11 +35,11 @@ pub fn driver_descriptor<T: PlugKitDriver>() -> &'static DriverDescriptor {
 
 pub mod prelude {
     pub use crate::{
-        device_exists, driver, driver_descriptor, emit_event, log_error, log_info, log_warn,
-        register_device, register_interface, take_events, take_logs, unregister_device, unregister_interface, DeviceBus, DeviceBytes,
-        DeviceClass, DeviceId, DeviceName, DevicePath, DeviceProperty, DeviceSpec,
-        DeviceString, DmaBuffer, DmaHandle, InterfaceHandle, Irq, IrqEvent,
-        Mmio, MmioHandle, PciConfig, PciConfigHandle, PlugKitDevice, PlugKitDriver,
-        PlugKitError, PlugKitEvent, PlugKitResources, PlugKitResult, ProbeResult,
+        DeviceBus, DeviceBytes, DeviceClass, DeviceId, DeviceName, DevicePath, DeviceProperty,
+        DeviceSpec, DeviceString, DmaBuffer, DmaHandle, InterfaceHandle, Irq, IrqEvent, Mmio,
+        MmioHandle, PciConfig, PciConfigHandle, PlugKitDevice, PlugKitDriver, PlugKitError,
+        PlugKitEvent, PlugKitResources, PlugKitResult, ProbeResult, device_exists, driver,
+        driver_descriptor, emit_event, log_error, log_info, log_warn, register_device,
+        register_interface, take_events, take_logs, unregister_device, unregister_interface,
     };
 }

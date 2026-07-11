@@ -16,7 +16,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 const MAX_IO_BYTES: usize = 128 * 1024 * 1024;
-const IO_CHUNK_BYTES: usize = 1 * 1024 * 1024;
+const IO_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_PIPES: usize = 64;
 const PIPE_BUFFER_CAP: usize = 64 * 1024;
 
@@ -263,7 +263,6 @@ fn cap_for_path(path_type: PathType, needed_rights: u32) -> Capability {
         | PathType::Libraries(_)
         | PathType::System(_)
         | PathType::Config
-        | PathType::Applications(_)
         | PathType::Mount(_)
         | PathType::Var(_)
         | PathType::Root
@@ -351,17 +350,24 @@ fn mode_for_stat(mode: u16) -> u32 {
 
 #[inline]
 pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64)> {
-    crate::cext::fs::file_metadata(path).or_else(|| crate::init::fs::file_metadata(path))
+    crate::init::fs::file_metadata(path).or_else(|| crate::cext::fs::file_metadata(path))
 }
 
 #[inline]
 pub(crate) fn is_directory_rootfs_first(path: &str) -> bool {
-    crate::cext::fs::is_directory(path) || crate::init::fs::is_directory(path)
+    crate::init::fs::is_directory(path) || crate::cext::fs::is_directory(path)
 }
 
 #[inline]
 pub(crate) fn readdir_rootfs_first(path: &str) -> Option<Vec<String>> {
-    crate::cext::fs::readdir_path(path).or_else(|| crate::init::fs::readdir_path(path))
+    crate::init::fs::readdir_path(path).or_else(|| crate::cext::fs::readdir_path(path))
+}
+
+#[inline]
+fn read_file_range_rootfs_first(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
+    crate::init::fs::read_range_rootfs(path, offset, buf)
+        .or_else(|| crate::cext::fs::read_range(path, offset, buf))
+        .or_else(|| crate::init::fs::read_range(path, offset, buf))
 }
 
 fn parse_readdir_names(bytes: &[u8]) -> Vec<String> {
@@ -493,21 +499,13 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
         return EIO;
     }
 
-    let data_vec = if is_dir {
-        Vec::new()
-    } else {
-        match crate::cext::fs::read_all(path)
-            .or_else(|| crate::init::fs::read_rootfs(path))
-            .or_else(|| crate::init::fs::read(path))
-        {
-            Some(d) => d,
-            None => return ENOENT,
-        }
-    };
+    if !is_dir && metadata_rootfs_first(path).is_none() {
+        return ENOENT;
+    }
 
     let cloexec = (flags & O_CLOEXEC) != 0;
     let handle = alloc::boxed::Box::new(FileHandle {
-        data: data_vec.into_boxed_slice(),
+        data: alloc::boxed::Box::new([]),
         pos: 0,
         fs_path: if is_dir { None } else { Some(path.to_string()) },
         dir_path: if is_dir { Some(path.to_string()) } else { None },
@@ -595,16 +593,22 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
 
     match with_fd_table_mut(pid, |t| {
         let fh = t.get_mut(idx).ok_or(EBADF)?;
+        let file_len = fh
+            .fs_path
+            .as_deref()
+            .and_then(metadata_rootfs_first)
+            .map(|(_, size)| size as usize)
+            .unwrap_or(fh.data.len());
         let new_pos = match whence {
             0 => offset,
             1 => fh.pos as i64 + offset,
-            2 => fh.data.len() as i64 + offset,
+            2 => file_len as i64 + offset,
             _ => return Err(EINVAL),
         };
         if new_pos < 0 {
             return Err(EINVAL);
         }
-        let new_pos = core::cmp::min(new_pos as usize, fh.data.len());
+        let new_pos = core::cmp::min(new_pos as usize, file_len);
         fh.pos = new_pos;
         Ok(fh.pos as u64)
     }) {
@@ -935,19 +939,48 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
 
     while written < to_copy {
         let chunk_len = core::cmp::min(IO_CHUNK_BYTES, to_copy - written);
-        let read_len = match with_fd_table_mut(pid, |t| {
-            let fh = t.get_mut(idx)?;
-            let avail = fh.data.len().saturating_sub(fh.pos);
-            let take = core::cmp::min(avail, chunk_len);
-            if take == 0 {
-                return Some(0usize);
+        let read_len = {
+            let (path, pos) = match with_fd_table(pid, |t| {
+                t.get(idx)
+                    .map(|fh| (fh.fs_path.clone(), fh.pos))
+                    .ok_or(EBADF)
+            }) {
+                Some(Ok(v)) => v,
+                Some(Err(errno)) => return errno,
+                None => return EBADF,
+            };
+            if let Some(path) = path.as_deref() {
+                let read =
+                    match read_file_range_rootfs_first(path, pos as u64, &mut tmp[..chunk_len]) {
+                        Some(read) => read,
+                        None => return EIO,
+                    };
+                let advanced = with_fd_table_mut(pid, |t| {
+                    let fh = t.get_mut(idx).ok_or(EBADF)?;
+                    fh.pos = fh.pos.checked_add(read).ok_or(EINVAL)?;
+                    Ok(())
+                });
+                match advanced {
+                    Some(Ok(())) => read,
+                    Some(Err(errno)) => return errno,
+                    None => return EBADF,
+                }
+            } else {
+                match with_fd_table_mut(pid, |t| {
+                    let fh = t.get_mut(idx)?;
+                    let avail = fh.data.len().saturating_sub(fh.pos);
+                    let take = core::cmp::min(avail, chunk_len);
+                    if take == 0 {
+                        return Some(0usize);
+                    }
+                    tmp[..take].copy_from_slice(&fh.data[fh.pos..fh.pos + take]);
+                    fh.pos += take;
+                    Some(take)
+                }) {
+                    Some(Some(v)) => v,
+                    _ => return EBADF,
+                }
             }
-            tmp[..take].copy_from_slice(&fh.data[fh.pos..fh.pos + take]);
-            fh.pos += take;
-            Some(take)
-        }) {
-            Some(Some(v)) => v,
-            _ => return EBADF,
         };
         if read_len == 0 {
             break;

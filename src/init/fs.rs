@@ -9,6 +9,7 @@ use core::str;
 
 /// EXT2ファイルシステムのマジックナンバー
 pub const EXT2_MAGIC: u16 = 0xEF53;
+const MAX_READ_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 /// BootInfo から設定される initfs イメージへのスライス
 /// ブートローダーが initfs_addr / initfs_size を設定した後に init() で初期化される
@@ -186,6 +187,23 @@ pub fn read_rootfs(name: &str) -> Option<Vec<u8>> {
         None
     } else {
         read_path_in(rootfs_image(), name)
+    }
+}
+
+pub fn read_range(name: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
+    if !rootfs_image().is_empty() {
+        if let Some(read) = read_range_in(rootfs_image(), name, offset, buf) {
+            return Some(read);
+        }
+    }
+    read_range_in(ext2_image(), name, offset, buf)
+}
+
+pub fn read_range_rootfs(name: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
+    if rootfs_image().is_empty() {
+        None
+    } else {
+        read_range_in(rootfs_image(), name, offset, buf)
     }
 }
 
@@ -372,6 +390,14 @@ fn read_inode_data(image: &[u8], sb: Superblock, inode_num: u32) -> Option<Vec<u
         return Some(Vec::new());
     }
     let size = inode.size as usize;
+    if size > MAX_READ_FILE_BYTES {
+        crate::warn!(
+            "initfs: refusing oversized file inode={} size={} bytes",
+            inode_num,
+            size
+        );
+        return None;
+    }
     let blocks_needed = size.div_ceil(sb.block_size as usize);
     let mut buf = Vec::with_capacity(size);
 
@@ -643,6 +669,14 @@ fn read_path_in(image: &[u8], path: &str) -> Option<Vec<u8>> {
             if is_dir(next_inode.mode) {
                 return None;
             }
+            if next_inode.size as usize > MAX_READ_FILE_BYTES {
+                crate::warn!(
+                    "initfs: refusing oversized file path={} size={} bytes",
+                    path,
+                    next_inode.size
+                );
+                return None;
+            }
             return read_inode_data(image, sb, inode_num);
         }
         if !is_dir(next_inode.mode) {
@@ -651,4 +685,70 @@ fn read_path_in(image: &[u8], path: &str) -> Option<Vec<u8>> {
         current = next_inode;
     }
     None
+}
+
+fn read_range_in(image: &[u8], path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
+    let sb = superblock(image)?;
+    let mut current = inode(image, sb, 2)?;
+    let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
+    parts.peek()?;
+
+    while let Some(part) = parts.next() {
+        if part == ".." || part == "." {
+            return None;
+        }
+        let is_last = parts.peek().is_none();
+        let inode_num = find_inode_in_dir(image, sb, current, part)?;
+        let next_inode = inode(image, sb, inode_num)?;
+        if is_last {
+            if is_dir(next_inode.mode) {
+                return None;
+            }
+            return read_inode_range(image, sb, next_inode, offset, buf);
+        }
+        if !is_dir(next_inode.mode) {
+            return None;
+        }
+        current = next_inode;
+    }
+    None
+}
+
+fn read_inode_range(
+    image: &[u8],
+    sb: Superblock,
+    inode: Inode,
+    offset: u64,
+    buf: &mut [u8],
+) -> Option<usize> {
+    if buf.is_empty() {
+        return Some(0);
+    }
+    let file_size = usize::try_from(inode.size).ok()?;
+    let start = usize::try_from(offset).ok()?;
+    if start >= file_size {
+        return Some(0);
+    }
+    let target = core::cmp::min(buf.len(), file_size - start);
+    let block_size = sb.block_size as usize;
+    if block_size == 0 {
+        return None;
+    }
+    let mut copied = 0usize;
+    while copied < target {
+        let absolute = start.checked_add(copied)?;
+        let block_idx = absolute / block_size;
+        let block_offset = absolute % block_size;
+        let to_copy = core::cmp::min(target - copied, block_size - block_offset);
+        let block_num = data_block_number(image, sb, inode, block_idx)?;
+        if block_num == 0 {
+            buf[copied..copied + to_copy].fill(0);
+        } else {
+            let block = block_slice(image, sb.block_size, block_num)?;
+            buf[copied..copied + to_copy]
+                .copy_from_slice(block.get(block_offset..block_offset + to_copy)?);
+        }
+        copied += to_copy;
+    }
+    Some(copied)
 }

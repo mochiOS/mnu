@@ -71,6 +71,9 @@ pub fn set_disk_ops(disk_ops: *const crate::cext::disk::McxDiskOps) -> i32 {
 }
 
 pub fn read_all(path: &str) -> Option<Vec<u8>> {
+    const MAX_READ_ALL_BYTES: usize = 64 * 1024 * 1024;
+    const READ_CHUNK_BYTES: usize = 256 * 1024;
+
     let ops = ops_ptr();
     if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
         return None;
@@ -80,27 +83,65 @@ pub fn read_all(path: &str) -> Option<Vec<u8>> {
         return None;
     }
     let size = usize::try_from(size).ok()?;
+    if size > MAX_READ_ALL_BYTES {
+        return None;
+    }
     let mut data = vec![0u8; size];
+    let mut total_read = 0usize;
+    while total_read < data.len() {
+        let chunk_len = core::cmp::min(READ_CHUNK_BYTES, data.len() - total_read);
+        let mut read = 0usize;
+        let rc = unsafe {
+            ((*ops).read)(
+                path_arg(path),
+                total_read as u64,
+                McxBuffer {
+                    ptr: data.as_mut_ptr().add(total_read),
+                    len: chunk_len,
+                },
+                &mut read,
+            )
+        };
+        if rc != 0 || read > chunk_len {
+            return None;
+        }
+        if read == 0 {
+            break;
+        }
+        total_read = total_read.checked_add(read)?;
+    }
+    if total_read != data.len() {
+        return None;
+    }
+    data.truncate(total_read);
+    Some(data)
+}
+
+pub fn read_range(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
+    let ops = ops_ptr();
+    if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
+        return None;
+    }
+    if buf.is_empty() {
+        return Some(0);
+    }
+    let (mode, _) = file_metadata(path)?;
+    if (mode & 0xf000) == 0x4000 {
+        return None;
+    }
     let mut read = 0usize;
     let rc = unsafe {
         ((*ops).read)(
             path_arg(path),
-            0,
+            offset,
             McxBuffer {
-                ptr: data.as_mut_ptr(),
-                len: data.len(),
+                ptr: buf.as_mut_ptr(),
+                len: buf.len(),
             },
             &mut read,
         )
     };
-    if rc != 0 {
-        return None;
-    }
-    if read != data.len() {
-        return None;
-    }
-    data.truncate(read);
-    Some(data)
+    (rc == 0 && read <= buf.len()).then_some(read)
 }
 
 pub fn write_all(path: &str, offset: u64, data: &[u8]) -> Option<usize> {

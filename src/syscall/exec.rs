@@ -517,101 +517,44 @@ fn fingerprint_exec_bytes(data: &[u8]) -> &'static str {
 }
 
 fn load_exec_image(path: &str, role: ManifestRole) -> Option<LoadedExec> {
-    let exec_path = resolve_app_bundle_entry(path).unwrap_or_else(|| path.to_string());
-    load_regular_exec_image(&exec_path, role).map(|(data, source)| LoadedExec {
+    load_regular_exec_image(path, role).map(|(data, source)| LoadedExec {
         data,
         source,
-        exec_path,
+        exec_path: path.to_string(),
     })
 }
 
 fn load_regular_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static str)> {
     if matches!(role, ManifestRole::CoreService | ManifestRole::Service) {
-        crate::init::fs::read_initfs(path)
-            .map(|data| (data, "initfs"))
-            .or_else(|| crate::init::fs::read_rootfs(path).map(|data| (data, "rootfs")))
-            .or_else(|| crate::cext::fs::read_all(path).map(|data| (data, "cext")))
-            .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
-    } else {
-        crate::cext::fs::read_all(path)
-            .map(|data| (data, "cext"))
-            .or_else(|| crate::init::fs::read_rootfs(path).map(|data| (data, "rootfs")))
-            .or_else(|| crate::init::fs::read(path).map(|data| (data, "fallback")))
-    }
-}
-
-fn resolve_app_bundle_entry(path: &str) -> Option<String> {
-    let app_root = path.trim_end_matches('/');
-    if !app_root.ends_with(".app") {
-        return None;
-    }
-
-    let about_path = alloc::format!("{}/about.toml", app_root);
-    let manifest_path = alloc::format!("{}/manifest.toml", app_root);
-    let about = read_exec_text(&about_path)?;
-    let manifest = read_exec_text(&manifest_path)?;
-    let entry = parse_toml_string_field(&about, "entry")
-        .or_else(|| parse_toml_string_field(&manifest, "path"))?;
-    if entry.starts_with('/') {
-        Some(entry)
-    } else {
-        Some(alloc::format!("{}/{}", app_root, entry))
-    }
-}
-
-fn read_exec_text(path: &str) -> Option<String> {
-    let bytes = crate::cext::fs::read_all(path)
-        .or_else(|| crate::init::fs::read_rootfs(path))
-        .or_else(|| crate::init::fs::read(path))?;
-    String::from_utf8(bytes).ok()
-}
-
-fn parse_toml_string_field(content: &str, key: &str) -> Option<String> {
-    for line in content.lines() {
-        let Some((field, value)) = line.trim().split_once('=') else {
-            continue;
-        };
-        if field.trim() != key {
-            continue;
+        if let Some(data) = crate::init::fs::read_initfs(path) {
+            return Some((data, "initfs"));
         }
-        return parse_toml_string_literal(value);
-    }
-    None
-}
-
-fn parse_toml_string_literal(value: &str) -> Option<String> {
-    let value = value.trim();
-    if !value.starts_with('"') {
-        return None;
-    }
-    let mut output = String::new();
-    let mut chars = value[1..].chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' => return Some(output),
-            '\\' => match chars.next()? {
-                '"' => output.push('"'),
-                '\\' => output.push('\\'),
-                'n' => output.push('\n'),
-                'r' => output.push('\r'),
-                't' => output.push('\t'),
-                other => output.push(other),
-            },
-            other => output.push(other),
+        if let Some(data) = crate::cext::fs::read_all(path) {
+            return Some((data, "cext"));
         }
+        if let Some(data) = crate::init::fs::read_rootfs(path) {
+            return Some((data, "rootfs"));
+        }
+        if let Some(data) = crate::init::fs::read(path) {
+            return Some((data, "fallback"));
+        }
+        None
+    } else {
+        if let Some(data) = crate::init::fs::read_rootfs(path) {
+            return Some((data, "rootfs"));
+        }
+        if let Some(data) = crate::cext::fs::read_all(path) {
+            return Some((data, "cext"));
+        }
+        if let Some(data) = crate::init::fs::read(path) {
+            return Some((data, "fallback"));
+        }
+        None
     }
-    None
 }
 
 fn derive_process_name(path: &str) -> String {
     let normalized = path.trim_end_matches('/');
-    if let Some(bundle_path) = normalized.strip_suffix("/entry.elf") {
-        if let Some(bundle_name) = bundle_path.rsplit('/').next() {
-            if bundle_name.ends_with(".app") && !bundle_name.is_empty() {
-                return bundle_name.to_string();
-            }
-        }
-    }
     normalized
         .rsplit('/')
         .next()
@@ -636,7 +579,9 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
 
-    if let Some(data) = crate::cext::fs::read_all(&path) {
+    if let Some(data) =
+        crate::init::fs::read_rootfs(&path).or_else(|| crate::cext::fs::read_all(&path))
+    {
         return exec_with_data(&data, &path, &path, &extra_args, None, None, None, None);
     }
 
@@ -1444,15 +1389,20 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     use crate::syscall::types::{EINVAL, ENOENT, EPERM};
 
     if path_ptr == 0 {
+        crate::warn!("execve: null path pointer");
         return EINVAL;
     }
     if !caller_has_process_spawn_capability() {
+        crate::warn!("execve: missing process spawn capability");
         return EPERM;
     }
 
     let path_owned = match crate::syscall::read_user_cstring(path_ptr, 256) {
         Ok(s) => s,
-        Err(_) => return EINVAL,
+        Err(err) => {
+            crate::warn!("execve: read path failed errno={}", err);
+            return EINVAL;
+        }
     };
     let path = path_owned.as_str();
 
@@ -1462,7 +1412,10 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         exec_path,
     } = match load_exec_image(path, ManifestRole::Unknown) {
         Some(loaded) => loaded,
-        None => return ENOENT,
+        None => {
+            crate::warn!("execve: image not found path='{}'", path);
+            return ENOENT;
+        }
     };
     let aslr_seed = next_aslr_seed(&exec_path);
     crate::info!(
