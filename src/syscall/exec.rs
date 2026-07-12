@@ -1,9 +1,10 @@
 use crate::capability::{
-    parse_kernel_authority_spec, Capability, CapabilitySet, KernelAuthoritySet,
+    Capability, CapabilitySet, KernelAuthoritySet, parse_kernel_authority_spec,
 };
 use crate::policy::{
-    caller_can_grant_capabilities_on_exec, claim_service_manager_pid, release_service_manager_pid,
-    resolve_exec_foreground, resolve_exec_priority, resolve_exec_privilege, ManifestRole,
+    ManifestRole, caller_can_grant_capabilities_on_exec, claim_service_manager_pid,
+    release_service_manager_pid, resolve_exec_foreground, resolve_exec_priority,
+    resolve_exec_privilege,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -204,7 +205,9 @@ fn validate_requested_exec_capabilities(
     };
     let caller_authorities = current_process_kernel_authorities().unwrap_or_default();
 
-    if !caps.is_subset_of(&caller_caps) {
+    let caller_can_manage_capabilities =
+        caller_caps.contains(crate::capability::Capability::CapabilitiesManage);
+    if !caller_can_manage_capabilities && !caps.is_subset_of(&caller_caps) {
         return Err(EPERM);
     }
     if !authorities.is_subset_of(&caller_authorities) {
@@ -842,7 +845,10 @@ fn exec_with_data(
                             _ => {
                                 crate::warn!(
                                     "ELF segment src offset+filesz out of bounds: seg={} src_off={} filesz={} data.len()={}",
-                                    i, src_off, filesz, data.len()
+                                    i,
+                                    src_off,
+                                    filesz,
+                                    data.len()
                                 );
                                 return crate::syscall::types::EINVAL;
                             }
@@ -872,8 +878,14 @@ fn exec_with_data(
                             executable,
                         ) {
                             crate::warn!("Failed to map segment at {:#x}: {:?}", vaddr, e);
-                            crate::warn!("  new_pt_phys={:#x}, filesz={}, memsz={}, writable={}, executable={}", 
-                                new_pt_phys, filesz, memsz, writable, executable);
+                            crate::warn!(
+                                "  new_pt_phys={:#x}, filesz={}, memsz={}, writable={}, executable={}",
+                                new_pt_phys,
+                                filesz,
+                                memsz,
+                                writable,
+                                executable
+                            );
                             return crate::syscall::types::EINVAL;
                         }
                     }

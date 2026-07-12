@@ -19,7 +19,9 @@ mod console;
 mod types;
 
 use crate::capability::{KernelAuthority, KernelCapability, KernelObjectRef};
+use alloc::format;
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use x86_64::instructions::port::Port;
 
@@ -91,6 +93,11 @@ fn is_canonical_user_range(addr: u64, len: u64) -> bool {
         }
     };
     end_inclusive <= USER_SPACE_END
+}
+
+fn current_process_name_for_log() -> Option<String> {
+    let pid = crate::syscall::security::current_process_id()?;
+    crate::task::with_process(pid, |p| p.name().to_string())
 }
 
 /// ユーザー空間の null 終端文字列を最大長付きで読み取り、カーネル所有の `String` を返す。
@@ -345,9 +352,26 @@ pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
         return Err(EFAULT);
     }
     crate::mem::paging::copy_from_user_in_table(user_pt, src_ptr, dst).map_err(|err| {
+        let (syscall_num, syscall_args) = last_syscall_snapshot();
+        let pid = crate::syscall::security::current_process_id()
+            .map(|pid| pid.as_u64())
+            .unwrap_or(0);
+        let process_name = current_process_name_for_log().unwrap_or_else(|| "?".to_string());
         crate::audit::log(
             crate::audit::AuditEventKind::Usercopy,
-            "copy_from_user rejected unmapped or unreadable range",
+            &format!(
+                "copy_from_user rejected unmapped or unreadable range pid={} process={} src={:#x} len={} last_syscall={} args=[{:#x},{:#x},{:#x},{:#x},{:#x}]",
+                pid,
+                process_name,
+                src_ptr,
+                dst.len(),
+                syscall_num,
+                syscall_args[0],
+                syscall_args[1],
+                syscall_args[2],
+                syscall_args[3],
+                syscall_args[4]
+            ),
         );
         match err {
             crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => EFAULT,
@@ -371,9 +395,26 @@ pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
         return Err(EFAULT);
     }
     crate::mem::paging::copy_to_user_in_table(user_pt, dst_ptr, src).map_err(|err| {
+        let (syscall_num, syscall_args) = last_syscall_snapshot();
+        let pid = crate::syscall::security::current_process_id()
+            .map(|pid| pid.as_u64())
+            .unwrap_or(0);
+        let process_name = current_process_name_for_log().unwrap_or_else(|| "?".to_string());
         crate::audit::log(
             crate::audit::AuditEventKind::Usercopy,
-            "copy_to_user rejected unmapped or unwritable range",
+            &format!(
+                "copy_to_user rejected unmapped or unwritable range pid={} process={} dst={:#x} len={} last_syscall={} args=[{:#x},{:#x},{:#x},{:#x},{:#x}]",
+                pid,
+                process_name,
+                dst_ptr,
+                src.len(),
+                syscall_num,
+                syscall_args[0],
+                syscall_args[1],
+                syscall_args[2],
+                syscall_args[3],
+                syscall_args[4]
+            ),
         );
         match err {
             crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => EFAULT,
