@@ -13,6 +13,7 @@ use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const EM_X86_64: u16 = 0x3E;
+const EXEC_MANIFEST_ENV_PREFIX: &str = "__MOCHI_EXEC_ENV=";
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct InitialUserStack {
@@ -249,7 +250,7 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
-    exec_internal(path, None, &extra_args, None, None, None, None)
+    exec_internal(path, None, &extra_args, &[], None, None, None, None)
 }
 
 /// exec 時に capability を付与して起動する
@@ -305,6 +306,7 @@ pub fn exec_with_capabilities_syscall(
         path.as_str(),
         None,
         &extra_args,
+        &[],
         Some(caps),
         Some(authorities),
         None,
@@ -359,7 +361,18 @@ pub fn exec_manifest_syscall(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
+    let mut extra_args: Vec<&str> = Vec::new();
+    let mut envp: Vec<&str> = Vec::new();
+    for item in &extra_args_owned {
+        if let Some(env) = item.strip_prefix(EXEC_MANIFEST_ENV_PREFIX) {
+            if env.is_empty() || !env.contains('=') {
+                return EINVAL;
+            }
+            envp.push(env);
+        } else {
+            extra_args.push(item.as_str());
+        }
+    }
 
     if !caller_can_grant_capabilities_on_exec() {
         crate::warn!(
@@ -402,6 +415,7 @@ pub fn exec_manifest_syscall(
         path.as_str(),
         None,
         &extra_args,
+        &envp,
         Some(caps),
         Some(authorities),
         requested_privilege,
@@ -411,7 +425,7 @@ pub fn exec_manifest_syscall(
 
 /// 名前を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
 pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
-    exec_internal(path, Some(name), &[], None, None, None, None)
+    exec_internal(path, Some(name), &[], &[], None, None, None, None)
 }
 
 /// 名前と初期 capability を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
@@ -446,6 +460,7 @@ pub fn exec_kernel_with_name_caps_and_authorities(
         path,
         Some(name),
         &[],
+        &[],
         Some(initial_caps),
         Some(initial_kernel_authorities),
         Some(requested_privilege),
@@ -457,6 +472,7 @@ fn exec_internal(
     path: &str,
     name_override: Option<&str>,
     args: &[&str],
+    envp: &[&str],
     initial_caps: Option<CapabilitySet>,
     initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
@@ -488,6 +504,7 @@ fn exec_internal(
             &process_name,
             &exec_path,
             args,
+            envp,
             None,
             initial_caps,
             initial_kernel_authorities,
@@ -584,7 +601,17 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     if let Some(data) =
         crate::init::fs::read_rootfs(&path).or_else(|| crate::cext::fs::read_all(&path))
     {
-        return exec_with_data(&data, &path, &path, &extra_args, None, None, None, None);
+        return exec_with_data(
+            &data,
+            &path,
+            &path,
+            &extra_args,
+            &[],
+            None,
+            None,
+            None,
+            None,
+        );
     }
 
     crate::syscall::types::ENOENT
@@ -739,6 +766,7 @@ fn exec_with_data(
     process_name: &str,
     exec_path: &str,
     args: &[&str],
+    envp: &[&str],
     parent_override: Option<crate::task::ProcessId>,
     initial_caps: Option<CapabilitySet>,
     initial_kernel_authorities: Option<KernelAuthoritySet>,
@@ -1042,7 +1070,6 @@ fn exec_with_data(
                 argv1
             );
         }
-        let envs: [&str; 0] = [];
         let auxv_entries = [
             (3u64, phdr_vaddr),
             (4u64, phentsize),
@@ -1067,7 +1094,7 @@ fn exec_with_data(
             stack_end_vaddr,
             initial_rsp,
             page_data,
-        } = match build_initial_user_stack(aslr_seed, &all_args, &envs, exec_path, &auxv_entries) {
+        } = match build_initial_user_stack(aslr_seed, &all_args, envp, exec_path, &auxv_entries) {
             Ok(stack) => stack,
             Err(errno) => return errno,
         };
@@ -1703,6 +1730,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         "user_exec",
         "user_exec",
         &[],
+        &[],
         delegated_parent_pid(),
         None,
         None,
@@ -1744,6 +1772,7 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         &owned,
         process_name,
         path.as_str(),
+        &[],
         &[],
         delegated_parent_pid(),
         None,
@@ -1799,6 +1828,7 @@ pub fn exec_from_buffer_named_args_syscall(
         process_name,
         path.as_str(),
         &args_refs,
+        &[],
         delegated_parent_pid(),
         None,
         None,
@@ -1874,6 +1904,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         process_name,
         path.as_str(),
         &args_refs,
+        &[],
         parent_override.or_else(delegated_parent_pid),
         None,
         None,
