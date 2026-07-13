@@ -159,65 +159,17 @@ fn normalize_path(path: &str) -> Option<String> {
 }
 
 pub fn classify_path(path: &str) -> PathType {
-    if path == "/" {
+    let Some(normalized) = normalize_path(path) else {
+        return PathType::Custom;
+    };
+    if normalized == "/" {
         return PathType::Root;
     }
-    if path == "/bin" || path.starts_with("/bin/") {
-        return PathType::Binary;
+
+    if let Some(registered) = lookup_path(&normalized) {
+        return registered.path_type;
     }
-    if path == "/tmp" || path.starts_with("/tmp/") {
-        return PathType::Temporary;
-    }
-    if path == "/config" || path.starts_with("/config/") {
-        return PathType::Config;
-    }
-    if path == "/mount" || path.starts_with("/mount/") {
-        return PathType::Mount(MountPath::Root);
-    }
-    if path == "/var" || path.starts_with("/var/") {
-        return PathType::Var(VarPath::Root);
-    }
-    if path == "/system" || path.starts_with("/system/") {
-        let suffix = path.strip_prefix("/system/").unwrap_or("");
-        let system_path = match suffix.split('/').next().unwrap_or("") {
-            "" => SystemPath::Root,
-            "kernel" => SystemPath::Kernel,
-            "boot" => SystemPath::Boot,
-            "services" => SystemPath::Services,
-            "log" => SystemPath::Log,
-            "state" => SystemPath::State,
-            "cache" => SystemPath::Cache,
-            "drivers" => SystemPath::Drivers,
-            "devices" => SystemPath::Devices,
-            "runtime" => SystemPath::Runtime,
-            "security" => SystemPath::Security,
-            "policy" => SystemPath::Policy,
-            _ => SystemPath::Root,
-        };
-        return PathType::System(system_path);
-    }
-    if path == "/lib"
-        || path.starts_with("/lib/")
-        || path == "/usr/lib"
-        || path.starts_with("/usr/lib/")
-    {
-        return PathType::Libraries(LibraryPath::Shared);
-    }
-    if path == "/home" || path.starts_with("/home/") {
-        let suffix = path.strip_prefix("/home/").unwrap_or("");
-        let user_path = match suffix.split('/').next().unwrap_or("") {
-            "" => UserPath::HomeRoot,
-            "documents" | "Documents" => UserPath::Documents,
-            "movies" | "Movies" => UserPath::Movies,
-            "develop" | "Develop" => UserPath::Develop,
-            "desktop" | "Desktop" => UserPath::Desktop,
-            "download" | "Download" | "downloads" | "Downloads" => UserPath::Download,
-            "music" | "Musics" => UserPath::Musics,
-            "images" | "Images" => UserPath::Images,
-            _ => UserPath::Home,
-        };
-        return PathType::User(user_path);
-    }
+
     PathType::Custom
 }
 
@@ -261,6 +213,35 @@ pub fn register_path(
     Ok(())
 }
 
+pub fn register_typed_path(
+    path: &str,
+    path_type: PathType,
+    owner: PathOwner,
+    rights: PathRights,
+) -> Result<(), PathRegistryError> {
+    let Some(normalized) = normalize_path(path) else {
+        return Err(PathRegistryError::InvalidPath);
+    };
+    let mut registry = registry_mut();
+    let map = registry.get_or_insert_with(BTreeMap::new);
+    if let Some(existing) = map.get(&normalized) {
+        if existing.owner == owner && existing.rights == rights && existing.path_type == path_type {
+            return Ok(());
+        }
+        return Err(PathRegistryError::AlreadyRegistered);
+    }
+    map.insert(
+        normalized.clone(),
+        PathCapability {
+            path: normalized,
+            path_type,
+            owner,
+            rights,
+        },
+    );
+    Ok(())
+}
+
 pub fn register_service_paths(service_pid: u64, paths: &[(&str, PathRights)]) -> usize {
     let mut registered = 0usize;
     for (path, rights) in paths.iter().copied() {
@@ -269,6 +250,69 @@ pub fn register_service_paths(service_pid: u64, paths: &[(&str, PathRights)]) ->
         }
     }
     registered
+}
+
+pub fn init_from_kernel_config() {
+    let Some(bytes) = crate::init::fs::kernel_read_initfs("/config/kernel.conf") else {
+        return;
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return;
+    };
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(path_type) = parse_config_path_type(key.trim()) else {
+            continue;
+        };
+        let path = value.trim();
+        let rights = PathRights::new(PATH_READ | PATH_EXEC | PATH_LIST);
+        let _ = register_typed_path(path, path_type, PathOwner::Any, rights);
+    }
+}
+
+fn parse_config_path_type(key: &str) -> Option<PathType> {
+    let kind = key.strip_prefix("capability.path.")?;
+    match kind {
+        "binary" => Some(PathType::Binary),
+        "tmp" | "temporary" => Some(PathType::Temporary),
+        "config" => Some(PathType::Config),
+        "mount" => Some(PathType::Mount(MountPath::Root)),
+        "var" => Some(PathType::Var(VarPath::Root)),
+        "system" => Some(PathType::System(SystemPath::Root)),
+        "system.kernel" => Some(PathType::System(SystemPath::Kernel)),
+        "system.boot" => Some(PathType::System(SystemPath::Boot)),
+        "system.services" => Some(PathType::System(SystemPath::Services)),
+        "system.log" => Some(PathType::System(SystemPath::Log)),
+        "system.state" => Some(PathType::System(SystemPath::State)),
+        "system.cache" => Some(PathType::System(SystemPath::Cache)),
+        "system.drivers" => Some(PathType::System(SystemPath::Drivers)),
+        "system.devices" => Some(PathType::System(SystemPath::Devices)),
+        "system.runtime" => Some(PathType::System(SystemPath::Runtime)),
+        "system.security" => Some(PathType::System(SystemPath::Security)),
+        "system.policy" => Some(PathType::System(SystemPath::Policy)),
+        "libraries" => Some(PathType::Libraries(LibraryPath::Shared)),
+        "libraries.shared" => Some(PathType::Libraries(LibraryPath::Shared)),
+        "libraries.static" => Some(PathType::Libraries(LibraryPath::Static)),
+        "libraries.runtime" => Some(PathType::Libraries(LibraryPath::Runtime)),
+        "libraries.frameworks" => Some(PathType::Libraries(LibraryPath::Frameworks)),
+        "libraries.plugkit" => Some(PathType::Libraries(LibraryPath::PlugKit)),
+        "user" => Some(PathType::User(UserPath::HomeRoot)),
+        "user.home" => Some(PathType::User(UserPath::Home)),
+        "user.documents" => Some(PathType::User(UserPath::Documents)),
+        "user.movies" => Some(PathType::User(UserPath::Movies)),
+        "user.develop" => Some(PathType::User(UserPath::Develop)),
+        "user.desktop" => Some(PathType::User(UserPath::Desktop)),
+        "user.downloads" => Some(PathType::User(UserPath::Download)),
+        "user.music" => Some(PathType::User(UserPath::Musics)),
+        "user.images" => Some(PathType::User(UserPath::Images)),
+        _ => None,
+    }
 }
 
 pub fn lookup_path(path: &str) -> Option<PathCapability> {

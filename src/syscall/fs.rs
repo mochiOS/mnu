@@ -451,20 +451,11 @@ const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 
 fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
-    if path == "/drivers/usb" {
-        debug_serial_write_str("fs::open /drivers/usb begin\n");
-    }
     let mut metadata = metadata_rootfs_first(path);
-    if path == "/drivers/usb" {
-        debug_serial_write_str("fs::open /drivers/usb metadata\n");
-    }
     let mut is_dir = metadata
         .map(|(mode, _)| mode_is_directory(mode))
         .unwrap_or_else(|| crate::cext::fs::is_directory(path));
     if let Err(errno) = ensure_fs_path_access(path, open_required_rights(path, flags, is_dir)) {
-        if path == "/drivers/usb" {
-            debug_serial_write_str("fs::open /drivers/usb access_err\n");
-        }
         return errno;
     }
 
@@ -526,12 +517,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     });
 
     match with_fd_table_mut(owner_pid, |t| t.alloc(handle, cloexec)) {
-        Some(Some(fd)) => {
-            if path == "/drivers/usb" {
-                debug_serial_write_str("fs::open /drivers/usb done\n");
-            }
-            fd as u64
-        }
+        Some(Some(fd)) => fd as u64,
         _ => ENOSYS,
     }
 }

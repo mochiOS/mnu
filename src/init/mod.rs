@@ -52,6 +52,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
 
     fs::init();
     crate::config::init();
+    crate::capability::path::init_from_kernel_config();
     crate::cext::init_runtime_config();
     crate::cext::register_builtin_cext("disk", crate::cext::CextKind::BlockDevice);
     crate::cext::register_builtin_cext("ext2", crate::cext::CextKind::Filesystem);

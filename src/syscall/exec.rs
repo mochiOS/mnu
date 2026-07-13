@@ -1,10 +1,9 @@
 use crate::capability::{
-    Capability, CapabilitySet, KernelAuthoritySet, parse_kernel_authority_spec,
+    parse_kernel_authority_spec, Capability, CapabilitySet, KernelAuthoritySet,
 };
 use crate::policy::{
-    ManifestRole, caller_can_grant_capabilities_on_exec, claim_service_manager_pid,
-    release_service_manager_pid, resolve_exec_foreground, resolve_exec_priority,
-    resolve_exec_privilege,
+    caller_can_grant_capabilities_on_exec, claim_service_manager_pid, release_service_manager_pid,
+    resolve_exec_foreground, resolve_exec_priority, resolve_exec_privilege, ManifestRole,
 };
 use alloc::string::String;
 use alloc::string::ToString;
