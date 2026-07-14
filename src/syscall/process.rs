@@ -454,7 +454,6 @@ pub fn fork() -> u64 {
         parent_priority,
         parent_foreground,
         parent_caps,
-        parent_kernel_authorities,
         parent_pt,
         heap_start,
         heap_end,
@@ -462,7 +461,7 @@ pub fn fork() -> u64 {
         stack_top,
         parent_cwd,
         parent_exe_path,
-        parent_rlimits,
+        parent_limits,
         parent_pgid,
         parent_sid,
         parent_mmap_regions,
@@ -473,7 +472,6 @@ pub fn fork() -> u64 {
             p.priority(),
             p.is_foreground(),
             p.capabilities().clone(),
-            p.clone_kernel_authorities_for_fork(),
             p.page_table(),
             p.heap_start(),
             p.heap_end(),
@@ -511,10 +509,25 @@ pub fn fork() -> u64 {
         );
     }
 
-    let (user_context, parent_fs) =
-        crate::task::with_thread(parent_tid, |t| (t.syscall_user_context(), t.fs_base()))
-            .unwrap_or((crate::task::thread::SyscallUserContext::empty(), 0));
-    if user_context.rip == 0 || user_context.rsp == 0 {
+    let (user_rip, user_rsp, user_rflags, parent_fs, user_rbx, user_rbp, user_r12, user_r13, user_r14, user_r15) =
+        crate::task::with_thread(parent_tid, |t| {
+            let (rip, rsp, rflags) = t.syscall_user_context();
+            let (rbx, rbp, r12, r13, r14, r15) = t.fork_user_callee_saved();
+            (
+                rip,
+                rsp,
+                rflags,
+                t.fs_base(),
+                rbx,
+                rbp,
+                r12,
+                r13,
+                r14,
+                r15,
+            )
+        })
+        .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+    if user_rip == 0 || user_rsp == 0 {
         let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOSYS;
     }
@@ -526,7 +539,6 @@ pub fn fork() -> u64 {
         crate::task::Process::new("fork", parent_priv, Some(parent_pid), parent_priority);
     child_proc.set_foreground(parent_foreground);
     child_proc.set_capabilities_for_exec(parent_caps);
-    child_proc.set_kernel_authorities_for_exec(parent_kernel_authorities);
     child_proc.set_page_table(child_pt);
     child_proc.set_heap_start(heap_start);
     child_proc.set_heap_end(heap_end);
@@ -534,7 +546,7 @@ pub fn fork() -> u64 {
     child_proc.set_stack_top(stack_top);
     child_proc.set_cwd(&parent_cwd);
     child_proc.set_exe_path(&parent_exe_path);
-    child_proc.set_resource_limits(parent_rlimits);
+    child_proc.set_resource_limits(parent_limits);
     child_proc.set_pgid(parent_pgid);
     child_proc.set_sid(parent_sid);
     child_proc.set_mmap_regions(parent_mmap_regions);
@@ -566,6 +578,12 @@ pub fn fork() -> u64 {
         child_pid,
         user_context,
         parent_fs,
+        user_rbx,
+        user_rbp,
+        user_r12,
+        user_r13,
+        user_r14,
+        user_r15,
         kstack,
         kstack_size,
     );

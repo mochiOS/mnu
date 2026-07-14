@@ -277,7 +277,7 @@ pub unsafe extern "C" fn syscall_entry() {
 
         "nop",
 
-        // fork/spawn 用に、直近のユーザー文脈を thread metadata に保存する。
+        // fork/spawn 用に、直近のユーザー文脈と callee-saved registers を保存する。
         "mov rdi, rsp",
         "call {save_user_context_for_fork}",
 

@@ -231,6 +231,13 @@ pub struct Thread {
     user_arg0: u64,
     /// fork時に子プロセスへ渡すユーザー RFLAGS
     fork_user_rflags: u64,
+    /// fork時に子プロセスへ渡す callee-saved registers
+    fork_user_rbx: u64,
+    fork_user_rbp: u64,
+    fork_user_r12: u64,
+    fork_user_r13: u64,
+    fork_user_r14: u64,
+    fork_user_r15: u64,
     /// TLS用 FS ベースレジスタ (arch_prctl ARCH_SET_FS で設定)
     fs_base: u64,
     /// 現在システムコールコンテキスト中かどうか
@@ -519,6 +526,12 @@ impl Thread {
             user_stack: 0,
             user_arg0: 0,
             fork_user_rflags: 0,
+            fork_user_rbx: 0,
+            fork_user_rbp: 0,
+            fork_user_r12: 0,
+            fork_user_r13: 0,
+            fork_user_r14: 0,
+            fork_user_r15: 0,
             fs_base: 0,
             in_syscall: false,
             syscall_user_cr3: 0,
@@ -636,6 +649,12 @@ impl Thread {
             user_stack,
             user_arg0,
             fork_user_rflags: 0,
+            fork_user_rbx: 0,
+            fork_user_rbp: 0,
+            fork_user_r12: 0,
+            fork_user_r13: 0,
+            fork_user_r14: 0,
+            fork_user_r15: 0,
             fs_base: 0,
             in_syscall: false,
             syscall_user_cr3: 0,
@@ -672,6 +691,17 @@ impl Thread {
         self.fork_user_rflags
     }
 
+    pub fn fork_user_callee_saved(&self) -> (u64, u64, u64, u64, u64, u64) {
+        (
+            self.fork_user_rbx,
+            self.fork_user_rbp,
+            self.fork_user_r12,
+            self.fork_user_r13,
+            self.fork_user_r14,
+            self.fork_user_r15,
+        )
+    }
+
     /// fork の子プロセス用スレッドを作成
     ///
     /// 子スレッドはユーザー空間で fork() の戻り値として 0 を返す
@@ -679,6 +709,12 @@ impl Thread {
         process_id: ProcessId,
         user_context: SyscallUserContext,
         fs_base: u64,
+        user_rbx: u64,
+        user_rbp: u64,
+        user_r12: u64,
+        user_r13: u64,
+        user_r14: u64,
+        user_r15: u64,
         kernel_stack: u64,
         kernel_stack_size: usize,
     ) -> Self {
@@ -704,8 +740,20 @@ impl Thread {
                     crate::task::exit_current_task(crate::syscall::EINVAL);
                 }
             };
-            let (context, fs) = match with_thread(tid, |thread| {
-                (thread.syscall_user_context(), thread.fs_base())
+            let (entry, stack, rflags, fs, rbx, rbp, r12, r13, r14, r15) =
+                match with_thread(tid, |thread| {
+                (
+                    thread.user_entry(),
+                    thread.user_stack(),
+                    thread.fork_user_rflags(),
+                    thread.fs_base(),
+                    thread.fork_user_rbx,
+                    thread.fork_user_rbp,
+                    thread.fork_user_r12,
+                    thread.fork_user_r13,
+                    thread.fork_user_r14,
+                    thread.fork_user_r15,
+                )
             }) {
                 Some(v) => v,
                 None => {
@@ -718,7 +766,9 @@ impl Thread {
                 }
             };
             unsafe {
-                crate::task::usermode::jump_to_usermode_fork_child(context, fs);
+                crate::task::usermode::jump_to_usermode_fork_child(
+                    entry, stack, rflags, fs, rbx, rbp, r12, r13, r14, r15,
+                );
             }
         }
 
@@ -740,7 +790,13 @@ impl Thread {
             user_entry: user_context.rip,
             user_stack: user_context.rsp,
             user_arg0: 0,
-            fork_user_rflags: user_context.rflags,
+            fork_user_rflags: user_rflags,
+            fork_user_rbx: user_rbx,
+            fork_user_rbp: user_rbp,
+            fork_user_r12: user_r12,
+            fork_user_r13: user_r13,
+            fork_user_r14: user_r14,
+            fork_user_r15: user_r15,
             fs_base,
             in_syscall: false,
             syscall_user_cr3: 0,
@@ -781,6 +837,23 @@ impl Thread {
 
     pub fn set_syscall_user_context(&mut self, context: SyscallUserContext) {
         self.syscall_user_context = context;
+    }
+
+    pub fn set_fork_user_callee_saved(
+        &mut self,
+        rbx: u64,
+        rbp: u64,
+        r12: u64,
+        r13: u64,
+        r14: u64,
+        r15: u64,
+    ) {
+        self.fork_user_rbx = rbx;
+        self.fork_user_rbp = rbp;
+        self.fork_user_r12 = r12;
+        self.fork_user_r13 = r13;
+        self.fork_user_r14 = r14;
+        self.fork_user_r15 = r15;
     }
 
     pub fn set_futex_timed_out(&mut self, timed_out: bool) {

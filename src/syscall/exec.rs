@@ -1444,21 +1444,17 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     };
     let path = path_owned.as_str();
 
-    let LoadedExec {
-        data: data_vec,
-        source,
-        exec_path,
-    } = match load_exec_image(path, ManifestRole::Unknown) {
+    let (data_vec, source) = match load_exec_image(path, false) {
         Some(loaded) => loaded,
-        None => {
-            crate::warn!("execve: image not found path='{}'", path);
-            return ENOENT;
-        }
+        None => return ENOENT,
     };
-    let aslr_seed = next_aslr_seed(&exec_path);
+    if !crate::policy::signature::verify_exec(path, &data_vec) {
+        crate::warn!("execve: signature verification failed for '{}'", path);
+        return EPERM;
+    }
     crate::info!(
         "execve: loaded '{}' from {} ({} bytes)",
-        exec_path,
+        path,
         source,
         data_vec.len()
     );
@@ -1466,8 +1462,9 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
 
     // ELF エントリポイントとセグメントを解析
     let entry = match crate::elf::entry_point(data) {
-        Some(e) => e,
+        Some(e) if e != 0 => e,
         None => return EINVAL,
+        _ => return EINVAL,
     };
 
     // 新しいページテーブルを作成

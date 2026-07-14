@@ -4,6 +4,16 @@ use crate::mem::gdt;
 use crate::task::thread::SyscallUserContext;
 use core::arch::asm;
 
+#[repr(C)]
+struct ForkCalleeSaved {
+    rbx: u64,
+    rbp: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+}
+
 /// ユーザーモードでコードを実行する
 ///
 /// # 引数
@@ -88,28 +98,28 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64, user_arg0: u64) -> !
         "cli",
 
         // データセグメントをユーザーセグメントに設定（iretq前）
-        "mov ax, {ss:x}",
+        "mov ax, r8w",
         "mov ds, ax",
         "mov es, ax",
 
         // iretq用のスタックフレームをプッシュ
-        "push {ss}",       // SS (ユーザーデータセグメント)
-        "push {rsp}",      // RSP (ユーザースタック)
+        "push r8",         // SS (ユーザーデータセグメント)
+        "push r9",         // RSP (ユーザースタック)
         "pushfq",          // 現在のRFLAGSを保存
         "pop r11",
         "or r11, 0x200",   // IF (Interrupt Flag) を設定
         "push r11",        // RFLAGS
-        "push {cs}",       // CS (ユーザーコードセグメント)
-        "push {rip}",      // RIP (エントリーポイント)
+        "push r10",        // CS (ユーザーコードセグメント)
+        "push r12",        // RIP (エントリーポイント)
         "mov rdi, {arg0}", // 最初の引数を user rdi に載せる
 
         // iretqでユーザーモードへジャンプ
         "iretq",
 
-        ss = in(reg) user_ss,
-        rsp = in(reg) user_stack,
-        cs = in(reg) user_cs,
-        rip = in(reg) entry,
+        in("r8") user_ss,
+        in("r9") user_stack,
+        in("r10") user_cs,
+        in("r12") entry,
         arg0 = in(reg) user_arg0,
         options(noreturn)
     )
@@ -134,7 +144,18 @@ fn read_gdtr() -> (u64, u16) {
 ///
 /// # Safety
 /// `entry`/`stack`/`user_rflags`/`fs_base` は子プロセスの有効な復帰コンテキストである必要がある。
-pub unsafe fn jump_to_usermode_fork_child(context: SyscallUserContext, fs_base: u64) -> ! {
+pub unsafe fn jump_to_usermode_fork_child(
+    entry: u64,
+    stack: u64,
+    user_rflags: u64,
+    fs_base: u64,
+    user_rbx: u64,
+    user_rbp: u64,
+    user_r12: u64,
+    user_r13: u64,
+    user_r14: u64,
+    user_r15: u64,
+) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3;
     let user_ss = gdt::user_data_selector() as u64 | 3;
     let user_cr3 = crate::task::current_thread_id()
@@ -143,6 +164,14 @@ pub unsafe fn jump_to_usermode_fork_child(context: SyscallUserContext, fs_base: 
         .unwrap_or(0);
     let fs_lo = fs_base as u32;
     let fs_hi = (fs_base >> 32) as u32;
+    let callee_saved = ForkCalleeSaved {
+        rbx: user_rbx,
+        rbp: user_rbp,
+        r12: user_r12,
+        r13: user_r13,
+        r14: user_r14,
+        r15: user_r15,
+    };
     if user_cr3 != 0 {
         crate::mem::paging::switch_page_table(user_cr3);
     }
@@ -153,36 +182,31 @@ pub unsafe fn jump_to_usermode_fork_child(context: SyscallUserContext, fs_base: 
         // 0xC0000100 へ iretq してしまう。
         "wrmsr",
         // データセグメントをユーザーセグメントに設定
-        "mov ax, {ss:x}",
+        "mov ax, r8w",
         "mov ds, ax",
         "mov es, ax",
+        // SysV callee-saved registers を親の syscall 呼び出し時点へ戻す。
+        "mov rbx, [rsi + 0x00]",
+        "mov rbp, [rsi + 0x08]",
+        "mov r12, [rsi + 0x10]",
+        "mov r13, [rsi + 0x18]",
+        "mov r14, [rsi + 0x20]",
+        "mov r15, [rsi + 0x28]",
         // iretq フレームを構築: SS, RSP, RFLAGS, CS, RIP
-        "push {ss}",
-        "push {rsp}",
-        "push {rflags}",
-        "push {cs}",
-        "push {rip}",
-    "mov rbp, {rbp}",
-    "mov rbx, {rbx}",
-    "mov r12, {r12}",
-    "mov r13, {r13}",
-    "mov r14, {r14}",
-    "mov r15, {r15}",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push rdi",
         // fork 子プロセスは rax=0 を返す
         "xor eax, eax",
         "iretq",
-        ss     = in(reg) user_ss,
-    rsp = in(reg) context.rsp,
-    rflags = in(reg) (context.rflags | 0x200),
-        cs     = in(reg) user_cs,
-    rip = in(reg) context.rip,
-    rbp = in(reg) context.rbp,
-    rbx = in(reg) context.rbx,
-    r12 = in(reg) context.r12,
-    r13 = in(reg) context.r13,
-    r14 = in(reg) context.r14,
-    r15 = in(reg) context.r15,
-        in("ecx") 0xC000_0100u32,
+        in("r8") user_ss,
+        in("r9") stack,
+        in("r10") (user_rflags | 0x200),
+        in("r11") user_cs,
+        in("rdi") entry,
+        in("rsi") (&callee_saved as *const ForkCalleeSaved),
         in("eax") fs_lo,
         in("edx") fs_hi,
         options(noreturn)
