@@ -790,7 +790,7 @@ impl Thread {
             user_entry: user_context.rip,
             user_stack: user_context.rsp,
             user_arg0: 0,
-            fork_user_rflags: user_rflags,
+            fork_user_rflags: user_context.rflags,
             fork_user_rbx: user_rbx,
             fork_user_rbp: user_rbp,
             fork_user_r12: user_r12,

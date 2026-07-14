@@ -137,7 +137,7 @@ fn kernel_main() -> ! {
 
         let mut signature_allow_caps = CapabilitySet::empty();
         signature_allow_caps.insert(Capability::ProcessSpawn);
-        let signature_allow_pid = exec_kernel_with_name_and_caps(
+        let signature_allow_pid = crate::syscall::exec::exec_kernel_with_name_and_caps(
             "/captest.bin",
             "signature-allow-test",
             signature_allow_caps,
@@ -155,7 +155,8 @@ fn kernel_main() -> ! {
             );
         }
 
-        let signature_deny_ret = exec_kernel_with_name("/unsigned.bin", "signature-deny-test");
+        let signature_deny_ret =
+            crate::syscall::exec::exec_kernel_with_name("/unsigned.bin", "signature-deny-test");
         if signature_deny_ret == 0 || signature_deny_ret & (1u64 << 63) == 0 {
             crate::error!(
                 "signature deny test unexpectedly succeeded: ret={:#x}",

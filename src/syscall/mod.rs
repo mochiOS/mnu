@@ -646,7 +646,17 @@ pub extern "sysv64" fn save_user_context_for_fork(frame: *const SavedSyscallFram
     let frame = unsafe { &*frame };
     if let Some(tid) = crate::task::current_thread_id() {
         let _ = crate::task::with_thread_mut(tid, |thread| {
-            thread.set_syscall_user_context(frame.user_rip, frame.user_rsp, frame.user_rflags);
+            thread.set_syscall_user_context(crate::task::thread::SyscallUserContext {
+                rip: frame.user_rip,
+                rsp: frame.user_rsp,
+                rflags: frame.user_rflags,
+                rbp: frame.rbp,
+                rbx: frame.rbx,
+                r12: frame.r12,
+                r13: frame.r13,
+                r14: frame.r14,
+                r15: frame.r15,
+            });
             thread.set_fork_user_callee_saved(
                 frame.rbx, frame.rbp, frame.r12, frame.r13, frame.r14, frame.r15,
             );

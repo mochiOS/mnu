@@ -1444,17 +1444,19 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     };
     let path = path_owned.as_str();
 
-    let (data_vec, source) = match load_exec_image(path, false) {
-        Some(loaded) => loaded,
+    let exec_path = path_owned.clone();
+    let aslr_seed = next_aslr_seed(exec_path.as_str());
+    let (data_vec, source) = match load_exec_image(path, ManifestRole::Unknown) {
+        Some(LoadedExec { data, source, .. }) => (data, source),
         None => return ENOENT,
     };
-    if !crate::policy::signature::verify_exec(path, &data_vec) {
-        crate::warn!("execve: signature verification failed for '{}'", path);
+    if !crate::policy::signature::verify_exec(exec_path.as_str(), &data_vec) {
+        crate::warn!("execve: signature verification failed for '{}'", exec_path);
         return EPERM;
     }
     crate::info!(
         "execve: loaded '{}' from {} ({} bytes)",
-        path,
+        exec_path,
         source,
         data_vec.len()
     );
