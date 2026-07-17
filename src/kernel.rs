@@ -175,12 +175,7 @@ fn kernel_main() -> ! {
     // カーネルはアイドル状態に入る
     info!("Kernel initialization complete. Entering idle loop...");
     loop {
-        if cfg!(mochios_qemu_kvm) {
-            task::yield_now();
-            core::hint::spin_loop();
-        } else {
-            x86_64::instructions::hlt();
-        }
+        x86_64::instructions::hlt();
     }
 }
 

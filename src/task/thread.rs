@@ -4,15 +4,6 @@ use x86_64::VirtAddr;
 use super::context::Context;
 use super::ids::{ProcessId, ThreadId, ThreadState};
 
-#[inline]
-fn initial_thread_rflags() -> u64 {
-    if cfg!(mochios_qemu_kvm) {
-        0x2
-    } else {
-        0x202
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct SyscallUserContext {
     pub rip: u64,
@@ -628,7 +619,7 @@ impl Thread {
         context.rsp = stack_ptr;
         context.rbp = stack_top;
         context.rip = usermode_entry_trampoline as *const () as u64;
-        context.rflags = initial_thread_rflags();
+        context.rflags = 0x202;
 
         crate::debug!(
             "Creating usermode thread '{}': user_entry={:#x}, user_stack={:#x}",
@@ -782,7 +773,7 @@ impl Thread {
         }
 
         context.rip = fork_child_trampoline as *const () as u64;
-        context.rflags = initial_thread_rflags();
+        context.rflags = 0x202;
 
         Self {
             id: ThreadId::new(),
