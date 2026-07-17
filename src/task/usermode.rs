@@ -94,6 +94,8 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64, user_arg0: u64) -> !
 
     // iretqスタックフレームを構築:
     // SS, RSP, RFLAGS, CS, RIP
+    let user_rflags = if cfg!(mochios_qemu_kvm) { 0x2 } else { 0x202 };
+
     asm!(
         "cli",
 
@@ -105,10 +107,7 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64, user_arg0: u64) -> !
         // iretq用のスタックフレームをプッシュ
         "push r8",         // SS (ユーザーデータセグメント)
         "push r9",         // RSP (ユーザースタック)
-        "pushfq",          // 現在のRFLAGSを保存
-        "pop r11",
-        "or r11, 0x200",   // IF (Interrupt Flag) を設定
-        "push r11",        // RFLAGS
+        "push {rflags:r}", // RFLAGS
         "push r10",        // CS (ユーザーコードセグメント)
         "push r12",        // RIP (エントリーポイント)
         "mov rdi, {arg0}", // 最初の引数を user rdi に載せる
@@ -120,6 +119,7 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64, user_arg0: u64) -> !
         in("r9") user_stack,
         in("r10") user_cs,
         in("r12") entry,
+        rflags = in(reg) user_rflags,
         arg0 = in(reg) user_arg0,
         options(noreturn)
     )
@@ -203,7 +203,11 @@ pub unsafe fn jump_to_usermode_fork_child(
         "iretq",
         in("r8") user_ss,
         in("r9") stack,
-        in("r10") (user_rflags | 0x200),
+        in("r10") if cfg!(mochios_qemu_kvm) {
+            user_rflags & !0x200
+        } else {
+            user_rflags | 0x200
+        },
         in("r11") user_cs,
         in("rdi") entry,
         in("rsi") (&callee_saved as *const ForkCalleeSaved),

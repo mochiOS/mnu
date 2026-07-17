@@ -75,12 +75,21 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     // MED-32修正: PIT初期化をCPU割り込み有効化より前に実行する
     // 以前は enable() が init_pit() より先だったため、PIT未初期化状態でタイマー割り込みが
     // 発生する可能性があった。正しい初期化順序: PIT→スケジューラ→タイマー→割り込み有効化
-    interrupt::init_pit();
     task::init_scheduler();
-    interrupt::enable_timer_interrupt();
+    if cfg!(mochios_qemu_kvm) {
+        crate::warn!("QEMU KVM build: timer IRQ temporarily disabled to avoid iretq #GP");
+        interrupt::disable_pit();
+    } else {
+        interrupt::init_pit();
+        interrupt::enable_timer_interrupt();
+    }
 
-    unsafe {
-        x86_64::instructions::interrupts::enable();
+    if cfg!(mochios_qemu_kvm) {
+        crate::warn!("QEMU KVM build: CPU interrupts left disabled");
+    } else {
+        unsafe {
+            x86_64::instructions::interrupts::enable();
+        }
     }
 
     // Initialize syscall MSRs (STAR/LSTAR/FMASK)

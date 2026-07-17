@@ -44,6 +44,9 @@ kcfi = []
 cet-ibt = []
 cet-shadow-stack = []
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mochios_qemu_kvm)'] }
+
 [profile.dev]
 panic = "abort"
 
