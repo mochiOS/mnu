@@ -3,6 +3,7 @@
 //! 仮想メモリとページテーブル管理
 
 use crate::info;
+use core::arch::asm;
 use crate::mem::frame;
 use crate::result::{Kernel, Memory, Result};
 use spin::Mutex;
@@ -873,9 +874,118 @@ pub fn create_user_page_table() -> Result<u64> {
         );
     }
 
+    map_cpu_descriptor_tables_in_user_table(new_l4_phys)?;
     crate::percpu::map_syscall_shared_region_in_table(new_l4_phys)?;
 
     Ok(new_l4_phys)
+}
+
+fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
+    fn mark_descriptor_page_user_readable(table_phys: u64, page: u64) -> Result<()> {
+        use x86_64::structures::paging::PageTableFlags as Flags;
+
+        let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+        let vaddr = VirtAddr::new(page);
+        let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
+
+        let l4e = &mut l4[vaddr.p4_index()];
+        if l4e.is_unused() || !l4e.flags().contains(Flags::PRESENT) {
+            return Err(Kernel::Memory(Memory::NotMapped));
+        }
+        l4e.set_addr(l4e.addr(), l4e.flags() | Flags::USER_ACCESSIBLE);
+
+        let l3 = unsafe { &mut *((l4e.addr().as_u64() + phys_off) as *mut PageTable) };
+        let l3e = &mut l3[vaddr.p3_index()];
+        if l3e.is_unused() || !l3e.flags().contains(Flags::PRESENT) {
+            return Err(Kernel::Memory(Memory::NotMapped));
+        }
+        if l3e.flags().contains(Flags::HUGE_PAGE) {
+            return Err(Kernel::Memory(Memory::InvalidAddress));
+        }
+        l3e.set_addr(l3e.addr(), l3e.flags() | Flags::USER_ACCESSIBLE);
+
+        let l2 = unsafe { &mut *((l3e.addr().as_u64() + phys_off) as *mut PageTable) };
+        let l2e = &mut l2[vaddr.p2_index()];
+        if l2e.is_unused() || !l2e.flags().contains(Flags::PRESENT) {
+            return Err(Kernel::Memory(Memory::NotMapped));
+        }
+
+        if l2e.flags().contains(Flags::HUGE_PAGE) {
+            let huge_phys = l2e.addr().as_u64();
+            let mut base_flags = l2e.flags();
+            base_flags.remove(Flags::HUGE_PAGE | Flags::USER_ACCESSIBLE);
+
+            let new_l1_frame = frame::allocate_frame()?;
+            let new_l1_phys = new_l1_frame.start_address().as_u64();
+            let new_l1 = unsafe { &mut *((new_l1_phys + phys_off) as *mut PageTable) };
+            new_l1.zero();
+            for i in 0..512 {
+                new_l1[i].set_addr(PhysAddr::new(huge_phys + (i as u64 * 4096)), base_flags);
+            }
+
+            l2e.set_addr(
+                PhysAddr::new(new_l1_phys),
+                (base_flags | Flags::USER_ACCESSIBLE) & !Flags::NO_EXECUTE,
+            );
+        } else {
+            l2e.set_addr(l2e.addr(), l2e.flags() | Flags::USER_ACCESSIBLE);
+        }
+
+        let l1 = unsafe { &mut *((l2e.addr().as_u64() + phys_off) as *mut PageTable) };
+        let l1e = &mut l1[vaddr.p1_index()];
+        if l1e.is_unused() || !l1e.flags().contains(Flags::PRESENT) {
+            let phys = translate_addr(vaddr)
+                .ok_or(Kernel::Memory(Memory::NotMapped))?
+                .as_u64()
+                & !0xfff;
+            l1e.set_addr(
+                PhysAddr::new(phys),
+                Flags::PRESENT | Flags::USER_ACCESSIBLE | Flags::NO_EXECUTE,
+            );
+        } else {
+            let mut flags = l1e.flags();
+            flags.remove(Flags::WRITABLE);
+            flags |= Flags::USER_ACCESSIBLE | Flags::NO_EXECUTE;
+            l1e.set_addr(l1e.addr(), flags);
+        }
+
+        Ok(())
+    }
+
+    fn map_current_range(table_phys: u64, base: u64, limit: u16) -> Result<()> {
+        let start = base & !0xfff;
+        let end = base
+            .checked_add(u64::from(limit))
+            .ok_or(Kernel::Memory(Memory::OutOfMemory))?
+            | 0xfff;
+        let mut page = start;
+        while page <= end {
+            mark_descriptor_page_user_readable(table_phys, page)?;
+            page = page
+                .checked_add(4096)
+                .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+        }
+        Ok(())
+    }
+
+    let mut gdtr = [0u8; 10];
+    let mut idtr = [0u8; 10];
+    unsafe {
+        asm!("sgdt [{}]", in(reg) gdtr.as_mut_ptr(), options(nostack, preserves_flags));
+        asm!("sidt [{}]", in(reg) idtr.as_mut_ptr(), options(nostack, preserves_flags));
+    }
+    let gdt_limit = u16::from_le_bytes([gdtr[0], gdtr[1]]);
+    let gdt_base = u64::from_le_bytes([
+        gdtr[2], gdtr[3], gdtr[4], gdtr[5], gdtr[6], gdtr[7], gdtr[8], gdtr[9],
+    ]);
+    let idt_limit = u16::from_le_bytes([idtr[0], idtr[1]]);
+    let idt_base = u64::from_le_bytes([
+        idtr[2], idtr[3], idtr[4], idtr[5], idtr[6], idtr[7], idtr[8], idtr[9],
+    ]);
+
+    map_current_range(table_phys, gdt_base, gdt_limit)?;
+    map_current_range(table_phys, idt_base, idt_limit)?;
+    Ok(())
 }
 
 /// 既存のユーザーページテーブルをフルコピーして新しいページテーブルを返す
