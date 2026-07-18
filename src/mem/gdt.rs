@@ -53,10 +53,10 @@ pub fn init() {
         let mut gdt = GlobalDescriptorTable::new();
         let code_selector = gdt.append(Descriptor::kernel_code_segment());
         let data_selector = gdt.append(Descriptor::kernel_data_segment());
-        // IA-32e mode ignores data/stack base and limit, but KVM validates the
-        // SS descriptor on iretq strictly. Use a minimal ring-3 writable data
-        // descriptor instead of the crate's 32-bit flat USER_DATA descriptor.
-        let user_data_selector = gdt.append(Descriptor::UserSegment(0x0000_f300_0000_0000));
+        // Keep the ring-3 stack segment as a conventional flat data descriptor.
+        // KVM validates SS strictly on iretq, and rejects the earlier minimal
+        // limit=0/D-B=0 descriptor even though long mode ignores data limits.
+        let user_data_selector = gdt.append(Descriptor::user_data_segment());
         let user_code_selector = gdt.append(Descriptor::user_code_segment());
         let tss_selector = gdt.append(Descriptor::tss_segment(tss));
 
