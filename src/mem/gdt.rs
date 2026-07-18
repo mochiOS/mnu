@@ -12,7 +12,10 @@ use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector
 /// ダブルフォルト用ISTインデックス（TSSと同じ値を使用）
 pub const DOUBLE_FAULT_IST_INDEX: u16 = tss::DOUBLE_FAULT_IST_INDEX;
 
-static GDT: Once<(GlobalDescriptorTable, Selectors)> = Once::new();
+#[repr(align(4096))]
+struct PageAligned<T>(T);
+
+static GDT: PageAligned<Once<(GlobalDescriptorTable, Selectors)>> = PageAligned(Once::new());
 
 fn halt_on_missing_gdt(which: &'static str) -> ! {
     crate::audit::log(crate::audit::AuditEventKind::Fault, which);
@@ -48,7 +51,7 @@ pub fn init() {
     crate::debug!("TSS initialized");
 
     // GDTを初期化
-    let (gdt, selectors) = GDT.call_once(|| {
+    let (gdt, selectors) = GDT.0.call_once(|| {
         crate::debug!("Creating GDT table");
         let mut gdt = GlobalDescriptorTable::new();
         let code_selector = gdt.append(Descriptor::kernel_code_segment());
@@ -117,28 +120,32 @@ pub fn init() {
 
 /// ユーザーモード用コードセレクタ（RPL=3）を返す
 pub fn user_code_selector() -> u16 {
-    GDT.get()
+    GDT.0
+        .get()
         .map(|g| g.1.user_code_selector.0)
         .unwrap_or_else(|| halt_on_missing_gdt("gdt user_code_selector unavailable"))
 }
 
 /// ユーザーモード用データセレクタ（RPL=3）を返す
 pub fn user_data_selector() -> u16 {
-    GDT.get()
+    GDT.0
+        .get()
         .map(|g| g.1.user_data_selector.0)
         .unwrap_or_else(|| halt_on_missing_gdt("gdt user_data_selector unavailable"))
 }
 
 /// カーネル用コードセレクタを返す
 pub fn kernel_code_selector() -> u16 {
-    GDT.get()
+    GDT.0
+        .get()
         .map(|g| g.1.code_selector.0)
         .unwrap_or_else(|| halt_on_missing_gdt("gdt kernel_code_selector unavailable"))
 }
 
 /// カーネル用データセレクタを返す
 pub fn kernel_data_selector() -> u16 {
-    GDT.get()
+    GDT.0
+        .get()
         .map(|g| g.1.data_selector.0)
         .unwrap_or_else(|| halt_on_missing_gdt("gdt kernel_data_selector unavailable"))
 }

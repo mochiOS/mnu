@@ -8,7 +8,10 @@ use x86_64::structures::gdt::SegmentSelector;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use x86_64::{PhysAddr, PrivilegeLevel};
 
-static IDT: Once<InterruptDescriptorTable> = Once::new();
+#[repr(align(4096))]
+struct PageAligned<T>(T);
+
+static IDT: PageAligned<Once<InterruptDescriptorTable>> = PageAligned(Once::new());
 
 macro_rules! irq_handler {
     ($name:ident, $irq:expr, $vector:expr) => {
@@ -67,7 +70,7 @@ fn normalize_user_iret_frame(stack_frame: &mut InterruptStackFrame) {
 pub fn init() {
     debug!("Initializing IDT...");
 
-    let idt = IDT.call_once(|| {
+    let idt = IDT.0.call_once(|| {
         let mut idt = InterruptDescriptorTable::new();
 
         // CPU例外ハンドラ
