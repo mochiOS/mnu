@@ -326,13 +326,6 @@ pub fn exec_manifest_syscall(
     let Some(role) = parse_manifest_role(role_raw) else {
         return EINVAL;
     };
-    crate::warn!(
-        "exec_manifest entry role={:?} caller.service_or_core={} caller.process.spawn={}",
-        role,
-        crate::policy::caller_is_service_or_core_process(),
-        caller_has_process_spawn_capability()
-    );
-
     let allowed = match role {
         ManifestRole::CoreService | ManifestRole::Service => {
             crate::policy::caller_can_launch_service()
