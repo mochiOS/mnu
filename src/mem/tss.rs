@@ -70,9 +70,14 @@ pub fn init() -> &'static TaskStateSegment {
 /// - `rsp`: 新しいRSP0の値 (次のスレッドのカーネルスタックのアドレス)
 pub fn set_rsp0(rsp: u64) {
     if let Some(tss) = TSS.get() {
-        // TSSは参照として取得されるが、RSP0は実行時に変更する必要があるため、
-        // 内部可変性を持つか、ポインタ経由で変更する
-        let ptr = tss as *const TaskStateSegment as *mut TaskStateSegment;
+        let virt = tss as *const TaskStateSegment as u64;
+        let ptr = crate::mem::paging::translate_addr(VirtAddr::new(virt))
+            .and_then(|phys| {
+                crate::mem::paging::physical_memory_offset()
+                    .and_then(|off| phys.as_u64().checked_add(off))
+            })
+            .map(|alias| alias as *mut TaskStateSegment)
+            .unwrap_or(virt as *mut TaskStateSegment);
         unsafe {
             // RSP0更新中の割り込み/コンテキストスイッチを防ぐため、
             // 割り込みを一時的に無効化してアトミックに更新
