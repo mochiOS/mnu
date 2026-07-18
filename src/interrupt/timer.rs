@@ -5,6 +5,8 @@
 use crate::debug;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::structures::idt::InterruptStackFrame;
+use x86_64::structures::gdt::SegmentSelector;
+use x86_64::PrivilegeLevel;
 
 pub const PIT_HZ: u64 = 500;
 pub const TICK_MS: u64 = 1000 / PIT_HZ;
@@ -17,10 +19,11 @@ static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 ///
 /// ## Arguments
 /// - `_stack_frame`: 割り込み発生時のスタックフレーム
-pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+pub extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
     let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(
-        _stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3,
+        stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3,
     );
+    normalize_user_iret_frame(&mut stack_frame);
 
     // タイマーカウンタを増加
     let ticks = TIMER_TICKS
@@ -44,6 +47,21 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptSta
 
     // ユーザーから入ってきた場合は、復帰先スレッドに応じたユーザーCR3へ戻す
     crate::syscall::syscall_entry::kpti_leave_after_trap(entered_from_user);
+}
+
+fn normalize_user_iret_frame(stack_frame: &mut InterruptStackFrame) {
+    if stack_frame.code_segment.rpl() != PrivilegeLevel::Ring3 {
+        return;
+    }
+
+    let user_cs = SegmentSelector(crate::mem::gdt::user_code_selector() | 0x3);
+    let user_ss = SegmentSelector(crate::mem::gdt::user_data_selector() | 0x3);
+    unsafe {
+        stack_frame.as_mut().update(|frame| {
+            frame.code_segment = user_cs;
+            frame.stack_segment = user_ss;
+        });
+    }
 }
 
 /// 現在のタイマーティック数を取得
