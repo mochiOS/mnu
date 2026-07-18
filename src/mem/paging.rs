@@ -988,6 +988,36 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
     Ok(())
 }
 
+fn is_current_descriptor_table_vaddr(vaddr: u64) -> bool {
+    fn range_contains_page(base: u64, limit: u16, page: u64) -> bool {
+        let start = base & !0xfff;
+        let end = base.saturating_add(u64::from(limit)) | 0xfff;
+        page >= start && page <= end
+    }
+
+    let mut gdtr = [0u8; 10];
+    let mut idtr = [0u8; 10];
+    unsafe {
+        asm!("sgdt [{}]", in(reg) gdtr.as_mut_ptr(), options(nostack, preserves_flags));
+        asm!("sidt [{}]", in(reg) idtr.as_mut_ptr(), options(nostack, preserves_flags));
+    }
+    let gdt_limit = u16::from_le_bytes([gdtr[0], gdtr[1]]);
+    let gdt_base = u64::from_le_bytes([
+        gdtr[2], gdtr[3], gdtr[4], gdtr[5], gdtr[6], gdtr[7], gdtr[8], gdtr[9],
+    ]);
+    let idt_limit = u16::from_le_bytes([idtr[0], idtr[1]]);
+    let idt_base = u64::from_le_bytes([
+        idtr[2], idtr[3], idtr[4], idtr[5], idtr[6], idtr[7], idtr[8], idtr[9],
+    ]);
+    let page = vaddr & !0xfff;
+    range_contains_page(gdt_base, gdt_limit, page)
+        || range_contains_page(idt_base, idt_limit, page)
+}
+
+fn is_preinstalled_user_mapping(vaddr: u64) -> bool {
+    is_current_descriptor_table_vaddr(vaddr) || crate::percpu::is_syscall_shared_vaddr(vaddr)
+}
+
 /// 既存のユーザーページテーブルをフルコピーして新しいページテーブルを返す
 ///
 /// - カーネル共有マッピングは `create_user_page_table()` により初期化
@@ -1163,6 +1193,9 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
                     let src_phys_base = l2e.addr().as_u64();
                     for sub in 0usize..512 {
                         let vaddr = vaddr_base + ((sub as u64) << 12);
+                        if is_preinstalled_user_mapping(vaddr) {
+                            continue;
+                        }
                         clone_page(
                             dst_l4,
                             vaddr,
@@ -1190,6 +1223,9 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
                         | ((l3i as u64) << 30)
                         | ((l2i as u64) << 21)
                         | ((l1i as u64) << 12);
+                    if is_preinstalled_user_mapping(vaddr) {
+                        continue;
+                    }
                     clone_page(dst_l4, vaddr, pte.addr().as_u64(), src_flags, phys_off)?;
                 }
             }

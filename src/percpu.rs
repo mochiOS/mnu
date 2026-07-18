@@ -96,6 +96,15 @@ fn syscall_stack_vaddr_for_cpu(cpu_id: usize) -> u64 {
     SYSCALL_SHARED_STACK_BASE + (cpu_id as u64) * 4096
 }
 
+pub fn is_syscall_shared_vaddr(vaddr: u64) -> bool {
+    let page = vaddr & !0xfff;
+    let state_start = SYSCALL_SHARED_BASE;
+    let stack_start = SYSCALL_SHARED_STACK_BASE;
+    let region_len = (MAX_CPUS as u64) * 4096;
+    (page >= state_start && page < state_start + region_len)
+        || (page >= stack_start && page < stack_start + region_len)
+}
+
 pub fn current_cpu_syscall_state_vaddr() -> u64 {
     syscall_state_vaddr_for_cpu(current_cpu_id())
 }
