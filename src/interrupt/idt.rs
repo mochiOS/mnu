@@ -4,6 +4,7 @@
 
 use crate::{debug, error, mem::gdt, syscall, warn};
 use spin::Once;
+use x86_64::structures::gdt::SegmentSelector;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use x86_64::{PhysAddr, PrivilegeLevel};
 
@@ -11,8 +12,9 @@ static IDT: Once<InterruptDescriptorTable> = Once::new();
 
 macro_rules! irq_handler {
     ($name:ident, $irq:expr, $vector:expr) => {
-        extern "x86-interrupt" fn $name(stack_frame: InterruptStackFrame) {
+        extern "x86-interrupt" fn $name(mut stack_frame: InterruptStackFrame) {
             let entered_from_user = enter_from_user(&stack_frame);
+            normalize_user_iret_frame(&mut stack_frame);
             crate::interrupt::dispatch::dispatch($irq);
             super::send_eoi($vector);
             leave_to_user(entered_from_user);
@@ -44,6 +46,21 @@ fn enter_from_user(stack_frame: &InterruptStackFrame) -> bool {
 #[inline]
 fn leave_to_user(entered_from_user: bool) {
     crate::syscall::syscall_entry::kpti_leave_after_trap(entered_from_user);
+}
+
+fn normalize_user_iret_frame(stack_frame: &mut InterruptStackFrame) {
+    if stack_frame.code_segment.rpl() != PrivilegeLevel::Ring3 {
+        return;
+    }
+
+    let user_cs = SegmentSelector(crate::mem::gdt::user_code_selector() | 0x3);
+    let user_ss = SegmentSelector(crate::mem::gdt::user_data_selector() | 0x3);
+    unsafe {
+        stack_frame.as_mut().update(|frame| {
+            frame.code_segment = user_cs;
+            frame.stack_segment = user_ss;
+        });
+    }
 }
 
 /// IDTを初期化
@@ -1041,8 +1058,9 @@ extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFram
 ///
 /// IRQ1 をIDTに登録せずに放置するとキーストロークのたびに #GP が発生し
 /// OS全体が停止する (C-2修正)。このハンドラはスキャンコードを読み捨て EOI を送る。
-extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    let entered_from_user = enter_from_user(&_stack_frame);
+extern "x86-interrupt" fn keyboard_interrupt_handler(mut stack_frame: InterruptStackFrame) {
+    let entered_from_user = enter_from_user(&stack_frame);
+    normalize_user_iret_frame(&mut stack_frame);
     // マスターPICにEOIを送信 (IRQ1はマスターPICが担当)
     unsafe {
         super::pic::PIC_MASTER.end_of_interrupt();
@@ -1051,8 +1069,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 }
 
 /// マウス割り込みハンドラ (IRQ12 / ベクタ 44)
-extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    let entered_from_user = enter_from_user(&_stack_frame);
+extern "x86-interrupt" fn mouse_interrupt_handler(mut stack_frame: InterruptStackFrame) {
+    let entered_from_user = enter_from_user(&stack_frame);
+    normalize_user_iret_frame(&mut stack_frame);
     // IRQ12 はスレーブPIC配下なので、スレーブ→マスターの順でEOIを送る
     super::send_eoi(44);
     leave_to_user(entered_from_user);
@@ -1067,8 +1086,9 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 ///
 /// このハンドラは、将来的に各デバイスに対応した具体的な処理を実装するためのプレースホルダとして使用される予定
-extern "x86-interrupt" fn generic_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    let entered_from_user = enter_from_user(&_stack_frame);
+extern "x86-interrupt" fn generic_interrupt_handler(mut stack_frame: InterruptStackFrame) {
+    let entered_from_user = enter_from_user(&stack_frame);
+    normalize_user_iret_frame(&mut stack_frame);
     debug!("INTERRUPT: GENERIC");
     // マスターPICのみにEOIを送信する (LOW-01)
     // このハンドラはどのIRQから呼ばれるか不明のため、IRQ 0-7 (マスターのみ) を想定して
