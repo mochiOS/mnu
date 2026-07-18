@@ -4,6 +4,8 @@ use crate::mem::gdt;
 use crate::task::thread::SyscallUserContext;
 use core::arch::asm;
 
+const IA32_FS_BASE: u32 = 0xC000_0100;
+
 #[repr(C)]
 struct ForkCalleeSaved {
     rbx: u64,
@@ -207,6 +209,7 @@ pub unsafe fn jump_to_usermode_fork_child(
         in("r11") user_cs,
         in("rdi") entry,
         in("rsi") (&callee_saved as *const ForkCalleeSaved),
+        in("ecx") IA32_FS_BASE,
         in("eax") fs_lo,
         in("edx") fs_hi,
         options(noreturn)
