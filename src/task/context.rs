@@ -191,6 +191,7 @@ pub unsafe fn switch_to_thread_with_slots(
     // 実際に切り替える直前に current thread を更新する。
     // これにより「currentだけ先に更新される競合窓」を避ける。
     crate::task::set_current_thread(Some(next_id), Some(next_slot));
+    crate::syscall::syscall_entry::switch_to_kernel_page_table();
 
     // TSSのRSP0とSYSCALL用カーネルスタックを更新
     crate::mem::tss::set_rsp0(next_kstack_top);
@@ -212,12 +213,6 @@ pub unsafe fn switch_to_thread_with_slots(
     // switch_context はカーネル管理領域上の Context とカーネルスタックを読む。
     // ユーザー CR3 に切り替えてから実行すると、KPTI で外した kernel heap 参照が
     // kernel-mode page fault になるため、実際の user CR3 への切替は iretq 直前に行う。
-    if current_process_id != Some(next_process_id) {
-        let kernel_cr3 = crate::percpu::kernel_cr3();
-        if kernel_cr3 != 0 {
-            crate::mem::paging::switch_page_table(kernel_cr3);
-        }
-    }
     switch_context(old_ctx_ptr, new_context_ptr);
 }
 
@@ -339,6 +334,7 @@ pub unsafe fn switch_to_thread_from_isr(
 
     // ISR 経路でも、実際の遷移直前に current thread を更新する。
     crate::task::set_current_thread(Some(next_id), Some(next_slot));
+    crate::syscall::syscall_entry::switch_to_kernel_page_table();
 
     // TSSのRSP0を更新
     crate::mem::tss::set_rsp0(next_kstack_top);
