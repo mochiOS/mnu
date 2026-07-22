@@ -29,6 +29,7 @@ struct SyscallPerCpuState {
     syscall_kernel_rsp: AtomicU64,
     syscall_user_rsp_tmp: AtomicU64,
     syscall_trampoline_rsp: AtomicU64,
+    syscall_user_r10_tmp: AtomicU64,
 }
 
 pub const GS_KERNEL_CR3_OFFSET: usize = offset_of!(SyscallPerCpuState, kernel_cr3);
@@ -37,6 +38,8 @@ pub const GS_SYSCALL_USER_RSP_TMP_OFFSET: usize =
     offset_of!(SyscallPerCpuState, syscall_user_rsp_tmp);
 pub const GS_SYSCALL_TRAMPOLINE_RSP_OFFSET: usize =
     offset_of!(SyscallPerCpuState, syscall_trampoline_rsp);
+pub const GS_SYSCALL_USER_R10_TMP_OFFSET: usize =
+    offset_of!(SyscallPerCpuState, syscall_user_r10_tmp);
 
 impl PerCpuState {
     const fn new() -> Self {

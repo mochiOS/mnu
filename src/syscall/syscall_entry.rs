@@ -263,6 +263,7 @@ pub unsafe extern "C" fn syscall_entry() {
         // ここからは kernel CR3。実カーネルスタックへ切り替え、保存済みレジスタをコピーする。
         "mov r11, rsp",
         "mov rsp, qword ptr gs:[{sys_rsp_off}]",
+        "and rsp, -16",
         "sub rsp, 128",
         "mov rdi, rsp",
         "mov rsi, r11",
@@ -306,8 +307,10 @@ pub unsafe extern "C" fn syscall_entry() {
         // syscall戻り値を保存
         "mov [rsp + 120], rax",
 
-        // user RIP/RFLAGS を復元する前に user CR3 を取得する
-        // saved r10 slot を user_cr3 の保存場所に使う
+        // user RIP/RFLAGS を復元する前に user CR3 を取得する。
+        // saved r10 slot は CR3 の一時領域として使うため、元の r10 を退避する。
+        "mov rax, [rsp + 88]",
+        "mov qword ptr gs:[{user_r10_tmp_off}], rax",
         "call {user_cr3_fn}",
         "mov [rsp + 88], rax",
 
@@ -370,6 +373,7 @@ pub unsafe extern "C" fn syscall_entry() {
 
         // ここから先は kernel stack に触らない
         "mov cr3, r10",
+        "mov r10, qword ptr gs:[{user_r10_tmp_off}]",
         "mov rsp, qword ptr gs:[{user_rsp_tmp_off}]",
         "swapgs",
         "sysretq",
@@ -385,6 +389,7 @@ pub unsafe extern "C" fn syscall_entry() {
         sys_rsp_off = const crate::percpu::GS_SYSCALL_KERNEL_RSP_OFFSET,
         kernel_cr3_off = const crate::percpu::GS_KERNEL_CR3_OFFSET,
         user_rsp_tmp_off = const crate::percpu::GS_SYSCALL_USER_RSP_TMP_OFFSET,
+        user_r10_tmp_off = const crate::percpu::GS_SYSCALL_USER_R10_TMP_OFFSET,
         trampoline_rsp_off = const crate::percpu::GS_SYSCALL_TRAMPOLINE_RSP_OFFSET,
         save_user_context_for_fork = sym crate::syscall::save_user_context_for_fork,
         fs_base_fn = sym current_thread_fs_base_for_sysret,
