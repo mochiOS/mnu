@@ -4,8 +4,8 @@
 
 use crate::debug;
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::structures::idt::InterruptStackFrame;
 use x86_64::structures::gdt::SegmentSelector;
+use x86_64::structures::idt::InterruptStackFrame;
 use x86_64::PrivilegeLevel;
 
 pub const PIT_HZ: u64 = 500;

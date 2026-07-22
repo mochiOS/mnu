@@ -744,29 +744,29 @@ impl Thread {
             };
             let (entry, stack, rflags, fs, rbx, rbp, r12, r13, r14, r15) =
                 match with_thread(tid, |thread| {
-                (
-                    thread.user_entry(),
-                    thread.user_stack(),
-                    thread.fork_user_rflags(),
-                    thread.fs_base(),
-                    thread.fork_user_rbx,
-                    thread.fork_user_rbp,
-                    thread.fork_user_r12,
-                    thread.fork_user_r13,
-                    thread.fork_user_r14,
-                    thread.fork_user_r15,
-                )
-            }) {
-                Some(v) => v,
-                None => {
-                    crate::warn!("fork_child_trampoline: Thread not found");
-                    crate::audit::log(
-                        crate::audit::AuditEventKind::Fault,
-                        "fork_child_trampoline missing thread metadata",
-                    );
-                    crate::task::exit_current_task(crate::syscall::EINVAL);
-                }
-            };
+                    (
+                        thread.user_entry(),
+                        thread.user_stack(),
+                        thread.fork_user_rflags(),
+                        thread.fs_base(),
+                        thread.fork_user_rbx,
+                        thread.fork_user_rbp,
+                        thread.fork_user_r12,
+                        thread.fork_user_r13,
+                        thread.fork_user_r14,
+                        thread.fork_user_r15,
+                    )
+                }) {
+                    Some(v) => v,
+                    None => {
+                        crate::warn!("fork_child_trampoline: Thread not found");
+                        crate::audit::log(
+                            crate::audit::AuditEventKind::Fault,
+                            "fork_child_trampoline missing thread metadata",
+                        );
+                        crate::task::exit_current_task(crate::syscall::EINVAL);
+                    }
+                };
             unsafe {
                 crate::task::usermode::jump_to_usermode_fork_child(
                     entry, stack, rflags, fs, rbx, rbp, r12, r13, r14, r15,

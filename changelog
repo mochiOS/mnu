@@ -1,7 +1,28 @@
-the mnu kernel ChangeLog   - version 0.12-rc2
-    - Release date: 2026-07-02
+the mnu kernel ChangeLog   - version 0.12
+    - Release date: 2026-07-17
     - Release creator: tas0dev
 
 Changes:
+* Fixed the x86_64 user-mode iretq return path for
+  QEMU/KVM by using a conventional flat user data
+  descriptor and mapping descriptor tables into
+  user CR3 for KPTI trap returns.
+* Fixed fork page-table cloning so preinstalled
+  per-CPU syscall and descriptor-table mappings are
+  not copied as private user pages.
+* Fixed TSS RSP0 updates while running on a user CR3
+  with read-only descriptor-table mappings.
+* Isolated GDT/IDT storage on page boundaries so KPTI
+  descriptor mappings do not make unrelated kernel data
+  read-only.
+* Fixed context switching to update kernel-only CPU
+  state after returning to the kernel page table.
+* Fixed fork-child user-mode entry to write IA32_FS_BASE
+  with the correct MSR selector.
+* Reduced boot-time serial output by removing normal
+  exec_manifest admission warnings while keeping denial logs.
+* Added QEMU/KVM runner support for
+  qemu64/single-core defaults.
 * Fixed a bug in the filesystem syscall.
-* Moved executable signature policy out of the kernel.
+* Moved executable signature policy out of
+  the kernel.

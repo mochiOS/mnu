@@ -3,9 +3,9 @@
 //! 仮想メモリとページテーブル管理
 
 use crate::info;
-use core::arch::asm;
 use crate::mem::frame;
 use crate::result::{Kernel, Memory, Result};
+use core::arch::asm;
 use spin::Mutex;
 use x86_64 as arch64;
 
@@ -1010,8 +1010,7 @@ fn is_current_descriptor_table_vaddr(vaddr: u64) -> bool {
         idtr[2], idtr[3], idtr[4], idtr[5], idtr[6], idtr[7], idtr[8], idtr[9],
     ]);
     let page = vaddr & !0xfff;
-    range_contains_page(gdt_base, gdt_limit, page)
-        || range_contains_page(idt_base, idt_limit, page)
+    range_contains_page(gdt_base, gdt_limit, page) || range_contains_page(idt_base, idt_limit, page)
 }
 
 fn is_preinstalled_user_mapping(vaddr: u64) -> bool {

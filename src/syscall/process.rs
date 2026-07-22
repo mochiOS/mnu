@@ -509,30 +509,22 @@ pub fn fork() -> u64 {
         );
     }
 
-    let (
-        user_context,
-        parent_fs,
-        user_rbx,
-        user_rbp,
-        user_r12,
-        user_r13,
-        user_r14,
-        user_r15,
-    ) = crate::task::with_thread(parent_tid, |t| {
-        let user_context = t.syscall_user_context();
-        let (rbx, rbp, r12, r13, r14, r15) = t.fork_user_callee_saved();
-        (
-            user_context,
-            t.fs_base(),
-            rbx,
-            rbp,
-            r12,
-            r13,
-            r14,
-            r15,
-        )
-    })
-        .unwrap_or((crate::task::thread::SyscallUserContext::empty(), 0, 0, 0, 0, 0, 0, 0));
+    let (user_context, parent_fs, user_rbx, user_rbp, user_r12, user_r13, user_r14, user_r15) =
+        crate::task::with_thread(parent_tid, |t| {
+            let user_context = t.syscall_user_context();
+            let (rbx, rbp, r12, r13, r14, r15) = t.fork_user_callee_saved();
+            (user_context, t.fs_base(), rbx, rbp, r12, r13, r14, r15)
+        })
+        .unwrap_or((
+            crate::task::thread::SyscallUserContext::empty(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ));
     if user_context.rip == 0 || user_context.rsp == 0 {
         let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOSYS;
