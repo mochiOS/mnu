@@ -619,7 +619,9 @@ impl Thread {
         context.rsp = stack_ptr;
         context.rbp = stack_top;
         context.rip = usermode_entry_trampoline as *const () as u64;
-        context.rflags = 0x202;
+        // The first context switch must reach the usermode trampoline before
+        // interrupts can observe this thread as current. iretq enables IF.
+        context.rflags = 0x2;
 
         crate::debug!(
             "Creating usermode thread '{}': user_entry={:#x}, user_stack={:#x}",
