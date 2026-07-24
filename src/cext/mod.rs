@@ -21,7 +21,7 @@ pub mod disk;
 pub mod fs;
 mod registry;
 
-const MCX_CEXT_ABI: u16 = 1;
+const MCX_CEXT_ABI: u16 = 2;
 const MCX_LOG_ERROR: u32 = 0;
 const MCX_LOG_WARN: u32 = 1;
 const MCX_LOG_INFO: u32 = 2;
@@ -42,6 +42,7 @@ pub struct McxKernelApi {
     pub alloc_dma: extern "C" fn(size: usize, align: usize, out_region: *mut McxDmaRegion) -> i32,
     pub log: extern "C" fn(level: u32, ptr: *const u8, len: usize),
     pub register_irq: extern "C" fn(irq: u8, handler: extern "C" fn(u8)) -> i32,
+    pub now_seconds: extern "C" fn() -> u32,
 }
 
 #[repr(C)]
@@ -60,7 +61,7 @@ pub struct McxPath {
 
 #[repr(C)]
 pub struct McxFsOps {
-    pub mount: extern "C" fn(device_id: u32) -> i32,
+    pub mount: extern "C" fn(device_id: u32, flags: u32) -> i32,
     pub set_disk_ops: extern "C" fn(ops: *const disk::McxDiskOps) -> i32,
     pub create: extern "C" fn(path: McxPath, mode: u32) -> i32,
     pub remove: extern "C" fn(path: McxPath, is_dir: u32) -> i32,
@@ -72,6 +73,7 @@ pub struct McxFsOps {
     pub truncate: extern "C" fn(path: McxPath, len: u64) -> i32,
     pub stat: extern "C" fn(path: McxPath, out_mode: *mut u16, out_size: *mut u64) -> i32,
     pub readdir: extern "C" fn(path: McxPath, buf: McxBuffer, out_len: *mut usize) -> i32,
+    pub sync: extern "C" fn() -> i32,
 }
 
 /// cext の種類
@@ -240,12 +242,22 @@ extern "C" fn kernel_register_irq(irq: u8, handler: extern "C" fn(u8)) -> i32 {
     crate::interrupt::dispatch::register_handler(irq, handler)
 }
 
+extern "C" fn kernel_now_seconds() -> u32 {
+    let ticks_per_second = crate::interrupt::timer::ticks_per_second();
+    if ticks_per_second == 0 {
+        return 0;
+    }
+    let seconds = crate::interrupt::timer::get_ticks() / ticks_per_second;
+    core::cmp::min(seconds, u32::MAX as u64) as u32
+}
+
 static KERNEL_API: McxKernelApi = McxKernelApi {
     abi: MCX_CEXT_ABI,
     struct_size: core::mem::size_of::<McxKernelApi>() as u16,
     alloc_dma: kernel_alloc_dma,
     log: kernel_log,
     register_irq: kernel_register_irq,
+    now_seconds: kernel_now_seconds,
 };
 
 fn register_disk_module(init_addr: u64, module_version: u16) -> bool {
@@ -449,7 +461,7 @@ fn load_bundle_directories() -> bool {
             crate::warn!("cext: invalid manifest {}", manifest_path);
             continue;
         };
-        if manifest.abi != 1 {
+        if manifest.abi != MCX_CEXT_ABI {
             crate::warn!(
                 "cext: unsupported abi {} for {}",
                 manifest.abi,
@@ -580,7 +592,7 @@ fn parse_header(bytes: &[u8]) -> Option<CextHeader> {
         return None;
     }
     let abi = read_u16(bytes, 4)?;
-    if abi != 1 {
+    if abi != MCX_CEXT_ABI {
         return None;
     }
     let module_version = read_u16(bytes, 6)?;

@@ -64,7 +64,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
                 crate::warn!("cext: fs set_disk_ops failed rc={}", rc);
             }
         }
-        let rc = crate::cext::fs::mount(0);
+        let rc = crate::cext::fs::mount(0, 0);
         if rc != 0 {
             crate::warn!("cext: fs mount failed rc={}", rc);
         } else {

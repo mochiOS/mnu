@@ -219,8 +219,12 @@ pub const EISDIR: u64 = (-21i64) as u64;
 pub const EINVAL: u64 = (-22i64) as u64;
 /// ファイルディスクリプタが多すぎる
 pub const EMFILE: u64 = (-24i64) as u64;
+/// ファイルが実装上の最大サイズを超える
+pub const EFBIG: u64 = (-27i64) as u64;
 /// ディスク/ストレージに空きがない
 pub const ENOSPC: u64 = (-28i64) as u64;
+/// 読み取り専用ファイルシステム
+pub const EROFS: u64 = (-30i64) as u64;
 /// デバイスでない
 pub const ENOTTY: u64 = (-25i64) as u64;
 /// パイプが壊れている
@@ -231,5 +235,7 @@ pub const ERANGE: u64 = (-34i64) as u64;
 pub const ENOSYS: u64 = (-38i64) as u64;
 /// データがない / ノンブロッキングで読み出しできない
 pub const ENODATA: u64 = (-61i64) as u64;
+/// 値が表現可能な範囲を超える
+pub const EOVERFLOW: u64 = (-75i64) as u64;
 /// 操作がサポートされていない
 pub const ENOTSUP: u64 = (-95i64) as u64;

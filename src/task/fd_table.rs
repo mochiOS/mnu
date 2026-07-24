@@ -61,10 +61,13 @@ impl FileHandleCap {
             cap = cap.union(Self::READ);
         }
         if acc == 0o1 {
-            cap = cap.union(Self::WRITE);
+            cap = cap.union(Self::WRITE).union(Self::TRUNCATE);
         }
         if acc == 0o2 {
-            cap = cap.union(Self::READ).union(Self::WRITE);
+            cap = cap
+                .union(Self::READ)
+                .union(Self::WRITE)
+                .union(Self::TRUNCATE);
         }
         if (flags & 0o100) != 0 {
             cap = cap.union(Self::CREATE);

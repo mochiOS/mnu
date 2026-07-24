@@ -1,8 +1,8 @@
 //! ファイルシステム関連のシステムコール
 
 use super::types::{
-    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS, ENOTDIR,
-    EPIPE, ESRCH, SUCCESS,
+    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS,
+    ENOTDIR, EOVERFLOW, EPIPE, EROFS, ESRCH, SUCCESS,
 };
 use crate::capability::path::{
     self, PathOwner, PathType, UserPath, PATH_CREATE, PATH_DELETE, PATH_LIST, PATH_READ, PATH_WRITE,
@@ -350,23 +350,23 @@ fn mode_for_stat(mode: u16) -> u32 {
 
 #[inline]
 pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64)> {
-    crate::init::fs::file_metadata(path).or_else(|| crate::cext::fs::file_metadata(path))
+    crate::cext::fs::file_metadata(path).or_else(|| crate::init::fs::file_metadata(path))
 }
 
 #[inline]
 pub(crate) fn is_directory_rootfs_first(path: &str) -> bool {
-    crate::init::fs::is_directory(path) || crate::cext::fs::is_directory(path)
+    crate::cext::fs::is_directory(path) || crate::init::fs::is_directory(path)
 }
 
 #[inline]
 pub(crate) fn readdir_rootfs_first(path: &str) -> Option<Vec<String>> {
-    crate::init::fs::readdir_path(path).or_else(|| crate::cext::fs::readdir_path(path))
+    crate::cext::fs::readdir_path(path).or_else(|| crate::init::fs::readdir_path(path))
 }
 
 #[inline]
 fn read_file_range_rootfs_first(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
-    crate::init::fs::read_range_rootfs(path, offset, buf)
-        .or_else(|| crate::cext::fs::read_range(path, offset, buf))
+    crate::cext::fs::read_range(path, offset, buf)
+        .or_else(|| crate::init::fs::read_range_rootfs(path, offset, buf))
         .or_else(|| crate::init::fs::read_range(path, offset, buf))
 }
 
@@ -450,7 +450,24 @@ const O_EXCL: u64 = 0o200;
 const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 
-fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
+fn errno_from_cext(rc: i32) -> u64 {
+    match rc {
+        -2 => ENOENT,
+        -5 => EIO,
+        -17 => EEXIST,
+        -20 => ENOTDIR,
+        -21 => EISDIR,
+        -22 => EINVAL,
+        -27 => EFBIG,
+        -28 => ENOSPC,
+        -30 => EROFS,
+        -38 => ENOSYS,
+        -75 => EOVERFLOW,
+        _ => EIO,
+    }
+}
+
+fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u64 {
     let mut metadata = metadata_rootfs_first(path);
     let mut is_dir = metadata
         .map(|(mode, _)| mode_is_directory(mode))
@@ -464,10 +481,14 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
         return EISDIR;
     }
 
-    let mut exists = metadata.is_some() || crate::cext::fs::file_metadata(path).is_some();
+    let existed_before = metadata.is_some() || crate::cext::fs::file_metadata(path).is_some();
+    if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 && existed_before {
+        return EEXIST;
+    }
+    let mut exists = existed_before;
     if !exists {
         if (flags & O_CREAT) != 0 {
-            let rc = crate::cext::fs::create(path, 0o644);
+            let rc = crate::cext::fs::create(path, (mode & 0o777) as u32);
             if rc != 0 {
                 return (-rc as i64) as u64;
             }
@@ -483,11 +504,11 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
             return ENOENT;
         }
     }
-    if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 && exists {
-        return EEXIST;
-    }
-    if (flags & O_TRUNC) != 0 && crate::cext::fs::truncate(path, 0) != 0 {
-        return EIO;
+    if (flags & O_TRUNC) != 0 {
+        let rc = crate::cext::fs::truncate(path, 0);
+        if rc != 0 {
+            return errno_from_cext(rc);
+        }
     }
 
     if !is_dir && metadata_rootfs_first(path).is_none() {
@@ -535,7 +556,7 @@ pub fn open(path_ptr: u64, flags: u64) -> u64 {
     };
 
     let path = resolve_path(owner_pid, &path);
-    open_resolved_for_pid(owner_pid, &path, flags)
+    open_resolved_for_pid(owner_pid, &path, flags, 0o644)
 }
 
 /// Closeシステムコール
@@ -594,7 +615,7 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
         if new_pos < 0 {
             return Err(EINVAL);
         }
-        let new_pos = core::cmp::min(new_pos as usize, file_len);
+        let new_pos = usize::try_from(new_pos).map_err(|_| EINVAL)?;
         fh.pos = new_pos;
         Ok(fh.pos as u64)
     }) {
@@ -1065,11 +1086,24 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         return ENOSPC;
     }
 
-    let (start_pos, fs_path) =
-        match with_fd_table(pid, |t| t.get(idx).map(|fh| (fh.pos, fh.fs_path.clone()))) {
-            Some(Some(info)) => info,
-            _ => return EBADF,
+    let (mut start_pos, fs_path, open_flags) = match with_fd_table(pid, |t| {
+        t.get(idx)
+            .map(|fh| (fh.pos, fh.fs_path.clone(), fh.open_flags))
+    }) {
+        Some(Some(info)) => info,
+        _ => return EBADF,
+    };
+    if (open_flags & O_APPEND) != 0 {
+        let Some(path) = fs_path.as_deref() else {
+            return EINVAL;
         };
+        start_pos = match crate::cext::fs::file_metadata(path)
+            .and_then(|(_, size)| usize::try_from(size).ok())
+        {
+            Some(size) => size,
+            None => return EIO,
+        };
+    }
     let mut written = 0usize;
     let mut tmp = alloc::vec![0u8; IO_CHUNK_BYTES];
 
@@ -1082,10 +1116,38 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         }
 
         if let Some(path) = fs_path.as_deref() {
-            match crate::cext::fs::write_all(path, (start_pos + written) as u64, &tmp[..chunk_len])
-            {
-                Some(wrote_chunk) if wrote_chunk == chunk_len => {}
-                _ => return EIO,
+            let write_offset = match start_pos.checked_add(written) {
+                Some(value) => value as u64,
+                None => return if written == 0 { EFBIG } else { written as u64 },
+            };
+            match crate::cext::fs::write_all(path, write_offset, &tmp[..chunk_len]) {
+                Ok(0) => return written as u64,
+                Ok(wrote_chunk) => {
+                    let end = match start_pos.checked_add(written + wrote_chunk) {
+                        Some(value) => value,
+                        None => return if written == 0 { EFBIG } else { written as u64 },
+                    };
+                    let updated = with_fd_table_mut(pid, |t| {
+                        let fh = t.get_mut(idx).ok_or(EBADF)?;
+                        fh.pos = end;
+                        Ok::<(), u64>(())
+                    });
+                    if !matches!(updated, Some(Ok(()))) {
+                        return if written == 0 { EBADF } else { written as u64 };
+                    }
+                    written += wrote_chunk;
+                    if wrote_chunk != chunk_len {
+                        return written as u64;
+                    }
+                    continue;
+                }
+                Err(rc) => {
+                    return if written == 0 {
+                        errno_from_cext(rc)
+                    } else {
+                        written as u64
+                    };
+                }
             }
         }
 
@@ -1221,8 +1283,16 @@ pub fn fsync(fd: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    match with_fd_table(pid, |t| t.get(idx).is_some()) {
-        Some(true) => SUCCESS,
+    match with_fd_table(pid, |t| t.get(idx).map(|fh| fh.fs_path.is_some())) {
+        Some(Some(true)) => {
+            let rc = crate::cext::fs::sync();
+            if rc == 0 {
+                SUCCESS
+            } else {
+                errno_from_cext(rc)
+            }
+        }
+        Some(Some(false)) => SUCCESS,
         _ => EBADF,
     }
 }
@@ -1241,6 +1311,9 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
         None => return EBADF,
     };
     let path = resolve_path(pid, &path);
+    if let Err(errno) = ensure_fs_path_access(&path, PATH_WRITE) {
+        return errno;
+    }
     match metadata_rootfs_first(&path) {
         Some((mode, _)) if mode_is_directory(mode) => return EISDIR,
         Some(_) => {}
@@ -1249,8 +1322,9 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
     if crate::cext::fs::file_metadata(&path).is_none() {
         return ENOENT;
     }
-    if crate::cext::fs::truncate(&path, len) != 0 {
-        return EIO;
+    let rc = crate::cext::fs::truncate(&path, len);
+    if rc != 0 {
+        return errno_from_cext(rc);
     }
     SUCCESS
 }
@@ -1281,13 +1355,15 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
             return Err(EISDIR);
         }
         if let Some(path) = fh.fs_path.as_deref() {
-            if crate::cext::fs::truncate(path, len) != 0 {
-                return Err(EIO);
+            let rc = crate::cext::fs::truncate(path, len);
+            if rc != 0 {
+                return Err(errno_from_cext(rc));
             }
+        } else {
+            let mut data = fh.data.to_vec();
+            data.resize(new_len, 0);
+            fh.data = data.into_boxed_slice();
         }
-        let mut data = fh.data.to_vec();
-        data.resize(new_len, 0);
-        fh.data = data.into_boxed_slice();
         if fh.pos > new_len {
             fh.pos = new_len;
         }
@@ -1544,12 +1620,20 @@ pub fn renameat(old_dirfd: i64, old_path_ptr: u64, new_dirfd: i64, new_path_ptr:
 ///
 /// AT_FDCWD(-100) の場合は CWD 相対の open() と同等。
 /// それ以外の dirfd は fd_table からディレクトリパスを取得してプレフィックスとして使用する。
-pub fn openat(dirfd: i64, path_ptr: u64, flags: u64, _mode: u64) -> u64 {
+pub fn openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
     const AT_FDCWD: i64 = -100;
 
     if dirfd == AT_FDCWD {
         // CWD 相対 → 通常の open() と同じ
-        return open(path_ptr, flags);
+        let pid = match current_process_id_raw() {
+            Some(pid) => pid,
+            None => return EBADF,
+        };
+        let path = match read_cstring(path_ptr) {
+            Ok(path) => resolve_path(pid, &path),
+            Err(errno) => return errno,
+        };
+        return open_resolved_for_pid(pid, &path, flags, mode);
     }
 
     // dirfd が示すディレクトリを取得
@@ -1577,7 +1661,7 @@ pub fn openat(dirfd: i64, path_ptr: u64, flags: u64, _mode: u64) -> u64 {
         alloc::format!("{}/{}", dir_path.trim_end_matches('/'), path)
     };
 
-    open_resolved_for_pid(pid, &normalize_path(&full_path), flags)
+    open_resolved_for_pid(pid, &normalize_path(&full_path), flags, mode)
 }
 
 /// Newfstatat (fstatat) システムコール

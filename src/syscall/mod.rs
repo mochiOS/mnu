@@ -557,6 +557,13 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Dup2 as u64 => fs::dup2(arg0, arg1),
         x if x == SyscallNumber::Fcntl as u64 => fs::fcntl(arg0, arg1, arg2),
         x if x == SyscallNumber::Read as u64 => fs::read(arg0, arg1, arg2),
+        x if x == SyscallNumber::Open as u64 => fs::open(arg0, arg1),
+        x if x == SyscallNumber::Lseek as u64 => fs::seek(arg0, arg1 as i64, arg2),
+        x if x == SyscallNumber::Fsync as u64 || x == SyscallNumber::Fdatasync as u64 => {
+            fs::fsync(arg0)
+        }
+        x if x == SyscallNumber::Truncate as u64 => fs::truncate(arg0, arg1),
+        x if x == SyscallNumber::Ftruncate as u64 => fs::ftruncate(arg0, arg1),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
         x if x == SyscallNumber::AllocSharedPages as u64 => {

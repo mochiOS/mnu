@@ -1380,7 +1380,7 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
                 write_off,
                 &copied[written..written + chunk_len],
             ) {
-                Some(n) if n == chunk_len => {}
+                Ok(n) if n == chunk_len => {}
                 _ => return EIO,
             }
             written += chunk_len;

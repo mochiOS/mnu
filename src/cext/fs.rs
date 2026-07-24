@@ -11,6 +11,9 @@ static LOADED: AtomicBool = AtomicBool::new(false);
 static VERSION: AtomicU16 = AtomicU16::new(0);
 static OPS: AtomicPtr<McxFsOps> = AtomicPtr::new(core::ptr::null_mut());
 static MOUNTED: AtomicBool = AtomicBool::new(false);
+static WRITABLE: AtomicBool = AtomicBool::new(false);
+
+pub const MOUNT_READ_ONLY: u32 = 1;
 
 fn ops_ptr() -> *const McxFsOps {
     OPS.load(Ordering::Acquire)
@@ -50,16 +53,29 @@ pub fn is_loaded() -> bool {
     LOADED.load(Ordering::Acquire) && !ops_ptr().is_null()
 }
 
-pub fn mount(device_id: u32) -> i32 {
+pub fn mount(device_id: u32, flags: u32) -> i32 {
     let ops = ops_ptr();
     if ops.is_null() {
         return -38;
     }
-    let rc = unsafe { ((*ops).mount)(device_id) };
+    let rc = unsafe { ((*ops).mount)(device_id, flags) };
     if rc == 0 {
         MOUNTED.store(true, Ordering::Release);
+        WRITABLE.store((flags & MOUNT_READ_ONLY) == 0, Ordering::Release);
     }
     rc
+}
+
+pub fn is_writable() -> bool {
+    MOUNTED.load(Ordering::Acquire) && WRITABLE.load(Ordering::Acquire)
+}
+
+pub fn sync() -> i32 {
+    let ops = ops_ptr();
+    if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
+        return -38;
+    }
+    unsafe { ((*ops).sync)() }
 }
 
 pub fn set_disk_ops(disk_ops: *const crate::cext::disk::McxDiskOps) -> i32 {
@@ -144,10 +160,13 @@ pub fn read_range(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
     (rc == 0 && read <= buf.len()).then_some(read)
 }
 
-pub fn write_all(path: &str, offset: u64, data: &[u8]) -> Option<usize> {
+pub fn write_all(path: &str, offset: u64, data: &[u8]) -> Result<usize, i32> {
     let ops = ops_ptr();
-    if ops.is_null() {
-        return None;
+    if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
+        return Err(-38);
+    }
+    if !WRITABLE.load(Ordering::Acquire) {
+        return Err(-30);
     }
     let mut written = 0usize;
     let rc = unsafe {
@@ -161,7 +180,14 @@ pub fn write_all(path: &str, offset: u64, data: &[u8]) -> Option<usize> {
             &mut written,
         )
     };
-    (rc == 0).then_some(written)
+    if written > data.len() {
+        return Err(-5);
+    }
+    if rc == 0 {
+        Ok(written)
+    } else {
+        Err(rc)
+    }
 }
 
 pub fn truncate(path: &str, len: u64) -> i32 {
