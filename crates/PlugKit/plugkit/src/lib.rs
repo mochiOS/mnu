@@ -15,6 +15,8 @@ pub use plugkit_sys::{
     unregister_device, unregister_interface,
 };
 
+pub mod virtio;
+
 pub trait PlugKitDriver {
     fn probe(device: &PlugKitDevice) -> ProbeResult;
     fn start(device: PlugKitDevice, resources: PlugKitResources) -> PlugKitResult<()>;
