@@ -18,6 +18,13 @@ const COMMON_DEVICE_FEATURE: u32 = 4;
 const COMMON_DRIVER_FEATURE_SELECT: u32 = 8;
 const COMMON_DRIVER_FEATURE: u32 = 12;
 const COMMON_DEVICE_STATUS: u32 = 20;
+const COMMON_QUEUE_SELECT: u32 = 22;
+const COMMON_QUEUE_SIZE: u32 = 24;
+const COMMON_QUEUE_ENABLE: u32 = 28;
+const COMMON_QUEUE_NOTIFY_OFF: u32 = 30;
+const COMMON_QUEUE_DESCRIPTOR: u32 = 32;
+const COMMON_QUEUE_DRIVER: u32 = 40;
+const COMMON_QUEUE_DEVICE: u32 = 48;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PciBar {
@@ -148,8 +155,10 @@ impl VirtioPciCapabilities {
 
 pub trait PciTransportAccess {
     fn read_u8(&mut self, bar: u8, offset: u32) -> VirtioResult<u8>;
+    fn read_u16(&mut self, bar: u8, offset: u32) -> VirtioResult<u16>;
     fn read_u32(&mut self, bar: u8, offset: u32) -> VirtioResult<u32>;
     fn write_u8(&mut self, bar: u8, offset: u32, value: u8) -> VirtioResult<()>;
+    fn write_u16(&mut self, bar: u8, offset: u32, value: u16) -> VirtioResult<()>;
     fn write_u32(&mut self, bar: u8, offset: u32, value: u32) -> VirtioResult<()>;
 }
 
@@ -222,6 +231,60 @@ impl<A: PciTransportAccess> VirtioPciTransport<A> {
         self.access.write_u32(select_bar, select_offset, 1)?;
         self.access
             .write_u32(feature_bar, feature_offset, (features.bits() >> 32) as u32)
+    }
+
+    pub fn configure_queue(
+        &mut self,
+        queue_index: u16,
+        requested_size: u16,
+        descriptor_address: u64,
+        available_address: u64,
+        used_address: u64,
+    ) -> VirtioResult<u16> {
+        let (select_bar, select_offset) = self.common_offset(COMMON_QUEUE_SELECT, 2)?;
+        self.access
+            .write_u16(select_bar, select_offset, queue_index)?;
+        let (size_bar, size_offset) = self.common_offset(COMMON_QUEUE_SIZE, 2)?;
+        let maximum = self.access.read_u16(size_bar, size_offset)?;
+        if maximum == 0 {
+            return Err(VirtioError::QueueUnavailable);
+        }
+        if requested_size < 2 || !requested_size.is_power_of_two() || requested_size > maximum {
+            return Err(VirtioError::InvalidQueueSize);
+        }
+        self.access
+            .write_u16(size_bar, size_offset, requested_size)?;
+        self.write_common_u64(COMMON_QUEUE_DESCRIPTOR, descriptor_address)?;
+        self.write_common_u64(COMMON_QUEUE_DRIVER, available_address)?;
+        self.write_common_u64(COMMON_QUEUE_DEVICE, used_address)?;
+        let (enable_bar, enable_offset) = self.common_offset(COMMON_QUEUE_ENABLE, 2)?;
+        self.access.write_u16(enable_bar, enable_offset, 1)?;
+        let (notify_bar, notify_offset) = self.common_offset(COMMON_QUEUE_NOTIFY_OFF, 2)?;
+        self.access.read_u16(notify_bar, notify_offset)
+    }
+
+    pub fn notify_queue(&mut self, queue_index: u16, queue_notify_off: u16) -> VirtioResult<()> {
+        let relative = u32::from(queue_notify_off)
+            .checked_mul(self.capabilities.notify_off_multiplier)
+            .ok_or(VirtioError::ArithmeticOverflow)?;
+        if !self.capabilities.notify.contains(relative, 2) {
+            return Err(VirtioError::RegisterOutOfBounds);
+        }
+        let offset = self
+            .capabilities
+            .notify
+            .offset
+            .checked_add(relative)
+            .ok_or(VirtioError::RegionOverflow)?;
+        self.access
+            .write_u16(self.capabilities.notify.bar, offset, queue_index)
+    }
+
+    fn write_common_u64(&mut self, offset: u32, value: u64) -> VirtioResult<()> {
+        let (bar, low_offset) = self.common_offset(offset, 8)?;
+        self.access.write_u32(bar, low_offset, value as u32)?;
+        self.access
+            .write_u32(bar, low_offset + 4, (value >> 32) as u32)
     }
 }
 
@@ -316,6 +379,15 @@ mod tests {
             Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         }
 
+        fn read_u16(&mut self, _bar: u8, offset: u32) -> VirtioResult<u16> {
+            let start = offset as usize;
+            let bytes = self
+                .bytes
+                .get(start..start + 2)
+                .ok_or(VirtioError::AccessFailed)?;
+            Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+        }
+
         fn write_u8(&mut self, _bar: u8, offset: u32, value: u8) -> VirtioResult<()> {
             if offset == COMMON_DEVICE_STATUS && self.reject_features {
                 self.bytes[offset as usize] = value & !DeviceStatus::FEATURES_OK.bits();
@@ -344,6 +416,16 @@ mod tests {
                     bytes.copy_from_slice(&value.to_le_bytes());
                 }
             }
+            Ok(())
+        }
+
+        fn write_u16(&mut self, _bar: u8, offset: u32, value: u16) -> VirtioResult<()> {
+            let start = offset as usize;
+            let bytes = self
+                .bytes
+                .get_mut(start..start + 2)
+                .ok_or(VirtioError::AccessFailed)?;
+            bytes.copy_from_slice(&value.to_le_bytes());
             Ok(())
         }
     }
@@ -453,5 +535,28 @@ mod tests {
             ),
             Err(VirtioError::FeaturesRejected)
         );
+    }
+
+    #[test]
+    fn configures_and_notifies_queue() {
+        let (config, bars) = valid_capabilities();
+        let capabilities = VirtioPciCapabilities::parse(&config, &bars).unwrap();
+        let mut access = MockAccess::new(VIRTIO_F_VERSION_1);
+        access.bytes[COMMON_QUEUE_SIZE as usize..COMMON_QUEUE_SIZE as usize + 2]
+            .copy_from_slice(&256u16.to_le_bytes());
+        access.bytes[COMMON_QUEUE_NOTIFY_OFF as usize..COMMON_QUEUE_NOTIFY_OFF as usize + 2]
+            .copy_from_slice(&3u16.to_le_bytes());
+        let mut transport = VirtioPciTransport::new(capabilities, access);
+        let notify_offset = transport
+            .configure_queue(0, 128, 0x1000, 0x2000, 0x3000)
+            .unwrap();
+        assert_eq!(notify_offset, 3);
+        transport.notify_queue(0, notify_offset).unwrap();
+        let access = transport.access();
+        assert_eq!(
+            &access.bytes[COMMON_QUEUE_SIZE as usize..COMMON_QUEUE_SIZE as usize + 2],
+            &128u16.to_le_bytes()
+        );
+        assert_eq!(&access.bytes[0x10c..0x10e], &0u16.to_le_bytes());
     }
 }

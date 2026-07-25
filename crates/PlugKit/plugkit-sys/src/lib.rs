@@ -461,12 +461,29 @@ impl PlugKitResources {
     }
 
     pub fn alloc_dma(&mut self, size: usize) -> PlugKitResult<DmaBuffer> {
+        self.alloc_dma_aligned(size, 1)
+    }
+
+    pub fn alloc_dma_aligned(
+        &mut self,
+        size: usize,
+        alignment: usize,
+    ) -> PlugKitResult<DmaBuffer> {
         if !self.dma_supported {
             return Err(PlugKitError::NotSupported);
         }
-        let addr = self.next_dma_addr;
+        if size == 0 || alignment == 0 || !alignment.is_power_of_two() {
+            return Err(PlugKitError::InvalidSize);
+        }
+        let mask = (alignment as u64).saturating_sub(1);
+        let addr = self
+            .next_dma_addr
+            .checked_add(mask)
+            .map(|value| value & !mask)
+            .ok_or(PlugKitError::OutOfMemory)?;
         self.next_dma_addr = self
             .next_dma_addr
+            .max(addr)
             .checked_add(size as u64)
             .ok_or(PlugKitError::OutOfMemory)?;
         Ok(DmaBuffer::new(size, addr))

@@ -16,6 +16,14 @@ pub enum VirtioError {
     DeviceResetFailed,
     RequiredFeatureMissing,
     FeaturesRejected,
+    InvalidQueueSize,
+    QueueUnavailable,
+    QueueFull,
+    InvalidDescriptor,
+    InvalidUsedIndex,
+    DmaBufferTooSmall,
+    ArithmeticOverflow,
+    CommandTimeout,
 }
 
 pub type VirtioResult<T> = Result<T, VirtioError>;
@@ -37,6 +45,14 @@ impl fmt::Display for VirtioError {
             Self::DeviceResetFailed => "virtio device did not reset",
             Self::RequiredFeatureMissing => "virtio device is missing a required feature",
             Self::FeaturesRejected => "virtio device rejected negotiated features",
+            Self::InvalidQueueSize => "virtqueue size is invalid",
+            Self::QueueUnavailable => "virtqueue is unavailable",
+            Self::QueueFull => "virtqueue has no free descriptors",
+            Self::InvalidDescriptor => "virtqueue descriptor is invalid",
+            Self::InvalidUsedIndex => "virtqueue used ring index is invalid",
+            Self::DmaBufferTooSmall => "virtqueue DMA buffer is too small",
+            Self::ArithmeticOverflow => "virtio address calculation overflowed",
+            Self::CommandTimeout => "virtio command timed out",
         })
     }
 }
