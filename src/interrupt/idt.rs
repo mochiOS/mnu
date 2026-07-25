@@ -427,7 +427,6 @@ fn dump_invalid_opcode_diagnostics(stack_frame: &InterruptStackFrame) {
         inst[8], inst[9], inst[10], inst[11],
         inst[12], inst[13], inst[14], inst[15],
     );
-
     let l4_idx = ((rip >> 39) & 0x1ff) as usize;
     let l3_idx = ((rip >> 30) & 0x1ff) as usize;
     let l2_idx = ((rip >> 21) & 0x1ff) as usize;
@@ -494,7 +493,6 @@ fn dump_invalid_opcode_diagnostics(stack_frame: &InterruptStackFrame) {
         stack_words[0], stack_words[1], stack_words[2], stack_words[3],
         stack_words[4], stack_words[5], stack_words[6], stack_words[7],
     );
-
     for (i, &candidate) in stack_words.iter().enumerate() {
         if (0x4000_0000u64..0x5000_0000u64).contains(&candidate) {
             let func_va = candidate.checked_add(0x40);

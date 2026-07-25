@@ -194,7 +194,7 @@ extern "C" fn kernel_alloc_dma(size: usize, align: usize, out_region: *mut McxDm
     if out_region.is_null() || size == 0 || align == 0 || !align.is_power_of_two() {
         return -22;
     }
-    if size > 65536 || align > 4096 {
+    if size > 256 * 1024 || align > 4096 {
         return -38;
     }
     let pages = size.div_ceil(4096);

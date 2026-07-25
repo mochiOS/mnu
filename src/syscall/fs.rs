@@ -16,7 +16,8 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 const MAX_IO_BYTES: usize = 128 * 1024 * 1024;
-const IO_CHUNK_BYTES: usize = 64 * 1024;
+const READ_IO_CHUNK_BYTES: usize = 64 * 1024;
+const WRITE_IO_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_PIPES: usize = 64;
 const PIPE_BUFFER_CAP: usize = 64 * 1024;
 
@@ -942,10 +943,10 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         Err(_) => MAX_IO_BYTES,
     };
     let mut written = 0usize;
-    let mut tmp = alloc::vec![0u8; IO_CHUNK_BYTES];
+    let mut tmp = alloc::vec![0u8; READ_IO_CHUNK_BYTES];
 
     while written < to_copy {
-        let chunk_len = core::cmp::min(IO_CHUNK_BYTES, to_copy - written);
+        let chunk_len = core::cmp::min(READ_IO_CHUNK_BYTES, to_copy - written);
         let read_len = {
             let (path, pos) = match with_fd_table(pid, |t| {
                 t.get(idx)
@@ -1105,10 +1106,10 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         };
     }
     let mut written = 0usize;
-    let mut tmp = alloc::vec![0u8; IO_CHUNK_BYTES];
+    let mut tmp = alloc::vec![0u8; WRITE_IO_CHUNK_BYTES];
 
     while written < len_usize {
-        let chunk_len = core::cmp::min(IO_CHUNK_BYTES, len_usize - written);
+        let chunk_len = core::cmp::min(WRITE_IO_CHUNK_BYTES, len_usize - written);
         if let Err(errno) =
             crate::syscall::copy_from_user(buf_ptr + written as u64, &mut tmp[..chunk_len])
         {

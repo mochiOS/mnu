@@ -1868,7 +1868,7 @@ fn deallocate_4k_frame_by_phys(frame_phys: u64) {
     let _ = frame::deallocate_frame(frame);
 }
 
-fn destroy_user_l1_table(l1_phys: u64, phys_off: u64) {
+fn destroy_user_l1_table(l1_phys: u64, phys_off: u64, vaddr_base: u64) {
     let l1 = unsafe { &mut *((l1_phys + phys_off) as *mut PageTable) };
     for i in 0..512 {
         let entry = l1[i].clone();
@@ -1879,13 +1879,18 @@ fn destroy_user_l1_table(l1_phys: u64, phys_off: u64) {
         {
             continue;
         }
+        let vaddr = vaddr_base + (i as u64) * 4096;
+        if is_preinstalled_user_mapping(vaddr) {
+            l1[i].set_unused();
+            continue;
+        }
         deallocate_4k_frame_by_phys(entry.addr().as_u64());
         l1[i].set_unused();
     }
     deallocate_4k_frame_by_phys(l1_phys);
 }
 
-fn destroy_user_l2_table(l2_phys: u64, phys_off: u64) {
+fn destroy_user_l2_table(l2_phys: u64, phys_off: u64, vaddr_base: u64) {
     let l2 = unsafe { &mut *((l2_phys + phys_off) as *mut PageTable) };
     for i in 0..512 {
         let entry = l2[i].clone();
@@ -1900,13 +1905,17 @@ fn destroy_user_l2_table(l2_phys: u64, phys_off: u64) {
             l2[i].set_unused();
             continue;
         }
-        destroy_user_l1_table(entry.addr().as_u64(), phys_off);
+        destroy_user_l1_table(
+            entry.addr().as_u64(),
+            phys_off,
+            vaddr_base + (i as u64) * (1 << 21),
+        );
         l2[i].set_unused();
     }
     deallocate_4k_frame_by_phys(l2_phys);
 }
 
-fn destroy_user_l3_table(l3_phys: u64, phys_off: u64) {
+fn destroy_user_l3_table(l3_phys: u64, phys_off: u64, vaddr_base: u64) {
     let l3 = unsafe { &mut *((l3_phys + phys_off) as *mut PageTable) };
     for i in 0..512 {
         let entry = l3[i].clone();
@@ -1921,7 +1930,11 @@ fn destroy_user_l3_table(l3_phys: u64, phys_off: u64) {
             l3[i].set_unused();
             continue;
         }
-        destroy_user_l2_table(entry.addr().as_u64(), phys_off);
+        destroy_user_l2_table(
+            entry.addr().as_u64(),
+            phys_off,
+            vaddr_base + (i as u64) * (1 << 30),
+        );
         l3[i].set_unused();
     }
     deallocate_4k_frame_by_phys(l3_phys);
@@ -1950,7 +1963,7 @@ pub fn destroy_user_page_table(table_phys: u64) -> Result<()> {
             l4[i].set_unused();
             continue;
         }
-        destroy_user_l3_table(entry.addr().as_u64(), phys_off);
+        destroy_user_l3_table(entry.addr().as_u64(), phys_off, (i as u64) * (1 << 39));
         l4[i].set_unused();
     }
 
