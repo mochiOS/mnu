@@ -241,17 +241,14 @@ impl<A: PciTransportAccess> VirtioPciTransport<A> {
         available_address: u64,
         used_address: u64,
     ) -> VirtioResult<u16> {
-        let (select_bar, select_offset) = self.common_offset(COMMON_QUEUE_SELECT, 2)?;
-        self.access
-            .write_u16(select_bar, select_offset, queue_index)?;
-        let (size_bar, size_offset) = self.common_offset(COMMON_QUEUE_SIZE, 2)?;
-        let maximum = self.access.read_u16(size_bar, size_offset)?;
+        let maximum = self.queue_max_size(queue_index)?;
         if maximum == 0 {
             return Err(VirtioError::QueueUnavailable);
         }
         if requested_size < 2 || !requested_size.is_power_of_two() || requested_size > maximum {
             return Err(VirtioError::InvalidQueueSize);
         }
+        let (size_bar, size_offset) = self.common_offset(COMMON_QUEUE_SIZE, 2)?;
         self.access
             .write_u16(size_bar, size_offset, requested_size)?;
         self.write_common_u64(COMMON_QUEUE_DESCRIPTOR, descriptor_address)?;
@@ -261,6 +258,14 @@ impl<A: PciTransportAccess> VirtioPciTransport<A> {
         self.access.write_u16(enable_bar, enable_offset, 1)?;
         let (notify_bar, notify_offset) = self.common_offset(COMMON_QUEUE_NOTIFY_OFF, 2)?;
         self.access.read_u16(notify_bar, notify_offset)
+    }
+
+    pub fn queue_max_size(&mut self, queue_index: u16) -> VirtioResult<u16> {
+        let (select_bar, select_offset) = self.common_offset(COMMON_QUEUE_SELECT, 2)?;
+        self.access
+            .write_u16(select_bar, select_offset, queue_index)?;
+        let (size_bar, size_offset) = self.common_offset(COMMON_QUEUE_SIZE, 2)?;
+        self.access.read_u16(size_bar, size_offset)
     }
 
     pub fn notify_queue(&mut self, queue_index: u16, queue_notify_off: u16) -> VirtioResult<()> {
