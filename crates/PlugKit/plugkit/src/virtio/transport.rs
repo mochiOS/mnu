@@ -122,10 +122,9 @@ impl VirtioPciCapabilities {
                     length: config
                         .read_u32(offset + 12)
                         .map_err(|_| VirtioError::InvalidCapabilityLength)?,
-                }
-                .validate(bars)?;
+                };
                 match cfg_type {
-                    VIRTIO_PCI_CAP_COMMON_CFG => common = Some(region),
+                    VIRTIO_PCI_CAP_COMMON_CFG => common = Some(region.validate(bars)?),
                     VIRTIO_PCI_CAP_NOTIFY_CFG => {
                         if cap_len < VIRTIO_PCI_NOTIFY_CAP_LENGTH {
                             return Err(VirtioError::InvalidCapabilityLength);
@@ -133,10 +132,10 @@ impl VirtioPciCapabilities {
                         notify_off_multiplier = config
                             .read_u32(offset + 16)
                             .map_err(|_| VirtioError::InvalidCapabilityLength)?;
-                        notify = Some(region);
+                        notify = Some(region.validate(bars)?);
                     }
-                    VIRTIO_PCI_CAP_ISR_CFG => isr = Some(region),
-                    VIRTIO_PCI_CAP_DEVICE_CFG => device = Some(region),
+                    VIRTIO_PCI_CAP_ISR_CFG => isr = Some(region.validate(bars)?),
+                    VIRTIO_PCI_CAP_DEVICE_CFG => device = Some(region.validate(bars)?),
                     _ => {}
                 }
             }
@@ -339,6 +338,21 @@ mod tests {
                 is_io: false,
             }],
         )
+    }
+
+    #[test]
+    fn ignores_unknown_vendor_capability_with_non_bar_selector() {
+        let (config, bars) = valid_capabilities();
+        let mut bytes = vec![0u8; 256];
+        for (offset, byte) in bytes.iter_mut().enumerate() {
+            *byte = config.read_u8(offset).unwrap_or(0);
+        }
+        bytes[0x79] = 0x88;
+        put_cap(&mut bytes, 0x88, 0, 16, 5, u8::MAX, 0, 0);
+
+        let parsed = VirtioPciCapabilities::parse(&PciConfig::new(bytes), &bars);
+
+        assert!(parsed.is_ok());
     }
 
     #[derive(Clone)]
