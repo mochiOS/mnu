@@ -1352,10 +1352,9 @@ fn exec_with_data(
             crate::debug!("exec: new_thread_id={:?}", tid);
         }
 
-        // Ensure newly launched user process gets CPU promptly
-        if crate::task::is_scheduler_enabled() {
-            crate::task::yield_now();
-        }
+        // Return the child identifier to the caller before the child can run.
+        // Timer-driven scheduling will pick up the ready thread after the spawn
+        // caller has completed its registration and handshake setup.
 
         crate::debug!(
             "exec: created usermode process '{}' (pid={:?}, entry={:#x})",
