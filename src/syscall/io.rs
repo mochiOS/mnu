@@ -18,6 +18,7 @@ fn caller_has_port_io_access() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
         Capability::UsbAccess,
         Capability::DeviceInput,
+        Capability::DeviceGpu,
     ])
 }
 

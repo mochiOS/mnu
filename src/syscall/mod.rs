@@ -197,7 +197,10 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
             size,
         },
     );
-    if !crate::task::process_has_kernel_authority(pid, &requested_authority) {
+    let has_device_gpu = crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::DeviceGpu,
+    ]);
+    if !has_device_gpu && !crate::task::process_has_kernel_authority(pid, &requested_authority) {
         return EACCES;
     }
     let pt_phys = match crate::task::with_process(pid, |proc| proc.page_table()).flatten() {
