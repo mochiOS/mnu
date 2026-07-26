@@ -2,9 +2,35 @@ use crate::task::ids::ThreadId;
 use crate::task::process::with_process;
 use crate::task::thread::THREAD_QUEUE;
 
-/// CPU コンテキスト（callee-saved 等を保存）
+const FXSAVE_AREA_SIZE: usize = 512;
+
+#[derive(Clone, Copy)]
+#[repr(C, align(16))]
+struct FxSaveArea {
+    bytes: [u8; FXSAVE_AREA_SIZE],
+}
+
+impl FxSaveArea {
+    const fn initial() -> Self {
+        let mut bytes = [0u8; FXSAVE_AREA_SIZE];
+        // Intel-defined reset state used by FNINIT and LDMXCSR.
+        bytes[0] = 0x7f;
+        bytes[1] = 0x03;
+        bytes[24] = 0x80;
+        bytes[25] = 0x1f;
+        Self { bytes }
+    }
+}
+
+impl core::fmt::Debug for FxSaveArea {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("FxSaveArea(..)")
+    }
+}
+
+/// CPU コンテキスト（callee-saved とFPU/SIMD状態を保存）
 #[derive(Debug, Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct Context {
     pub rsp: u64,
     pub rbp: u64,
@@ -18,6 +44,7 @@ pub struct Context {
     /// 命令ポインタ（戻り先アドレス）
     pub rip: u64,
     pub rflags: u64,
+    fx_state: FxSaveArea,
 }
 
 impl Default for Context {
@@ -40,9 +67,14 @@ impl Context {
             rsi: 0,
             rip: 0,
             rflags: 0,
+            fx_state: FxSaveArea::initial(),
         }
     }
 }
+
+const _: () = assert!(core::mem::offset_of!(Context, fx_state) == 0x60);
+const _: () = assert!(core::mem::align_of::<Context>() == 16);
+const _: () = assert!(core::mem::size_of::<Context>() == 0x260);
 
 /// 初回スイッチ時に使用するダミーコンテキスト（保存先として使われるが値は参照されない）
 static mut INITIAL_DUMMY_CONTEXT: Context = Context::new();
@@ -60,6 +92,7 @@ static mut INITIAL_DUMMY_CONTEXT: Context = Context::new();
 /// offset 0x40: rsi
 /// offset 0x48: rip
 /// offset 0x50: rflags
+/// offset 0x60: 16-byte aligned FXSAVE area (512 bytes)
 ///
 /// # Safety
 /// `old_context`/`new_context` は有効な `Context` 領域を指し、呼び出し規約に従って
@@ -90,7 +123,11 @@ pub unsafe extern "C" fn switch_context(old_context: *mut Context, new_context: 
         "pushfq",
         "pop rax",
         "mov [rdi + 0x50], rax", // rflags
+        // FXSAVE/FXRSTOR are required because user rendering code keeps live
+        // floating-point and SIMD values across preemptive context switches.
+        "fxsave64 [rdi + 0x60]",
         // 新しいコンテキストを復元
+        "fxrstor64 [rsi + 0x60]",
         "mov rax, [rsi + 0x48]", // 新しいrip
         "mov r11, [rsi + 0x50]", // 新しいrflags
         "mov rbx, [rsi + 0x10]", // rbx
