@@ -761,8 +761,9 @@ pub fn mkdir(path_ptr: u64, mode: u64) -> u64 {
         return errno;
     }
     const S_IFDIR: u32 = 0x4000;
-    if crate::cext::fs::create(&resolved, S_IFDIR | ((mode as u32) & 0o777)) != 0 {
-        return EIO;
+    let rc = crate::cext::fs::create(&resolved, S_IFDIR | ((mode as u32) & 0o777));
+    if rc != 0 {
+        return errno_from_cext(rc);
     }
     SUCCESS
 }
