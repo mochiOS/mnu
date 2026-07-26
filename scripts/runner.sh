@@ -112,7 +112,7 @@ readelf -h "${USER_BIN}" | grep -E 'Type:|Entry point address:' || true
 echo "[check] selftest marker"
 strings "${USER_BIN}" | grep -n 'selftest: enter' || true
 
-SIGNATURE_DB_STAGE="${TARGET_DIR}/signature.db"
+SIGNATURE_DB_STAGE="${TARGET_DIR}/execution.allowlist"
 echo "[build] bootloader"
 cargo build \
     --release \

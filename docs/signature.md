@@ -455,7 +455,7 @@ Capability要求には、少なくとも次の情報を持たせます。
 
 ## 13. データベースの永続化
 
-署名データベースは、ビルド時に生成して rootfs へ配置します。実装例では `signature.db` を使い、起動時にカーネルがそれを読み込みます。
+現在のbootstrap実装は、ビルド時に生成したpathとSHA-256の一覧を`/execution.allowlist`へ配置し、起動時にカーネルが読み込みます。公開鍵やレコード署名を持つ動的な署名データベースではありません。Developer CertificateによるMPKG検証は`signature.service`が別に担当します。
 
 初期構成では、次のように分割できます。
 

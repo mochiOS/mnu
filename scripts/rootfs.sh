@@ -52,7 +52,7 @@ fi
 
 if [[ -n "${SIGNATURE_DB_SRC}" ]]; then
     need_file "${SIGNATURE_DB_SRC}"
-    install -m 0644 "${SIGNATURE_DB_SRC}" "${ROOTFS_STAGE}/signature.db"
+    install -m 0644 "${SIGNATURE_DB_SRC}" "${ROOTFS_STAGE}/execution.allowlist"
 fi
 
 truncate -s "${ROOTFS_SIZE}" "${ROOTFS_IMG}"

@@ -4,7 +4,7 @@ use core::str;
 
 use spin::Mutex;
 
-const SIGNATURE_DB_PATH: &str = "/signature.db";
+const EXECUTION_ALLOWLIST_PATH: &str = "/execution.allowlist";
 
 #[derive(Clone)]
 struct SignatureRecord {
@@ -47,12 +47,7 @@ fn parse_db(bytes: &[u8]) -> Option<SignatureDatabase> {
     let text = str::from_utf8(bytes).ok()?;
     let mut lines = text.lines();
     let header = lines.next()?.trim();
-    if header != "mnu-signature-db v1" {
-        return None;
-    }
-
-    let pubkey_line = lines.next()?.trim();
-    if pubkey_line.strip_prefix("pubkey ").is_none() {
+    if header != "mochios-execution-allowlist v1" {
         return None;
     }
 
@@ -68,7 +63,6 @@ fn parse_db(bytes: &[u8]) -> Option<SignatureDatabase> {
         let mut parts = rest.split_whitespace();
         let path = parts.next()?.to_string();
         let digest_hex = parts.next()?;
-        let _sig_hex = parts.next()?;
         if parts.next().is_some() {
             return None;
         }
@@ -80,14 +74,14 @@ fn parse_db(bytes: &[u8]) -> Option<SignatureDatabase> {
 }
 
 fn load_db_from_rootfs() -> bool {
-    let Some(bytes) = crate::init::fs::read_rootfs(SIGNATURE_DB_PATH)
-        .or_else(|| crate::cext::fs::read_all(SIGNATURE_DB_PATH))
+    let Some(bytes) = crate::init::fs::read_rootfs(EXECUTION_ALLOWLIST_PATH)
+        .or_else(|| crate::cext::fs::read_all(EXECUTION_ALLOWLIST_PATH))
     else {
-        crate::warn!("signature: missing {}", SIGNATURE_DB_PATH);
+        crate::warn!("execution allowlist: missing {}", EXECUTION_ALLOWLIST_PATH);
         return false;
     };
     let Some(db) = parse_db(&bytes) else {
-        crate::warn!("signature: invalid {}", SIGNATURE_DB_PATH);
+        crate::warn!("execution allowlist: invalid {}", EXECUTION_ALLOWLIST_PATH);
         return false;
     };
     *SIGNATURE_DB.lock() = Some(db);
@@ -220,6 +214,6 @@ pub fn verify_exec(path: &str, data: &[u8]) -> bool {
         return true;
     }
 
-    crate::warn!("signature: no matching record for {}", path);
+    crate::warn!("execution allowlist: no matching record for {}", path);
     false
 }

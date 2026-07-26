@@ -489,7 +489,7 @@ fn load_bundle_directories() -> bool {
             }
             continue;
         };
-        // Boot-stage cext bundles are loaded before rootfs is mounted, so signature.db
+        // Boot-stage cext bundles are loaded before rootfs is mounted, so execution.allowlist
         // is not reachable yet. Initfs itself is treated as the trusted boot boundary.
         if builtin_kind(&manifest.name).is_none() {
             crate::warn!("cext: unregistered bundle {}", manifest.name);
