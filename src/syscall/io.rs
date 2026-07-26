@@ -19,6 +19,7 @@ fn caller_has_port_io_access() -> bool {
         Capability::UsbAccess,
         Capability::DeviceInput,
         Capability::DeviceGpu,
+        Capability::DeviceNet,
     ])
 }
 
