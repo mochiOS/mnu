@@ -173,6 +173,7 @@ pub enum SyscallNumber {
     DmaAlloc = 604,
     DmaFree = 605,
     ExecManifest = 606,
+    RandomFill = 607,
     CheckGravityExist = 999,
 }
 

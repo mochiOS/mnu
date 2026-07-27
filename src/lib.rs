@@ -96,6 +96,9 @@ pub mod percpu;
 #[cfg(not(test))]
 mod plugkit;
 #[cfg(not(test))]
+/// Kernel cryptographic random generator.
+pub mod random;
+#[cfg(not(test))]
 /// SMP/マルチコアの共有ハンドオフ
 pub mod smp;
 
@@ -176,6 +179,9 @@ pub struct BootInfo {
     pub smp_trampoline_addr: u64,
     /// AP 起動用トランポリンのサイズ
     pub smp_trampoline_size: usize,
+    /// Firmware RNG seed. Valid only when `entropy_seed_valid` is non-zero.
+    pub entropy_seed: [u8; 32],
+    pub entropy_seed_valid: u8,
 }
 
 /// メモリ領域の種類

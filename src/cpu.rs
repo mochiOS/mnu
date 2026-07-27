@@ -574,6 +574,102 @@ fn bcd_to_bin(v: u8) -> u8 {
     (v & 0x0f) + ((v >> 4) * 10)
 }
 
+pub use mochios_time_core::UtcDateTime as RtcDateTime;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RawRtcDateTime {
+    second: u8,
+    minute: u8,
+    hour: u8,
+    day: u8,
+    month: u8,
+    year: u8,
+    century: u8,
+    register_b: u8,
+}
+
+fn read_raw_rtc() -> RawRtcDateTime {
+    RawRtcDateTime {
+        second: cmos_read(0x00),
+        minute: cmos_read(0x02),
+        hour: cmos_read(0x04),
+        day: cmos_read(0x07),
+        month: cmos_read(0x08),
+        year: cmos_read(0x09),
+        century: cmos_read(0x32),
+        register_b: cmos_read(0x0b),
+    }
+}
+
+fn wait_for_rtc_update() -> bool {
+    const POLL_LIMIT: usize = 1_000_000;
+    for _ in 0..POLL_LIMIT {
+        if (cmos_read(0x0a) & 0x80) == 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+/// Read a stable UTC date from the platform RTC.
+///
+/// The QEMU machine RTC is configured as UTC by the runner. A changing or
+/// malformed snapshot is rejected by the wall-clock layer.
+pub fn rtc_utc() -> Option<RtcDateTime> {
+    let _guard = CMOS_LOCK.lock();
+    let mut snapshot = None;
+    for _ in 0..4 {
+        if !wait_for_rtc_update() {
+            return None;
+        }
+        let first = read_raw_rtc();
+        if !wait_for_rtc_update() {
+            return None;
+        }
+        let second = read_raw_rtc();
+        if first == second {
+            snapshot = Some(first);
+            break;
+        }
+    }
+    let mut raw = snapshot?;
+    let binary = (raw.register_b & 0x04) != 0;
+    let hour_24 = (raw.register_b & 0x02) != 0;
+    let pm = (raw.hour & 0x80) != 0;
+    raw.hour &= 0x7f;
+    if !binary {
+        raw.second = bcd_to_bin(raw.second);
+        raw.minute = bcd_to_bin(raw.minute);
+        raw.hour = bcd_to_bin(raw.hour);
+        raw.day = bcd_to_bin(raw.day);
+        raw.month = bcd_to_bin(raw.month);
+        raw.year = bcd_to_bin(raw.year);
+        raw.century = bcd_to_bin(raw.century);
+    }
+    if !hour_24 {
+        raw.hour %= 12;
+        if pm {
+            raw.hour = raw.hour.saturating_add(12);
+        }
+    }
+    let year = if (19..=99).contains(&raw.century) {
+        u16::from(raw.century) * 100 + u16::from(raw.year)
+    } else if raw.year >= 70 {
+        1900 + u16::from(raw.year)
+    } else {
+        2000 + u16::from(raw.year)
+    };
+    Some(RtcDateTime {
+        year,
+        month: raw.month,
+        day: raw.day,
+        hour: raw.hour,
+        minute: raw.minute,
+        second: raw.second,
+    })
+}
+
 fn rtc_entropy_u64() -> u64 {
     let _guard = CMOS_LOCK.lock();
     while (cmos_read(0x0A) & 0x80) != 0 {

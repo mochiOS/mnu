@@ -16,6 +16,14 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
 
     // CPU機能の初期化（SSE/FPU有効化）
     crate::cpu::init();
+    if let Err(error) =
+        crate::random::initialize(&boot_info.entropy_seed, boot_info.entropy_seed_valid != 0)
+    {
+        crate::warn!("CSPRNG unavailable: {:?}", error);
+    }
+    if let Err(error) = crate::syscall::time::initialize_realtime() {
+        crate::warn!("UTC wall clock unavailable: {:?}", error);
+    }
 
     let memory_map = unsafe {
         core::slice::from_raw_parts(

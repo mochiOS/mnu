@@ -189,6 +189,8 @@ pub enum UserCapability {
     NetConnect,
     NetListen,
     NetRaw,
+    NetTlsConnect,
+    NetHttpRequest,
     WindowCreate,
     WindowOverlay,
     WindowDecorate,
@@ -215,6 +217,7 @@ pub enum UserCapability {
     PowerReboot,
     PowerSuspend,
     SystemTimeRead,
+    SystemRandomRead,
     SystemTimeSet,
     SystemInfoRead,
     SystemLogsRead,
@@ -266,6 +269,8 @@ impl UserCapability {
             NetConnect => "net.connect",
             NetListen => "net.listen",
             NetRaw => "net.raw",
+            NetTlsConnect => "net.tls.connect",
+            NetHttpRequest => "net.http.request",
             WindowCreate => "window.create",
             WindowOverlay => "window.overlay",
             WindowDecorate => "window.decorate",
@@ -292,6 +297,7 @@ impl UserCapability {
             PowerReboot => "power.reboot",
             PowerSuspend => "power.suspend",
             SystemTimeRead => "system.time.read",
+            SystemRandomRead => "system.random.read",
             SystemTimeSet => "system.time.set",
             SystemInfoRead => "system.info.read",
             SystemLogsRead => "system.logs.read",
@@ -343,6 +349,8 @@ impl UserCapability {
             "net.connect" => Some(NetConnect),
             "net.listen" => Some(NetListen),
             "net.raw" => Some(NetRaw),
+            "net.tls.connect" => Some(NetTlsConnect),
+            "net.http.request" => Some(NetHttpRequest),
             "window.create" => Some(WindowCreate),
             "window.overlay" => Some(WindowOverlay),
             "window.decorate" => Some(WindowDecorate),
@@ -369,6 +377,7 @@ impl UserCapability {
             "power.reboot" => Some(PowerReboot),
             "power.suspend" => Some(PowerSuspend),
             "system.time.read" => Some(SystemTimeRead),
+            "system.random.read" => Some(SystemRandomRead),
             "system.time.set" => Some(SystemTimeSet),
             "system.info.read" => Some(SystemInfoRead),
             "system.logs.read" => Some(SystemLogsRead),
@@ -440,6 +449,8 @@ pub enum Capability {
     NetConnect,
     NetListen,
     NetRaw,
+    NetTlsConnect,
+    NetHttpRequest,
 
     IpcClient,
     IpcServer,
@@ -483,6 +494,7 @@ pub enum Capability {
     PowerSuspend,
 
     SystemTimeRead,
+    SystemRandomRead,
     SystemTimeSet,
     SystemInfoRead,
     SystemLogsRead,
@@ -539,10 +551,12 @@ impl Capability {
             | FsReadUserPictures | FsWriteUserPictures | FsReadUserMusic | FsWriteUserMusic
             | FsReadUserVideos | FsWriteUserVideos | FsReadUser | FsWriteUser | FsReadTmp
             | FsWriteTmp | FsReadRemovable | FsWriteRemovable | NetConnect | NetListen
-            | WindowCreate | WindowOverlay | DisplayRead | InputKeyboard | InputPointer
-            | AudioPlayback | AudioRecord | ClipboardRead | ClipboardWrite | NotificationSend
-            | SystemTimeRead | SystemInfoRead | SystemLogsRead | AccountSelfRead
-            | AccountSelfModify | SettingsRead => CapabilityClass::UserGrantable,
+            | NetTlsConnect | NetHttpRequest | WindowCreate | WindowOverlay | DisplayRead
+            | InputKeyboard | InputPointer | AudioPlayback | AudioRecord | ClipboardRead
+            | ClipboardWrite | NotificationSend | SystemTimeRead | SystemInfoRead
+            | SystemLogsRead | AccountSelfRead | AccountSelfModify | SettingsRead => {
+                CapabilityClass::UserGrantable
+            }
             FsReadAll | FsWriteAll | NetRaw | WindowDecorate | WindowCapture | DisplayCapture
             | InputKeyboardGlobal | InputPointerGlobal | InputGamepad | CameraAccess
             | MicrophoneAccess | LocationAccess | BluetoothAccess | UsbAccess | SerialAccess
@@ -552,8 +566,10 @@ impl Capability {
             | AccountOtherRead | AccountOtherModify | SettingsWrite => CapabilityClass::Privileged,
             ProcessSpawn | ProcessInspect | ProcessKill | IpcClient | IpcServer | DmaAllocate
             | MemoryPhysMap | MemoryPhysTranslate | KernelModuleLoad | KernelDebug
-            | CapabilitiesManage | Unsandboxed | DeveloperDebug | DeveloperProfile
-            | DeveloperTracing | SignatureRead | SignatureWrite => CapabilityClass::SystemOnly,
+            | CapabilitiesManage | SystemRandomRead | Unsandboxed | DeveloperDebug
+            | DeveloperProfile | DeveloperTracing | SignatureRead | SignatureWrite => {
+                CapabilityClass::SystemOnly
+            }
         }
     }
 
@@ -585,6 +601,8 @@ impl Capability {
             NetConnect => "net.connect",
             NetListen => "net.listen",
             NetRaw => "net.raw",
+            NetTlsConnect => "net.tls.connect",
+            NetHttpRequest => "net.http.request",
 
             IpcClient => "ipc.client",
             IpcServer => "ipc.server",
@@ -628,6 +646,7 @@ impl Capability {
             PowerSuspend => "power.suspend",
 
             SystemTimeRead => "system.time.read",
+            SystemRandomRead => "system.random.read",
             SystemTimeSet => "system.time.set",
             SystemInfoRead => "system.info.read",
             SystemLogsRead => "system.logs.read",
@@ -703,6 +722,8 @@ impl Capability {
             "net.connect" => NetConnect,
             "net.listen" => NetListen,
             "net.raw" => NetRaw,
+            "net.tls.connect" => NetTlsConnect,
+            "net.http.request" => NetHttpRequest,
 
             "ipc.client" => IpcClient,
             "ipc.server" => IpcServer,
@@ -746,6 +767,7 @@ impl Capability {
             "power.suspend" => PowerSuspend,
 
             "system.time.read" => SystemTimeRead,
+            "system.random.read" => SystemRandomRead,
             "system.time.set" => SystemTimeSet,
             "system.info.read" => SystemInfoRead,
             "system.logs.read" => SystemLogsRead,
@@ -849,6 +871,8 @@ impl Capability {
             NetConnect => UserCapability::NetConnect,
             NetListen => UserCapability::NetListen,
             NetRaw => UserCapability::NetRaw,
+            NetTlsConnect => UserCapability::NetTlsConnect,
+            NetHttpRequest => UserCapability::NetHttpRequest,
             WindowCreate => UserCapability::WindowCreate,
             WindowOverlay => UserCapability::WindowOverlay,
             WindowDecorate => UserCapability::WindowDecorate,
@@ -875,6 +899,7 @@ impl Capability {
             PowerReboot => UserCapability::PowerReboot,
             PowerSuspend => UserCapability::PowerSuspend,
             SystemTimeRead => UserCapability::SystemTimeRead,
+            SystemRandomRead => UserCapability::SystemRandomRead,
             SystemTimeSet => UserCapability::SystemTimeSet,
             SystemInfoRead => UserCapability::SystemInfoRead,
             SystemLogsRead => UserCapability::SystemLogsRead,
@@ -953,6 +978,8 @@ impl Capability {
             NetConnect,
             NetListen,
             NetRaw,
+            NetTlsConnect,
+            NetHttpRequest,
             IpcClient,
             IpcServer,
             ProcessSpawn,
@@ -984,6 +1011,7 @@ impl Capability {
             PowerReboot,
             PowerSuspend,
             SystemTimeRead,
+            SystemRandomRead,
             SystemTimeSet,
             SystemInfoRead,
             SystemLogsRead,

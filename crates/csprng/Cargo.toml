@@ -1,0 +1,9 @@
+[package]
+name = "mochios-csprng"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rand_chacha = { version = "0.3.1", default-features = false }
+rand_core = { version = "0.6.4", default-features = false }
+zeroize = { version = "1.8", default-features = false }

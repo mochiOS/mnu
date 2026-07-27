@@ -534,6 +534,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
             process::find_process_by_name(arg0, arg1)
         }
         x if x == SyscallNumber::Getrandom as u64 => process::getrandom(arg0, arg1, arg2),
+        x if x == SyscallNumber::RandomFill as u64 => process::random_fill(arg0, arg1),
         x if x == SyscallNumber::ThreadCreate as u64 => task::thread_create(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadExit as u64 => {
             if let Some(id) = crate::task::current_thread_id() {
@@ -552,9 +553,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::MemoryMap as u64 => process::mmap(arg0, arg1, arg2, arg3, arg4),
         x if x == SyscallNumber::GetFramebufferInfo as u64 => get_framebuffer_info(arg0),
         x if x == SyscallNumber::MapFramebuffer as u64 => map_framebuffer(arg0, arg1),
-        x if x == SyscallNumber::MapPhysicalRange as u64 => {
-            map_physical_range(arg0, arg1, arg2)
-        }
+        x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryProtect as u64 => pgroup::mprotect(arg0, arg1, arg2),
         x if x == SyscallNumber::Pipe as u64 => fs::pipe(arg0),
@@ -601,6 +600,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::EventSignal as u64 => event::signal(arg0, arg1, arg2),
         x if x == SyscallNumber::EventPoll as u64 => event::poll(arg0, arg1, arg2),
         x if x == SyscallNumber::TimeNow as u64 => time::get_ticks(),
+        x if x == SyscallNumber::ClockGettime as u64 => time::clock_gettime(arg0, arg1),
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
         x if x == SyscallNumber::PortIn as u64 => io::port_in(arg0, arg1),

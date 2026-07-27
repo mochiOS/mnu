@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{ECHILD, EFAULT, EINVAL, EIO, ENOMEM, ENOSYS, EPERM, SUCCESS};
+use super::types::{EAGAIN, ECHILD, EFAULT, EINVAL, EIO, ENOMEM, ENOSYS, EPERM, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
 use alloc::string::ToString;
@@ -1625,31 +1625,43 @@ pub fn set_robust_list(_head: u64, _len: u64) -> u64 {
     SUCCESS
 }
 
-/// getrandom システムコール（最小実装）
-///
-/// カーネル内の軽量PRNGでバイト列を生成して返す。
-pub fn getrandom(buf_ptr: u64, len: u64, _flags: u64) -> u64 {
+/// Fill a userspace buffer from the initialized kernel CSPRNG.
+pub fn getrandom(buf_ptr: u64, len: u64, flags: u64) -> u64 {
+    const CHUNK_LEN: usize = 256;
     if len == 0 {
         return 0;
     }
-    if buf_ptr == 0 || !super::validate_user_ptr(buf_ptr, len) {
+    if flags != 0 {
+        return EINVAL;
+    }
+    if buf_ptr == 0 || len > isize::MAX as u64 || !super::validate_user_ptr(buf_ptr, len) {
         return EFAULT;
     }
-    let mut state = crate::syscall::time::get_ticks()
-        ^ buf_ptr.rotate_left(17)
-        ^ len.rotate_left(7)
-        ^ 0x9E37_79B9_7F4A_7C15;
-    let mut out = alloc::vec![0u8; len as usize];
-    for b in out.iter_mut() {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        *b = (state >> 24) as u8;
+    let mut buffer = [0u8; CHUNK_LEN];
+    let mut offset = 0u64;
+    while offset < len {
+        let chunk_len = core::cmp::min(CHUNK_LEN as u64, len - offset) as usize;
+        if crate::random::fill(&mut buffer[..chunk_len]).is_err() {
+            buffer.fill(0);
+            return EAGAIN;
+        }
+        if let Err(error) = crate::syscall::copy_to_user(buf_ptr + offset, &buffer[..chunk_len]) {
+            buffer.fill(0);
+            return error;
+        }
+        offset += chunk_len as u64;
     }
-    match crate::syscall::copy_to_user(buf_ptr, &out) {
-        Ok(()) => len,
-        Err(e) => e,
+    buffer.fill(0);
+    len
+}
+
+pub fn random_fill(buf_ptr: u64, len: u64) -> u64 {
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::SystemRandomRead,
+    ]) {
+        return super::types::EACCES;
     }
+    getrandom(buf_ptr, len, 0)
 }
 
 /// FindProcessByNameシステムコール

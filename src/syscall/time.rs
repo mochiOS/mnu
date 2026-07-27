@@ -1,8 +1,50 @@
 //! 時間関連システムコール
 
-use super::types::{EAGAIN, EFAULT, EINVAL, SUCCESS};
+use super::types::{EACCES, EAGAIN, EFAULT, EINVAL, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+static REALTIME_VALID: AtomicBool = AtomicBool::new(false);
+static REALTIME_BASE_SECONDS: AtomicU64 = AtomicU64::new(0);
+static REALTIME_BASE_TICKS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RealtimeError {
+    Unavailable,
+    InvalidDate,
+    InvalidYear,
+}
+
+pub fn initialize_realtime() -> Result<(), RealtimeError> {
+    let date = crate::cpu::rtc_utc().ok_or(RealtimeError::Unavailable)?;
+    let seconds = mochios_time_core::unix_seconds(date).map_err(|error| match error {
+        mochios_time_core::Error::InvalidDate => RealtimeError::InvalidDate,
+        mochios_time_core::Error::InvalidYear => RealtimeError::InvalidYear,
+    })?;
+    REALTIME_BASE_SECONDS.store(seconds, Ordering::Release);
+    REALTIME_BASE_TICKS.store(get_ticks(), Ordering::Release);
+    REALTIME_VALID.store(true, Ordering::Release);
+    Ok(())
+}
+
+pub fn realtime() -> Result<(u64, u64), RealtimeError> {
+    if !REALTIME_VALID.load(Ordering::Acquire) {
+        return Err(RealtimeError::Unavailable);
+    }
+    let ticks_per_second = crate::interrupt::timer::ticks_per_second();
+    if ticks_per_second == 0 {
+        return Err(RealtimeError::Unavailable);
+    }
+    let elapsed = get_ticks().saturating_sub(REALTIME_BASE_TICKS.load(Ordering::Acquire));
+    let seconds = REALTIME_BASE_SECONDS
+        .load(Ordering::Acquire)
+        .saturating_add(elapsed / ticks_per_second);
+    let nanoseconds = (elapsed % ticks_per_second)
+        .saturating_mul(crate::interrupt::timer::tick_ms())
+        .saturating_mul(1_000_000);
+    Ok((seconds, nanoseconds))
+}
 
 #[derive(Clone, Copy)]
 struct SleepEntry {
@@ -90,25 +132,34 @@ pub fn clock_gettime(clk_id: u64, ts_ptr: u64) -> u64 {
         return EFAULT;
     }
 
-    // タイマーティックを使って時刻を計算
+    if clk_id == CLOCK_REALTIME
+        && !crate::syscall::security::caller_has_any_capability(&[
+            crate::capability::Capability::SystemTimeRead,
+        ])
+    {
+        return EACCES;
+    }
+
     let ticks = get_ticks();
     let ticks_per_second = crate::interrupt::timer::ticks_per_second();
     let tick_ns = crate::interrupt::timer::tick_ms() * 1_000_000;
-    let sec = ticks / ticks_per_second;
-    let nsec = (ticks % ticks_per_second) * tick_ns;
-
-    match clk_id {
-        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            // timespec { tv_sec: i64, tv_nsec: i64 }
-            let mut buf = [0u8; 16];
-            buf[0..8].copy_from_slice(&(sec as i64).to_ne_bytes());
-            buf[8..16].copy_from_slice(&(nsec as i64).to_ne_bytes());
-            match crate::syscall::copy_to_user(ts_ptr, &buf) {
-                Ok(()) => SUCCESS,
-                Err(e) => e,
-            }
-        }
-        _ => EINVAL,
+    let (sec, nsec) = match clk_id {
+        CLOCK_REALTIME => match realtime() {
+            Ok(value) => value,
+            Err(_) => return EAGAIN,
+        },
+        CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => (
+            ticks / ticks_per_second,
+            (ticks % ticks_per_second) * tick_ns,
+        ),
+        _ => return EINVAL,
+    };
+    let mut buf = [0u8; 16];
+    buf[0..8].copy_from_slice(&(sec as i64).to_ne_bytes());
+    buf[8..16].copy_from_slice(&(nsec as i64).to_ne_bytes());
+    match crate::syscall::copy_to_user(ts_ptr, &buf) {
+        Ok(()) => SUCCESS,
+        Err(e) => e,
     }
 }
 
