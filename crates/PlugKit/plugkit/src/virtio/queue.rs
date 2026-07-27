@@ -420,6 +420,20 @@ mod tests {
     }
 
     #[test]
+    fn reclaimed_receive_descriptor_can_be_reposted() {
+        let mut queue = queue(2);
+        let descriptor = Descriptor {
+            address: 0x8000,
+            length: 1_526,
+            device_writable: true,
+        };
+        let head = queue.enqueue(&[descriptor]).unwrap();
+        complete(&mut queue, 1, u32::from(head), 64);
+        assert_eq!(queue.pop_used().unwrap().unwrap().head, head);
+        assert_eq!(queue.enqueue(&[descriptor]), Ok(head));
+    }
+
+    #[test]
     fn handles_used_ring_wraparound() {
         let mut queue = queue(2);
         queue.last_used_index = u16::MAX;

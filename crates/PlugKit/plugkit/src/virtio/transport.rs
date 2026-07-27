@@ -513,6 +513,9 @@ mod tests {
         assert!(status.contains(DeviceStatus::DRIVER));
         assert!(status.contains(DeviceStatus::FEATURES_OK));
         assert!(status.contains(DeviceStatus::DRIVER_OK));
+        device.reset().unwrap();
+        assert_eq!(device.transport_mut().read_status().unwrap().bits(), 0);
+        assert_eq!(device.negotiated_features().bits(), 0);
     }
 
     #[test]

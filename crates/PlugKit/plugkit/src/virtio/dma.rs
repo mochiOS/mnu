@@ -4,6 +4,9 @@ use super::error::{VirtioError, VirtioResult};
 
 pub trait DmaMemory {
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn device_address(&self) -> u64;
     fn bytes(&self) -> &[u8];
     fn bytes_mut(&mut self) -> &mut [u8];
