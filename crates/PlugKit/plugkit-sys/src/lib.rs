@@ -464,11 +464,7 @@ impl PlugKitResources {
         self.alloc_dma_aligned(size, 1)
     }
 
-    pub fn alloc_dma_aligned(
-        &mut self,
-        size: usize,
-        alignment: usize,
-    ) -> PlugKitResult<DmaBuffer> {
+    pub fn alloc_dma_aligned(&mut self, size: usize, alignment: usize) -> PlugKitResult<DmaBuffer> {
         if !self.dma_supported {
             return Err(PlugKitError::NotSupported);
         }
