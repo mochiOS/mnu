@@ -104,9 +104,9 @@ version = "0.1.0"
 dependencies = [
  "linked_list_allocator",
  "mnu-abi",
- "mochios-csprng",
- "mochios-time-core",
- "plugkit-sys",
+ "mochios-csprng 0.1.0 (git+https://github.com/mochiOS/mnu)",
+ "mochios-time-core 0.1.0 (git+https://github.com/mochiOS/mnu)",
+ "plugkit-sys 0.1.0 (git+https://github.com/mochiOS/mnu)",
  "sha2",
  "spin",
  "x86_64",
@@ -115,6 +115,7 @@ dependencies = [
 [[package]]
 name = "mnu-abi"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/mnu#08c36e6a9cc59b29116dfc9f5eff4fadc1b51d75"
 
 [[package]]
 name = "mochios-csprng"
@@ -126,20 +127,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "mochios-csprng"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/mnu#08c36e6a9cc59b29116dfc9f5eff4fadc1b51d75"
+dependencies = [
+ "rand_chacha",
+ "rand_core",
+ "zeroize",
+]
+
+[[package]]
 name = "mochios-time-core"
 version = "0.1.0"
+
+[[package]]
+name = "mochios-time-core"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/mnu#08c36e6a9cc59b29116dfc9f5eff4fadc1b51d75"
 
 [[package]]
 name = "plugkit"
 version = "0.1.0"
 dependencies = [
- "plugkit-macros",
- "plugkit-sys",
+ "plugkit-macros 0.1.0 (git+https://github.com/mochiOS/mnu)",
+ "plugkit-sys 0.1.0 (git+https://github.com/mochiOS/mnu)",
+]
+
+[[package]]
+name = "plugkit"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/mnu#08c36e6a9cc59b29116dfc9f5eff4fadc1b51d75"
+dependencies = [
+ "plugkit-macros 0.1.0 (git+https://github.com/mochiOS/mnu)",
+ "plugkit-sys 0.1.0 (git+https://github.com/mochiOS/mnu)",
 ]
 
 [[package]]
 name = "plugkit-macros"
 version = "0.1.0"
+
+[[package]]
+name = "plugkit-macros"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/mnu#08c36e6a9cc59b29116dfc9f5eff4fadc1b51d75"
 
 [[package]]
 name = "plugkit-sys"
@@ -149,11 +179,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugkit-sys"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/mnu#08c36e6a9cc59b29116dfc9f5eff4fadc1b51d75"
+dependencies = [
+ "spin",
+]
+
+[[package]]
 name = "plugkit-test"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
- "plugkit",
+ "plugkit 0.1.0 (git+https://github.com/mochiOS/mnu)",
 ]
 
 [[package]]

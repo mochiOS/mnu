@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mnu-abi = { path = "../../crates/abi" }
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 spin = "0.9"
 uefi = { version = "0.30", features = ["alloc", "global_allocator"] }
 x86_64 = { version = "0.15", default-features = false, features = ["instructions"] }

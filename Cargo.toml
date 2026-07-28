@@ -31,16 +31,16 @@ bench = false
 required-features = ["kernel-bin"]
 
 [target.'cfg(any(target_os = "none", target_os = "uefi"))'.dependencies]
-mnu-abi = { path = "crates/abi" }
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 linked_list_allocator = "0.10.5"
-mochios-csprng = { path = "crates/csprng" }
-mochios-time-core = { path = "crates/time-core" }
+mochios-csprng = { git = "https://github.com/mochiOS/mnu", package = "mochios-csprng" }
+mochios-time-core = { git = "https://github.com/mochiOS/mnu", package = "mochios-time-core" }
 sha2 = { version = "0.10.8", default-features = false }
 spin = "0.9"
 x86_64 = "0.15"
 
 [dependencies]
-plugkit-sys = { path = "crates/PlugKit/plugkit-sys" }
+plugkit-sys = { git = "https://github.com/mochiOS/mnu", package = "plugkit-sys" }
 
 [features]
 default = ["kernel-bin"]
