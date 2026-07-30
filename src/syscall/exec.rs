@@ -915,9 +915,9 @@ fn exec_with_data(
             phdr_vaddr = load_base.saturating_add(eh.e_phoff);
         }
 
-        // __sinit は Service 起動時にのみ必要なシンボル。
-        // ここでは path ではなく、呼び出し側が明示した privilege を参照する。
-        let needs_sinit = requested_privilege == Some(crate::task::PrivilegeLevel::Service);
+        // The newlib crt0 initializes stdio with the required _impure_ptr argument.
+        // Calling __sinit directly here violates its ABI and duplicates that initialization.
+        let needs_sinit = false;
         let mut sinit_addr: Option<u64> = None;
         if needs_sinit {
             if let Some(eh_sym) = crate::elf::parse_elf_header(data) {
