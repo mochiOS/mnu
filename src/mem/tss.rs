@@ -10,7 +10,21 @@ use x86_64::VirtAddr;
 /// ダブルフォルト用ISTインデックス
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
-static TSS: Once<TaskStateSegment> = Once::new();
+const IST_STACK_SIZE: usize = 4096 * 16;
+const RING0_STACK_SIZE: usize = 4096 * 32;
+
+#[repr(align(16))]
+struct IstStack([u8; IST_STACK_SIZE]);
+
+#[repr(align(16))]
+struct Ring0Stack([u8; RING0_STACK_SIZE]);
+
+static TSS: [Once<TaskStateSegment>; crate::percpu::MAX_CPUS] =
+    [const { Once::new() }; crate::percpu::MAX_CPUS];
+static mut IST_STACKS: [IstStack; crate::percpu::MAX_CPUS] =
+    [const { IstStack([0; IST_STACK_SIZE]) }; crate::percpu::MAX_CPUS];
+static mut RING0_STACKS: [Ring0Stack; crate::percpu::MAX_CPUS] =
+    [const { Ring0Stack([0; RING0_STACK_SIZE]) }; crate::percpu::MAX_CPUS];
 
 /// TSSを初期化して返す
 ///
@@ -20,16 +34,14 @@ static TSS: Once<TaskStateSegment> = Once::new();
 pub fn init() -> &'static TaskStateSegment {
     info!("Initializing TSS...");
 
-    TSS.call_once(|| {
+    let cpu = crate::percpu::current_cpu_id();
+    TSS[cpu].call_once(|| {
         let mut tss = TaskStateSegment::new();
 
         // ダブルフォルト用の専用スタックを設定
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            const STACK_SIZE: usize = 4096 * 16; // 64KB (増量: 20KB→64KB)
-            static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-
-            let stack_start = VirtAddr::from_ptr(unsafe { &raw const STACK });
-            let stack_end = stack_start + STACK_SIZE as u64;
+            let stack_start = VirtAddr::from_ptr(unsafe { &raw const IST_STACKS[cpu] });
+            let stack_end = stack_start + IST_STACK_SIZE as u64;
             info!(
                 "  IST[{}] stack: {:#x}",
                 DOUBLE_FAULT_IST_INDEX,
@@ -40,10 +52,7 @@ pub fn init() -> &'static TaskStateSegment {
 
         // ユーザーモードからカーネルモードへの遷移用のRing0スタックを設定
         tss.privilege_stack_table[0] = {
-            const RING0_STACK_SIZE: usize = 4096 * 32; // 128KB (増量: 16KB→128KB)
-            static mut RING0_STACK: [u8; RING0_STACK_SIZE] = [0; RING0_STACK_SIZE];
-
-            let stack_start = VirtAddr::from_ptr(unsafe { &raw const RING0_STACK });
+            let stack_start = VirtAddr::from_ptr(unsafe { &raw const RING0_STACKS[cpu] });
             let stack_end = stack_start + RING0_STACK_SIZE as u64;
             info!("  Ring0 stack (RSP0): {:#x}", stack_end.as_u64());
             stack_end
@@ -69,7 +78,7 @@ pub fn init() -> &'static TaskStateSegment {
 /// ## Arguments
 /// - `rsp`: 新しいRSP0の値 (次のスレッドのカーネルスタックのアドレス)
 pub fn set_rsp0(rsp: u64) {
-    if let Some(tss) = TSS.get() {
+    if let Some(tss) = TSS[crate::percpu::current_cpu_id()].get() {
         let virt = tss as *const TaskStateSegment as u64;
         let ptr = crate::mem::paging::translate_addr(VirtAddr::new(virt))
             .and_then(|phys| {

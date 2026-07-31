@@ -15,7 +15,12 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = tss::DOUBLE_FAULT_IST_INDEX;
 #[repr(align(4096))]
 struct PageAligned<T>(T);
 
-static GDT: PageAligned<Once<(GlobalDescriptorTable, Selectors)>> = PageAligned(Once::new());
+static GDT: PageAligned<[Once<(GlobalDescriptorTable, Selectors)>; crate::percpu::MAX_CPUS]> =
+    PageAligned([const { Once::new() }; crate::percpu::MAX_CPUS]);
+
+fn current_gdt() -> &'static Once<(GlobalDescriptorTable, Selectors)> {
+    &GDT.0[crate::percpu::current_cpu_id()]
+}
 
 fn halt_on_missing_gdt(which: &'static str) -> ! {
     crate::audit::log(crate::audit::AuditEventKind::Fault, which);
@@ -51,7 +56,7 @@ pub fn init() {
     crate::debug!("TSS initialized");
 
     // GDTを初期化
-    let (gdt, selectors) = GDT.0.call_once(|| {
+    let (gdt, selectors) = current_gdt().call_once(|| {
         crate::debug!("Creating GDT table");
         let mut gdt = GlobalDescriptorTable::new();
         let code_selector = gdt.append(Descriptor::kernel_code_segment());
@@ -96,19 +101,6 @@ pub fn init() {
         set_data_segments(selectors.data_selector);
         crate::debug!("Data segments set");
 
-        // 共有GDT上のTSS descriptorはBSPでbusyになる。
-        // APでも同じdescriptorを再利用するため、LTR前にbusy bitを落としておく。
-        let mut gdtr: [u8; 10] = [0; 10];
-        asm!("sgdt [{}]", in(reg) &mut gdtr, options(nostack));
-        let gdt_base = u64::from_le_bytes([
-            gdtr[2], gdtr[3], gdtr[4], gdtr[5], gdtr[6], gdtr[7], gdtr[8], gdtr[9],
-        ]);
-        let tss_index = selectors.tss_selector.0 as usize >> 3;
-        let tss_desc_ptr = (gdt_base + (tss_index * 8) as u64) as *mut u64;
-        let tss_desc_old = core::ptr::read_volatile(tss_desc_ptr);
-        let tss_desc_new = tss_desc_old & !(1u64 << 41);
-        core::ptr::write_volatile(tss_desc_ptr, tss_desc_new);
-
         // TSSをロード
         crate::debug!("Loading TSS");
         load_tss(selectors.tss_selector);
@@ -120,7 +112,7 @@ pub fn init() {
 
 /// ユーザーモード用コードセレクタ（RPL=3）を返す
 pub fn user_code_selector() -> u16 {
-    GDT.0
+    current_gdt()
         .get()
         .map(|g| g.1.user_code_selector.0)
         .unwrap_or_else(|| halt_on_missing_gdt("gdt user_code_selector unavailable"))
@@ -128,7 +120,7 @@ pub fn user_code_selector() -> u16 {
 
 /// ユーザーモード用データセレクタ（RPL=3）を返す
 pub fn user_data_selector() -> u16 {
-    GDT.0
+    current_gdt()
         .get()
         .map(|g| g.1.user_data_selector.0)
         .unwrap_or_else(|| halt_on_missing_gdt("gdt user_data_selector unavailable"))
@@ -136,7 +128,7 @@ pub fn user_data_selector() -> u16 {
 
 /// カーネル用コードセレクタを返す
 pub fn kernel_code_selector() -> u16 {
-    GDT.0
+    current_gdt()
         .get()
         .map(|g| g.1.code_selector.0)
         .unwrap_or_else(|| halt_on_missing_gdt("gdt kernel_code_selector unavailable"))
@@ -144,7 +136,7 @@ pub fn kernel_code_selector() -> u16 {
 
 /// カーネル用データセレクタを返す
 pub fn kernel_data_selector() -> u16 {
-    GDT.0
+    current_gdt()
         .get()
         .map(|g| g.1.data_selector.0)
         .unwrap_or_else(|| halt_on_missing_gdt("gdt kernel_data_selector unavailable"))

@@ -238,9 +238,24 @@ fn schedule_with_slot() -> Option<(ThreadId, usize, Option<usize>)> {
     }
 
     // 次の Ready スレッドを探す
-    let next_slot = queue.next_ready_slot_after(current_slot)?;
+    let next_slot =
+        queue.next_ready_slot_for_cpu_after(current_slot, crate::percpu::current_cpu_id())?;
+    let cpu = crate::percpu::current_cpu_id();
     let (next_id, next_pid, interactive_score, cpu_burst_score) =
-        queue.get_slot(next_slot).map(|thread| {
+        queue.get_slot_mut(next_slot).map(|thread| {
+            if thread.cpu_affinity().is_none() {
+                thread.set_cpu_affinity(Some(cpu));
+                if cpu != 0 {
+                    crate::debug!(
+                        "SMP CPU {} claimed thread {:?} '{}' rsp={:#x} rip={:#x}",
+                        cpu,
+                        thread.id(),
+                        thread.name(),
+                        thread.context().rsp,
+                        thread.context().rip,
+                    );
+                }
+            }
             (
                 thread.id(),
                 thread.process_id(),

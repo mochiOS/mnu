@@ -217,6 +217,8 @@ pub struct Thread {
     name_len: usize,
     /// 現在の状態
     state: ThreadState,
+    /// CPU that owns this thread after its first dispatch.
+    cpu_affinity: Option<usize>,
     /// CPUコンテキスト
     context: Context,
     /// カーネルスタックの開始アドレス
@@ -519,6 +521,7 @@ impl Thread {
             name: name_buf,
             name_len: len,
             state: ThreadState::Ready,
+            cpu_affinity: None,
             context,
             kernel_stack,
             kernel_stack_size,
@@ -644,6 +647,7 @@ impl Thread {
             name: name_buf,
             name_len: len,
             state: ThreadState::Ready,
+            cpu_affinity: None,
             context,
             kernel_stack,
             kernel_stack_size,
@@ -786,6 +790,7 @@ impl Thread {
             ],
             name_len: 4,
             state: ThreadState::Ready,
+            cpu_affinity: None,
             context,
             kernel_stack,
             kernel_stack_size,
@@ -938,6 +943,14 @@ impl Thread {
     /// スレッドの状態を設定
     pub fn set_state(&mut self, state: ThreadState) {
         self.state = state;
+    }
+
+    pub fn cpu_affinity(&self) -> Option<usize> {
+        self.cpu_affinity
+    }
+
+    pub fn set_cpu_affinity(&mut self, cpu: Option<usize>) {
+        self.cpu_affinity = cpu;
     }
 
     /// コンテキストへの可変参照を取得
@@ -1195,6 +1208,33 @@ impl ThreadQueue {
         let next_slot = self.ready_mask_from_slot(start)?;
         self.rr_cursor = (next_slot + 1) % Self::MAX_THREADS;
         Some(next_slot)
+    }
+
+    pub fn next_ready_slot_for_cpu_after(
+        &mut self,
+        current_slot: Option<usize>,
+        cpu: usize,
+    ) -> Option<usize> {
+        if self.ready_bitmap == 0 {
+            return None;
+        }
+        let start = current_slot
+            .map(|slot| (slot + 1) % Self::MAX_THREADS)
+            .unwrap_or(self.rr_cursor);
+        for offset in 0..Self::MAX_THREADS {
+            let slot = (start + offset) % Self::MAX_THREADS;
+            if self.ready_bitmap & (1u64 << slot) == 0 {
+                continue;
+            }
+            if self
+                .get_slot(slot)
+                .is_some_and(|thread| thread.cpu_affinity().is_none_or(|owner| owner == cpu))
+            {
+                self.rr_cursor = (slot + 1) % Self::MAX_THREADS;
+                return Some(slot);
+            }
+        }
+        None
     }
 
     /// 指定スロットの状態を更新

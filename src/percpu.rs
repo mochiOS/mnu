@@ -9,7 +9,7 @@ use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
 
-const MAX_CPUS: usize = 64;
+pub const MAX_CPUS: usize = 64;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 pub const SYSCALL_SHARED_BASE: u64 = 0x0000_7fff_0000_0000;
 pub const SYSCALL_SHARED_STACK_BASE: u64 = SYSCALL_SHARED_BASE + (MAX_CPUS as u64) * 4096;

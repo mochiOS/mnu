@@ -14,8 +14,6 @@ const MAX_SMP_STACKS: usize = crate::MAX_CPU_IDS;
 const X2APIC_SIVR_MSR: u32 = 0x80F;
 const X2APIC_ICR_MSR: u32 = 0x830;
 const APIC_SIVR_ENABLE: u64 = 1 << 8;
-const START_SECONDARY_CPUS: bool = false;
-
 #[repr(align(16))]
 struct ApBootStack([u8; AP_BOOT_STACK_SIZE]);
 
@@ -529,13 +527,6 @@ unsafe fn install_trampoline(boot_info: &'static BootInfo) -> Option<()> {
 }
 
 pub fn start_secondary_cpus() {
-    if !START_SECONDARY_CPUS {
-        crate::warn!(
-            "SMP startup temporarily disabled; booting single-core to avoid AP trampoline fault"
-        );
-        return;
-    }
-
     let boot_info = match boot_info() {
         Some(info) => info,
         None => {

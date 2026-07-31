@@ -67,7 +67,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     crate::cext::load_modules();
     if crate::cext::fs::is_loaded() {
         if crate::cext::disk::is_loaded() {
-            let rc = crate::cext::fs::set_disk_ops(crate::cext::disk::ops_ptr());
+            let rc = crate::cext::fs::set_disk_ops(crate::cext::disk::serialized_ops_ptr());
             if rc != 0 {
                 crate::warn!("cext: fs set_disk_ops failed rc={}", rc);
             }

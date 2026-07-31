@@ -25,23 +25,31 @@ fn kernel_process_id() -> Option<task::ProcessId> {
 
 fn ap_idle_loop() -> ! {
     loop {
-        x86_64::instructions::hlt();
+        task::schedule_and_switch();
+        core::hint::spin_loop();
     }
 }
 
 fn spawn_ap_idle_thread() -> Result<(task::ThreadId, usize)> {
-    let kernel_pid = kernel_process_id().ok_or(Kernel::Process(Process::ProcessNotFound))?;
     let kernel_stack = task::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE)
         .ok_or(Kernel::Memory(crate::result::Memory::OutOfMemory))?;
     let seq = AP_IDLE_THREAD_SEQ.fetch_add(1, Ordering::AcqRel) + 1;
     let name = alloc::format!("ap-idle-{}", seq);
-    let thread = task::Thread::new(
-        kernel_pid,
+    let idle_process =
+        task::Process::new(&name, task::PrivilegeLevel::Core, kernel_process_id(), 0);
+    let idle_pid = idle_process.id();
+    if task::add_process(idle_process).is_none() {
+        task::free_kernel_stack(kernel_stack);
+        return Err(Kernel::Process(Process::MaxProcessesReached));
+    }
+    let mut thread = task::Thread::new(
+        idle_pid,
         &name,
         ap_idle_loop,
         kernel_stack,
         KERNEL_THREAD_STACK_SIZE,
     );
+    thread.set_cpu_affinity(Some(crate::percpu::current_cpu_id()));
     let Some(thread_id) = task::add_thread(thread) else {
         task::free_kernel_stack(kernel_stack);
         return Err(Kernel::Process(Process::MaxProcessesReached));
@@ -183,6 +191,13 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo) -> ! {
     info!("Secondary CPU CPU features initialized");
     crate::syscall::syscall_entry::init_syscall_current_cpu();
     info!("Secondary CPU syscall state initialized");
+    let (idle_thread_id, idle_thread_slot) = match spawn_ap_idle_thread() {
+        Ok(v) => v,
+        Err(err) => {
+            crate::warn!("Failed to create AP idle thread: {:?}", err);
+            halt_forever();
+        }
+    };
     if let Some(handoff) = crate::smp::handoff() {
         let before = handoff.ap_count.fetch_add(1, Ordering::SeqCst);
         info!(
@@ -191,13 +206,6 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo) -> ! {
             before + 1
         );
     }
-    let (idle_thread_id, idle_thread_slot) = match spawn_ap_idle_thread() {
-        Ok(v) => v,
-        Err(err) => {
-            crate::warn!("Failed to create AP idle thread: {:?}", err);
-            halt_forever();
-        }
-    };
     info!(
         "Secondary CPU switching to idle thread {:?} (slot={})",
         idle_thread_id, idle_thread_slot
@@ -229,13 +237,14 @@ fn create_kernel_proc(
     }
 
     let stack_addr = unsafe { (&raw const KERNEL_THREAD_STACK as *const u8) as u64 };
-    let kernel_thread = task::Thread::new(
+    let mut kernel_thread = task::Thread::new(
         kernel_pid,
         "core",
         kernel_main,
         stack_addr,
         KERNEL_THREAD_STACK_SIZE,
     );
+    kernel_thread.set_cpu_affinity(Some(crate::percpu::current_cpu_id()));
 
     if task::add_thread(kernel_thread).is_none() {
         return Err(Kernel::Process(Process::MaxProcessesReached));
