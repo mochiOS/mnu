@@ -450,6 +450,7 @@ const O_CREAT: u64 = 0o100;
 const O_EXCL: u64 = 0o200;
 const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
+const O_NONBLOCK: u64 = 0x4000;
 
 fn errno_from_cext(rc: i32) -> u64 {
     match rc {
@@ -930,13 +931,13 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    let pipe_id = match with_fd_table(pid, |t| t.get(idx).and_then(|fh| fh.pipe_id)) {
-        Some(Some(id)) => Some(id),
-        Some(None) => None,
-        None => return EBADF,
-    };
+    let (pipe_id, open_flags) =
+        match with_fd_table(pid, |t| t.get(idx).map(|fh| (fh.pipe_id, fh.open_flags))) {
+            Some(Some(info)) => info,
+            Some(None) | None => return EBADF,
+        };
     if let Some(pipe_id) = pipe_id {
-        return read_pipe(pipe_id, buf_ptr, len);
+        return read_pipe(pipe_id, open_flags, buf_ptr, len);
     }
 
     let to_copy = match usize::try_from(len) {
@@ -1003,48 +1004,44 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     written as u64
 }
 
-fn read_pipe(pipe_id: usize, buf_ptr: u64, len: u64) -> u64 {
+fn read_pipe(pipe_id: usize, open_flags: u64, buf_ptr: u64, len: u64) -> u64 {
     let target_len = match usize::try_from(len) {
         Ok(v) => v.min(MAX_IO_BYTES),
         Err(_) => MAX_IO_BYTES,
     };
-    let mut copied = 0usize;
-    while copied < target_len {
-        let mut chunk = Vec::new();
-        let mut should_wait = false;
-        {
-            let mut table = PIPE_TABLE.lock();
-            let Some(Some(pipe)) = table.get_mut(pipe_id) else {
-                return if copied == 0 { EBADF } else { copied as u64 };
+    loop {
+        let chunk = {
+            let table = PIPE_TABLE.lock();
+            let Some(Some(pipe)) = table.get(pipe_id) else {
+                return EBADF;
             };
             if pipe.data.is_empty() {
                 if pipe.writers == 0 {
-                    return copied as u64;
+                    return 0;
                 }
-                should_wait = true;
+                if (open_flags & O_NONBLOCK) != 0 {
+                    return EAGAIN;
+                }
+                None
             } else {
-                let take = core::cmp::min(pipe.data.len(), target_len - copied);
-                chunk.extend_from_slice(&pipe.data[..take]);
+                let take = core::cmp::min(pipe.data.len(), target_len);
+                Some(pipe.data[..take].to_vec())
             }
-        }
-        if should_wait {
+        };
+        let Some(chunk) = chunk else {
             crate::task::yield_now();
             continue;
-        }
-        if chunk.is_empty() {
-            break;
-        }
-        if crate::syscall::copy_to_user(buf_ptr + copied as u64, &chunk).is_err() {
+        };
+        if crate::syscall::copy_to_user(buf_ptr, &chunk).is_err() {
             return EFAULT;
         }
         let mut table = PIPE_TABLE.lock();
         let Some(Some(pipe)) = table.get_mut(pipe_id) else {
-            return if copied == 0 { EBADF } else { copied as u64 };
+            return EBADF;
         };
         pipe.data.drain(0..chunk.len());
-        copied += chunk.len();
+        return chunk.len() as u64;
     }
-    copied as u64
 }
 
 /// Write: 開かれたファイルへデータを書き込む
