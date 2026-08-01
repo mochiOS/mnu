@@ -571,6 +571,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         }
         x if x == SyscallNumber::Truncate as u64 => fs::truncate(arg0, arg1),
         x if x == SyscallNumber::Ftruncate as u64 => fs::ftruncate(arg0, arg1),
+        x if x == SyscallNumber::Rmdir as u64 => fs::rmdir(arg0),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
         x if x == SyscallNumber::AllocSharedPages as u64 => {

@@ -464,6 +464,7 @@ fn errno_from_cext(rc: i32) -> u64 {
         -28 => ENOSPC,
         -30 => EROFS,
         -38 => ENOSYS,
+        -39 => (-39i64) as u64,
         -75 => EOVERFLOW,
         _ => EIO,
     }
@@ -791,8 +792,9 @@ pub fn rmdir(path_ptr: u64) -> u64 {
         Some(_) => return ENOTDIR,
         None => return ENOENT,
     }
-    if crate::cext::fs::remove(&resolved, true) != 0 {
-        return EIO;
+    let rc = crate::cext::fs::remove(&resolved, true);
+    if rc != 0 {
+        return errno_from_cext(rc);
     }
     SUCCESS
 }
@@ -1606,11 +1608,12 @@ pub fn renameat(old_dirfd: i64, old_path_ptr: u64, new_dirfd: i64, new_path_ptr:
     if let Err(errno) = ensure_fs_path_access(&new_path, PATH_CREATE) {
         return errno;
     }
-    if metadata_rootfs_first(&old_path).is_none() || metadata_rootfs_first(&new_path).is_none() {
+    if metadata_rootfs_first(&old_path).is_none() {
         return ENOENT;
     }
-    if crate::cext::fs::rename(&old_path, &new_path) != 0 {
-        return EIO;
+    let rc = crate::cext::fs::rename(&old_path, &new_path);
+    if rc != 0 {
+        return errno_from_cext(rc);
     }
     SUCCESS
 }
