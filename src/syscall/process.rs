@@ -811,7 +811,8 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
     if length == 0 {
         return EINVAL;
     }
-    const MAX_MMAP_BACKING_BYTES: u64 = 16 * 1024 * 1024;
+    // A 4K RGBA image needs about 32 MiB in one contiguous allocation.
+    const MAX_MMAP_BACKING_BYTES: u64 = 64 * 1024 * 1024;
 
     // MAP_ANONYMOUS (0x20) は従来通りサポートする。
     const MAP_ANONYMOUS: u64 = 0x20;
@@ -917,15 +918,8 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
         };
 
         if anonymous {
-            let backing_len = match usize::try_from(size) {
-                Ok(len) => len,
-                Err(_) => return Err(ENOMEM),
-            };
-            let mut backing = alloc::vec::Vec::new();
-            backing.try_reserve_exact(backing_len).map_err(|_| ENOMEM)?;
-            backing.resize(backing_len, 0);
             let region = crate::task::MmapRegion::anonymous(
-                map_start, size, prot, flags, backing, writable, shared,
+                map_start, size, prot, flags, writable, shared,
             );
             if !process.add_mmap_region(region) {
                 crate::debug!("process::mmap overlap");

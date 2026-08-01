@@ -179,7 +179,6 @@ impl MmapRegion {
         len: u64,
         prot: u64,
         flags: u64,
-        data: alloc::vec::Vec<u8>,
         writable: bool,
         shared: bool,
     ) -> Self {
@@ -189,7 +188,7 @@ impl MmapRegion {
             prot,
             flags,
             backing: MmapBacking::Anonymous {
-                data,
+                data: alloc::vec::Vec::new(),
                 writable,
                 shared,
             },
