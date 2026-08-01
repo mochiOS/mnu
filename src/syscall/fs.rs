@@ -16,7 +16,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 const MAX_IO_BYTES: usize = 128 * 1024 * 1024;
-const READ_IO_CHUNK_BYTES: usize = 64 * 1024;
+const READ_IO_CHUNK_BYTES: usize = 256 * 1024;
 const WRITE_IO_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_PIPES: usize = 64;
 const PIPE_BUFFER_CAP: usize = 64 * 1024;
