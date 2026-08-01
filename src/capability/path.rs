@@ -132,8 +132,11 @@ pub enum PathRegistryError {
 
 static PATH_REGISTRY: Mutex<Option<BTreeMap<String, PathCapability>>> = Mutex::new(None);
 
-fn registry_mut() -> spin::MutexGuard<'static, Option<BTreeMap<String, PathCapability>>> {
-    PATH_REGISTRY.lock()
+fn with_registry<R>(f: impl FnOnce(&mut Option<BTreeMap<String, PathCapability>>) -> R) -> R {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut registry = PATH_REGISTRY.lock();
+        f(&mut registry)
+    })
 }
 
 fn normalize_path(path: &str) -> Option<String> {
@@ -193,24 +196,28 @@ pub fn register_path(
         return Err(PathRegistryError::InvalidPath);
     };
     let path_type = classify_path(&normalized);
-    let mut registry = registry_mut();
-    let map = registry.get_or_insert_with(BTreeMap::new);
-    if let Some(existing) = map.get(&normalized) {
-        if existing.owner == owner && existing.rights == rights && existing.path_type == path_type {
-            return Ok(());
+    with_registry(|registry| {
+        let map = registry.get_or_insert_with(BTreeMap::new);
+        if let Some(existing) = map.get(&normalized) {
+            if existing.owner == owner
+                && existing.rights == rights
+                && existing.path_type == path_type
+            {
+                return Ok(());
+            }
+            return Err(PathRegistryError::AlreadyRegistered);
         }
-        return Err(PathRegistryError::AlreadyRegistered);
-    }
-    map.insert(
-        normalized.clone(),
-        PathCapability {
-            path: normalized,
-            path_type,
-            owner,
-            rights,
-        },
-    );
-    Ok(())
+        map.insert(
+            normalized.clone(),
+            PathCapability {
+                path: normalized,
+                path_type,
+                owner,
+                rights,
+            },
+        );
+        Ok(())
+    })
 }
 
 pub fn register_typed_path(
@@ -222,24 +229,28 @@ pub fn register_typed_path(
     let Some(normalized) = normalize_path(path) else {
         return Err(PathRegistryError::InvalidPath);
     };
-    let mut registry = registry_mut();
-    let map = registry.get_or_insert_with(BTreeMap::new);
-    if let Some(existing) = map.get(&normalized) {
-        if existing.owner == owner && existing.rights == rights && existing.path_type == path_type {
-            return Ok(());
+    with_registry(|registry| {
+        let map = registry.get_or_insert_with(BTreeMap::new);
+        if let Some(existing) = map.get(&normalized) {
+            if existing.owner == owner
+                && existing.rights == rights
+                && existing.path_type == path_type
+            {
+                return Ok(());
+            }
+            return Err(PathRegistryError::AlreadyRegistered);
         }
-        return Err(PathRegistryError::AlreadyRegistered);
-    }
-    map.insert(
-        normalized.clone(),
-        PathCapability {
-            path: normalized,
-            path_type,
-            owner,
-            rights,
-        },
-    );
-    Ok(())
+        map.insert(
+            normalized.clone(),
+            PathCapability {
+                path: normalized,
+                path_type,
+                owner,
+                rights,
+            },
+        );
+        Ok(())
+    })
 }
 
 pub fn register_service_paths(service_pid: u64, paths: &[(&str, PathRights)]) -> usize {
@@ -317,37 +328,39 @@ fn parse_config_path_type(key: &str) -> Option<PathType> {
 
 pub fn lookup_path(path: &str) -> Option<PathCapability> {
     let normalized = normalize_path(path)?;
-    let registry = registry_mut();
-    let map = registry.as_ref()?;
-    let mut best: Option<&PathCapability> = None;
-    for (registered_path, capability) in map.iter() {
-        let is_match = if registered_path == "/" {
-            true
-        } else {
-            normalized == *registered_path
-                || normalized.starts_with(registered_path)
-                    && normalized
-                        .as_bytes()
-                        .get(registered_path.len())
-                        .map(|b| *b == b'/')
-                        .unwrap_or(false)
-        };
-        if is_match {
-            best = match best {
-                Some(current) if current.path.len() >= capability.path.len() => Some(current),
-                _ => Some(capability),
+    with_registry(|registry| {
+        let map = registry.as_ref()?;
+        let mut best: Option<&PathCapability> = None;
+        for (registered_path, capability) in map.iter() {
+            let is_match = if registered_path == "/" {
+                true
+            } else {
+                normalized == *registered_path
+                    || normalized.starts_with(registered_path)
+                        && normalized
+                            .as_bytes()
+                            .get(registered_path.len())
+                            .map(|b| *b == b'/')
+                            .unwrap_or(false)
             };
+            if is_match {
+                best = match best {
+                    Some(current) if current.path.len() >= capability.path.len() => Some(current),
+                    _ => Some(capability),
+                };
+            }
         }
-    }
-    best.cloned()
+        best.cloned()
+    })
 }
 
 pub fn list_paths() -> Vec<PathCapability> {
-    let registry = registry_mut();
-    registry
-        .as_ref()
-        .map(|map| map.values().cloned().collect())
-        .unwrap_or_default()
+    with_registry(|registry| {
+        registry
+            .as_ref()
+            .map(|map| map.values().cloned().collect())
+            .unwrap_or_default()
+    })
 }
 
 pub fn rights_to_string(rights: PathRights) -> String {
