@@ -1668,7 +1668,13 @@ pub fn openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
 /// AT_FDCWD(-100) の場合は stat() と同等。
 pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
     const AT_FDCWD: i64 = -100;
+    const AT_SYMLINK_NOFOLLOW: u64 = 2;
     const AT_EMPTY_PATH: u64 = 0x1000;
+    const SUPPORTED_FLAGS: u64 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+
+    if flags & !SUPPORTED_FLAGS != 0 {
+        return EINVAL;
+    }
 
     // AT_EMPTY_PATH: path が空の場合は dirfd 自体を fstat する
     if (flags & AT_EMPTY_PATH) != 0 {
