@@ -136,15 +136,15 @@ if [[ -z "${BOOT_BIN}" || ! -f "${BOOT_BIN}" ]]; then
 fi
 
 rm -rf "${ESP_DIR}" "${INITFS_STAGE}" "${ROOTFS_STAGE}"
-mkdir -p "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}"
+mkdir -p "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}/tmp"
 
 install -m 0644 "${KERNEL_BIN}" "${ESP_DIR}/kernel"
 install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/core.service"
-install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/captest.bin"
-install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/unsigned.bin"
-install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/hello.bin"
+install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/tmp/captest.bin"
+install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/tmp/unsigned.bin"
+install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/tmp/hello.bin"
 mkdir -p "${INITFS_STAGE}/plugkit/test"
 install -m 0644 "${ROOT_DIR}/examples/plugkit/test/about.toml" "${INITFS_STAGE}/plugkit/test/about.toml"
 install -m 0755 "${PLUGKIT_TEST_BIN}" "${INITFS_STAGE}/plugkit/test/entry.elf"
@@ -155,8 +155,8 @@ SIGNATURE_DB_ARGS=(
     --output "${SIGNATURE_DB_STAGE}"
     --entry "core.service=${USER_BIN}"
     --entry "/plugkit/test/entry.elf=${PLUGKIT_TEST_BIN}"
-    --entry "/hello.bin=${USER_BIN}"
-    --entry "/captest.bin=${CAPTEST_BIN}"
+    --entry "/tmp/hello.bin=${USER_BIN}"
+    --entry "/tmp/captest.bin=${CAPTEST_BIN}"
 )
 while IFS= read -r -d '' module_path; do
     module_name="$(basename "${module_path}")"

@@ -4,7 +4,7 @@ use core::str;
 
 use spin::Mutex;
 
-const EXECUTION_ALLOWLIST_PATH: &str = "/execution.allowlist";
+const EXECUTION_ALLOWLIST_PATH: &str = "/libraries/system/execution.allowlist";
 
 #[derive(Clone)]
 struct SignatureRecord {

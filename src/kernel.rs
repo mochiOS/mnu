@@ -1,11 +1,11 @@
 use crate::capability::path::{
-    register_service_paths, PathRights, PATH_CREATE, PATH_LIST, PATH_READ, PATH_WRITE,
+    PATH_CREATE, PATH_LIST, PATH_READ, PATH_WRITE, PathRights, register_service_paths,
 };
 use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
 use crate::util::log::LogLevel;
+use crate::{BootInfo, MemoryRegion, Result, init::kinit, task, util};
 use crate::{debug, info};
-use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
 use core::sync::atomic::Ordering;
 use core::sync::atomic::{AtomicU64, AtomicUsize};
 
@@ -135,10 +135,10 @@ fn kernel_main() -> ! {
         }
         let service_paths = [
             (
-                "/core.service.fs-test",
+                "/tmp/core.service.fs-test",
                 PathRights::new(PATH_READ | PATH_WRITE | PATH_CREATE),
             ),
-            ("/testdata", PathRights::new(PATH_READ | PATH_LIST)),
+            ("/tmp/testdata", PathRights::new(PATH_READ | PATH_LIST)),
         ];
         let _ = register_service_paths(manager_pid, &service_paths);
     } else {

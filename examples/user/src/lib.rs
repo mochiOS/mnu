@@ -188,11 +188,11 @@ const SYS_FILE_WRITE: u64 = mnu_abi::SyscallNumber::FileWrite as u64;
 const SYS_FILE_SEEK: u64 = mnu_abi::SyscallNumber::FileSeek as u64;
 const STDOUT_FD: u64 = 1;
 const PLUGKIT_TEST_DRIVER_PATH: &str = "/plugkit/test/entry.elf";
-const CORE_SERVICE_FS_TEST_PATH: &str = "/core.service.fs-test";
-const SIGNATURE_DB_PATH: &str = "/execution.allowlist";
-const SIGNATURE_ALLOW_PATH: &str = "/captest.bin";
-const SIGNATURE_DENY_PATH: &str = "/unsigned.bin";
-const ROOTFS_BENCH_PATH: &str = "/testdata";
+const CORE_SERVICE_FS_TEST_PATH: &str = "/tmp/core.service.fs-test";
+const SIGNATURE_DB_PATH: &str = "/libraries/system/execution.allowlist";
+const SIGNATURE_ALLOW_PATH: &str = "/tmp/captest.bin";
+const SIGNATURE_DENY_PATH: &str = "/tmp/unsigned.bin";
+const ROOTFS_BENCH_PATH: &str = "/tmp/testdata";
 const MEMORY_PHYS_MAP_CAP: &str = "memory.phys.map";
 const FS_TEST_SIZE: usize = 1024 * 1024;
 static mut FS_TEST_WRITE_BUF: [u8; FS_TEST_SIZE] = [0x55; FS_TEST_SIZE];
@@ -709,7 +709,7 @@ fn format_line(prefix: &str, bytes: u64, elapsed_ms: u64, mib_s: f64) -> LineBuf
 
 pub fn path_registry_self_test() -> bool {
     write_line("[core.service][path-map]");
-    write_line("/core.service.fs-test\towner=service\trights=read|write|create\ttype=Custom");
+    write_line("/tmp/core.service.fs-test\towner=service\trights=read|write|create\ttype=Custom");
     let line = alloc::format!(
         "{}\towner=service\trights=read|list\ttype=Custom",
         ROOTFS_BENCH_PATH

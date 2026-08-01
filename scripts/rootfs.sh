@@ -36,24 +36,29 @@ need_file "${ROOTFS_SOURCE_DIR}"
 mkdir -p "$(dirname "${ROOTFS_IMG}")"
 rm -rf "${ROOTFS_STAGE}"
 mkdir -p "${ROOTFS_STAGE}"
+mkdir -p "${ROOTFS_STAGE}/tmp" "${ROOTFS_STAGE}/libraries/system" "${ROOTFS_STAGE}/system/logs"
 
 if [[ "${ROOTFS_CLEAN_INITFS}" != "0" ]]; then
     rm -rf "${INITFS_STAGE}"
 fi
-mkdir -p "${INITFS_STAGE}"
+mkdir -p "${INITFS_STAGE}" "${INITFS_STAGE}/tmp"
 
 cp -a "${ROOTFS_SOURCE_DIR}/." "${ROOTFS_STAGE}/"
 cp -a "${ROOTFS_SOURCE_DIR}/." "${INITFS_STAGE}/"
 
 if [[ -f "${ROOTFS_SOURCE_DIR}/../testdata" ]]; then
-    install -m 0644 "${ROOTFS_SOURCE_DIR}/../testdata" "${ROOTFS_STAGE}/testdata"
-    install -m 0644 "${ROOTFS_SOURCE_DIR}/../testdata" "${INITFS_STAGE}/testdata"
+    install -m 0644 "${ROOTFS_SOURCE_DIR}/../testdata" "${ROOTFS_STAGE}/tmp/testdata"
+    install -m 0644 "${ROOTFS_SOURCE_DIR}/../testdata" "${INITFS_STAGE}/tmp/testdata"
 fi
 
 if [[ -n "${SIGNATURE_DB_SRC}" ]]; then
     need_file "${SIGNATURE_DB_SRC}"
-    install -m 0644 "${SIGNATURE_DB_SRC}" "${ROOTFS_STAGE}/execution.allowlist"
+    install -m 0644 "${SIGNATURE_DB_SRC}" \
+        "${ROOTFS_STAGE}/libraries/system/execution.allowlist"
 fi
+
+ROOT_ENTRY="$(find "${ROOTFS_STAGE}" -mindepth 1 -maxdepth 1 ! -type d -print -quit)"
+[[ -z "${ROOT_ENTRY}" ]] || die "rootfs root must contain directories only: ${ROOT_ENTRY}"
 
 truncate -s "${ROOTFS_SIZE}" "${ROOTFS_IMG}"
 mke2fs -q -t ext2 -b "${ROOTFS_BLOCK_SIZE}" -d "${ROOTFS_STAGE}" -F "${ROOTFS_IMG}"

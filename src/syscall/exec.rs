@@ -1,9 +1,10 @@
 use crate::capability::{
-    parse_kernel_authority_spec, Capability, CapabilitySet, KernelAuthoritySet,
+    Capability, CapabilitySet, KernelAuthoritySet, parse_kernel_authority_spec,
 };
 use crate::policy::{
-    caller_can_grant_capabilities_on_exec, claim_service_manager_pid, release_service_manager_pid,
-    resolve_exec_foreground, resolve_exec_priority, resolve_exec_privilege, ManifestRole,
+    ManifestRole, caller_can_grant_capabilities_on_exec, claim_service_manager_pid,
+    release_service_manager_pid, resolve_exec_foreground, resolve_exec_priority,
+    resolve_exec_privilege,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -243,7 +244,7 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
         };
         provided_path = Some(path);
     }
-    let path = provided_path.as_deref().unwrap_or("/hello.bin");
+    let path = provided_path.as_deref().unwrap_or("/tmp/hello.bin");
 
     let extra_args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
         Ok(v) => v,

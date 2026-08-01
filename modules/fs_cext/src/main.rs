@@ -39,8 +39,8 @@ pub struct McxFsOps {
 }
 
 const BENCH_CAPACITY: usize = 32 * 1024 * 1024;
-const BENCH_DIR: &[u8] = b"/bench";
-const BENCH_FILE: &[u8] = b"/bench/huge.bin";
+const BENCH_DIR: &[u8] = b"/tmp/bench";
+const BENCH_FILE: &[u8] = b"/tmp/bench/huge.bin";
 const FILE_MODE: u16 = 0x8000 | 0o644;
 
 static MOUNTED: AtomicBool = AtomicBool::new(false);
