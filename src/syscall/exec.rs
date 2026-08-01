@@ -1226,6 +1226,11 @@ fn exec_with_data(
             && process_name == boot_service_manager.process_name;
         let priority = resolve_exec_priority(ManifestRole::Unknown, parent_pid);
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
+        if let Some(credentials) =
+            parent_pid.and_then(|pid| crate::task::with_process(pid, |parent| parent.credentials()))
+        {
+            proc.set_credentials_for_exec(credentials);
+        }
         let foreground = resolve_exec_foreground(ManifestRole::Unknown, privilege, parent_pid);
         proc.set_foreground(foreground);
         if let Some(caps) = initial_caps {

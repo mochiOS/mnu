@@ -296,18 +296,22 @@ pub fn access(path_ptr: u64, _mode: u64) -> u64 {
     }
 }
 
-/// getuid / geteuid / getgid / getegid システムコール（常に 0 = root を返す）
+fn current_credentials() -> Option<crate::task::ProcessCredentials> {
+    current_pid().and_then(|pid| crate::task::with_process(pid, |process| process.credentials()))
+}
+
+/// getuid / geteuid / getgid / getegid システムコール
 pub fn getuid() -> u64 {
-    0
+    current_credentials().map_or(0, |credentials| credentials.real_uid() as u64)
 }
 pub fn getgid() -> u64 {
-    0
+    current_credentials().map_or(0, |credentials| credentials.real_gid() as u64)
 }
 pub fn geteuid() -> u64 {
-    0
+    current_credentials().map_or(0, |credentials| credentials.effective_uid() as u64)
 }
 pub fn getegid() -> u64 {
-    0
+    current_credentials().map_or(0, |credentials| credentials.effective_gid() as u64)
 }
 
 /// uname システムコール
