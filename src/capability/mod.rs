@@ -193,6 +193,7 @@ pub enum UserCapability {
     NetHttpRequest,
     WindowCreate,
     WindowOverlay,
+    WindowSecureOverlay,
     WindowDecorate,
     WindowCapture,
     DisplayRead,
@@ -231,6 +232,7 @@ pub enum UserCapability {
     KernelModuleLoad,
     AccountSelfRead,
     AccountSelfModify,
+    AccountAuthenticate,
     AccountOtherRead,
     AccountOtherModify,
     SettingsRead,
@@ -273,6 +275,7 @@ impl UserCapability {
             NetHttpRequest => "net.http.request",
             WindowCreate => "window.create",
             WindowOverlay => "window.overlay",
+            WindowSecureOverlay => "window.secure-overlay",
             WindowDecorate => "window.decorate",
             WindowCapture => "window.capture",
             DisplayRead => "display.read",
@@ -311,6 +314,7 @@ impl UserCapability {
             KernelModuleLoad => "kernel.module.load",
             AccountSelfRead => "account.self.read",
             AccountSelfModify => "account.self.modify",
+            AccountAuthenticate => "account.authenticate",
             AccountOtherRead => "account.other.read",
             AccountOtherModify => "account.other.modify",
             SettingsRead => "settings.read",
@@ -353,6 +357,7 @@ impl UserCapability {
             "net.http.request" => Some(NetHttpRequest),
             "window.create" => Some(WindowCreate),
             "window.overlay" => Some(WindowOverlay),
+            "window.secure-overlay" => Some(WindowSecureOverlay),
             "window.decorate" => Some(WindowDecorate),
             "window.capture" => Some(WindowCapture),
             "display.read" => Some(DisplayRead),
@@ -391,6 +396,7 @@ impl UserCapability {
             "kernel.module.load" => Some(KernelModuleLoad),
             "account.self.read" => Some(AccountSelfRead),
             "account.self.modify" => Some(AccountSelfModify),
+            "account.authenticate" => Some(AccountAuthenticate),
             "account.other.read" => Some(AccountOtherRead),
             "account.other.modify" => Some(AccountOtherModify),
             "settings.read" => Some(SettingsRead),
@@ -461,6 +467,7 @@ pub enum Capability {
 
     WindowCreate,
     WindowOverlay,
+    WindowSecureOverlay,
     WindowDecorate,
     WindowCapture,
 
@@ -524,6 +531,7 @@ pub enum Capability {
 
     AccountSelfRead,
     AccountSelfModify,
+    AccountAuthenticate,
     AccountOtherRead,
     AccountOtherModify,
 
@@ -563,13 +571,14 @@ impl Capability {
             | PowerShutdown | PowerReboot | PowerSuspend | SystemTimeSet | PackageInstall
             | PackageRemove | PackageUpdate | ServiceRegister | ServiceControl | VmCreate
             | VmControl | DeviceGpu | DeviceAudio | DeviceInput | DeviceStorage | DeviceNet
-            | AccountOtherRead | AccountOtherModify | SettingsWrite => CapabilityClass::Privileged,
-            ProcessSpawn | ProcessInspect | ProcessKill | IpcClient | IpcServer | DmaAllocate
-            | MemoryPhysMap | MemoryPhysTranslate | KernelModuleLoad | KernelDebug
-            | CapabilitiesManage | SystemRandomRead | Unsandboxed | DeveloperDebug
-            | DeveloperProfile | DeveloperTracing | SignatureRead | SignatureWrite => {
-                CapabilityClass::SystemOnly
+            | AccountAuthenticate | AccountOtherRead | AccountOtherModify | SettingsWrite => {
+                CapabilityClass::Privileged
             }
+            ProcessSpawn | ProcessInspect | ProcessKill | IpcClient | IpcServer
+            | WindowSecureOverlay | DmaAllocate | MemoryPhysMap | MemoryPhysTranslate
+            | KernelModuleLoad | KernelDebug | CapabilitiesManage | SystemRandomRead
+            | Unsandboxed | DeveloperDebug | DeveloperProfile | DeveloperTracing
+            | SignatureRead | SignatureWrite => CapabilityClass::SystemOnly,
         }
     }
 
@@ -613,6 +622,7 @@ impl Capability {
 
             WindowCreate => "window.create",
             WindowOverlay => "window.overlay",
+            WindowSecureOverlay => "window.secure-overlay",
             WindowDecorate => "window.decorate",
             WindowCapture => "window.capture",
 
@@ -676,6 +686,7 @@ impl Capability {
 
             AccountSelfRead => "account.self.read",
             AccountSelfModify => "account.self.modify",
+            AccountAuthenticate => "account.authenticate",
             AccountOtherRead => "account.other.read",
             AccountOtherModify => "account.other.modify",
 
@@ -734,6 +745,7 @@ impl Capability {
 
             "window.create" => WindowCreate,
             "window.overlay" => WindowOverlay,
+            "window.secure-overlay" => WindowSecureOverlay,
             "window.decorate" => WindowDecorate,
             "window.capture" => WindowCapture,
 
@@ -797,6 +809,7 @@ impl Capability {
 
             "account.self.read" => AccountSelfRead,
             "account.self.modify" => AccountSelfModify,
+            "account.authenticate" => AccountAuthenticate,
             "account.other.read" => AccountOtherRead,
             "account.other.modify" => AccountOtherModify,
 
@@ -875,6 +888,7 @@ impl Capability {
             NetHttpRequest => UserCapability::NetHttpRequest,
             WindowCreate => UserCapability::WindowCreate,
             WindowOverlay => UserCapability::WindowOverlay,
+            WindowSecureOverlay => UserCapability::WindowSecureOverlay,
             WindowDecorate => UserCapability::WindowDecorate,
             WindowCapture => UserCapability::WindowCapture,
             DisplayRead => UserCapability::DisplayRead,
@@ -914,6 +928,7 @@ impl Capability {
             KernelModuleLoad => UserCapability::KernelModuleLoad,
             AccountSelfRead => UserCapability::AccountSelfRead,
             AccountSelfModify => UserCapability::AccountSelfModify,
+            AccountAuthenticate => UserCapability::AccountAuthenticate,
             AccountOtherRead => UserCapability::AccountOtherRead,
             AccountOtherModify => UserCapability::AccountOtherModify,
             SettingsRead => UserCapability::SettingsRead,
@@ -987,6 +1002,7 @@ impl Capability {
             ProcessKill,
             WindowCreate,
             WindowOverlay,
+            WindowSecureOverlay,
             WindowDecorate,
             WindowCapture,
             DisplayRead,
@@ -1034,6 +1050,7 @@ impl Capability {
             DeviceNet,
             AccountSelfRead,
             AccountSelfModify,
+            AccountAuthenticate,
             AccountOtherRead,
             AccountOtherModify,
             SettingsRead,
