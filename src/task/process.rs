@@ -320,6 +320,41 @@ impl ProcessCredentials {
         }
     }
 
+    pub(crate) const fn user(uid: u32, gid: u32) -> Self {
+        Self {
+            real_uid: uid,
+            effective_uid: uid,
+            real_gid: gid,
+            effective_gid: gid,
+        }
+    }
+
+    pub(crate) fn set_uid(&mut self, uid: u32) -> bool {
+        if self.effective_uid == 0 {
+            self.real_uid = uid;
+            self.effective_uid = uid;
+            true
+        } else if uid == self.real_uid {
+            self.effective_uid = uid;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn set_gid(&mut self, gid: u32) -> bool {
+        if self.effective_uid == 0 {
+            self.real_gid = gid;
+            self.effective_gid = gid;
+            true
+        } else if gid == self.real_gid {
+            self.effective_gid = gid;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) const fn real_uid(self) -> u32 {
         self.real_uid
     }
@@ -552,6 +587,14 @@ impl Process {
 
     pub(crate) fn set_credentials_for_exec(&mut self, credentials: ProcessCredentials) {
         self.credentials = credentials;
+    }
+
+    pub(crate) fn set_uid(&mut self, uid: u32) -> bool {
+        self.credentials.set_uid(uid)
+    }
+
+    pub(crate) fn set_gid(&mut self, gid: u32) -> bool {
+        self.credentials.set_gid(gid)
     }
 
     /// 親プロセスIDを取得
@@ -1433,4 +1476,25 @@ pub fn process_has_kernel_capability_authority(
     capability: crate::capability::KernelCapability,
 ) -> bool {
     with_process(pid, |proc| proc.has_kernel_capability_authority(capability)).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::ProcessCredentials;
+
+    #[test]
+    fn root_can_select_a_user_identity() {
+        let mut credentials = ProcessCredentials::root();
+        assert!(credentials.set_gid(1000));
+        assert!(credentials.set_uid(1000));
+        assert_eq!(credentials, ProcessCredentials::user(1000, 1000));
+    }
+
+    #[test]
+    fn unprivileged_identity_cannot_switch_to_another_user() {
+        let mut credentials = ProcessCredentials::user(1000, 1000);
+        assert!(!credentials.set_uid(1001));
+        assert!(!credentials.set_gid(1001));
+        assert_eq!(credentials, ProcessCredentials::user(1000, 1000));
+    }
 }

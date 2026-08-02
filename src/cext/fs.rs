@@ -94,7 +94,7 @@ pub fn read_all(path: &str) -> Option<Vec<u8>> {
     if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
         return None;
     }
-    let (mode, size) = file_metadata(path)?;
+    let (mode, size, _, _) = file_metadata(path)?;
     if (mode & 0xf000) == 0x4000 {
         return None;
     }
@@ -141,7 +141,7 @@ pub fn read_range(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
     if buf.is_empty() {
         return Some(0);
     }
-    let (mode, _) = file_metadata(path)?;
+    let (mode, _, _, _) = file_metadata(path)?;
     if (mode & 0xf000) == 0x4000 {
         return None;
     }
@@ -198,20 +198,22 @@ pub fn truncate(path: &str, len: u64) -> i32 {
     unsafe { ((*ops).truncate)(path_arg(path), len) }
 }
 
-pub fn file_metadata(path: &str) -> Option<(u16, u64)> {
+pub fn file_metadata(path: &str) -> Option<(u16, u64, u32, u32)> {
     let ops = ops_ptr();
     if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
         return None;
     }
     let mut mode = 0u16;
     let mut size = 0u64;
-    let rc = unsafe { ((*ops).stat)(path_arg(path), &mut mode, &mut size) };
-    (rc == 0).then_some((mode, size))
+    let mut uid = 0u32;
+    let mut gid = 0u32;
+    let rc = unsafe { ((*ops).stat)(path_arg(path), &mut mode, &mut size, &mut uid, &mut gid) };
+    (rc == 0).then_some((mode, size, uid, gid))
 }
 
 pub fn is_directory(path: &str) -> bool {
     file_metadata(path)
-        .map(|(mode, _)| (mode & 0xf000) == 0x4000)
+        .map(|(mode, _, _, _)| (mode & 0xf000) == 0x4000)
         .unwrap_or(false)
 }
 
@@ -248,12 +250,28 @@ pub fn readdir_path(path: &str) -> Option<Vec<String>> {
     Some(names)
 }
 
-pub fn create(path: &str, mode: u32) -> i32 {
+pub fn create(path: &str, mode: u32, uid: u32, gid: u32) -> i32 {
     let ops = ops_ptr();
     if ops.is_null() {
         return -38;
     }
-    unsafe { ((*ops).create)(path_arg(path), mode) }
+    unsafe { ((*ops).create)(path_arg(path), mode, uid, gid) }
+}
+
+pub fn chmod(path: &str, mode: u32) -> i32 {
+    let ops = ops_ptr();
+    if ops.is_null() {
+        return -38;
+    }
+    unsafe { ((*ops).chmod)(path_arg(path), mode) }
+}
+
+pub fn chown(path: &str, uid: u32, gid: u32) -> i32 {
+    let ops = ops_ptr();
+    if ops.is_null() {
+        return -38;
+    }
+    unsafe { ((*ops).chown)(path_arg(path), uid, gid) }
 }
 
 pub fn remove(path: &str, is_dir: bool) -> i32 {

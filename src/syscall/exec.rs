@@ -251,7 +251,7 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
-    exec_internal(path, None, &extra_args, &[], None, None, None, None)
+    exec_internal(path, None, &extra_args, &[], None, None, None, None, None)
 }
 
 /// exec 時に capability を付与して起動する
@@ -312,6 +312,7 @@ pub fn exec_with_capabilities_syscall(
         Some(authorities),
         None,
         None,
+        None,
     )
 }
 
@@ -321,6 +322,71 @@ pub fn exec_manifest_syscall(
     caps_ptr: u64,
     caps_total_len: u64,
     role_raw: u64,
+) -> u64 {
+    exec_manifest_common(path_ptr, args_ptr, caps_ptr, caps_total_len, role_raw, None)
+}
+
+pub fn exec_manifest_with_credentials_syscall(
+    path_ptr: u64,
+    args_ptr: u64,
+    caps_ptr: u64,
+    caps_total_len: u64,
+    request_ptr: u64,
+) -> u64 {
+    use crate::syscall::types::{EFAULT, EINVAL, EPERM};
+
+    const REQUEST_LEN: u64 = 24;
+    if request_ptr == 0 || !crate::syscall::validate_user_ptr(request_ptr, REQUEST_LEN) {
+        return EFAULT;
+    }
+    let mut request = [0u8; REQUEST_LEN as usize];
+    if let Err(errno) = crate::syscall::copy_from_user(request_ptr, &mut request) {
+        return errno;
+    }
+    let role_raw = u64::from_le_bytes([
+        request[0], request[1], request[2], request[3], request[4], request[5], request[6],
+        request[7],
+    ]);
+    let uid = u32::from_le_bytes([request[8], request[9], request[10], request[11]]);
+    let gid = u32::from_le_bytes([request[12], request[13], request[14], request[15]]);
+    let reserved = u64::from_le_bytes([
+        request[16],
+        request[17],
+        request[18],
+        request[19],
+        request[20],
+        request[21],
+        request[22],
+        request[23],
+    ]);
+    if reserved != 0 {
+        return EINVAL;
+    }
+    if !caller_has_process_spawn_capability()
+        || !crate::syscall::security::caller_has_any_capability(&[
+            crate::capability::Capability::CapabilitiesManage,
+        ])
+    {
+        return EPERM;
+    }
+
+    exec_manifest_common(
+        path_ptr,
+        args_ptr,
+        caps_ptr,
+        caps_total_len,
+        role_raw,
+        Some(crate::task::ProcessCredentials::user(uid, gid)),
+    )
+}
+
+fn exec_manifest_common(
+    path_ptr: u64,
+    args_ptr: u64,
+    caps_ptr: u64,
+    caps_total_len: u64,
+    role_raw: u64,
+    credentials: Option<crate::task::ProcessCredentials>,
 ) -> u64 {
     use crate::syscall::types::{EACCES, EINVAL, EPERM};
 
@@ -412,6 +478,7 @@ pub fn exec_manifest_syscall(
         &envp,
         Some(caps),
         Some(authorities),
+        credentials,
         requested_privilege,
         Some(role),
     )
@@ -419,7 +486,7 @@ pub fn exec_manifest_syscall(
 
 /// 名前を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
 pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
-    exec_internal(path, Some(name), &[], &[], None, None, None, None)
+    exec_internal(path, Some(name), &[], &[], None, None, None, None, None)
 }
 
 /// 名前と初期 capability を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
@@ -457,6 +524,7 @@ pub fn exec_kernel_with_name_caps_and_authorities(
         &[],
         Some(initial_caps),
         Some(initial_kernel_authorities),
+        None,
         Some(requested_privilege),
         manifest_role,
     )
@@ -469,6 +537,7 @@ fn exec_internal(
     envp: &[&str],
     initial_caps: Option<CapabilitySet>,
     initial_kernel_authorities: Option<KernelAuthoritySet>,
+    requested_credentials: Option<crate::task::ProcessCredentials>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     manifest_role: Option<ManifestRole>,
 ) -> u64 {
@@ -502,6 +571,7 @@ fn exec_internal(
             None,
             initial_caps,
             initial_kernel_authorities,
+            requested_credentials,
             requested_privilege,
         )
     } else {
@@ -601,6 +671,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
             &path,
             &extra_args,
             &[],
+            None,
             None,
             None,
             None,
@@ -764,6 +835,7 @@ fn exec_with_data(
     parent_override: Option<crate::task::ProcessId>,
     initial_caps: Option<CapabilitySet>,
     initial_kernel_authorities: Option<KernelAuthoritySet>,
+    requested_credentials: Option<crate::task::ProcessCredentials>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
 ) -> u64 {
     crate::debug!("exec: name={}", process_name);
@@ -1229,6 +1301,9 @@ fn exec_with_data(
         if let Some(credentials) =
             parent_pid.and_then(|pid| crate::task::with_process(pid, |parent| parent.credentials()))
         {
+            proc.set_credentials_for_exec(credentials);
+        }
+        if let Some(credentials) = requested_credentials {
             proc.set_credentials_for_exec(credentials);
         }
         let foreground = resolve_exec_foreground(ManifestRole::Unknown, privilege, parent_pid);
@@ -1732,6 +1807,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -1772,6 +1848,7 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         &[],
         &[],
         delegated_parent_pid(),
+        None,
         None,
         None,
         None,
@@ -1827,6 +1904,7 @@ pub fn exec_from_buffer_named_args_syscall(
         &args_refs,
         &[],
         delegated_parent_pid(),
+        None,
         None,
         None,
         None,
@@ -1903,6 +1981,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         &args_refs,
         &[],
         parent_override.or_else(delegated_parent_pid),
+        None,
         None,
         None,
         None,

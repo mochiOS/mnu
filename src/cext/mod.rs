@@ -21,7 +21,7 @@ pub mod disk;
 pub mod fs;
 mod registry;
 
-const MCX_CEXT_ABI: u16 = 2;
+const MCX_CEXT_ABI: u16 = 3;
 const MCX_LOG_ERROR: u32 = 0;
 const MCX_LOG_WARN: u32 = 1;
 const MCX_LOG_INFO: u32 = 2;
@@ -63,7 +63,7 @@ pub struct McxPath {
 pub struct McxFsOps {
     pub mount: extern "C" fn(device_id: u32, flags: u32) -> i32,
     pub set_disk_ops: extern "C" fn(ops: *const disk::McxDiskOps) -> i32,
-    pub create: extern "C" fn(path: McxPath, mode: u32) -> i32,
+    pub create: extern "C" fn(path: McxPath, mode: u32, uid: u32, gid: u32) -> i32,
     pub remove: extern "C" fn(path: McxPath, is_dir: u32) -> i32,
     pub rename: extern "C" fn(src: McxPath, dst: McxPath) -> i32,
     pub read:
@@ -71,7 +71,15 @@ pub struct McxFsOps {
     pub write:
         extern "C" fn(path: McxPath, offset: u64, buf: McxBuffer, out_written: *mut usize) -> i32,
     pub truncate: extern "C" fn(path: McxPath, len: u64) -> i32,
-    pub stat: extern "C" fn(path: McxPath, out_mode: *mut u16, out_size: *mut u64) -> i32,
+    pub stat: extern "C" fn(
+        path: McxPath,
+        out_mode: *mut u16,
+        out_size: *mut u64,
+        out_uid: *mut u32,
+        out_gid: *mut u32,
+    ) -> i32,
+    pub chmod: extern "C" fn(path: McxPath, mode: u32) -> i32,
+    pub chown: extern "C" fn(path: McxPath, uid: u32, gid: u32) -> i32,
     pub readdir: extern "C" fn(path: McxPath, buf: McxBuffer, out_len: *mut usize) -> i32,
     pub sync: extern "C" fn() -> i32,
 }

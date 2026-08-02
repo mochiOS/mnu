@@ -4,12 +4,12 @@ use super::types::{
     EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS,
     ENOTDIR, EOVERFLOW, EPIPE, EROFS, ESRCH, SUCCESS,
 };
-use crate::capability::path::{
-    self, PathOwner, PathType, UserPath, PATH_CREATE, PATH_DELETE, PATH_LIST, PATH_READ, PATH_WRITE,
-};
 use crate::capability::Capability;
+use crate::capability::path::{
+    self, PATH_CREATE, PATH_DELETE, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner, PathType, UserPath,
+};
 use crate::task::fd_table::{
-    FdTable, FileHandle, FileHandleCap, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
+    FD_BASE, FdTable, FileHandle, FileHandleCap, O_CLOEXEC, PROCESS_MAX_FDS,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -20,6 +20,7 @@ const READ_IO_CHUNK_BYTES: usize = 256 * 1024;
 const WRITE_IO_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_PIPES: usize = 64;
 const PIPE_BUFFER_CAP: usize = 64 * 1024;
+const UNIX_EXECUTE: u32 = 1 << 31;
 
 struct PipeState {
     data: Vec<u8>,
@@ -168,20 +169,109 @@ pub(crate) fn ensure_fs_path_readable(path: &str) -> Result<(), u64> {
 }
 
 fn ensure_fs_path_access(path: &str, needed_rights: u32) -> Result<(), u64> {
-    let Some(entry) = path::lookup_path(path) else {
-        return enforce_fs_path_capability(path, needed_rights);
-    };
-    let Some(pid_raw) = current_process_id_raw() else {
-        return Err(EACCES);
-    };
-    if !path_owner_allows(entry.owner, pid_raw) {
-        return Err(EACCES);
+    ensure_fs_capability_access(path, needed_rights)?;
+    ensure_unix_traversal(path)?;
+    if (needed_rights & (PATH_CREATE | PATH_DELETE)) != 0 {
+        ensure_unix_parent_write(path)
+    } else if metadata_rootfs_first(path).is_some() {
+        ensure_unix_mode_access(path, needed_rights)
+    } else {
+        Ok(())
     }
-    if entry.rights.contains(needed_rights) {
+}
+
+fn ensure_fs_capability_access(path: &str, needed_rights: u32) -> Result<(), u64> {
+    if let Some(entry) = path::lookup_path(path) {
+        let Some(pid_raw) = current_process_id_raw() else {
+            return Err(EACCES);
+        };
+        if !path_owner_allows(entry.owner, pid_raw) {
+            return Err(EACCES);
+        }
+        if !entry.rights.contains(needed_rights) {
+            enforce_fs_path_capability(path, needed_rights)?;
+        }
+    } else {
+        enforce_fs_path_capability(path, needed_rights)?;
+    }
+    Ok(())
+}
+
+fn current_effective_ids() -> Option<(u32, u32)> {
+    let pid = crate::syscall::security::current_process_id()?;
+    crate::task::with_process(pid, |process| {
+        let credentials = process.credentials();
+        (credentials.effective_uid(), credentials.effective_gid())
+    })
+}
+
+fn unix_mode_allows(mode: u16, owner: u32, group: u32, uid: u32, gid: u32, rights: u32) -> bool {
+    if uid == 0 {
+        return true;
+    }
+    let shift = if uid == owner {
+        6
+    } else if gid == group {
+        3
+    } else {
+        0
+    };
+    let granted = ((mode >> shift) & 0o7) as u32;
+    let mut required = 0u32;
+    if (rights & (PATH_READ | PATH_LIST)) != 0 {
+        required |= 0o4;
+    }
+    if (rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) != 0 {
+        required |= 0o2;
+    }
+    if (rights & UNIX_EXECUTE) != 0 || ((rights & PATH_LIST) != 0 && mode_is_directory(mode)) {
+        required |= 0o1;
+    }
+    (granted & required) == required
+}
+
+fn ensure_unix_mode_access(path: &str, rights: u32) -> Result<(), u64> {
+    let Some((mode, _, owner, group)) = metadata_rootfs_first(path) else {
+        return Ok(());
+    };
+    let Some((uid, gid)) = current_effective_ids() else {
+        return Err(EACCES);
+    };
+    if unix_mode_allows(mode, owner, group, uid, gid, rights) {
         Ok(())
     } else {
-        enforce_fs_path_capability(path, needed_rights)
+        Err(EACCES)
     }
+}
+
+fn ensure_unix_traversal(path: &str) -> Result<(), u64> {
+    let normalized = normalize_path(path);
+    if normalized != "/" {
+        ensure_unix_mode_access("/", UNIX_EXECUTE)?;
+    }
+    let mut parent = String::from("/");
+    let mut components = normalized.trim_start_matches('/').split('/').peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            break;
+        }
+        if parent.len() > 1 {
+            parent.push('/');
+        }
+        parent.push_str(component);
+        ensure_unix_mode_access(&parent, UNIX_EXECUTE)?;
+    }
+    Ok(())
+}
+
+fn ensure_unix_parent_write(path: &str) -> Result<(), u64> {
+    let normalized = normalize_path(path);
+    let parent =
+        normalized.rsplit_once('/').map_or(
+            "/",
+            |(parent, _)| if parent.is_empty() { "/" } else { parent },
+        );
+    ensure_unix_mode_access(parent, PATH_WRITE | UNIX_EXECUTE)
 }
 
 fn path_owner_allows(owner: PathOwner, pid_raw: u64) -> bool {
@@ -189,7 +279,12 @@ fn path_owner_allows(owner: PathOwner, pid_raw: u64) -> bool {
         PathOwner::Any => true,
         PathOwner::System => false,
         PathOwner::Service(owner_pid) | PathOwner::Application(owner_pid) => owner_pid == pid_raw,
-        PathOwner::User(_) => false,
+        PathOwner::User(owner_uid) => {
+            crate::task::with_process(crate::task::ids::ProcessId::from_u64(pid_raw), |process| {
+                u64::from(process.credentials().effective_uid()) == owner_uid
+            })
+            .is_some_and(|matches| matches)
+        }
     }
 }
 
@@ -343,15 +438,13 @@ fn mode_for_stat(mode: u16) -> u32 {
     if (out & 0xF000) == 0 {
         out |= 0x8000;
     }
-    if (out & 0o777) == 0 {
-        out |= 0o755;
-    }
     out
 }
 
 #[inline]
-pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64)> {
-    crate::cext::fs::file_metadata(path).or_else(|| crate::init::fs::file_metadata(path))
+pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64, u32, u32)> {
+    crate::cext::fs::file_metadata(path)
+        .or_else(|| crate::init::fs::file_metadata(path).map(|(mode, size)| (mode, size, 0, 0)))
 }
 
 #[inline]
@@ -473,7 +566,7 @@ fn errno_from_cext(rc: i32) -> u64 {
 fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u64 {
     let mut metadata = metadata_rootfs_first(path);
     let mut is_dir = metadata
-        .map(|(mode, _)| mode_is_directory(mode))
+        .map(|(mode, _, _, _)| mode_is_directory(mode))
         .unwrap_or_else(|| crate::cext::fs::is_directory(path));
     if let Err(errno) = ensure_fs_path_access(path, open_required_rights(path, flags, is_dir)) {
         return errno;
@@ -491,13 +584,16 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
     let mut exists = existed_before;
     if !exists {
         if (flags & O_CREAT) != 0 {
-            let rc = crate::cext::fs::create(path, (mode & 0o777) as u32);
+            let Some((uid, gid)) = current_effective_ids() else {
+                return EACCES;
+            };
+            let rc = crate::cext::fs::create(path, (mode & 0o777) as u32, uid, gid);
             if rc != 0 {
                 return (-rc as i64) as u64;
             }
             metadata = metadata_rootfs_first(path);
             is_dir = metadata
-                .map(|(mode, _)| mode_is_directory(mode))
+                .map(|(mode, _, _, _)| mode_is_directory(mode))
                 .unwrap_or_else(|| crate::cext::fs::is_directory(path));
             exists = metadata.is_some() || crate::cext::fs::file_metadata(path).is_some();
             if !exists {
@@ -607,7 +703,7 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
             .fs_path
             .as_deref()
             .and_then(metadata_rootfs_first)
-            .map(|(_, size)| size as usize)
+            .map(|(_, size, _, _)| size as usize)
             .unwrap_or(fh.data.len());
         let new_pos = match whence {
             0 => offset,
@@ -643,7 +739,7 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
 ///   56: st_blksize (i64)
 ///   64: st_blocks  (i64)  — 512 バイト単位
 ///   72-143: timespec × 3 + unused (ゼロ)
-fn write_stat_buf(stat_ptr: u64, mode: u32, size: u64) {
+fn write_stat_buf(stat_ptr: u64, mode: u32, size: u64, uid: u32, gid: u32) {
     const STAT_SIZE: usize = 144;
     let blocks = size.div_ceil(512);
     let mut buf = [0u8; STAT_SIZE];
@@ -651,6 +747,8 @@ fn write_stat_buf(stat_ptr: u64, mode: u32, size: u64) {
     buf[8..16].copy_from_slice(&1u64.to_ne_bytes());
     buf[16..24].copy_from_slice(&1u64.to_ne_bytes());
     buf[24..28].copy_from_slice(&mode.to_ne_bytes());
+    buf[28..32].copy_from_slice(&uid.to_ne_bytes());
+    buf[32..36].copy_from_slice(&gid.to_ne_bytes());
     buf[48..56].copy_from_slice(&size.to_ne_bytes());
     buf[56..64].copy_from_slice(&4096u64.to_ne_bytes());
     buf[64..72].copy_from_slice(&blocks.to_ne_bytes());
@@ -669,7 +767,7 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
 
     if fd < FD_BASE as u64 {
         // stdin/stdout/stderr → キャラクタデバイス (S_IFCHR | 0666 = 0x2000 | 0o666)
-        write_stat_buf(stat_ptr, 0x2000 | 0o666, 0);
+        write_stat_buf(stat_ptr, 0x2000 | 0o666, 0, 0, 0);
         return SUCCESS;
     }
 
@@ -694,24 +792,27 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
                 .or(fh.fs_path.as_deref())
                 .and_then(metadata_rootfs_first);
             let size = metadata
-                .map(|(_, size)| size)
+                .map(|(_, size, _, _)| size)
                 .unwrap_or(fh.data.len() as u64);
-            let is_dir = metadata
-                .map(|(mode, _)| mode_is_directory(mode))
-                .unwrap_or(fh.dir_path.is_some());
-            (size, is_dir)
+            let mode = metadata.map_or_else(
+                || {
+                    if fh.dir_path.is_some() {
+                        0x4000u32 | 0o755
+                    } else {
+                        0x8000u32 | 0o644
+                    }
+                },
+                |(mode, _, _, _)| mode_for_stat(mode),
+            );
+            let (uid, gid) = metadata.map_or((0, 0), |(_, _, uid, gid)| (uid, gid));
+            (size, mode, uid, gid)
         })
     });
-    let (size, is_dir) = match file_info {
+    let (size, mode, uid, gid) = match file_info {
         Some(Some(v)) => v,
         _ => return EBADF,
     };
-    let mode = if is_dir {
-        0x4000u32 | 0o755
-    } else {
-        0x8000u32 | 0o644
-    };
-    write_stat_buf(stat_ptr, mode, size);
+    write_stat_buf(stat_ptr, mode, size, uid, gid);
     SUCCESS
 }
 
@@ -737,8 +838,8 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
-        Some((mode, size)) => {
-            write_stat_buf(stat_ptr, mode_for_stat(mode), size);
+        Some((mode, size, uid, gid)) => {
+            write_stat_buf(stat_ptr, mode_for_stat(mode), size, uid, gid);
             SUCCESS
         }
         None => ENOENT,
@@ -763,7 +864,10 @@ pub fn mkdir(path_ptr: u64, mode: u64) -> u64 {
         return errno;
     }
     const S_IFDIR: u32 = 0x4000;
-    let rc = crate::cext::fs::create(&resolved, S_IFDIR | ((mode as u32) & 0o777));
+    let Some((uid, gid)) = current_effective_ids() else {
+        return EACCES;
+    };
+    let rc = crate::cext::fs::create(&resolved, S_IFDIR | ((mode as u32) & 0o777), uid, gid);
     if rc != 0 {
         return errno_from_cext(rc);
     }
@@ -788,7 +892,7 @@ pub fn rmdir(path_ptr: u64) -> u64 {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
-        Some((mode, _)) if mode_is_directory(mode) => {}
+        Some((mode, _, _, _)) if mode_is_directory(mode) => {}
         Some(_) => return ENOTDIR,
         None => return ENOENT,
     }
@@ -858,11 +962,17 @@ pub fn chdir(path_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(pid_raw, &path);
-    if let Err(errno) = ensure_fs_path_access(&resolved, PATH_LIST) {
+    if let Err(errno) = ensure_fs_capability_access(&resolved, PATH_LIST) {
+        return errno;
+    }
+    if let Err(errno) = ensure_unix_traversal(&resolved) {
+        return errno;
+    }
+    if let Err(errno) = ensure_unix_mode_access(&resolved, UNIX_EXECUTE) {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
-        Some((mode, _)) => {
+        Some((mode, _, _, _)) => {
             if !mode_is_directory(mode) {
                 return ENOTDIR;
             }
@@ -1099,7 +1209,7 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
             return EINVAL;
         };
         start_pos = match crate::cext::fs::file_metadata(path)
-            .and_then(|(_, size)| usize::try_from(size).ok())
+            .and_then(|(_, size, _, _)| usize::try_from(size).ok())
         {
             Some(size) => size,
             None => return EIO,
@@ -1316,7 +1426,7 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
         return errno;
     }
     match metadata_rootfs_first(&path) {
-        Some((mode, _)) if mode_is_directory(mode) => return EISDIR,
+        Some((mode, _, _, _)) if mode_is_directory(mode) => return EISDIR,
         Some(_) => {}
         None => return ENOENT,
     }
@@ -1328,6 +1438,71 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
         return errno_from_cext(rc);
     }
     SUCCESS
+}
+
+pub fn chmod(path_ptr: u64, mode: u64) -> u64 {
+    if path_ptr == 0 || mode > u32::MAX as u64 {
+        return EINVAL;
+    }
+    let Some(pid) = current_process_id_raw() else {
+        return EBADF;
+    };
+    let path = match read_cstring(path_ptr) {
+        Ok(path) => resolve_path(pid, &path),
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = ensure_fs_capability_access(&path, PATH_WRITE) {
+        return errno;
+    }
+    if let Err(errno) = ensure_unix_traversal(&path) {
+        return errno;
+    }
+    let Some((_, _, owner, _)) = metadata_rootfs_first(&path) else {
+        return ENOENT;
+    };
+    let Some((uid, _)) = current_effective_ids() else {
+        return EACCES;
+    };
+    if uid != 0 && uid != owner {
+        return EACCES;
+    }
+    let rc = crate::cext::fs::chmod(&path, mode as u32);
+    if rc == 0 {
+        SUCCESS
+    } else {
+        errno_from_cext(rc)
+    }
+}
+
+pub fn chown(path_ptr: u64, uid: u64, gid: u64) -> u64 {
+    if path_ptr == 0 || uid > u32::MAX as u64 || gid > u32::MAX as u64 {
+        return EINVAL;
+    }
+    let Some(pid) = current_process_id_raw() else {
+        return EBADF;
+    };
+    let path = match read_cstring(path_ptr) {
+        Ok(path) => resolve_path(pid, &path),
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = ensure_fs_path_access(&path, PATH_WRITE) {
+        return errno;
+    }
+    let Some((effective_uid, _)) = current_effective_ids() else {
+        return EACCES;
+    };
+    if effective_uid != 0 {
+        return EACCES;
+    }
+    if metadata_rootfs_first(&path).is_none() {
+        return ENOENT;
+    }
+    let rc = crate::cext::fs::chown(&path, uid as u32, gid as u32);
+    if rc == 0 {
+        SUCCESS
+    } else {
+        errno_from_cext(rc)
+    }
 }
 
 /// ftruncate システムコール（ローカル一時FDのみ）
@@ -1570,7 +1745,7 @@ pub fn unlink(path_ptr: u64) -> u64 {
         return errno;
     }
     match metadata_rootfs_first(&resolved) {
-        Some((mode, _)) if mode_is_directory(mode) => return EISDIR,
+        Some((mode, _, _, _)) if mode_is_directory(mode) => return EISDIR,
         Some(_) => {}
         None => return ENOENT,
     }
@@ -1718,12 +1893,12 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
         ))
     };
     match metadata_rootfs_first(&full) {
-        Some((mode, size)) => {
+        Some((mode, size, uid, gid)) => {
             const STAT_SIZE: u64 = 144;
             if !crate::syscall::validate_user_ptr(stat_ptr, STAT_SIZE) {
                 return EFAULT;
             }
-            write_stat_buf(stat_ptr, mode_for_stat(mode), size);
+            write_stat_buf(stat_ptr, mode_for_stat(mode), size, uid, gid);
             SUCCESS
         }
         None => ENOENT,
@@ -1910,7 +2085,7 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
                     name
                 ));
                 let dtype = match metadata_rootfs_first(&child) {
-                    Some((mode, _)) if mode_is_directory(mode) => 4u8,
+                    Some((mode, _, _, _)) if mode_is_directory(mode) => 4u8,
                     Some(_) => 8u8,
                     None => 0u8,
                 };
@@ -2025,4 +2200,48 @@ pub fn file_rename(old_dirfd: i64, old_path_ptr: u64, new_dirfd: i64, new_path_p
 
 pub fn file_sync(fd: u64) -> u64 {
     fsync(fd)
+}
+
+#[cfg(test)]
+mod unix_mode_tests {
+    use super::{PATH_LIST, PATH_READ, PATH_WRITE, UNIX_EXECUTE, unix_mode_allows};
+
+    #[test]
+    fn root_bypasses_unix_mode_bits() {
+        assert!(unix_mode_allows(
+            0,
+            1000,
+            1000,
+            0,
+            0,
+            PATH_READ | PATH_WRITE
+        ));
+    }
+
+    #[test]
+    fn owner_group_and_other_bits_are_selected_by_identity() {
+        let mode = 0o640;
+        assert!(unix_mode_allows(mode, 1000, 2000, 1000, 3000, PATH_WRITE));
+        assert!(unix_mode_allows(mode, 1000, 2000, 3000, 2000, PATH_READ));
+        assert!(!unix_mode_allows(mode, 1000, 2000, 3000, 3000, PATH_READ));
+    }
+
+    #[test]
+    fn directory_listing_and_traversal_require_execute() {
+        let directory = 0x4000 | 0o740;
+        assert!(unix_mode_allows(
+            directory, 1000, 2000, 1000, 3000, PATH_LIST
+        ));
+        assert!(!unix_mode_allows(
+            directory, 1000, 2000, 3000, 2000, PATH_LIST
+        ));
+        assert!(!unix_mode_allows(
+            directory,
+            1000,
+            2000,
+            3000,
+            2000,
+            UNIX_EXECUTE
+        ));
+    }
 }

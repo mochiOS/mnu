@@ -43,6 +43,8 @@ pub enum SyscallNumber {
     Truncate = 76,
     Ftruncate = 77,
     Getcwd = 79,
+    Chmod = 90,
+    Chown = 92,
     Unlink = 87,
     Readlink = 89,
     // Native mnu file syscalls
@@ -62,6 +64,8 @@ pub enum SyscallNumber {
     FileSync = 573,
     Getuid = 102,
     Getgid = 104,
+    Setuid = 105,
+    Setgid = 106,
     Geteuid = 107,
     Getegid = 108,
     Setpgid = 109,
@@ -174,7 +178,29 @@ pub enum SyscallNumber {
     DmaFree = 605,
     ExecManifest = 606,
     RandomFill = 607,
+    ExecManifestWithCredentials = 608,
     CheckGravityExist = 999,
+}
+
+/// `ExecManifestWithCredentials` に渡す固定長の資格情報指定。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExecManifestCredentials {
+    pub role: u64,
+    pub uid: u32,
+    pub gid: u32,
+    pub reserved: u64,
+}
+
+#[cfg(test)]
+mod credential_spawn_tests {
+    use super::ExecManifestCredentials;
+
+    #[test]
+    fn credential_request_layout_is_fixed() {
+        assert_eq!(core::mem::size_of::<ExecManifestCredentials>(), 24);
+        assert_eq!(core::mem::align_of::<ExecManifestCredentials>(), 8);
+    }
 }
 
 #[repr(C)]

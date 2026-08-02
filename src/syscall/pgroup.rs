@@ -314,6 +314,28 @@ pub fn getegid() -> u64 {
     current_credentials().map_or(0, |credentials| credentials.effective_gid() as u64)
 }
 
+pub fn setuid(uid: u64) -> u64 {
+    let Ok(uid) = u32::try_from(uid) else {
+        return EINVAL;
+    };
+    let Some(pid) = current_pid() else {
+        return EPERM;
+    };
+    crate::task::with_process_mut(pid, |process| process.set_uid(uid))
+        .map_or(EPERM, |changed| if changed { SUCCESS } else { EPERM })
+}
+
+pub fn setgid(gid: u64) -> u64 {
+    let Ok(gid) = u32::try_from(gid) else {
+        return EINVAL;
+    };
+    let Some(pid) = current_pid() else {
+        return EPERM;
+    };
+    crate::task::with_process_mut(pid, |process| process.set_gid(gid))
+        .map_or(EPERM, |changed| if changed { SUCCESS } else { EPERM })
+}
+
 /// uname システムコール
 ///
 /// struct utsname のレイアウト (Linux x86_64): 各フィールド 65 バイト × 6 = 390 バイト
