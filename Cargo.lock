@@ -115,7 +115,6 @@ dependencies = [
 [[package]]
 name = "mnu-abi"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#1ea281e09f4646b0f212399a5fda68909c1db5ce"
 
 [[package]]
 name = "mochios-csprng"
