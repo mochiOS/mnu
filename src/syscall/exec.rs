@@ -380,6 +380,85 @@ pub fn exec_manifest_with_credentials_syscall(
     )
 }
 
+pub fn exec_manifest_for_requester_syscall(
+    path_ptr: u64,
+    args_ptr: u64,
+    caps_ptr: u64,
+    caps_total_len: u64,
+    request_ptr: u64,
+) -> u64 {
+    use crate::syscall::types::{EFAULT, EINVAL, EPERM};
+
+    const REQUEST_LEN: u64 = 24;
+    if request_ptr == 0 || !crate::syscall::validate_user_ptr(request_ptr, REQUEST_LEN) {
+        return EFAULT;
+    }
+    let mut request = [0u8; REQUEST_LEN as usize];
+    if let Err(errno) = crate::syscall::copy_from_user(request_ptr, &mut request) {
+        return errno;
+    }
+    let role_raw = u64::from_le_bytes([
+        request[0], request[1], request[2], request[3], request[4], request[5], request[6],
+        request[7],
+    ]);
+    let requester_tid = u64::from_le_bytes([
+        request[8],
+        request[9],
+        request[10],
+        request[11],
+        request[12],
+        request[13],
+        request[14],
+        request[15],
+    ]);
+    let reserved = u64::from_le_bytes([
+        request[16],
+        request[17],
+        request[18],
+        request[19],
+        request[20],
+        request[21],
+        request[22],
+        request[23],
+    ]);
+    if requester_tid == 0 || reserved != 0 {
+        return EINVAL;
+    }
+    if !caller_has_process_spawn_capability()
+        || !crate::syscall::security::caller_has_any_capability(&[
+            crate::capability::Capability::CapabilitiesManage,
+        ])
+    {
+        return EPERM;
+    }
+
+    let requester = crate::task::ThreadId::from_u64(requester_tid);
+    let Some(requester_pid) = crate::task::with_thread(requester, |thread| thread.process_id())
+    else {
+        return EINVAL;
+    };
+    if !crate::task::process::process_has_capability(
+        requester_pid,
+        crate::capability::Capability::ProcessSpawn,
+    ) {
+        return EPERM;
+    }
+    let Some(credentials) =
+        crate::task::with_process(requester_pid, |process| process.credentials())
+    else {
+        return EINVAL;
+    };
+
+    exec_manifest_common(
+        path_ptr,
+        args_ptr,
+        caps_ptr,
+        caps_total_len,
+        role_raw,
+        Some(credentials),
+    )
+}
+
 fn exec_manifest_common(
     path_ptr: u64,
     args_ptr: u64,
