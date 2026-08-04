@@ -162,7 +162,7 @@ pub fn kill(pid_raw: u64, sig_raw: u64) -> u64 {
     if sig == 0 {
         if target_pid_raw > 0 {
             let target = ProcessId::from_u64(target_pid_raw as u64);
-            if current_pid() != Some(target) && !caller_has_process_kill_capability() {
+            if !caller_can_signal_process(target) {
                 return EPERM;
             }
             let exists = with_process(target, |_| ()).is_some();
@@ -183,7 +183,7 @@ pub fn kill(pid_raw: u64, sig_raw: u64) -> u64 {
 
     if target_pid_raw > 0 {
         let target = ProcessId::from_u64(target_pid_raw as u64);
-        if current_pid() != Some(target) && !caller_has_process_kill_capability() {
+        if !caller_can_signal_process(target) {
             return EPERM;
         }
         if with_process(target, |_| ()).is_none() {
@@ -226,15 +226,13 @@ pub fn tkill(tid_raw: u64, sig_raw: u64) -> u64 {
     if sig > 64 {
         return EINVAL;
     }
-    if current_thread_id().map(|tid| tid.as_u64()) != Some(tid_raw)
-        && !caller_has_process_kill_capability()
-    {
-        return EPERM;
-    }
     let target_pid = match thread_to_process_id(tid_raw) {
         Some(pid) => pid,
         None => return ESRCH,
     };
+    if !caller_can_signal_process(target_pid) {
+        return EPERM;
+    }
     if sig == 0 {
         return SUCCESS;
     }
@@ -252,17 +250,15 @@ pub fn tgkill(tgid_raw: u64, tid_raw: u64, sig_raw: u64) -> u64 {
     if sig > 64 {
         return EINVAL;
     }
-    let self_target = current_thread_id().map(|tid| tid.as_u64()) == Some(tid_raw)
-        && current_pid().map(|pid| pid.as_u64()) == Some(tgid_raw);
-    if !self_target && !caller_has_process_kill_capability() {
-        return EPERM;
-    }
     let target_pid = match thread_to_process_id(tid_raw) {
         Some(pid) => pid,
         None => return ESRCH,
     };
     if tgid_raw != 0 && target_pid.as_u64() != tgid_raw {
         return ESRCH;
+    }
+    if !caller_can_signal_process(target_pid) {
+        return EPERM;
     }
     if sig == 0 {
         return SUCCESS;
@@ -524,8 +520,44 @@ fn caller_has_process_kill_capability() -> bool {
     ]) || crate::syscall::security::caller_is_core()
 }
 
+fn caller_can_signal_process(target: ProcessId) -> bool {
+    let Some(caller) = current_pid() else {
+        return false;
+    };
+    if caller == target || caller_has_process_kill_capability() {
+        return true;
+    }
+    let caller_uid = with_process(caller, |process| process.credentials().effective_uid());
+    let target_uid = with_process(target, |process| process.credentials().effective_uid());
+    matches!(
+        (caller_uid, target_uid),
+        (Some(uid), Some(target_uid)) if uids_allow_signal(uid, target_uid)
+    )
+}
+
+const fn uids_allow_signal(caller_uid: u32, target_uid: u32) -> bool {
+    caller_uid != 0 && caller_uid == target_uid
+}
+
 fn caller_can_broadcast_signal() -> bool {
     caller_has_process_kill_capability()
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::uids_allow_signal;
+
+    #[test]
+    fn a_user_can_signal_the_same_user_only() {
+        assert!(uids_allow_signal(1000, 1000));
+        assert!(!uids_allow_signal(1000, 1001));
+    }
+
+    #[test]
+    fn root_services_still_require_process_kill() {
+        assert!(!uids_allow_signal(0, 0));
+        assert!(!uids_allow_signal(0, 1000));
+    }
 }
 
 /// 指定プロセスの最初のスレッドを起床させる

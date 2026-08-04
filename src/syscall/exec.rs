@@ -664,6 +664,15 @@ fn exec_internal(
         process_name = alias;
     }
     let role = manifest_role.unwrap_or(ManifestRole::Unknown);
+    let access_process = parent_override.or_else(|| {
+        crate::task::current_thread_id()
+            .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
+    });
+    if let Some(pid) = access_process {
+        if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(path, pid) {
+            return errno;
+        }
+    }
     let loaded = load_exec_image(path, role);
     if let Some(LoadedExec {
         data,
@@ -777,6 +786,13 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
+
+    let Some(pid) = crate::syscall::security::current_process_id() else {
+        return crate::syscall::types::EACCES;
+    };
+    if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(&path, pid) {
+        return errno;
+    }
 
     if let Some(data) =
         crate::init::fs::read_rootfs(&path).or_else(|| crate::cext::fs::read_all(&path))
@@ -1632,6 +1648,13 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         }
     };
     let path = path_owned.as_str();
+
+    let Some(pid) = crate::syscall::security::current_process_id() else {
+        return crate::syscall::types::EACCES;
+    };
+    if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(path, pid) {
+        return errno;
+    }
 
     let exec_path = path_owned.clone();
     let aslr_seed = next_aslr_seed(exec_path.as_str());
