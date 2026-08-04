@@ -251,7 +251,18 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
-    exec_internal(path, None, &extra_args, &[], None, None, None, None, None)
+    exec_internal(
+        path,
+        None,
+        &extra_args,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// exec 時に capability を付与して起動する
@@ -313,6 +324,7 @@ pub fn exec_with_capabilities_syscall(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -323,7 +335,15 @@ pub fn exec_manifest_syscall(
     caps_total_len: u64,
     role_raw: u64,
 ) -> u64 {
-    exec_manifest_common(path_ptr, args_ptr, caps_ptr, caps_total_len, role_raw, None)
+    exec_manifest_common(
+        path_ptr,
+        args_ptr,
+        caps_ptr,
+        caps_total_len,
+        role_raw,
+        None,
+        None,
+    )
 }
 
 pub fn exec_manifest_with_credentials_syscall(
@@ -377,6 +397,7 @@ pub fn exec_manifest_with_credentials_syscall(
         caps_total_len,
         role_raw,
         Some(crate::task::ProcessCredentials::user(uid, gid)),
+        None,
     )
 }
 
@@ -456,6 +477,7 @@ pub fn exec_manifest_for_requester_syscall(
         caps_total_len,
         role_raw,
         Some(credentials),
+        Some(requester_pid),
     )
 }
 
@@ -466,6 +488,7 @@ fn exec_manifest_common(
     caps_total_len: u64,
     role_raw: u64,
     credentials: Option<crate::task::ProcessCredentials>,
+    parent_override: Option<crate::task::ProcessId>,
 ) -> u64 {
     use crate::syscall::types::{EACCES, EINVAL, EPERM};
 
@@ -560,12 +583,24 @@ fn exec_manifest_common(
         credentials,
         requested_privilege,
         Some(role),
+        parent_override,
     )
 }
 
 /// 名前を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
 pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
-    exec_internal(path, Some(name), &[], &[], None, None, None, None, None)
+    exec_internal(
+        path,
+        Some(name),
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// 名前と初期 capability を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
@@ -606,6 +641,7 @@ pub fn exec_kernel_with_name_caps_and_authorities(
         None,
         Some(requested_privilege),
         manifest_role,
+        None,
     )
 }
 
@@ -619,6 +655,7 @@ fn exec_internal(
     requested_credentials: Option<crate::task::ProcessCredentials>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     manifest_role: Option<ManifestRole>,
+    parent_override: Option<crate::task::ProcessId>,
 ) -> u64 {
     let mut process_name = name_override
         .map(|s| s.to_string())
@@ -647,7 +684,7 @@ fn exec_internal(
             &exec_path,
             args,
             envp,
-            None,
+            parent_override,
             initial_caps,
             initial_kernel_authorities,
             requested_credentials,

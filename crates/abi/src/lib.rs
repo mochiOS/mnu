@@ -143,7 +143,7 @@ pub enum SyscallNumber {
     ExecWithCapabilities = 554,
     BlockRead = 555,
     BlockWrite = 556,
-    Reserved557 = 557,
+    IpcEndpointOwner = 557,
     ProcessExit = 574,
     ProcessSpawn = 575,
     ProcessWait = 576,

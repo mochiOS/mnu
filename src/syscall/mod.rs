@@ -599,6 +599,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::IpcReply as u64 => ipc::reply(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcWait as u64 => ipc::wait(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcEndpointAlive as u64 => ipc::endpoint_alive(arg0),
+        x if x == SyscallNumber::IpcEndpointOwner as u64 => ipc::endpoint_owner_process(arg0),
         x if x == SyscallNumber::CapClone as u64 => capability::clone_capability(arg0, arg1),
         x if x == SyscallNumber::CapDrop as u64 => capability::drop_capability(arg0, arg1),
         x if x == SyscallNumber::CapTransfer as u64 => {

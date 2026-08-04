@@ -129,6 +129,20 @@ pub fn endpoint_alive(handle: u64) -> u64 {
     }
 }
 
+pub fn endpoint_owner_process(handle: u64) -> u64 {
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::ProcessInspect,
+    ]) {
+        return EACCES;
+    }
+    let Some(record) = endpoint_record_from_handle(handle) else {
+        return EINVAL;
+    };
+    crate::task::thread_to_process_id(record.thread_id)
+        .map(|process_id| process_id.as_u64())
+        .unwrap_or(EINVAL)
+}
+
 fn endpoint_rights_for_thread(thread_id: u64) -> EndpointRights {
     let Some(pid) = crate::task::thread_to_process_id(thread_id) else {
         return EndpointRights::empty();
@@ -472,11 +486,12 @@ fn recv_blocking_reply_for_thread(
                 )) {
                     crate::task::yield_now();
                 } else {
+                    // The caller's mailbox also carries ordinary events. A wakeup
+                    // without a reply must not abort an already-delivered IPC call.
                     let mut boxes = MAILBOXES.lock();
                     if boxes[idx].waiter == caller_thread_id {
                         boxes[idx].waiter = 0;
                     }
-                    return EAGAIN;
                 }
             }
         }
