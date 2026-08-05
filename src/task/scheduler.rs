@@ -351,6 +351,22 @@ pub fn wake_thread(id: ThreadId) {
     }
 }
 
+/// Wake a thread that has already registered itself as an IPC mailbox waiter.
+///
+/// A waiter can still be Running in the short interval before it transitions
+/// to Sleeping. Latch that wakeup so `sleep_thread_unless_woken` cannot miss a
+/// message delivered in that interval.
+pub fn wake_ipc_waiter(id: ThreadId) {
+    if let Some(current_state) = crate::task::with_thread(id, |thread| thread.state()) {
+        if current_state == ThreadState::Sleeping || current_state == ThreadState::Blocked {
+            let _ = with_thread_mut(id, |thread| thread.note_interactive_wakeup());
+            set_thread_state(id, ThreadState::Ready);
+        } else if current_state == ThreadState::Ready || current_state == ThreadState::Running {
+            with_thread_mut(id, |thread| thread.set_pending_wakeup());
+        }
+    }
+}
+
 /// 現在のスレッドをスリープ状態にする。
 ///
 /// pending_wakeup フラグが立っていれば眠らずに即座に返す（競合回避）。

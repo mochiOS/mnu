@@ -262,6 +262,7 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
         None,
         None,
         None,
+        true,
     )
 }
 
@@ -325,6 +326,7 @@ pub fn exec_with_capabilities_syscall(
         None,
         None,
         None,
+        true,
     )
 }
 
@@ -584,6 +586,7 @@ fn exec_manifest_common(
         requested_privilege,
         Some(role),
         parent_override,
+        true,
     )
 }
 
@@ -600,6 +603,7 @@ pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
         None,
         None,
         None,
+        false,
     )
 }
 
@@ -642,6 +646,7 @@ pub fn exec_kernel_with_name_caps_and_authorities(
         Some(requested_privilege),
         manifest_role,
         None,
+        false,
     )
 }
 
@@ -656,6 +661,7 @@ fn exec_internal(
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     manifest_role: Option<ManifestRole>,
     parent_override: Option<crate::task::ProcessId>,
+    enforce_path_access: bool,
 ) -> u64 {
     let mut process_name = name_override
         .map(|s| s.to_string())
@@ -664,13 +670,16 @@ fn exec_internal(
         process_name = alias;
     }
     let role = manifest_role.unwrap_or(ManifestRole::Unknown);
-    let access_process = parent_override.or_else(|| {
-        crate::task::current_thread_id()
-            .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
-    });
-    if let Some(pid) = access_process {
-        if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(path, pid) {
-            return errno;
+    if enforce_path_access {
+        let access_process = parent_override.or_else(|| {
+            crate::task::current_thread_id()
+                .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
+        });
+        if let Some(pid) = access_process {
+            if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(path, pid)
+            {
+                return errno;
+            }
         }
     }
     let loaded = load_exec_image(path, role);
