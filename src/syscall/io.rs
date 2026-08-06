@@ -20,6 +20,7 @@ fn caller_has_port_io_access() -> bool {
         Capability::DeviceInput,
         Capability::DeviceGpu,
         Capability::DeviceNet,
+        Capability::SerialAccess,
     ])
 }
 
