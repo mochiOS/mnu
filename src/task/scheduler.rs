@@ -16,9 +16,9 @@ pub struct Scheduler {
     /// スケジューラが有効かどうか
     enabled: bool,
     /// タイムスライス（タイマー割り込み回数）
-    time_slice: u64,
+    time_slice: [u64; crate::percpu::MAX_CPUS],
     /// 現在のタイムスライスカウンタ
-    current_slice: u64,
+    current_slice: [u64; crate::percpu::MAX_CPUS],
 }
 
 impl Scheduler {
@@ -27,8 +27,8 @@ impl Scheduler {
         let default_time_slice = crate::config::kernel().scheduler.default_time_slice_ticks();
         Self {
             enabled: false,
-            time_slice: default_time_slice,
-            current_slice: 0,
+            time_slice: [default_time_slice; crate::percpu::MAX_CPUS],
+            current_slice: [0; crate::percpu::MAX_CPUS],
         }
     }
 
@@ -49,7 +49,7 @@ impl Scheduler {
 
     /// タイムスライスを設定
     pub fn set_time_slice(&mut self, slice: u64) {
-        self.time_slice = slice;
+        self.time_slice[crate::percpu::current_cpu_id()] = slice;
     }
 
     /// タイマー割り込み時に呼ばれる
@@ -60,9 +60,10 @@ impl Scheduler {
             return false;
         }
 
-        self.current_slice += 1;
-        if self.current_slice >= self.time_slice {
-            self.current_slice = 0;
+        let cpu = crate::percpu::current_cpu_id();
+        self.current_slice[cpu] += 1;
+        if self.current_slice[cpu] >= self.time_slice[cpu] {
+            self.current_slice[cpu] = 0;
             true // スケジューリングが必要
         } else {
             false
@@ -71,7 +72,7 @@ impl Scheduler {
 
     /// タイムスライスをリセット
     pub fn reset_slice(&mut self) {
-        self.current_slice = 0;
+        self.current_slice[crate::percpu::current_cpu_id()] = 0;
     }
 }
 

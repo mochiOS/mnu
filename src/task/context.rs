@@ -76,8 +76,14 @@ const _: () = assert!(core::mem::offset_of!(Context, fx_state) == 0x60);
 const _: () = assert!(core::mem::align_of::<Context>() == 16);
 const _: () = assert!(core::mem::size_of::<Context>() == 0x260);
 
-/// 初回スイッチ時に使用するダミーコンテキスト（保存先として使われるが値は参照されない）
-static mut INITIAL_DUMMY_CONTEXT: Context = Context::new();
+/// CPUごとの初回スイッチ用ダミーコンテキスト（保存値は参照されない）。
+static mut INITIAL_DUMMY_CONTEXTS: [Context; crate::percpu::MAX_CPUS] =
+    [const { Context::new() }; crate::percpu::MAX_CPUS];
+
+fn initial_dummy_context() -> *mut Context {
+    let cpu = crate::percpu::current_cpu_id();
+    unsafe { core::ptr::addr_of_mut!(INITIAL_DUMMY_CONTEXTS[cpu]) }
+}
 /// 現在のスレッドから次のスレッドへコンテキストを切り替える
 ///
 /// Context構造体のレイアウト:
@@ -205,7 +211,7 @@ pub unsafe fn switch_to_thread_with_slots(
     } else {
         // 現在のスレッドがない場合（初回スイッチ）はダミーに書き込む（値は捨てられる）
         (
-            unsafe { core::ptr::addr_of_mut!(INITIAL_DUMMY_CONTEXT) },
+            initial_dummy_context(),
             None,
         )
     };
@@ -333,7 +339,7 @@ pub unsafe fn switch_to_thread_from_isr(
         }
     } else {
         (
-            unsafe { core::ptr::addr_of_mut!(INITIAL_DUMMY_CONTEXT) },
+            initial_dummy_context(),
             None,
             crate::task::PrivilegeLevel::Core,
         )

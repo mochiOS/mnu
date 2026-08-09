@@ -12,8 +12,18 @@ use crate::{BootInfo, SmpHandoff};
 const AP_BOOT_STACK_SIZE: usize = 0x2000;
 const MAX_SMP_STACKS: usize = crate::MAX_CPU_IDS;
 const X2APIC_SIVR_MSR: u32 = 0x80F;
+const X2APIC_EOI_MSR: u32 = 0x80B;
 const X2APIC_ICR_MSR: u32 = 0x830;
+const X2APIC_LVT_TIMER_MSR: u32 = 0x832;
+const X2APIC_TIMER_INITIAL_COUNT_MSR: u32 = 0x838;
+const X2APIC_TIMER_CURRENT_COUNT_MSR: u32 = 0x839;
+const X2APIC_TIMER_DIVIDE_MSR: u32 = 0x83E;
 const APIC_SIVR_ENABLE: u64 = 1 << 8;
+const APIC_TIMER_VECTOR: u8 = 48;
+const APIC_TIMER_PERIODIC: u32 = 1 << 17;
+const APIC_TIMER_MASKED: u32 = 1 << 16;
+const APIC_TIMER_DIVIDE_BY_16: u32 = 0x3;
+const APIC_TIMER_CALIBRATION_TICKS: u64 = 10;
 #[repr(align(16))]
 struct ApBootStack([u8; AP_BOOT_STACK_SIZE]);
 
@@ -24,6 +34,7 @@ static BOOT_INFO_PTR: AtomicU64 = AtomicU64::new(0);
 static SMP_HANDOFF_ADDR: AtomicU64 = AtomicU64::new(0);
 static TRAMPOLINE_PHYS: AtomicU64 = AtomicU64::new(0);
 static TRAMPOLINE_SIZE: AtomicUsize = AtomicUsize::new(0);
+static APIC_TIMER_INITIAL_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 struct TrampolineLayout {
@@ -327,6 +338,90 @@ pub fn init_local_apic() {
     }
 }
 
+fn local_apic_write(x2apic_msr: u32, xapic_offset: usize, value: u32) -> bool {
+    if apic_mode_is_x2apic() {
+        unsafe { x2apic_write(x2apic_msr, u64::from(value)) };
+        true
+    } else {
+        unsafe { xapic_write(xapic_offset, value) }.is_some()
+    }
+}
+
+fn local_apic_read(x2apic_msr: u32, xapic_offset: usize) -> Option<u32> {
+    if apic_mode_is_x2apic() {
+        Some(unsafe { x2apic_read(x2apic_msr) } as u32)
+    } else {
+        unsafe { xapic_read(xapic_offset) }
+    }
+}
+
+pub fn local_apic_eoi() {
+    if apic_mode_is_x2apic() {
+        unsafe { x2apic_write(X2APIC_EOI_MSR, 0) };
+    } else {
+        let _ = unsafe { xapic_write(0xB0, 0) };
+    }
+}
+
+fn calibrate_apic_timer() -> Option<u32> {
+    if !local_apic_write(
+        X2APIC_LVT_TIMER_MSR,
+        0x320,
+        APIC_TIMER_MASKED | u32::from(APIC_TIMER_VECTOR),
+    ) || !local_apic_write(X2APIC_TIMER_DIVIDE_MSR, 0x3E0, APIC_TIMER_DIVIDE_BY_16)
+    {
+        return None;
+    }
+
+    let initial_tick = crate::interrupt::timer::get_ticks();
+    while crate::interrupt::timer::get_ticks() == initial_tick {
+        core::hint::spin_loop();
+    }
+    let start_tick = crate::interrupt::timer::get_ticks();
+    if !local_apic_write(X2APIC_TIMER_INITIAL_COUNT_MSR, 0x380, u32::MAX) {
+        return None;
+    }
+    while crate::interrupt::timer::get_ticks().saturating_sub(start_tick)
+        < APIC_TIMER_CALIBRATION_TICKS
+    {
+        core::hint::spin_loop();
+    }
+    let current = local_apic_read(X2APIC_TIMER_CURRENT_COUNT_MSR, 0x390)?;
+    let elapsed = u32::MAX.saturating_sub(current);
+    let count = elapsed / APIC_TIMER_CALIBRATION_TICKS as u32;
+    (count != 0).then_some(count)
+}
+
+fn prepare_secondary_timer() {
+    match calibrate_apic_timer() {
+        Some(count) => {
+            APIC_TIMER_INITIAL_COUNT.store(u64::from(count), Ordering::Release);
+            crate::info!("Local APIC timer calibrated: initial_count={}", count);
+        }
+        None => crate::warn!("Local APIC timer calibration failed; AP preemption unavailable"),
+    }
+    let _ = local_apic_write(
+        X2APIC_LVT_TIMER_MSR,
+        0x320,
+        APIC_TIMER_MASKED | u32::from(APIC_TIMER_VECTOR),
+    );
+    let _ = local_apic_write(X2APIC_TIMER_INITIAL_COUNT_MSR, 0x380, 0);
+}
+
+pub fn enable_local_scheduler_timer() -> bool {
+    let count = APIC_TIMER_INITIAL_COUNT.load(Ordering::Acquire) as u32;
+    if count == 0 {
+        return false;
+    }
+    local_apic_write(X2APIC_TIMER_DIVIDE_MSR, 0x3E0, APIC_TIMER_DIVIDE_BY_16)
+        && local_apic_write(
+            X2APIC_LVT_TIMER_MSR,
+            0x320,
+            APIC_TIMER_PERIODIC | u32::from(APIC_TIMER_VECTOR),
+        )
+        && local_apic_write(X2APIC_TIMER_INITIAL_COUNT_MSR, 0x380, count)
+}
+
 #[inline]
 fn wait_for_icr_idle_x2apic() {
     loop {
@@ -551,6 +646,8 @@ pub fn start_secondary_cpus() {
         );
         return;
     }
+
+    prepare_secondary_timer();
 
     if unsafe { install_trampoline(boot_info) }.is_none() {
         crate::warn!("AP trampoline installation failed; skipping AP startup");

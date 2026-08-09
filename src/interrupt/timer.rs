@@ -49,6 +49,22 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: Interrupt
     crate::syscall::syscall_entry::kpti_leave_after_trap(entered_from_user);
 }
 
+/// Per-CPU Local APIC timer handler used by secondary processors.
+pub extern "x86-interrupt" fn local_timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
+    let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(
+        stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3,
+    );
+    normalize_user_iret_frame(&mut stack_frame);
+
+    let should_schedule = crate::task::scheduler_tick();
+    crate::smp::local_apic_eoi();
+    if should_schedule {
+        crate::task::schedule_and_switch();
+    }
+
+    crate::syscall::syscall_entry::kpti_leave_after_trap(entered_from_user);
+}
+
 fn normalize_user_iret_frame(stack_frame: &mut InterruptStackFrame) {
     if stack_frame.code_segment.rpl() != PrivilegeLevel::Ring3 {
         return;

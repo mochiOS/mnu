@@ -144,6 +144,7 @@ pub fn init() {
             }
             idt[i].set_handler_fn(generic_interrupt_handler);
         }
+        idt[48].set_handler_fn(super::timer::local_timer_interrupt_handler);
 
         idt
     });

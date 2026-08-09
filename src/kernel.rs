@@ -26,7 +26,7 @@ fn kernel_process_id() -> Option<task::ProcessId> {
 fn ap_idle_loop() -> ! {
     loop {
         task::schedule_and_switch();
-        core::hint::spin_loop();
+        x86_64::instructions::hlt();
     }
 }
 
@@ -191,6 +191,11 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo) -> ! {
     info!("Secondary CPU CPU features initialized");
     crate::syscall::syscall_entry::init_syscall_current_cpu();
     info!("Secondary CPU syscall state initialized");
+    if crate::smp::enable_local_scheduler_timer() {
+        info!("Secondary CPU scheduler timer initialized");
+    } else {
+        crate::warn!("Secondary CPU scheduler timer unavailable");
+    }
     let (idle_thread_id, idle_thread_slot) = match spawn_ap_idle_thread() {
         Ok(v) => v,
         Err(err) => {
@@ -211,6 +216,9 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo) -> ! {
         idle_thread_id, idle_thread_slot
     );
     task::set_thread_state(idle_thread_id, task::ThreadState::Running);
+    unsafe {
+        x86_64::instructions::interrupts::enable();
+    }
     unsafe {
         task::context::switch_to_thread_with_slots(None, None, idle_thread_id, idle_thread_slot);
     }
