@@ -193,6 +193,11 @@ pub fn resolve_endpoint_handle(dest: u64) -> Option<u64> {
     endpoint_record_from_handle(dest).map(|record| record.thread_id)
 }
 
+pub fn resolve_sender_thread_id(sender: u64) -> Option<u64> {
+    resolve_endpoint_handle(sender)
+        .or_else(|| crate::task::thread_slot_index_and_generation_by_u64(sender).map(|_| sender))
+}
+
 pub fn create(flags: u64, _reserved: u64) -> u64 {
     if flags != 0 {
         return EINVAL;

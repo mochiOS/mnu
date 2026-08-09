@@ -56,12 +56,8 @@ pub fn check_thread_capability(thread_id: u64, cap_ptr: u64, cap_len: u64) -> u6
     let Ok(name) = core::str::from_utf8(&buf) else {
         return EINVAL;
     };
-    let resolved_thread = match crate::syscall::ipc::resolve_endpoint_handle(thread_id) {
-        Some(thread_id) => thread_id,
-        None if crate::task::thread_slot_index_and_generation_by_u64(thread_id).is_some() => {
-            thread_id
-        }
-        None => return 0,
+    let Some(resolved_thread) = crate::syscall::ipc::resolve_sender_thread_id(thread_id) else {
+        return 0;
     };
     let Some(pid) = crate::task::thread_to_process_id(resolved_thread) else {
         return 0;

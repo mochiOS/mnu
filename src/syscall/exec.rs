@@ -455,6 +455,9 @@ pub fn exec_manifest_for_requester_syscall(
         return EPERM;
     }
 
+    let Some(requester_tid) = crate::syscall::ipc::resolve_sender_thread_id(requester_tid) else {
+        return EINVAL;
+    };
     let requester = crate::task::ThreadId::from_u64(requester_tid);
     let Some(requester_pid) = crate::task::with_thread(requester, |thread| thread.process_id())
     else {
