@@ -521,6 +521,11 @@ impl Process {
         self.app_id.as_deref()
     }
 
+    /// アプリIDを設定する（信頼済みmanifest起動経路専用）
+    pub(crate) fn set_app_id<S: Into<String>>(&mut self, app_id: S) {
+        self.app_id = Some(app_id.into());
+    }
+
     /// サービスIDを取得
     pub fn service_id(&self) -> Option<&str> {
         self.service_id.as_deref()

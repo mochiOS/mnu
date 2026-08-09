@@ -191,8 +191,12 @@ fn ensure_fs_path_access_for_process(
     needed_rights: u32,
     pid_raw: u64,
 ) -> Result<(), u64> {
+    let application_storage = application_storage_path_allows(path, pid_raw);
     ensure_fs_capability_access_for_process(path, needed_rights, pid_raw)?;
     ensure_unix_traversal_for_process(path, pid_raw)?;
+    if application_storage {
+        return Ok(());
+    }
     if (needed_rights & (PATH_CREATE | PATH_DELETE)) != 0 {
         ensure_unix_parent_write_for_process(path, pid_raw)?;
         if (needed_rights & PATH_DELETE) != 0 {
@@ -218,6 +222,9 @@ fn ensure_fs_capability_access_for_process(
     needed_rights: u32,
     pid_raw: u64,
 ) -> Result<(), u64> {
+    if application_storage_path_allows(path, pid_raw) {
+        return Ok(());
+    }
     if let Some(entry) = path::lookup_path(path) {
         if !path_owner_allows(entry.owner, pid_raw) {
             return Err(EACCES);
@@ -230,6 +237,30 @@ fn ensure_fs_capability_access_for_process(
         enforce_fs_path_capability_for_process(path, needed_rights, pid_raw)?;
     }
     Ok(())
+}
+
+fn application_storage_path_allows(path: &str, pid_raw: u64) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    let normalized = normalize_path(path);
+    let Some(app_id) =
+        crate::task::with_process(crate::task::ids::ProcessId::from_u64(pid_raw), |process| {
+            process.app_id().map(ToString::to_string)
+        })
+        .flatten()
+    else {
+        return false;
+    };
+    path_is_in_application_storage(&normalized, &app_id)
+}
+
+fn path_is_in_application_storage(normalized: &str, app_id: &str) -> bool {
+    let root = alloc::format!("/libraries/applications/{app_id}");
+    normalized == root
+        || normalized
+            .strip_prefix(&root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn current_effective_ids() -> Option<(u32, u32)> {
@@ -2462,6 +2493,26 @@ mod unix_mode_tests {
         assert!(sticky_directory_allows_delete(0o1777, 1000, 1001, 1000));
         assert!(sticky_directory_allows_delete(0o1777, 0, 1001, 0));
         assert!(!sticky_directory_allows_delete(0o1777, 0, 1001, 1000));
+    }
+
+    #[test]
+    fn application_storage_is_scoped_to_exact_bundle_id() {
+        assert!(path_is_in_application_storage(
+            "/libraries/applications/org.mochios.binder",
+            "org.mochios.binder"
+        ));
+        assert!(path_is_in_application_storage(
+            "/libraries/applications/org.mochios.binder/dock.conf",
+            "org.mochios.binder"
+        ));
+        assert!(!path_is_in_application_storage(
+            "/libraries/applications/org.mochios.files/settings",
+            "org.mochios.binder"
+        ));
+        assert!(!path_is_in_application_storage(
+            "/libraries/applications/org.mochios.binder-extra/settings",
+            "org.mochios.binder"
+        ));
     }
 
     #[test]

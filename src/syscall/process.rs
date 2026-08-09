@@ -464,6 +464,7 @@ pub fn fork() -> u64 {
         stack_top,
         parent_cwd,
         parent_exe_path,
+        parent_app_id,
         parent_limits,
         parent_pgid,
         parent_sid,
@@ -483,6 +484,7 @@ pub fn fork() -> u64 {
             p.stack_top(),
             p.cwd().to_string(),
             p.exe_path().to_string(),
+            p.app_id().map(ToString::to_string),
             p.resource_limits(),
             p.pgid(),
             p.sid(),
@@ -549,6 +551,9 @@ pub fn fork() -> u64 {
     child_proc.set_stack_top(stack_top);
     child_proc.set_cwd(&parent_cwd);
     child_proc.set_exe_path(&parent_exe_path);
+    if let Some(app_id) = parent_app_id {
+        child_proc.set_app_id(app_id);
+    }
     child_proc.set_resource_limits(parent_limits);
     child_proc.set_pgid(parent_pgid);
     child_proc.set_sid(parent_sid);

@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 const EM_X86_64: u16 = 0x3E;
 const EXEC_MANIFEST_ENV_PREFIX: &str = "__MOCHI_EXEC_ENV=";
+const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MOCHI_EXEC_APP_ID=";
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct InitialUserStack {
@@ -262,6 +263,7 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
         None,
         None,
         None,
+        None,
         true,
     )
 }
@@ -322,6 +324,7 @@ pub fn exec_with_capabilities_syscall(
         &[],
         Some(caps),
         Some(authorities),
+        None,
         None,
         None,
         None,
@@ -530,12 +533,19 @@ fn exec_manifest_common(
     };
     let mut extra_args: Vec<&str> = Vec::new();
     let mut envp: Vec<&str> = Vec::new();
+    let mut app_id: Option<&str> = None;
     for item in &extra_args_owned {
         if let Some(env) = item.strip_prefix(EXEC_MANIFEST_ENV_PREFIX) {
             if env.is_empty() || !env.contains('=') {
                 return EINVAL;
             }
             envp.push(env);
+        } else if let Some(value) = item.strip_prefix(EXEC_MANIFEST_APP_ID_PREFIX) {
+            if role != ManifestRole::Application || app_id.is_some() || !valid_application_id(value)
+            {
+                return EINVAL;
+            }
+            app_id = Some(value);
         } else {
             extra_args.push(item.as_str());
         }
@@ -589,8 +599,17 @@ fn exec_manifest_common(
         requested_privilege,
         Some(role),
         parent_override,
+        app_id,
         true,
     )
+}
+
+fn valid_application_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
 }
 
 /// 名前を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
@@ -600,6 +619,7 @@ pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
         Some(name),
         &[],
         &[],
+        None,
         None,
         None,
         None,
@@ -649,6 +669,7 @@ pub fn exec_kernel_with_name_caps_and_authorities(
         Some(requested_privilege),
         manifest_role,
         None,
+        None,
         false,
     )
 }
@@ -664,6 +685,7 @@ fn exec_internal(
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     manifest_role: Option<ManifestRole>,
     parent_override: Option<crate::task::ProcessId>,
+    app_id: Option<&str>,
     enforce_path_access: bool,
 ) -> u64 {
     let mut process_name = name_override
@@ -710,6 +732,7 @@ fn exec_internal(
             initial_kernel_authorities,
             requested_credentials,
             requested_privilege,
+            app_id,
         )
     } else {
         crate::warn!("exec: file not found: {}", path);
@@ -815,6 +838,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
             &path,
             &extra_args,
             &[],
+            None,
             None,
             None,
             None,
@@ -981,6 +1005,7 @@ fn exec_with_data(
     initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_credentials: Option<crate::task::ProcessCredentials>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
+    app_id: Option<&str>,
 ) -> u64 {
     crate::debug!("exec: name={}", process_name);
     let aslr_seed = next_aslr_seed(process_name);
@@ -1442,6 +1467,9 @@ fn exec_with_data(
             && process_name == boot_service_manager.process_name;
         let priority = resolve_exec_priority(ManifestRole::Unknown, parent_pid);
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
+        if let Some(app_id) = app_id {
+            proc.set_app_id(app_id);
+        }
         if let Some(credentials) =
             parent_pid.and_then(|pid| crate::task::with_process(pid, |parent| parent.credentials()))
         {
@@ -1959,6 +1987,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -1999,6 +2028,7 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         &[],
         &[],
         delegated_parent_pid(),
+        None,
         None,
         None,
         None,
@@ -2055,6 +2085,7 @@ pub fn exec_from_buffer_named_args_syscall(
         &args_refs,
         &[],
         delegated_parent_pid(),
+        None,
         None,
         None,
         None,
@@ -2132,6 +2163,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         &args_refs,
         &[],
         parent_override.or_else(delegated_parent_pid),
+        None,
         None,
         None,
         None,
