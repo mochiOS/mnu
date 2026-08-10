@@ -192,9 +192,10 @@ fn ensure_fs_path_access_for_process(
     pid_raw: u64,
 ) -> Result<(), u64> {
     let application_storage = application_storage_path_allows(path, pid_raw);
+    let settings_storage = settings_storage_path_allows(path, needed_rights, pid_raw);
     ensure_fs_capability_access_for_process(path, needed_rights, pid_raw)?;
     ensure_unix_traversal_for_process(path, pid_raw)?;
-    if application_storage {
+    if application_storage || settings_storage {
         return Ok(());
     }
     if (needed_rights & (PATH_CREATE | PATH_DELETE)) != 0 {
@@ -223,6 +224,9 @@ fn ensure_fs_capability_access_for_process(
     pid_raw: u64,
 ) -> Result<(), u64> {
     if application_storage_path_allows(path, pid_raw) {
+        return Ok(());
+    }
+    if settings_storage_path_allows(path, needed_rights, pid_raw) {
         return Ok(());
     }
     if let Some(entry) = path::lookup_path(path) {
@@ -260,6 +264,24 @@ fn path_is_in_application_storage(normalized: &str, app_id: &str) -> bool {
     normalized == root
         || normalized
             .strip_prefix(&root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn settings_storage_path_allows(path: &str, needed_rights: u32, pid_raw: u64) -> bool {
+    let normalized = normalize_path(path);
+    if !path_is_in_settings_storage(&normalized) {
+        return false;
+    }
+    let writes = (needed_rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) != 0;
+    let reads = (needed_rights & (PATH_READ | PATH_LIST | PATH_EXEC)) != 0;
+    (!writes || process_has_cap(pid_raw, Capability::SettingsWrite))
+        && (!reads || process_has_cap(pid_raw, Capability::SettingsRead))
+}
+
+fn path_is_in_settings_storage(normalized: &str) -> bool {
+    normalized == "/var/config"
+        || normalized
+            .strip_prefix("/var/config")
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
@@ -2413,8 +2435,8 @@ pub fn file_sync(fd: u64) -> u64 {
 mod unix_mode_tests {
     use super::{
         access_mode_rights, capability_requirement_satisfied, open_path_required_rights,
-        sticky_directory_allows_delete, unix_mode_allows, O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE,
-        PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, UNIX_EXECUTE,
+        path_is_in_settings_storage, sticky_directory_allows_delete, unix_mode_allows, O_CREAT,
+        O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, UNIX_EXECUTE,
     };
     use crate::capability::Capability;
 
@@ -2513,6 +2535,16 @@ mod unix_mode_tests {
             "/libraries/applications/org.mochios.binder-extra/settings",
             "org.mochios.binder"
         ));
+    }
+
+    #[test]
+    fn settings_storage_is_scoped_to_var_config() {
+        assert!(path_is_in_settings_storage("/var/config"));
+        assert!(path_is_in_settings_storage(
+            "/var/config/appearance/settings.conf"
+        ));
+        assert!(!path_is_in_settings_storage("/var/configuration"));
+        assert!(!path_is_in_settings_storage("/system/config"));
     }
 
     #[test]
