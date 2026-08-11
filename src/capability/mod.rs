@@ -239,7 +239,6 @@ pub enum UserCapability {
     SettingsWrite,
     CapabilitiesManage,
     Unsandboxed,
-    DeveloperCompile,
     DeveloperDebug,
     DeveloperProfile,
     DeveloperTracing,
@@ -322,7 +321,6 @@ impl UserCapability {
             SettingsWrite => "settings.write",
             CapabilitiesManage => "capabilities.manage",
             Unsandboxed => "unsandboxed",
-            DeveloperCompile => "developer.compile",
             DeveloperDebug => "developer.debug",
             DeveloperProfile => "developer.profile",
             DeveloperTracing => "developer.tracing",
@@ -405,7 +403,6 @@ impl UserCapability {
             "settings.write" => Some(SettingsWrite),
             "capabilities.manage" => Some(CapabilitiesManage),
             "unsandboxed" => Some(Unsandboxed),
-            "developer.compile" => Some(DeveloperCompile),
             "developer.debug" => Some(DeveloperDebug),
             "developer.profile" => Some(DeveloperProfile),
             "developer.tracing" => Some(DeveloperTracing),
@@ -544,7 +541,6 @@ pub enum Capability {
 
     Unsandboxed,
 
-    DeveloperCompile,
     DeveloperDebug,
     DeveloperProfile,
     DeveloperTracing,
@@ -575,8 +571,9 @@ impl Capability {
             | PowerShutdown | PowerReboot | PowerSuspend | SystemTimeSet | PackageInstall
             | PackageRemove | PackageUpdate | ServiceRegister | ServiceControl | VmCreate
             | VmControl | DeviceGpu | DeviceAudio | DeviceInput | DeviceStorage | DeviceNet
-            | AccountAuthenticate | AccountOtherRead | AccountOtherModify | SettingsWrite
-            | DeveloperCompile => CapabilityClass::Privileged,
+            | AccountAuthenticate | AccountOtherRead | AccountOtherModify | SettingsWrite => {
+                CapabilityClass::Privileged
+            }
             ProcessSpawn | ProcessInspect | ProcessKill | IpcClient | IpcServer
             | WindowSecureOverlay | DmaAllocate | MemoryPhysMap | MemoryPhysTranslate
             | KernelModuleLoad | KernelDebug | CapabilitiesManage | SystemRandomRead
@@ -699,7 +696,6 @@ impl Capability {
 
             Unsandboxed => "unsandboxed",
 
-            DeveloperCompile => "developer.compile",
             DeveloperDebug => "developer.debug",
             DeveloperProfile => "developer.profile",
             DeveloperTracing => "developer.tracing",
@@ -823,7 +819,6 @@ impl Capability {
 
             "unsandboxed" => Unsandboxed,
 
-            "developer.compile" => DeveloperCompile,
             "developer.debug" => DeveloperDebug,
             "developer.profile" => DeveloperProfile,
             "developer.tracing" => DeveloperTracing,
@@ -940,7 +935,6 @@ impl Capability {
             SettingsWrite => UserCapability::SettingsWrite,
             CapabilitiesManage => UserCapability::CapabilitiesManage,
             Unsandboxed => UserCapability::Unsandboxed,
-            DeveloperCompile => UserCapability::DeveloperCompile,
             DeveloperDebug => UserCapability::DeveloperDebug,
             DeveloperProfile => UserCapability::DeveloperProfile,
             DeveloperTracing => UserCapability::DeveloperTracing,
@@ -1063,7 +1057,6 @@ impl Capability {
             SettingsWrite,
             CapabilitiesManage,
             Unsandboxed,
-            DeveloperCompile,
             DeveloperDebug,
             DeveloperProfile,
             DeveloperTracing,
