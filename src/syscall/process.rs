@@ -460,6 +460,7 @@ pub fn fork() -> u64 {
         parent_pt,
         heap_start,
         heap_end,
+        ipc_mapping_end,
         stack_bottom,
         stack_top,
         parent_cwd,
@@ -480,6 +481,7 @@ pub fn fork() -> u64 {
             p.page_table(),
             p.heap_start(),
             p.heap_end(),
+            p.ipc_mapping_end(),
             p.stack_bottom(),
             p.stack_top(),
             p.cwd().to_string(),
@@ -547,6 +549,7 @@ pub fn fork() -> u64 {
     child_proc.set_page_table(child_pt);
     child_proc.set_heap_start(heap_start);
     child_proc.set_heap_end(heap_end);
+    child_proc.set_ipc_mapping_end(ipc_mapping_end);
     child_proc.set_stack_bottom(stack_bottom);
     child_proc.set_stack_top(stack_top);
     child_proc.set_cwd(&parent_cwd);
@@ -821,8 +824,9 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
     if length == 0 {
         return EINVAL;
     }
-    // A 4K RGBA image needs about 32 MiB in one contiguous allocation.
-    const MAX_MMAP_BACKING_BYTES: u64 = 64 * 1024 * 1024;
+    // Signature verification accepts MPKG files up to 256 MiB. Keep one
+    // allocation large enough for that payload while retaining a hard limit.
+    const MAX_MMAP_BACKING_BYTES: u64 = 256 * 1024 * 1024;
 
     // MAP_ANONYMOUS (0x20) は従来通りサポートする。
     const MAP_ANONYMOUS: u64 = 0x20;

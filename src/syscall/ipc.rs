@@ -1340,12 +1340,12 @@ fn map_external_pages_for_receiver(
     let page_span = (ext_pages.count as u64).saturating_mul(0x1000);
 
     let _ = map_start_hint; // 受信側の安全のためヒントは無視して自動配置する
-    let (virt_addr, page_table, reserved_heap_old, reserved_heap_new) =
+    let (virt_addr, page_table, reserved_mapping_old, reserved_mapping_new) =
         match crate::task::with_process_mut(target_pid, |p| {
-            let base = if p.heap_end() < 0x7100_0000_0000u64 {
+            let base = if p.ipc_mapping_end() < 0x7100_0000_0000u64 {
                 0x7100_0000_0000u64
             } else {
-                p.heap_end()
+                p.ipc_mapping_end()
             };
             let virt_addr = base
                 .checked_add(0xfff)
@@ -1353,8 +1353,8 @@ fn map_external_pages_for_receiver(
                 .ok_or(EINVAL)?;
             let new_end = virt_addr.checked_add(page_span).ok_or(EINVAL)?;
             let pt = p.page_table().ok_or(EINVAL)?;
-            let old_end = p.heap_end();
-            p.set_heap_end(new_end);
+            let old_end = p.ipc_mapping_end();
+            p.set_ipc_mapping_end(new_end);
             Ok((virt_addr, pt, old_end, new_end))
         }) {
             Some(Ok(v)) => (v.0, v.1, Some(v.2), Some(v.3)),
@@ -1385,10 +1385,10 @@ fn map_external_pages_for_receiver(
                 let rollback_virt = virt_addr + (j as u64 * 0x1000);
                 let _ = crate::mem::paging::unmap_page_in_table(page_table, rollback_virt);
             }
-            if let (Some(old_end), Some(new_end)) = (reserved_heap_old, reserved_heap_new) {
+            if let (Some(old_end), Some(new_end)) = (reserved_mapping_old, reserved_mapping_new) {
                 let _ = crate::task::with_process_mut(target_pid, |p| {
-                    if p.heap_end() == new_end {
-                        p.set_heap_end(old_end);
+                    if p.ipc_mapping_end() == new_end {
+                        p.set_ipc_mapping_end(old_end);
                     }
                 });
             }
@@ -1400,8 +1400,8 @@ fn map_external_pages_for_receiver(
         target_pid,
         page_table,
         virt_addr,
-        old_end: reserved_heap_old.unwrap_or(0),
-        new_end: reserved_heap_new.unwrap_or(0),
+        old_end: reserved_mapping_old.unwrap_or(0),
+        new_end: reserved_mapping_new.unwrap_or(0),
         page_count: ext_pages.count as usize,
     })
 }
@@ -1422,8 +1422,8 @@ impl ExternalPageMapping {
             let _ = crate::mem::paging::unmap_page_in_table(self.page_table, rollback_virt);
         }
         let _ = crate::task::with_process_mut(self.target_pid, |p| {
-            if p.heap_end() == self.new_end {
-                p.set_heap_end(self.old_end);
+            if p.ipc_mapping_end() == self.new_end {
+                p.set_ipc_mapping_end(self.old_end);
             }
         });
     }

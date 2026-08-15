@@ -1920,6 +1920,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         p.set_page_table(new_pt_phys);
         p.set_heap_start(heap_base);
         p.set_heap_end(heap_base + heap_map_size);
+        p.set_ipc_mapping_end(0);
         p.set_stack_bottom(stack_base_vaddr);
         p.set_stack_top(stack_end_vaddr + 4096);
         p.set_exe_path(&exec_path);

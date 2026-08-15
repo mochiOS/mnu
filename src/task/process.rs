@@ -414,6 +414,8 @@ pub struct Process {
     dma_start: u64,
     /// DMA 専用仮想アドレス領域の現在位置
     dma_end: u64,
+    /// IPCで受信した共有ページ用仮想アドレス領域の現在位置
+    ipc_mapping_end: u64,
     /// ユーザースタックの現在の最低マップアドレス（下向きに伸びる）
     stack_bottom: u64,
     /// ユーザースタックのトップアドレス（初期 RSP 付近）
@@ -488,6 +490,7 @@ impl Process {
             heap_end: heap_start,
             dma_start: 0,
             dma_end: 0,
+            ipc_mapping_end: 0,
             stack_bottom: 0,
             stack_top: 0,
             cwd: {
@@ -687,6 +690,14 @@ impl Process {
     pub fn reset_dma_arena(&mut self) {
         self.dma_start = 0;
         self.dma_end = 0;
+    }
+
+    pub fn ipc_mapping_end(&self) -> u64 {
+        self.ipc_mapping_end
+    }
+
+    pub fn set_ipc_mapping_end(&mut self, addr: u64) {
+        self.ipc_mapping_end = addr;
     }
 
     pub fn stack_bottom(&self) -> u64 {
