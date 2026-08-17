@@ -243,7 +243,13 @@ pub fn call(
         boxes[idx].reply_to = 0;
         saved
     };
-    let sent = send_to_thread_id(dest_thread_id, sender, req_ptr, req_len);
+    let sent = loop {
+        let status = send_to_thread_id(dest_thread_id, sender, req_ptr, req_len);
+        if status != EAGAIN {
+            break status;
+        }
+        crate::task::yield_now();
+    };
     if sent != 0 {
         let mut boxes = MAILBOXES.lock();
         if let Some((idx, _)) = crate::task::thread_slot_index_and_generation_by_u64(caller) {
