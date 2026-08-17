@@ -148,7 +148,7 @@ impl Default for KernelConfig {
                 brk_heap_aslr_max_pages: 0x8000,
                 mmap_heap_base_min: 0x5000_0000,
                 mmap_heap_aslr_max_pages: 0x10000,
-                kernel_thread_stack_size: 4096 * 4,
+                kernel_thread_stack_size: 4096 * 16,
             },
             cext: CextConfig {
                 module_load_base_start: 0x0000_6000_0000_0000,

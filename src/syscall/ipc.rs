@@ -316,7 +316,7 @@ fn recv_blocking_from_sender_for_thread(
         return EINVAL;
     }
 
-    let mut recv_buf = [0u8; MAX_MSG_SIZE];
+    let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
     loop {
         let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
         let recv = {
@@ -419,7 +419,7 @@ fn recv_blocking_reply_for_thread(
         return EINVAL;
     }
 
-    let mut recv_buf = [0u8; MAX_MSG_SIZE];
+    let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
     loop {
         let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
         let recv = {
@@ -1152,7 +1152,7 @@ fn send_to_thread_id_with_kind(
     // - 送信時点と受信時点で世代不一致なら古いメッセージとして破棄される。
 
     // データをユーザー空間からコピー
-    let mut data = [0u8; MAX_MSG_SIZE];
+    let mut data = vec![0u8; MAX_MSG_SIZE];
     if len > 0 && buf_ptr != 0 {
         if let Err(err) = crate::syscall::copy_from_user(buf_ptr, &mut data[..len]) {
             return err;
@@ -1557,7 +1557,7 @@ fn recv_blocking_for_thread(
         return EINVAL;
     }
 
-    let mut recv_buf = [0u8; MAX_MSG_SIZE];
+    let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
     loop {
         let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
         let recv = {

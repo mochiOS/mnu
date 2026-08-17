@@ -932,9 +932,8 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
         };
 
         if anonymous {
-            let region = crate::task::MmapRegion::anonymous(
-                map_start, size, prot, flags, writable, shared,
-            );
+            let region =
+                crate::task::MmapRegion::anonymous(map_start, size, prot, flags, writable, shared);
             if !process.add_mmap_region(region) {
                 crate::debug!("process::mmap overlap");
                 return Err(EINVAL);

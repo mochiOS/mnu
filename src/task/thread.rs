@@ -261,7 +261,8 @@ pub struct Thread {
 }
 
 // Simple kernel stack pool for creating kernel stacks for threads
-const KSTACK_POOL_SIZE: usize = 4096 * 512; // 2 MiB（128KB/スレッドで約15スレッド分、フリーリストで再利用）
+const KSTACK_SLOT_BYTES: usize = 4096 * 16;
+const KSTACK_POOL_SIZE: usize = 4096 * 4096;
 const KSTACK_PAGE_BYTES: usize = 4096;
 const KSTACK_GUARD_BYTES: usize = KSTACK_PAGE_BYTES;
 
@@ -354,16 +355,13 @@ fn unmap_guard_page(guard_addr: u64) -> bool {
 }
 
 /// カーネルスタックを内部プールから割り当てます。
+/// 全スレッドで固定長スロットを使い、フリーリストの異なるサイズ間での再利用を防ぐ。
 /// フリーリストに空きがあれば再利用し、なければバンプアロケータから新規割り当て。
 /// Returns base address (bottom) of stack.
 pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
-    if size == 0 || size > KSTACK_POOL_SIZE.saturating_sub(KSTACK_GUARD_BYTES) {
+    if size == 0 || size > KSTACK_SLOT_BYTES {
         return None;
     }
-    let size_pages = size
-        .checked_add(KSTACK_PAGE_BYTES - 1)?
-        .checked_div(KSTACK_PAGE_BYTES)?
-        .checked_mul(KSTACK_PAGE_BYTES)?;
 
     // フリーリストから再利用を試みる（guard ページは既に unmap 済み）
     {
@@ -382,7 +380,7 @@ pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
     }
 
     // バンプアロケータから新規割り当て
-    let alloc_size = size_pages.checked_add(KSTACK_GUARD_BYTES)?;
+    let alloc_size = KSTACK_SLOT_BYTES.checked_add(KSTACK_GUARD_BYTES)?;
     let off = NEXT_KSTACK_OFFSET.fetch_add(alloc_size, core::sync::atomic::Ordering::SeqCst);
     if off + alloc_size > KSTACK_POOL_SIZE {
         crate::debug!(
@@ -972,8 +970,8 @@ impl Thread {
     }
 
     pub fn is_kernel_stack_guard_intact(&self) -> bool {
-        use x86_64::structures::paging::mapper::TranslateError;
         use x86_64::structures::paging::Mapper;
+        use x86_64::structures::paging::mapper::TranslateError;
         use x86_64::structures::paging::{Page, Size4KiB};
 
         let (pool_start, pool_end) = {

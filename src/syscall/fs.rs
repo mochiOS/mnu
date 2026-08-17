@@ -4,13 +4,13 @@ use super::types::{
     EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS,
     ENOTDIR, EOVERFLOW, EPIPE, EROFS, ESRCH, SUCCESS,
 };
-use crate::capability::Capability;
 use crate::capability::path::{
-    self, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner,
-    PathType, UserPath,
+    self, PathOwner, PathType, UserPath, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ,
+    PATH_WRITE,
 };
+use crate::capability::Capability;
 use crate::task::fd_table::{
-    FD_BASE, FdTable, FileHandle, FileHandleCap, O_CLOEXEC, PROCESS_MAX_FDS,
+    FdTable, FileHandle, FileHandleCap, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -2489,10 +2489,7 @@ mod unix_mode_tests {
             open_path_required_rights(O_CREAT | O_WRONLY, false, false),
             PATH_CREATE
         );
-        assert_eq!(
-            open_path_required_rights(O_CREAT, false, true),
-            PATH_READ
-        );
+        assert_eq!(open_path_required_rights(O_CREAT, false, true), PATH_READ);
     }
 
     #[test]

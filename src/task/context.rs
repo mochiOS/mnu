@@ -210,17 +210,40 @@ pub unsafe fn switch_to_thread_with_slots(
         }
     } else {
         // 現在のスレッドがない場合（初回スイッチ）はダミーに書き込む（値は捨てられる）
-        (
-            initial_dummy_context(),
-            None,
-        )
+        (initial_dummy_context(), None)
     };
 
     // 次のスレッドのコンテキストへのポインタとカーネルスタックトップを取得
+    let resolved_next_slot = if queue
+        .get_slot(next_slot)
+        .is_some_and(|thread| thread.id() == next_id)
+    {
+        Some(next_slot)
+    } else {
+        queue.slot_index(next_id)
+    };
     let (new_context_ptr, next_kstack_top, next_process_id, next_fs_base, _next_in_syscall) =
-        if let Some(thread) = queue.get_slot(next_slot).or_else(|| queue.get(next_id)) {
+        if let Some(thread) = resolved_next_slot.and_then(|slot| queue.get_slot(slot)) {
             let ptr = thread.context() as *const Context;
             let kstack = thread.kernel_stack_top();
+            let saved_rsp = thread.context().rsp;
+            if saved_rsp < thread.kernel_stack_bottom() || saved_rsp >= kstack {
+                crate::error!(
+                    "Refusing invalid kernel context: tid={:?} pid={:?} thread='{}' rip={:#x} rsp={:#x} kstack=[{:#x}..{:#x}]",
+                    next_id,
+                    thread.process_id(),
+                    thread.name(),
+                    thread.context().rip,
+                    saved_rsp,
+                    thread.kernel_stack_bottom(),
+                    kstack,
+                );
+                drop(queue);
+                x86_64::instructions::interrupts::disable();
+                loop {
+                    x86_64::instructions::hlt();
+                }
+            }
             let pid = thread.process_id();
             let fs = thread.fs_base();
             let in_syscall = thread.in_syscall();
@@ -233,7 +256,7 @@ pub unsafe fn switch_to_thread_with_slots(
 
     // 実際に切り替える直前に current thread を更新する。
     // これにより「currentだけ先に更新される競合窓」を避ける。
-    crate::task::set_current_thread(Some(next_id), Some(next_slot));
+    crate::task::set_current_thread(Some(next_id), resolved_next_slot);
     crate::syscall::syscall_entry::switch_to_kernel_page_table();
 
     // TSSのRSP0とSYSCALL用カーネルスタックを更新

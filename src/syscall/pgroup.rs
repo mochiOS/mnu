@@ -321,8 +321,13 @@ pub fn setuid(uid: u64) -> u64 {
     let Some(pid) = current_pid() else {
         return EPERM;
     };
-    crate::task::with_process_mut(pid, |process| process.set_uid(uid))
-        .map_or(EPERM, |changed| if changed { SUCCESS } else { EPERM })
+    crate::task::with_process_mut(pid, |process| process.set_uid(uid)).map_or(EPERM, |changed| {
+        if changed {
+            SUCCESS
+        } else {
+            EPERM
+        }
+    })
 }
 
 pub fn setgid(gid: u64) -> u64 {
@@ -332,8 +337,13 @@ pub fn setgid(gid: u64) -> u64 {
     let Some(pid) = current_pid() else {
         return EPERM;
     };
-    crate::task::with_process_mut(pid, |process| process.set_gid(gid))
-        .map_or(EPERM, |changed| if changed { SUCCESS } else { EPERM })
+    crate::task::with_process_mut(pid, |process| process.set_gid(gid)).map_or(EPERM, |changed| {
+        if changed {
+            SUCCESS
+        } else {
+            EPERM
+        }
+    })
 }
 
 /// uname システムコール
