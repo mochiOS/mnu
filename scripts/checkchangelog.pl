@@ -66,7 +66,7 @@ for my $i (5 .. $#lines) {
     }
 
     if ($line =~ /^  .+/) {
-        if (!defined $current_item) {
+        if (!$current_item) {
             error($line_no, "continuation line appears before any change item");
         }
         next;
@@ -79,7 +79,7 @@ for my $i (5 .. $#lines) {
     error($line_no, "invalid change line. expected '* ' or two-space continuation");
 }
 
-if (!defined $has_change) {
+if (!$has_change) {
     error(6, "at least one change item is required");
 }
 
