@@ -5,8 +5,8 @@
 
 use super::types::{EINVAL, EPERM, ESRCH, SUCCESS};
 use crate::task::{
-    current_thread_id, default_action, thread_to_process_id, with_process, with_process_mut,
-    DefaultAction, ProcessId, SigAction, SIGCHLD, SIGKILL,
+    DefaultAction, ProcessId, SIGCHLD, SIGKILL, SigAction, current_thread_id, default_action,
+    thread_to_process_id, with_process, with_process_mut,
 };
 
 // ---- rt_sigprocmask の how 引数 ----
@@ -206,11 +206,7 @@ pub fn kill(pid_raw: u64, sig_raw: u64) -> u64 {
                 }
             }
         }
-        if found {
-            SUCCESS
-        } else {
-            ESRCH
-        }
+        if found { SUCCESS } else { ESRCH }
     } else {
         EINVAL
     }
@@ -525,6 +521,9 @@ fn caller_can_signal_process(target: ProcessId) -> bool {
         return false;
     };
     if caller == target || caller_has_process_kill_capability() {
+        return true;
+    }
+    if with_process(target, |process| process.parent_id() == Some(caller)).unwrap_or(false) {
         return true;
     }
     let caller_uid = with_process(caller, |process| process.credentials().effective_uid());
