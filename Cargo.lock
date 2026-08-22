@@ -128,7 +128,7 @@ dependencies = [
 [[package]]
 name = "mochios-csprng"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#4673bae786ef94d4cce112ad2f4f110db42db6ed"
+source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
 dependencies = [
  "rand_chacha",
  "rand_core",
@@ -142,7 +142,7 @@ version = "0.1.0"
 [[package]]
 name = "mochios-time-core"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#4673bae786ef94d4cce112ad2f4f110db42db6ed"
+source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
 
 [[package]]
 name = "plugkit"
@@ -155,7 +155,7 @@ dependencies = [
 [[package]]
 name = "plugkit"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#4673bae786ef94d4cce112ad2f4f110db42db6ed"
+source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
 dependencies = [
  "plugkit-macros 0.1.0 (git+https://github.com/mochiOS/mnu)",
  "plugkit-sys 0.1.0 (git+https://github.com/mochiOS/mnu)",
@@ -168,7 +168,7 @@ version = "0.1.0"
 [[package]]
 name = "plugkit-macros"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#4673bae786ef94d4cce112ad2f4f110db42db6ed"
+source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
 
 [[package]]
 name = "plugkit-sys"
@@ -180,7 +180,7 @@ dependencies = [
 [[package]]
 name = "plugkit-sys"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#4673bae786ef94d4cce112ad2f4f110db42db6ed"
+source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
 dependencies = [
  "spin",
 ]

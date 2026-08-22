@@ -244,7 +244,7 @@ pub fn call(
         saved
     };
     let sent = loop {
-        let status = send_to_thread_id(dest_thread_id, sender, req_ptr, req_len);
+        let status = send_call_to_thread_id(dest_thread_id, sender, req_ptr, req_len);
         if status != EAGAIN {
             break status;
         }
@@ -302,7 +302,7 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         None => return EINVAL,
     };
     let _ = caller_handle;
-    send_to_thread_id_with_kind(target_thread, caller_handle, buf_ptr, len, true)
+    send_to_thread_id_with_kind(target_thread, caller_handle, buf_ptr, len, true, false)
 }
 
 fn recv_blocking_from_sender_for_thread(
@@ -339,7 +339,7 @@ fn recv_blocking_from_sender_for_thread(
                     if let Some((caller_idx, _)) =
                         crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                     {
-                        if caller_idx < MAX_THREADS {
+                        if caller_idx < MAX_THREADS && v.2 {
                             boxes[caller_idx].reply_to = v.0;
                         }
                     }
@@ -353,7 +353,7 @@ fn recv_blocking_from_sender_for_thread(
         };
 
         match recv {
-            Some((from, copy_len)) => {
+            Some((from, copy_len, _)) => {
                 if copy_len > 0 && buf_ptr != 0 {
                     if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len]) {
                         return err;
@@ -364,7 +364,7 @@ fn recv_blocking_from_sender_for_thread(
             None => {
                 {
                     let mut boxes = MAILBOXES.lock();
-                    if let Some((from, copy_len)) = boxes[idx].pop_from_sender_copy(
+                    if let Some((from, copy_len, expects_reply)) = boxes[idx].pop_from_sender_copy(
                         sender_handle,
                         receiver_thread_id,
                         idx as u16,
@@ -378,7 +378,7 @@ fn recv_blocking_from_sender_for_thread(
                         if let Some((caller_idx, _)) =
                             crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                         {
-                            if caller_idx < MAX_THREADS {
+                            if caller_idx < MAX_THREADS && expects_reply {
                                 boxes[caller_idx].reply_to = from;
                             }
                         }
@@ -603,6 +603,7 @@ pub struct Message {
     to_slot: u16,
     to_generation: u64,
     is_reply: bool,
+    expects_reply: bool,
     len: usize,
     data: [u8; MAX_MSG_SIZE],
     ext_pages: ExternalPages,
@@ -616,6 +617,7 @@ impl Message {
             to_slot: 0,
             to_generation: 0,
             is_reply: false,
+            expects_reply: false,
             len: 0,
             data: [0; MAX_MSG_SIZE],
             ext_pages: ExternalPages::empty(),
@@ -721,6 +723,7 @@ impl Mailbox {
         to_generation: u64,
         data: &[u8],
         is_reply: bool,
+        expects_reply: bool,
     ) -> Result<(), ()> {
         if data.len() > ipc_max_msg_size() {
             return Err(());
@@ -735,6 +738,7 @@ impl Mailbox {
         msg.to_slot = to_slot;
         msg.to_generation = to_generation;
         msg.is_reply = is_reply;
+        msg.expects_reply = expects_reply;
         msg.len = data.len();
         msg.ext_pages = ExternalPages::empty();
         if !data.is_empty() {
@@ -753,7 +757,7 @@ impl Mailbox {
         receiver_slot: u16,
         receiver_generation: u64,
         out: &mut [u8],
-    ) -> Option<(u64, usize, ExternalPages)> {
+    ) -> Option<(u64, usize, ExternalPages, bool)> {
         while let Some(slot_idx) = self.dequeue_slot() {
             let msg = &self.slots[slot_idx];
             if msg.to == receiver
@@ -764,20 +768,22 @@ impl Mailbox {
                 if !msg.ext_pages.is_empty() && msg.len == 0 {
                     let from = msg.from;
                     let ext_pages = msg.ext_pages;
+                    let expects_reply = msg.expects_reply;
                     if !self.free_slot(slot_idx) {
                         return None;
                     }
-                    return Some((from, 0usize, ext_pages));
+                    return Some((from, 0usize, ext_pages, expects_reply));
                 }
                 if copy_len > 0 {
                     out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
                 }
                 let from = msg.from;
                 let ext_pages = msg.ext_pages;
+                let expects_reply = msg.expects_reply;
                 if !self.free_slot(slot_idx) {
                     return None;
                 }
-                return Some((from, copy_len, ext_pages));
+                return Some((from, copy_len, ext_pages, expects_reply));
             }
             // 古い宛先のメッセージは破棄
             if !self.free_slot(slot_idx) {
@@ -796,7 +802,7 @@ impl Mailbox {
         receiver_generation: u64,
         out: &mut [u8],
         reply_only: bool,
-    ) -> Option<(u64, usize)> {
+    ) -> Option<(u64, usize, bool)> {
         if self.count == 0 {
             return None;
         }
@@ -823,10 +829,11 @@ impl Mailbox {
                 out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
             }
             let from = msg.from;
+            let expects_reply = msg.expects_reply;
             if !self.free_slot(slot_idx) {
                 return None;
             }
-            return Some((from, copy_len));
+            return Some((from, copy_len, expects_reply));
         }
 
         None
@@ -909,6 +916,7 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
                 dest_generation,
                 data,
                 false,
+                false,
             )
             .is_ok()
         {
@@ -953,6 +961,7 @@ pub fn send_pages_from_kernel(
             msg.to_slot = idx as u16;
             msg.to_generation = dest_generation;
             msg.is_reply = false;
+            msg.expects_reply = false;
             // serialize map_start, total only.
             // 物理ページ配列は data に露出させず ext_pages 側だけに保持する。
             let mut off = 0usize;
@@ -1022,6 +1031,7 @@ fn send_virtual_pages_from_kernel(
             msg.to_slot = idx as u16;
             msg.to_generation = dest_generation;
             msg.is_reply = false;
+            msg.expects_reply = false;
             if 16 > ipc_max_msg_size() {
                 let _ = mb.free_slot(slot_idx);
                 return false;
@@ -1075,6 +1085,7 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
             msg.to_slot = idx as u16;
             msg.to_generation = dest_generation;
             msg.is_reply = false;
+            msg.expects_reply = false;
             // New format: [magic:u32][map_start:u64][total:u64] (20 bytes)
             let mut off = 0usize;
             if 20 > ipc_max_msg_size() {
@@ -1120,7 +1131,16 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
 }
 
 fn send_to_thread_id(dest_thread_id: u64, sender_handle: u64, buf_ptr: u64, len: u64) -> u64 {
-    send_to_thread_id_with_kind(dest_thread_id, sender_handle, buf_ptr, len, false)
+    send_to_thread_id_with_kind(dest_thread_id, sender_handle, buf_ptr, len, false, false)
+}
+
+fn send_call_to_thread_id(
+    dest_thread_id: u64,
+    sender_handle: u64,
+    buf_ptr: u64,
+    len: u64,
+) -> u64 {
+    send_to_thread_id_with_kind(dest_thread_id, sender_handle, buf_ptr, len, false, true)
 }
 
 fn send_to_thread_id_with_kind(
@@ -1129,6 +1149,7 @@ fn send_to_thread_id_with_kind(
     buf_ptr: u64,
     len: u64,
     is_reply: bool,
+    expects_reply: bool,
 ) -> u64 {
     if dest_thread_id == 0 {
         return EINVAL;
@@ -1173,6 +1194,7 @@ fn send_to_thread_id_with_kind(
             dest_generation,
             &data[..len],
             is_reply,
+            expects_reply,
         )
         .is_err()
     {
@@ -1498,7 +1520,7 @@ fn recv_from_thread_nonblocking(
 
     let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
     let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
-    let (from, copy_len, ext_pages) = {
+    let (from, copy_len, ext_pages, _) = {
         let mut boxes = MAILBOXES.lock();
         match boxes[idx].pop_valid_for_receiver_copy(
             receiver_thread_id,
@@ -1510,7 +1532,7 @@ fn recv_from_thread_nonblocking(
                 if let Some((caller_idx, _)) =
                     crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                 {
-                    if caller_idx < MAX_THREADS {
+                    if caller_idx < MAX_THREADS && v.3 {
                         boxes[caller_idx].reply_to = v.0;
                     }
                 }
@@ -1578,7 +1600,7 @@ fn recv_blocking_for_thread(
                     if let Some((caller_idx, _)) =
                         crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                     {
-                        if caller_idx < MAX_THREADS {
+                        if caller_idx < MAX_THREADS && v.3 {
                             boxes[caller_idx].reply_to = v.0;
                         }
                     }
@@ -1592,7 +1614,7 @@ fn recv_blocking_for_thread(
         };
 
         match recv {
-            Some((from, copy_len, ext_pages)) => {
+            Some((from, copy_len, ext_pages, _)) => {
                 let (copy_len, mapping) = match prepare_external_pages_for_user(
                     receiver_thread_id,
                     &mut recv_buf,
@@ -1622,7 +1644,7 @@ fn recv_blocking_for_thread(
             None => {
                 {
                     let mut boxes = MAILBOXES.lock();
-                    if let Some((from, copy_len, ext_pages)) = boxes[idx]
+                    if let Some((from, copy_len, ext_pages, expects_reply)) = boxes[idx]
                         .pop_valid_for_receiver_copy(
                             receiver_thread_id,
                             idx as u16,
@@ -1636,7 +1658,7 @@ fn recv_blocking_for_thread(
                         if let Some((caller_idx, _)) =
                             crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                         {
-                            if caller_idx < MAX_THREADS {
+                            if caller_idx < MAX_THREADS && expects_reply {
                                 boxes[caller_idx].reply_to = from;
                             }
                         }
@@ -1755,7 +1777,7 @@ pub fn recv_from_sender_for_kernel_nonblocking(
                 buf,
                 false,
             )
-            .map(|(_, n)| n)
+            .map(|(_, n, _)| n)
     };
 
     Ok(n)
@@ -1795,7 +1817,7 @@ pub fn recv_blocking_from_sender_for_kernel(
                 buf,
                 false,
             ) {
-                Some((_, n)) => Some(n),
+                Some((_, n, _)) => Some(n),
                 None => {
                     boxes[idx].waiter = receiver_u64;
                     None
@@ -1808,7 +1830,7 @@ pub fn recv_blocking_from_sender_for_kernel(
             None => {
                 {
                     let mut boxes = MAILBOXES.lock();
-                    if let Some((_, n)) = boxes[idx].pop_from_sender_copy(
+                    if let Some((_, n, _)) = boxes[idx].pop_from_sender_copy(
                         sender_thread_id,
                         receiver_u64,
                         idx as u16,
