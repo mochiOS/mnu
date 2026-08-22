@@ -24,7 +24,8 @@ fn caller_has_process_spawn_capability() -> bool {
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 /// Linux互換: 操作がタイムアウトした
 const ETIMEDOUT: u64 = (-110i64) as u64;
-use crate::task::{current_thread_id, exit_current_task};
+use crate::task::current_thread_id;
+use crate::task::scheduler::exit_current_process;
 
 #[derive(Clone, Copy)]
 struct FutexWaitEntry {
@@ -212,8 +213,10 @@ pub fn wake_due_futex_waiters(now_tick: u64) {
 pub fn exit(exit_code: u64) -> ! {
     crate::sprintln!("Process exiting with code: {}", exit_code);
 
-    // スケジューラから現在のタスクを削除して終了
-    exit_current_task(exit_code)
+    // ProcessExit/_exit は同一プロセスの全スレッドを終了させる。
+    // ここで現在スレッドだけを止めると、ViewKit などがワーカー
+    // スレッドを持つ場合にプロセスが Zombie にならず waitpid が永久待機する。
+    exit_current_process(exit_code as i32)
 }
 
 /// List processes into a user-supplied buffer.

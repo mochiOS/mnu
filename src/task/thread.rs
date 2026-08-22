@@ -970,8 +970,8 @@ impl Thread {
     }
 
     pub fn is_kernel_stack_guard_intact(&self) -> bool {
-        use x86_64::structures::paging::Mapper;
         use x86_64::structures::paging::mapper::TranslateError;
+        use x86_64::structures::paging::Mapper;
         use x86_64::structures::paging::{Page, Size4KiB};
 
         let (pool_start, pool_end) = {

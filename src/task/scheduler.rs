@@ -633,9 +633,24 @@ pub fn start_scheduling() -> ! {
     }
 }
 
-/// プロセス終了用のエイリアス（ページフォルトハンドラなどから呼び出される）
+/// 現在のプロセス全体を終了させる。
 ///
-/// 現在のプロセス/スレッドを終了させる
+/// `ProcessExit` と致命的な例外は POSIX `_exit` と同じく、呼び出し元
+/// スレッドだけでなく同一プロセスの全スレッドを終了させる。
+/// スレッド単体の終了には `ThreadExit` を使う。
 pub fn exit_current_process(exit_code: i32) -> ! {
+    if let Some(current_id) = current_thread_id() {
+        if let Some(current_pid) = with_thread(current_id, |thread| thread.process_id()) {
+            let mut siblings = alloc::vec::Vec::new();
+            crate::task::for_each_thread(|thread| {
+                if thread.process_id() == current_pid && thread.id() != current_id {
+                    siblings.push(thread.id());
+                }
+            });
+            for sibling in siblings {
+                terminate_thread(sibling);
+            }
+        }
+    }
     exit_current_task(exit_code as u64)
 }
