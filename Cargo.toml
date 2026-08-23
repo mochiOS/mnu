@@ -52,6 +52,13 @@ test = false
 bench = false
 required-features = ["domain-guest"]
 
+[[bin]]
+name = "grant-bootstrap"
+path = "src/grant_bootstrap.rs"
+test = false
+bench = false
+required-features = ["domain-guest"]
+
 [target.'cfg(any(target_os = "none", target_os = "uefi"))'.dependencies]
 linked_list_allocator = "0.10.5"
 mochios-csprng = { path = "crates/csprng" }

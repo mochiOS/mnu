@@ -6,8 +6,9 @@ mod domain_hypercall;
 use domain_hypercall::{halt_forever, invoke, shutdown};
 use mnu_abi::hypervisor::{
     DomainBootInfo, HypercallNumber, ShutdownReason, DOMAIN_FEATURE_EVENT_CHANNEL,
-    DOMAIN_FEATURE_READY, DOMAIN_ROLE_SYSTEM, HYPERCALL_INVALID_ARGUMENT, HYPERCALL_SUCCESS,
-    HYPERCALL_UNSUPPORTED, HYPERVISOR_BACKEND_AMD_SVM, HYPERVISOR_BACKEND_INTEL_VMX,
+    DOMAIN_FEATURE_GRANT_TABLE, DOMAIN_FEATURE_READY, DOMAIN_ROLE_SYSTEM,
+    HYPERCALL_INVALID_ARGUMENT, HYPERCALL_SUCCESS, HYPERCALL_UNSUPPORTED,
+    HYPERVISOR_BACKEND_AMD_SVM, HYPERVISOR_BACKEND_INTEL_VMX,
 };
 
 static START_MESSAGE: &[u8] = b"mochiOS System Domain entered\n";
@@ -20,8 +21,9 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
     };
     if boot_info.validate().is_err()
         || boot_info.domain_role != DOMAIN_ROLE_SYSTEM
-        || boot_info.feature_flags & (DOMAIN_FEATURE_READY | DOMAIN_FEATURE_EVENT_CHANNEL)
-            != DOMAIN_FEATURE_READY | DOMAIN_FEATURE_EVENT_CHANNEL
+        || boot_info.feature_flags
+            & (DOMAIN_FEATURE_READY | DOMAIN_FEATURE_EVENT_CHANNEL | DOMAIN_FEATURE_GRANT_TABLE)
+            != DOMAIN_FEATURE_READY | DOMAIN_FEATURE_EVENT_CHANNEL | DOMAIN_FEATURE_GRANT_TABLE
     {
         invalid_boot_info(boot_info.hypervisor_backend)
     }
