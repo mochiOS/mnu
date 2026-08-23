@@ -1,14 +1,20 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 1;
+pub const DOMAIN_BOOT_VERSION: u32 = 2;
 
 pub const HYPERVISOR_BACKEND_INTEL_VMX: u32 = 1;
 pub const HYPERVISOR_BACKEND_AMD_SVM: u32 = 2;
 
+pub const DOMAIN_ROLE_SYSTEM: u32 = 1;
+pub const DOMAIN_ROLE_HARDWARE: u32 = 2;
+pub const DOMAIN_ROLE_APPLICATION: u32 = 3;
+
 pub const DOMAIN_FEATURE_CONSOLE_WRITE: u64 = 1 << 0;
 pub const DOMAIN_FEATURE_YIELD: u64 = 1 << 1;
 pub const DOMAIN_FEATURE_SHUTDOWN: u64 = 1 << 2;
+pub const DOMAIN_FEATURE_READY: u64 = 1 << 3;
+pub const DOMAIN_FEATURE_WAIT: u64 = 1 << 4;
 
 pub const HYPERCALL_SUCCESS: u64 = 0;
 pub const HYPERCALL_UNSUPPORTED: u64 = u64::MAX;
@@ -20,6 +26,8 @@ pub enum HypercallNumber {
     ConsoleWrite = 0,
     Yield = 1,
     Shutdown = 2,
+    Ready = 3,
+    Wait = 4,
 }
 
 #[repr(u64)]
@@ -28,6 +36,7 @@ pub enum ShutdownReason {
     Completed = 0,
     InvalidBootInfo = 1,
     Panic = 2,
+    InitializationFailed = 3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +45,7 @@ pub enum DomainBootInfoError {
     UnsupportedVersion,
     InvalidStructSize,
     InvalidBackend,
+    InvalidRole,
     MissingRequiredHypercall,
     InvalidMemorySize,
 }
@@ -53,7 +63,7 @@ pub struct DomainBootInfo {
     pub domain_id: u32,
     pub vcpu_id: u32,
     pub hypervisor_backend: u32,
-    pub _reserved0: u32,
+    pub domain_role: u32,
     pub memory_size: u64,
     pub feature_flags: u64,
     pub _reserved1: [u64; 4],
@@ -64,6 +74,7 @@ impl DomainBootInfo {
         domain_id: u32,
         vcpu_id: u32,
         hypervisor_backend: u32,
+        domain_role: u32,
         memory_size: u64,
     ) -> Self {
         Self {
@@ -73,11 +84,13 @@ impl DomainBootInfo {
             domain_id,
             vcpu_id,
             hypervisor_backend,
-            _reserved0: 0,
+            domain_role,
             memory_size,
             feature_flags: DOMAIN_FEATURE_CONSOLE_WRITE
                 | DOMAIN_FEATURE_YIELD
-                | DOMAIN_FEATURE_SHUTDOWN,
+                | DOMAIN_FEATURE_SHUTDOWN
+                | DOMAIN_FEATURE_READY
+                | DOMAIN_FEATURE_WAIT,
             _reserved1: [0; 4],
         }
     }
@@ -97,6 +110,12 @@ impl DomainBootInfo {
             HYPERVISOR_BACKEND_INTEL_VMX | HYPERVISOR_BACKEND_AMD_SVM
         ) {
             return Err(DomainBootInfoError::InvalidBackend);
+        }
+        if !matches!(
+            self.domain_role,
+            DOMAIN_ROLE_SYSTEM | DOMAIN_ROLE_HARDWARE | DOMAIN_ROLE_APPLICATION
+        ) {
+            return Err(DomainBootInfoError::InvalidRole);
         }
         if self.feature_flags & DOMAIN_FEATURE_SHUTDOWN == 0 {
             return Err(DomainBootInfoError::MissingRequiredHypercall);
@@ -120,20 +139,51 @@ mod tests {
 
     #[test]
     fn valid_domain_boot_info_is_accepted() {
-        let info = DomainBootInfo::new(1, 0, HYPERVISOR_BACKEND_AMD_SVM, 2 * 1024 * 1024);
+        let info = DomainBootInfo::new(
+            1,
+            0,
+            HYPERVISOR_BACKEND_AMD_SVM,
+            DOMAIN_ROLE_SYSTEM,
+            2 * 1024 * 1024,
+        );
         assert_eq!(info.validate(), Ok(()));
     }
 
     #[test]
     fn unknown_backend_is_rejected() {
-        let mut info = DomainBootInfo::new(1, 0, HYPERVISOR_BACKEND_INTEL_VMX, 4096);
+        let mut info = DomainBootInfo::new(
+            1,
+            0,
+            HYPERVISOR_BACKEND_INTEL_VMX,
+            DOMAIN_ROLE_SYSTEM,
+            4096,
+        );
         info.hypervisor_backend = 9;
         assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidBackend));
     }
 
     #[test]
     fn unaligned_memory_size_is_rejected() {
-        let info = DomainBootInfo::new(1, 0, HYPERVISOR_BACKEND_INTEL_VMX, 4097);
+        let info = DomainBootInfo::new(
+            1,
+            0,
+            HYPERVISOR_BACKEND_INTEL_VMX,
+            DOMAIN_ROLE_SYSTEM,
+            4097,
+        );
         assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidMemorySize));
+    }
+
+    #[test]
+    fn unknown_domain_role_is_rejected() {
+        let mut info = DomainBootInfo::new(
+            1,
+            0,
+            HYPERVISOR_BACKEND_INTEL_VMX,
+            DOMAIN_ROLE_SYSTEM,
+            4096,
+        );
+        info.domain_role = 99;
+        assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidRole));
     }
 }
