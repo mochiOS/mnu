@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
-plugkit = { git = "https://github.com/mochiOS/mnu", package = "plugkit" }
+mnu-abi = { path = "../../../crates/abi" }
+plugkit = { path = "../../../crates/PlugKit/plugkit" }
 
 [[bin]]
 name = "entry"
@@ -16,9 +16,3 @@ harness = false
 
 [lib]
 path = "src/lib.rs"
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"

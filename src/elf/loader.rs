@@ -79,7 +79,7 @@ pub fn parse_elf_header(data: &[u8]) -> Option<Elf64Ehdr> {
     let mut e_ident = [0u8; 16];
     e_ident.copy_from_slice(&data[0..16]);
 
-    /// ELFのマジックが正しいか
+    // ELFのマジックが正しいか
     if &e_ident[0..4] != b"\x7fELF" {
         return None;
     }

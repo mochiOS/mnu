@@ -8,10 +8,10 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     util::console::init();
     util::vga::init(
         boot_info.framebuffer_addr,
-        boot_info.framebuffer_size,
-        boot_info.screen_width,
-        boot_info.screen_height,
-        boot_info.stride,
+        boot_info.framebuffer_size as usize,
+        boot_info.screen_width as usize,
+        boot_info.screen_height as usize,
+        boot_info.stride as usize,
     );
 
     // CPU機能の初期化（SSE/FPU有効化）
@@ -28,7 +28,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     let memory_map = unsafe {
         core::slice::from_raw_parts(
             boot_info.memory_map_addr as *const MemoryRegion,
-            boot_info.memory_map_len,
+            boot_info.memory_map_len as usize,
         )
     };
 
@@ -87,9 +87,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     interrupt::init_pit();
     interrupt::enable_timer_interrupt();
 
-    unsafe {
-        x86_64::instructions::interrupts::enable();
-    }
+    x86_64::instructions::interrupts::enable();
 
     // Initialize syscall MSRs (STAR/LSTAR/FMASK)
 

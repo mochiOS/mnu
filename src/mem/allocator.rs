@@ -25,7 +25,6 @@ const HEAP_HEADER_ALIGNMENT: usize = 16;
 #[derive(Clone, Copy)]
 struct QuarantinedBlock {
     user_ptr: *mut u8,
-    user_layout: Layout,
     raw_ptr: *mut u8,
     raw_layout: Layout,
 }
@@ -259,8 +258,6 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
         };
         let block = QuarantinedBlock {
             user_ptr: ptr,
-            user_layout: Layout::from_size_align(header.user_size, header.user_align)
-                .unwrap_or(layout),
             raw_ptr,
             raw_layout,
         };
@@ -389,9 +386,7 @@ fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
     }
     // 回復不能: 割り込みを無効化してシステムを停止
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        x86_64::instructions::interrupts::disable();
-    }
+    x86_64::instructions::interrupts::disable();
     loop {
         #[cfg(target_arch = "x86_64")]
         unsafe {

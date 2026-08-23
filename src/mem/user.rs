@@ -1,10 +1,9 @@
 //! ユーザー空間メモリ管理
 
 use spin::Mutex;
-use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
-use x86_64::VirtAddr;
+use x86_64::structures::paging::PageTableFlags;
 
-use crate::mem::{frame, paging};
+use crate::mem::paging;
 use crate::result::{Kernel, Memory, Result};
 
 const PAGE_SIZE: u64 = 4096;
@@ -17,15 +16,6 @@ static NEXT_STACK_TOP: Mutex<u64> = Mutex::new(USER_STACK_TOP);
 pub struct UserStack {
     pub bottom: u64,
     pub top: u64,
-}
-
-fn current_process_user_page_table() -> Result<u64> {
-    let pid = crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
-        .ok_or(Kernel::Memory(Memory::NotMapped))?;
-    crate::task::with_process(pid, |proc| proc.page_table())
-        .flatten()
-        .ok_or(Kernel::Memory(Memory::NotMapped))
 }
 
 /// 指定したユーザーページテーブル上に任意のユーザ空間レンジをマップ
@@ -61,18 +51,6 @@ pub fn map_user_range_in_table(
         flags.contains(PageTableFlags::WRITABLE),
         !flags.contains(PageTableFlags::NO_EXECUTE),
     )
-}
-
-/// 任意のユーザ空間レンジをマップ
-pub fn map_user_range(start: u64, size: u64, flags: PageTableFlags) -> Result<()> {
-    let table_phys = current_process_user_page_table()?;
-    map_user_range_in_table(table_phys, start, size, flags)
-}
-
-/// ユーザスタックを確保
-pub fn alloc_user_stack(pages: u64) -> Result<UserStack> {
-    let table_phys = current_process_user_page_table()?;
-    alloc_user_stack_in_table(table_phys, pages)
 }
 
 /// 指定したユーザーページテーブル上にユーザスタックを確保

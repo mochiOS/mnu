@@ -114,7 +114,7 @@ pub fn getsid(pid_arg: u64) -> u64 {
 /// - TIOCGWINSZ (0x5413): ウィンドウサイズ取得
 /// - TCGETS (0x5401): termios 取得
 /// - TCSETS/TCSETSW/TCSETSF (0x5402-0x5404): termios 設定
-pub fn ioctl(fd: u64, request: u64, arg: u64) -> u64 {
+pub fn ioctl(_fd: u64, request: u64, arg: u64) -> u64 {
     const TIOCGPGRP: u64 = 0x540f;
     const TIOCSPGRP: u64 = 0x5410;
     const TIOCGWINSZ: u64 = 0x5413;

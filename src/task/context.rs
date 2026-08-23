@@ -157,14 +157,13 @@ pub unsafe extern "C" fn switch_context(old_context: *mut Context, new_context: 
 /// # Safety
 /// 呼び出し側は `next_id` が有効な実行可能スレッドであることを保証する必要がある。
 pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) {
-    let mut queue = THREAD_QUEUE.lock();
-    let current_slot = current_id.and_then(|id| queue.slot_index(id));
+    let queue = THREAD_QUEUE.lock();
     let next_slot = match queue.slot_index(next_id) {
         Some(slot) => slot,
         None => return,
     };
     drop(queue);
-    switch_to_thread_with_slots(current_id, current_slot, next_id, next_slot);
+    switch_to_thread_with_slots(current_id, next_id, next_slot);
 }
 
 /// 別スレッドへ切替（通常呼び出し経路）
@@ -173,7 +172,6 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
 /// 呼び出し側は `next_id` が有効な実行可能スレッドであることを保証する必要がある。
 pub unsafe fn switch_to_thread_with_slots(
     current_id: Option<ThreadId>,
-    current_slot: Option<usize>,
     next_id: ThreadId,
     next_slot: usize,
 ) {
@@ -369,7 +367,7 @@ pub unsafe fn switch_to_thread_from_isr(
     };
 
     let (
-        new_ctx_ptr,
+        _new_ctx_ptr,
         next_priv,
         next_kstack_top,
         next_fs_base,

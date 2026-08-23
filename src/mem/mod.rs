@@ -39,10 +39,9 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
     crate::debug!("Paging initialized, initializing PAGE_TABLE");
 
     let smap_was_enabled_for_paging = crate::cpu::is_smap_enabled();
-    let smep_was_enabled_for_paging = unsafe {
-        let cr4 = x86_64::registers::control::Cr4::read();
-        cr4.contains(x86_64::registers::control::Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION)
-    };
+    let cr4 = x86_64::registers::control::Cr4::read();
+    let smep_was_enabled_for_paging =
+        cr4.contains(x86_64::registers::control::Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION);
 
     if smap_was_enabled_for_paging {
         unsafe {

@@ -7,7 +7,7 @@ edition = "2024"
 path = "src/lib.rs"
 
 [dependencies]
-mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
+mnu-abi = { path = "../../crates/abi" }
 
 [[bin]]
 name = "user"

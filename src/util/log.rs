@@ -45,7 +45,7 @@ pub fn log(level: LogLevel, args: core::fmt::Arguments) {
         return;
     }
 
-    use crate::{sprint, sprintln, vprint, vprintln};
+    use crate::{sprint, sprintln};
 
     let prefix = match level {
         LogLevel::Trace => "[TRACE]",

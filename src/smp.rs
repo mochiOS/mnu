@@ -25,10 +25,12 @@ const APIC_TIMER_MASKED: u32 = 1 << 16;
 const APIC_TIMER_DIVIDE_BY_16: u32 = 0x3;
 const APIC_TIMER_CALIBRATION_TICKS: u64 = 10;
 #[repr(align(16))]
-struct ApBootStack([u8; AP_BOOT_STACK_SIZE]);
+struct ApBootStack {
+    _bytes: [u8; AP_BOOT_STACK_SIZE],
+}
 
 static mut AP_BOOT_STACKS: [ApBootStack; MAX_SMP_STACKS] =
-    [const { ApBootStack([0; AP_BOOT_STACK_SIZE]) }; MAX_SMP_STACKS];
+    [const { ApBootStack { _bytes: [0; AP_BOOT_STACK_SIZE] } }; MAX_SMP_STACKS];
 
 static BOOT_INFO_PTR: AtomicU64 = AtomicU64::new(0);
 static SMP_HANDOFF_ADDR: AtomicU64 = AtomicU64::new(0);
@@ -513,22 +515,12 @@ unsafe fn patch_trampoline_u32(base_virt: u64, instr_offset: usize, value: u32) 
     ptr::write_unaligned(ptr, value);
 }
 
-unsafe fn patch_trampoline_u32_prefixed(base_virt: u64, instr_offset: usize, value: u32) {
-    let ptr = (base_virt + instr_offset as u64 + 2) as *mut u32;
-    ptr::write_unaligned(ptr, value);
-}
-
 unsafe fn patch_gdt_descriptor_base(base_virt: u64, descriptor_offset: usize, base: u32) {
     let desc = (base_virt + descriptor_offset as u64) as *mut u8;
     ptr::write(desc.add(2), (base & 0xFF) as u8);
     ptr::write(desc.add(3), ((base >> 8) & 0xFF) as u8);
     ptr::write(desc.add(4), ((base >> 16) & 0xFF) as u8);
     ptr::write(desc.add(7), ((base >> 24) & 0xFF) as u8);
-}
-
-unsafe fn patch_trampoline_u64(base_virt: u64, instr_offset: usize, value: u64) {
-    let ptr = (base_virt + instr_offset as u64 + 2) as *mut u64;
-    ptr::write_unaligned(ptr, value);
 }
 
 unsafe fn write_trampoline_gdtr(base_virt: u64, gdtr_offset: usize, gdt_phys: u64) {
@@ -544,7 +536,7 @@ unsafe fn install_trampoline(boot_info: &'static BootInfo) -> Option<()> {
         return None;
     }
     let layout = trampoline_layout();
-    if boot_info.smp_trampoline_size < layout.size {
+    if boot_info.smp_trampoline_size < layout.size as u64 {
         crate::warn!(
             "SMP trampoline too small: have={} need={}",
             boot_info.smp_trampoline_size,
@@ -696,7 +688,7 @@ pub fn start_secondary_cpus() {
     }
 
     let bsp_apic_id = boot_info.bsp_apic_id;
-    let cpu_count = boot_info.cpu_apic_id_count.min(crate::MAX_CPU_IDS);
+    let cpu_count = (boot_info.cpu_apic_id_count as usize).min(crate::MAX_CPU_IDS);
     let expected_ap_count = boot_info.cpu_enabled.saturating_sub(1);
     let mut started = 0usize;
 

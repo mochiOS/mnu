@@ -2,7 +2,6 @@
 //!
 //! CR0/CR4レジスタの設定、SSE/FPUの有効化など
 
-use crate::sprintln;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;

@@ -23,9 +23,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     // 割り込みを無効化
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        x86_64::instructions::interrupts::disable();
-    }
+    x86_64::instructions::interrupts::disable();
 
     // システムを停止
     loop {

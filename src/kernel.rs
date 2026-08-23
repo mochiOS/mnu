@@ -5,7 +5,7 @@ use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
 use crate::util::log::LogLevel;
 use crate::{debug, info};
-use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
+use crate::{init::kinit, task, util, BootInfo, Result};
 use core::sync::atomic::Ordering;
 use core::sync::atomic::{AtomicU64, AtomicUsize};
 
@@ -14,9 +14,13 @@ static KERNEL_PROCESS_ID_RAW: AtomicU64 = AtomicU64::new(0);
 static AP_IDLE_THREAD_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(align(16))]
-struct KernelStack([u8; KERNEL_THREAD_STACK_SIZE]);
+struct KernelStack {
+    _bytes: [u8; KERNEL_THREAD_STACK_SIZE],
+}
 
-static mut KERNEL_THREAD_STACK: KernelStack = KernelStack([0; KERNEL_THREAD_STACK_SIZE]);
+static mut KERNEL_THREAD_STACK: KernelStack = KernelStack {
+    _bytes: [0; KERNEL_THREAD_STACK_SIZE],
+};
 
 fn kernel_process_id() -> Option<task::ProcessId> {
     let raw = KERNEL_PROCESS_ID_RAW.load(Ordering::Acquire);
@@ -157,16 +161,25 @@ fn kernel_main() -> ! {
 
 /// カーネルエントリポイント（kernel binary から呼ばれる）
 pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
+    crate::util::console::init();
+    if let Err(error) = boot_info.validate() {
+        crate::error!("Boot ABI validation failed: {:?}", error);
+        halt_forever();
+    }
+    unsafe {
+        crate::init::fs::set_image(boot_info.initfs_addr, boot_info.initfs_size as usize);
+        crate::init::fs::set_rootfs(boot_info.rootfs_addr, boot_info.rootfs_size as usize);
+    }
     crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
-    let memory_map = match kinit(boot_info) {
-        Ok(map) => map,
+    match kinit(boot_info) {
+        Ok(_) => {}
         Err(e) => {
             handle_kernel_error(e);
             halt_forever();
         }
-    };
+    }
 
-    create_kernel_proc(boot_info, memory_map).unwrap_or_else(|e| {
+    create_kernel_proc().unwrap_or_else(|e| {
         handle_kernel_error(e);
         halt_forever();
     });
@@ -216,11 +229,9 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo) -> ! {
         idle_thread_id, idle_thread_slot
     );
     task::set_thread_state(idle_thread_id, task::ThreadState::Running);
+    x86_64::instructions::interrupts::enable();
     unsafe {
-        x86_64::instructions::interrupts::enable();
-    }
-    unsafe {
-        task::context::switch_to_thread_with_slots(None, None, idle_thread_id, idle_thread_slot);
+        task::context::switch_to_thread_with_slots(None, idle_thread_id, idle_thread_slot);
     }
     crate::warn!("Secondary CPU idle thread switch returned unexpectedly");
     halt_forever();
@@ -232,10 +243,7 @@ pub static SECONDARY_CPU_ENTRY: unsafe extern "sysv64" fn(*const BootInfo) -> ! 
     secondary_cpu_entry;
 
 /// カーネルメインプロセスの作成
-fn create_kernel_proc(
-    boot_info: &'static BootInfo,
-    memory_map: &'static [MemoryRegion],
-) -> Result<()> {
+fn create_kernel_proc() -> Result<()> {
     let kernel_process = task::Process::new("kernel", task::PrivilegeLevel::Core, None, 0);
     let kernel_pid = kernel_process.id();
     KERNEL_PROCESS_ID_RAW.store(kernel_pid.as_u64(), Ordering::Release);
@@ -244,7 +252,7 @@ fn create_kernel_proc(
         return Err(Kernel::Process(Process::MaxProcessesReached));
     }
 
-    let stack_addr = unsafe { (&raw const KERNEL_THREAD_STACK as *const u8) as u64 };
+    let stack_addr = (&raw const KERNEL_THREAD_STACK as *const u8) as u64;
     let mut kernel_thread = task::Thread::new(
         kernel_pid,
         "core",

@@ -209,11 +209,11 @@ pub fn scheduler_tick() -> bool {
 /// # Returns
 /// 次に実行すべきスレッドID。実行可能なスレッドがない場合はNone
 pub fn schedule() -> Option<ThreadId> {
-    schedule_with_slot().map(|(next_id, _, _)| next_id)
+    schedule_with_slot().map(|(next_id, _)| next_id)
 }
 
 /// 次に実行すべきスレッドIDとスロットを取得
-fn schedule_with_slot() -> Option<(ThreadId, usize, Option<usize>)> {
+fn schedule_with_slot() -> Option<(ThreadId, usize)> {
     let mut queue = THREAD_QUEUE.lock();
 
     let current = current_thread_id();
@@ -284,7 +284,7 @@ fn schedule_with_slot() -> Option<(ThreadId, usize, Option<usize>)> {
     scheduler.set_time_slice(next_time_slice.max(1));
     scheduler.reset_slice();
 
-    Some((next_id, next_slot, current_slot))
+    Some((next_id, next_slot))
 }
 
 /// 現在のスレッドを明示的にCPUを手放す（yield）
@@ -298,12 +298,12 @@ pub fn yield_now() {
     // スケジューリングと切り替えは割り込み禁止区間で実行し、
     // 状態更新と実際の切替の間に割り込みが入る競合窓を防ぐ。
     x86_64::instructions::interrupts::without_interrupts(|| {
-        if let Some((next_id, next_slot, current_slot)) = schedule_with_slot() {
+        if let Some((next_id, next_slot)) = schedule_with_slot() {
             let current = current_thread_id();
             // 次のスレッドが現在のスレッドと異なる場合のみ切り替え
             if Some(next_id) != current {
                 unsafe {
-                    switch_to_thread_with_slots(current, current_slot, next_id, next_slot);
+                    switch_to_thread_with_slots(current, next_id, next_slot);
                 }
             }
         }
@@ -480,7 +480,7 @@ pub fn exit_current_task(exit_code: u64) -> ! {
 
         x86_64::instructions::interrupts::without_interrupts(|| {
             // 次のスレッドにスケジューリング（戻ってこない）
-            if let Some((next_id, next_slot, _current_slot)) = schedule_with_slot() {
+            if let Some((next_id, next_slot)) = schedule_with_slot() {
                 crate::debug!("Switching from exited thread to {:?}", next_id);
 
                 // スレッドをキューから削除（コンテキストスイッチ前に削除）
@@ -494,7 +494,7 @@ pub fn exit_current_task(exit_code: u64) -> ! {
                 // コンテキストスイッチを実行（終了したスレッドのコンテキストは保存しない）
                 // old_context_ptr = None を渡すことで、現在のコンテキストを保存せずに次のスレッドにジャンプ
                 unsafe {
-                    switch_to_thread_with_slots(None, None, next_id, next_slot);
+                    switch_to_thread_with_slots(None, next_id, next_slot);
                 }
 
                 crate::audit::log(
@@ -538,11 +538,11 @@ pub fn schedule_and_switch() {
         let current = current_thread_id();
 
         // 次のスレッドを選択
-        if let Some((next_id, next_slot, current_slot)) = schedule_with_slot() {
+        if let Some((next_id, next_slot)) = schedule_with_slot() {
             // 次のスレッドが現在のスレッドと異なる場合のみ切り替え
             if Some(next_id) != current {
                 unsafe {
-                    switch_to_thread_with_slots(current, current_slot, next_id, next_slot);
+                    switch_to_thread_with_slots(current, next_id, next_slot);
                 }
             }
         }
@@ -597,7 +597,7 @@ pub fn start_scheduling() -> ! {
                 };
                 match first_slot {
                     Some(first_slot) => {
-                        switch_to_thread_with_slots(None, None, first_id, first_slot);
+                        switch_to_thread_with_slots(None, first_id, first_slot);
                     }
                     None => {
                         crate::audit::log(

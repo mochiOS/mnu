@@ -8,7 +8,10 @@ use core::arch::asm;
 use core::fmt::Write;
 use core::mem::size_of;
 use core::ptr::{copy_nonoverlapping, write_bytes};
-use core::sync::atomic::{AtomicU64, AtomicUsize};
+use core::sync::atomic::Ordering;
+use mnu_boot_abi::{
+    BootInfo, MemoryRegion, MemoryType as MemoryRegionKind, SmpHandoff, MAX_CPU_IDS,
+};
 use spin::Mutex;
 use uefi::prelude::*;
 use uefi::fs::Error as FsError;
@@ -28,7 +31,6 @@ const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 const SERIAL_BASE: u16 = 0x3f8;
 const MAX_MEMORY_REGIONS: usize = 1024;
-const MAX_CPU_IDS: usize = 64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -77,105 +79,6 @@ struct Elf64Rela {
     r_addend: i64,
 }
 
-#[allow(dead_code)]
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MemoryRegionKind {
-    Usable = 0,
-    Reserved = 1,
-    AcpiReclaimable = 2,
-    AcpiNvs = 3,
-    BadMemory = 4,
-    BootloaderReclaimable = 5,
-    KernelStack = 6,
-    PageTable = 7,
-    Framebuffer = 8,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct MemoryRegion {
-    start: u64,
-    len: u64,
-    region_type: MemoryRegionKind,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct BootInfo {
-    physical_memory_offset: u64,
-    framebuffer_addr: u64,
-    framebuffer_size: usize,
-    screen_width: usize,
-    screen_height: usize,
-    stride: usize,
-    memory_map_addr: u64,
-    memory_map_len: usize,
-    memory_map_entry_size: usize,
-    kernel_heap_addr: u64,
-    initfs_addr: u64,
-    initfs_size: usize,
-    rootfs_addr: u64,
-    rootfs_size: usize,
-    cpu_total: usize,
-    cpu_enabled: usize,
-    bsp_apic_id: u32,
-    cpu_apic_ids: [u32; MAX_CPU_IDS],
-    cpu_apic_id_count: usize,
-    smp_handoff_addr: u64,
-    smp_handoff_size: usize,
-    smp_trampoline_addr: u64,
-    smp_trampoline_size: usize,
-}
-
-#[repr(C)]
-#[derive(Debug)]
-struct SmpHandoff {
-    ready: AtomicU64,
-    kernel_secondary_entry: AtomicU64,
-    boot_info_ptr: AtomicU64,
-    kernel_cr3: AtomicU64,
-    ap_count: AtomicUsize,
-}
-
-impl SmpHandoff {
-    const fn new() -> Self {
-        Self {
-            ready: AtomicU64::new(0),
-            kernel_secondary_entry: AtomicU64::new(0),
-            boot_info_ptr: AtomicU64::new(0),
-            kernel_cr3: AtomicU64::new(0),
-            ap_count: AtomicUsize::new(0),
-        }
-    }
-}
-
-const EMPTY_BOOT_INFO: BootInfo = BootInfo {
-    physical_memory_offset: 0,
-    framebuffer_addr: 0,
-    framebuffer_size: 0,
-    screen_width: 0,
-    screen_height: 0,
-    stride: 0,
-    memory_map_addr: 0,
-    memory_map_len: 0,
-    memory_map_entry_size: size_of::<MemoryRegion>(),
-    kernel_heap_addr: 0,
-    initfs_addr: 0,
-    initfs_size: 0,
-    rootfs_addr: 0,
-    rootfs_size: 0,
-    cpu_total: 1,
-    cpu_enabled: 1,
-    bsp_apic_id: 0,
-    cpu_apic_ids: [0; MAX_CPU_IDS],
-    cpu_apic_id_count: 1,
-    smp_handoff_addr: 0,
-    smp_handoff_size: 0,
-    smp_trampoline_addr: 0,
-    smp_trampoline_size: 0,
-};
-
 #[repr(C, align(4096))]
 struct AlignedPageTable(PageTable);
 
@@ -185,7 +88,7 @@ static mut MEMORY_REGIONS: [MemoryRegion; MAX_MEMORY_REGIONS] = [MemoryRegion {
     len: 0,
     region_type: MemoryRegionKind::Reserved,
 }; MAX_MEMORY_REGIONS];
-static mut BOOT_INFO: BootInfo = EMPTY_BOOT_INFO;
+static mut BOOT_INFO: BootInfo = BootInfo::empty();
 static mut SMP_HANDOFF: SmpHandoff = SmpHandoff::new();
 static mut PAGE_TABLES: [AlignedPageTable; 6] = [
     AlignedPageTable(PageTable::new()),
@@ -613,7 +516,7 @@ fn efi_main(image: Handle, mut st: SystemTable<Boot>) -> Status {
     let region_count = map_memory_regions(&mmap);
 
     unsafe {
-        BOOT_INFO = EMPTY_BOOT_INFO;
+        BOOT_INFO = BootInfo::empty();
         BOOT_INFO.physical_memory_offset = 0;
         BOOT_INFO.framebuffer_addr = 0;
         BOOT_INFO.framebuffer_size = 0;
@@ -621,29 +524,26 @@ fn efi_main(image: Handle, mut st: SystemTable<Boot>) -> Status {
         BOOT_INFO.screen_height = 0;
         BOOT_INFO.stride = 0;
         BOOT_INFO.memory_map_addr = core::ptr::addr_of!(MEMORY_REGIONS) as u64;
-        BOOT_INFO.memory_map_len = region_count;
-        BOOT_INFO.memory_map_entry_size = size_of::<MemoryRegion>();
+        BOOT_INFO.memory_map_len = region_count as u64;
+        BOOT_INFO.memory_map_entry_size = size_of::<MemoryRegion>() as u32;
         BOOT_INFO.kernel_heap_addr = 0;
         BOOT_INFO.initfs_addr = initfs_addr;
-        BOOT_INFO.initfs_size = initfs_size;
+        BOOT_INFO.initfs_size = initfs_size as u64;
         BOOT_INFO.rootfs_addr = rootfs_addr;
-        BOOT_INFO.rootfs_size = rootfs_size;
+        BOOT_INFO.rootfs_size = rootfs_size as u64;
         BOOT_INFO.cpu_total = 1;
         BOOT_INFO.cpu_enabled = 1;
         BOOT_INFO.bsp_apic_id = 0;
         BOOT_INFO.cpu_apic_ids = [0; MAX_CPU_IDS];
         BOOT_INFO.cpu_apic_id_count = 1;
         BOOT_INFO.smp_handoff_addr = core::ptr::addr_of!(SMP_HANDOFF) as u64;
-        BOOT_INFO.smp_handoff_size = size_of::<SmpHandoff>();
+        BOOT_INFO.smp_handoff_size = size_of::<SmpHandoff>() as u32;
         BOOT_INFO.smp_trampoline_addr = 0;
         BOOT_INFO.smp_trampoline_size = 0;
-        SMP_HANDOFF = SmpHandoff {
-            ready: AtomicU64::new(0),
-            kernel_secondary_entry: AtomicU64::new(0),
-            boot_info_ptr: AtomicU64::new(core::ptr::addr_of!(BOOT_INFO) as u64),
-            kernel_cr3: AtomicU64::new(0),
-            ap_count: AtomicUsize::new(0),
-        };
+        SMP_HANDOFF = SmpHandoff::new();
+        SMP_HANDOFF
+            .boot_info_ptr
+            .store(core::ptr::addr_of!(BOOT_INFO) as u64, Ordering::Relaxed);
     }
 
     slog!(

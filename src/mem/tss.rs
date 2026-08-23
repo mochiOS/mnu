@@ -14,17 +14,21 @@ const IST_STACK_SIZE: usize = 4096 * 16;
 const RING0_STACK_SIZE: usize = 4096 * 32;
 
 #[repr(align(16))]
-struct IstStack([u8; IST_STACK_SIZE]);
+struct IstStack {
+    _bytes: [u8; IST_STACK_SIZE],
+}
 
 #[repr(align(16))]
-struct Ring0Stack([u8; RING0_STACK_SIZE]);
+struct Ring0Stack {
+    _bytes: [u8; RING0_STACK_SIZE],
+}
 
 static TSS: [Once<TaskStateSegment>; crate::percpu::MAX_CPUS] =
     [const { Once::new() }; crate::percpu::MAX_CPUS];
 static mut IST_STACKS: [IstStack; crate::percpu::MAX_CPUS] =
-    [const { IstStack([0; IST_STACK_SIZE]) }; crate::percpu::MAX_CPUS];
+    [const { IstStack { _bytes: [0; IST_STACK_SIZE] } }; crate::percpu::MAX_CPUS];
 static mut RING0_STACKS: [Ring0Stack; crate::percpu::MAX_CPUS] =
-    [const { Ring0Stack([0; RING0_STACK_SIZE]) }; crate::percpu::MAX_CPUS];
+    [const { Ring0Stack { _bytes: [0; RING0_STACK_SIZE] } }; crate::percpu::MAX_CPUS];
 
 /// TSSを初期化して返す
 ///

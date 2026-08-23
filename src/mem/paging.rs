@@ -27,39 +27,23 @@ pub static KERNEL_L4_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::A
 /// x86-64 canonical ユーザー空間上限
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 
-#[cfg(any(target_os = "uefi", target_os = "none"))]
-#[used]
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".text$A")]
-static __MOCHIOS_TEXT_START_MARKER: u8 = 0;
-#[cfg(any(target_os = "uefi", target_os = "none"))]
-#[used]
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".text$Z")]
-static __MOCHIOS_TEXT_END_MARKER: u8 = 0;
-
-#[cfg(not(any(target_os = "uefi", target_os = "none")))]
+#[cfg(target_os = "none")]
 unsafe extern "C" {
     static __text_start: u8;
     static __text_end: u8;
 }
 
-#[cfg(any(target_os = "uefi", target_os = "none"))]
+#[cfg(target_os = "none")]
 fn kernel_text_range() -> (u64, u64) {
     (
-        core::ptr::addr_of!(__MOCHIOS_TEXT_START_MARKER) as u64,
-        core::ptr::addr_of!(__MOCHIOS_TEXT_END_MARKER) as u64,
+        core::ptr::addr_of!(__text_start) as u64,
+        core::ptr::addr_of!(__text_end) as u64,
     )
 }
 
-#[cfg(not(any(target_os = "uefi", target_os = "none")))]
+#[cfg(not(target_os = "none"))]
 fn kernel_text_range() -> (u64, u64) {
-    unsafe {
-        (
-            core::ptr::addr_of!(__text_start) as u64,
-            core::ptr::addr_of!(__text_end) as u64,
-        )
-    }
+    (0, 0)
 }
 
 fn protect_kernel_text_pages(page_table: &mut OffsetPageTable<'static>) {
@@ -173,11 +157,13 @@ pub fn init_page_table() -> Result<()> {
     KERNEL_L4_PHYS.store(new_l4_phys, core::sync::atomic::Ordering::Release);
 
     // 新しい L4 テーブルでページテーブルを作成
-    let page_table = unsafe {
+    let mut page_table = unsafe {
         let new_l4_virt = new_l4_phys + phys_offset;
         let l4_table = &mut *(new_l4_virt as *mut PageTable);
         OffsetPageTable::new(l4_table, VirtAddr::new(phys_offset))
     };
+
+    protect_kernel_text_pages(&mut page_table);
 
     // PAGE_TABLE を設定
     *PAGE_TABLE.lock() = Some(page_table);
@@ -185,24 +171,6 @@ pub fn init_page_table() -> Result<()> {
     info!("PAGE_TABLE initialized with new L4 table successfully.");
 
     Ok(())
-}
-
-/// アクティブなレベル4ページテーブルへの参照を取得
-///
-/// ## Arguments
-/// - `physical_memory_offset`: カーネルが使用する物理メモリオフセット（仮想アドレス = 物理アドレス + オフセット）
-///
-/// ## Returns
-/// アクティブなレベル4ページテーブルへのミュータブル参照
-unsafe fn active_level_4_table(physical_memory_offset: u64) -> &'static mut PageTable {
-    use x86_64::registers::control::Cr3;
-
-    let (level_4_table_frame, _) = Cr3::read();
-    let phys = level_4_table_frame.start_address();
-    let virt = VirtAddr::new(phys.as_u64() + physical_memory_offset);
-    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
-
-    &mut *page_table_ptr
 }
 
 /// ページをマップ
@@ -588,7 +556,7 @@ pub fn map_and_copy_segment(
     use crate::mem::frame;
     use crate::result::{Kernel, Memory};
 
-    let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+    physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
     if memsz == 0 {
         return if filesz == 0 {
             Ok(())
@@ -647,7 +615,7 @@ pub fn map_and_copy_segment(
         if copy_start < copy_end {
             let src_off = (copy_start - vaddr) as usize;
             let len = (copy_end - copy_start) as usize;
-            let offset_into_page = (copy_start - page_start);
+            let offset_into_page = copy_start - page_start;
             let dst_virt_addr = page_start + offset_into_page;
             let dst_virt = dst_virt_addr as *mut u8;
             crate::debug!(
@@ -664,7 +632,7 @@ pub fn map_and_copy_segment(
             let zero_start = core::cmp::max(page_start, file_end);
             let zero_end = core::cmp::min(page_end, mem_end);
             if zero_start < zero_end {
-                let offset_into_page = (zero_start - page_start);
+                let offset_into_page = zero_start - page_start;
                 let dst_virt_addr = page_start + offset_into_page;
                 let dst_virt = dst_virt_addr as *mut u8;
                 let len = (zero_end - zero_start) as usize;
@@ -1577,7 +1545,7 @@ pub fn map_and_copy_segment_to(
                 let new_exec = !final_flags.contains(Flags::NO_EXECUTE);
                 let new_write = final_flags.contains(Flags::WRITABLE);
                 if (existing_exec && new_write) || (existing_write && new_exec) {
-                    frame::deallocate_frame(frame);
+                    let _ = frame::deallocate_frame(frame);
                     return Err(Kernel::Memory(Memory::PermissionDenied));
                 }
                 let merged = if !existing_flags.contains(Flags::NO_EXECUTE) {
@@ -1586,7 +1554,7 @@ pub fn map_and_copy_segment_to(
                     final_flags
                 };
                 l1[l1_index].set_addr(PhysAddr::new(existing_addr), merged);
-                frame::deallocate_frame(frame);
+                let _ = frame::deallocate_frame(frame);
                 phys_frame_addr = existing_addr;
             }
         }

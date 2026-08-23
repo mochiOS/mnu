@@ -1,7 +1,6 @@
 //! ユーザーモード実行サポート
 
 use crate::mem::gdt;
-use crate::task::thread::SyscallUserContext;
 use core::arch::asm;
 
 const IA32_FS_BASE: u32 = 0xC000_0100;

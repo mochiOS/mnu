@@ -137,12 +137,6 @@ fn caller_pid() -> Option<ProcessId> {
         .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
 }
 
-fn caller_is_core() -> bool {
-    caller_pid()
-        .and_then(|pid| crate::task::with_process(pid, |p| p.privilege()))
-        .is_some_and(|lvl| lvl == PrivilegeLevel::Core)
-}
-
 fn caller_is_service_or_core() -> bool {
     caller_pid()
         .and_then(|pid| crate::task::with_process(pid, |p| p.privilege()))

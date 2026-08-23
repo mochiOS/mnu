@@ -336,7 +336,7 @@ struct CextHeader {
 
 struct CextMeta {
     name: String,
-    deps: Vec<String>,
+    _deps: Vec<String>,
     module_version: u16,
     elf: Vec<u8>,
 }
@@ -586,7 +586,7 @@ fn parse_cext(bytes: &[u8]) -> Option<CextMeta> {
 
     Some(CextMeta {
         name: name.to_string(),
-        deps,
+        _deps: deps,
         module_version: header.module_version,
         elf: bytes[elf_start..elf_end].to_vec(),
     })

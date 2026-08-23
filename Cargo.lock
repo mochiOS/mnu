@@ -104,9 +104,9 @@ version = "0.1.0"
 dependencies = [
  "linked_list_allocator",
  "mnu-abi",
- "mochios-csprng 0.1.0 (git+https://github.com/mochiOS/mnu)",
- "mochios-time-core 0.1.0 (git+https://github.com/mochiOS/mnu)",
- "plugkit-sys 0.1.0 (git+https://github.com/mochiOS/mnu)",
+ "mnu-boot-abi",
+ "mochios-csprng",
+ "mochios-time-core",
  "sha2",
  "spin",
  "x86_64",
@@ -117,18 +117,12 @@ name = "mnu-abi"
 version = "0.1.0"
 
 [[package]]
-name = "mochios-csprng"
+name = "mnu-boot-abi"
 version = "0.1.0"
-dependencies = [
- "rand_chacha",
- "rand_core",
- "zeroize",
-]
 
 [[package]]
 name = "mochios-csprng"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
 dependencies = [
  "rand_chacha",
  "rand_core",
@@ -140,25 +134,11 @@ name = "mochios-time-core"
 version = "0.1.0"
 
 [[package]]
-name = "mochios-time-core"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
-
-[[package]]
 name = "plugkit"
 version = "0.1.0"
 dependencies = [
- "plugkit-macros 0.1.0 (git+https://github.com/mochiOS/mnu)",
- "plugkit-sys 0.1.0 (git+https://github.com/mochiOS/mnu)",
-]
-
-[[package]]
-name = "plugkit"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
-dependencies = [
- "plugkit-macros 0.1.0 (git+https://github.com/mochiOS/mnu)",
- "plugkit-sys 0.1.0 (git+https://github.com/mochiOS/mnu)",
+ "plugkit-macros",
+ "plugkit-sys",
 ]
 
 [[package]]
@@ -166,21 +146,8 @@ name = "plugkit-macros"
 version = "0.1.0"
 
 [[package]]
-name = "plugkit-macros"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
-
-[[package]]
 name = "plugkit-sys"
 version = "0.1.0"
-dependencies = [
- "spin",
-]
-
-[[package]]
-name = "plugkit-sys"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
 dependencies = [
  "spin",
 ]
@@ -190,7 +157,7 @@ name = "plugkit-test"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
- "plugkit 0.1.0 (git+https://github.com/mochiOS/mnu)",
+ "plugkit",
 ]
 
 [[package]]

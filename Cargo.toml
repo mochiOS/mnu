@@ -7,6 +7,7 @@ build = "build.rs"
 [workspace]
 members = [
     "crates/csprng",
+    "crates/boot-abi",
     "crates/PlugKit/plugkit",
     "crates/PlugKit/plugkit-macros",
     "crates/PlugKit/plugkit-sys",
@@ -31,16 +32,16 @@ bench = false
 required-features = ["kernel-bin"]
 
 [target.'cfg(any(target_os = "none", target_os = "uefi"))'.dependencies]
-mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
+mnu-abi = { path = "crates/abi" }
 linked_list_allocator = "0.10.5"
-mochios-csprng = { git = "https://github.com/mochiOS/mnu", package = "mochios-csprng" }
-mochios-time-core = { git = "https://github.com/mochiOS/mnu", package = "mochios-time-core" }
+mochios-csprng = { path = "crates/csprng" }
+mochios-time-core = { path = "crates/time-core" }
 sha2 = { version = "0.10.8", default-features = false }
 spin = "0.9"
 x86_64 = "0.15"
 
 [dependencies]
-plugkit-sys = { git = "https://github.com/mochiOS/mnu", package = "plugkit-sys" }
+mnu-boot-abi = { path = "crates/boot-abi" }
 
 [features]
 default = ["kernel-bin"]

@@ -335,21 +335,19 @@ fn unmap_guard_page(guard_addr: u64) -> bool {
         }
     }
 
-    unsafe {
-        match page_table.unmap(page) {
-            Ok((_frame, flush)) => {
-                flush.flush();
-                crate::debug!("unmap_guard_page: successfully unmapped {:#x}", guard_addr);
-                true
-            }
-            Err(e) => {
-                crate::debug!(
-                    "unmap_guard_page: unmap error at {:#x}: {:?}",
-                    guard_addr,
-                    e
-                );
-                false
-            }
+    match page_table.unmap(page) {
+        Ok((_frame, flush)) => {
+            flush.flush();
+            crate::debug!("unmap_guard_page: successfully unmapped {:#x}", guard_addr);
+            true
+        }
+        Err(e) => {
+            crate::debug!(
+                "unmap_guard_page: unmap error at {:#x}: {:?}",
+                guard_addr,
+                e
+            );
+            false
         }
     }
 }

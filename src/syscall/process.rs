@@ -255,7 +255,6 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
             ProcessState::Sleeping => 3,
             ProcessState::Zombie => 4,
             ProcessState::Terminated => 4,
-            _ => 0,
         };
         out_buf[16..24].copy_from_slice(&state_num.to_ne_bytes());
         let parent = proc.parent_id().map_or(0, |pid| pid.as_u64());

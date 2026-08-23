@@ -7,7 +7,6 @@ pub mod dispatch;
 pub mod idt;
 pub mod pic;
 pub mod spinlock;
-mod syscall;
 pub mod timer;
 
 pub use idt::init as init_idt;

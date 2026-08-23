@@ -4,7 +4,6 @@
 
 extern crate alloc;
 
-use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub mod loader;
@@ -13,7 +12,6 @@ pub use loader::{
     entry_point, parse_elf_header, parse_phdr, Elf64Ehdr, Elf64Phdr, PT_LOAD, PT_NULL,
 };
 
-use crate::init;
 use crate::mem::{paging, user};
 use crate::result::{Kernel, Memory, Result};
 
@@ -35,20 +33,6 @@ const R_X86_64_RELATIVE: u32 = 8;
 const PIE_LOAD_BIAS: u64 = 0x2000_0000;
 const PIE_ASLR_WINDOW_PAGES: u64 = 0x4000; // 64MiB
 static PIE_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn debug_serial_write_str(s: &str) {
-    use x86_64::instructions::port::Port;
-
-    unsafe {
-        // SAFETY: COM1 is the kernel's debug serial port during early boot and service launch.
-        let mut lsr = Port::<u8>::new(0x3FD);
-        let mut data = Port::<u8>::new(0x3F8);
-        for byte in s.bytes() {
-            while (lsr.read() & 0x20) == 0 {}
-            data.write(byte);
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct LoadedElf {

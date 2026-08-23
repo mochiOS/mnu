@@ -6,8 +6,6 @@
 //! ブートローダーは sysv64 呼び出し規約で kernel_entry(boot_info_ptr) を呼ぶ。
 //! ここで自前の LockedHeap アロケータを設定してから `mnu` のカーネル本体へ移譲する。
 
-extern crate alloc;
-
 use mnu::mem::allocator::HardenedKernelHeap;
 
 /// カーネルのグローバルアロケータ
@@ -25,10 +23,6 @@ pub unsafe extern "sysv64" fn kernel_entry(boot_info_ptr: *mut mnu::BootInfo) ->
     // kernel_heap_addr = &KERNEL_ALLOCATOR（init_heap がここを初期化する）
     (*boot_info_ptr).kernel_heap_addr = &KERNEL_ALLOCATOR as *const HardenedKernelHeap as u64;
     mnu::smp::set_boot_info_addr(boot_info_ptr as u64);
-
-    // ブートローダーがロードした initfs イメージを fs モジュールに設定
-    mnu::init::fs::set_image((*boot_info_ptr).initfs_addr, (*boot_info_ptr).initfs_size);
-    mnu::init::fs::set_rootfs((*boot_info_ptr).rootfs_addr, (*boot_info_ptr).rootfs_size);
 
     let boot_info: &'static mnu::BootInfo = &*(boot_info_ptr as *const _);
     mnu::kernel_entry(boot_info)

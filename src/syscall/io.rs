@@ -10,10 +10,6 @@ const STDOUT_FD: u64 = 1;
 /// 標準エラー出力のファイルディスクリプタ
 const STDERR_FD: u64 = 2;
 
-fn caller_has_usb_access() -> bool {
-    crate::syscall::security::caller_has_any_capability(&[Capability::UsbAccess])
-}
-
 fn caller_has_port_io_access() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
         Capability::UsbAccess,

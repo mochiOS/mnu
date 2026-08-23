@@ -15,7 +15,6 @@ pub mod syscall_entry;
 pub mod task;
 pub mod time;
 
-mod console;
 mod types;
 
 use crate::capability::{KernelAuthority, KernelCapability, KernelObjectRef};
@@ -23,7 +22,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use x86_64::instructions::port::Port;
 
 /// ユーザー空間ポインタの有効性を検証する
 ///
@@ -62,14 +60,6 @@ pub fn validate_user_ptr(ptr: u64, len: u64) -> bool {
     };
 
     crate::mem::paging::is_user_range_mapped_in_table(user_pt, ptr, len)
-}
-
-#[inline]
-pub fn with_user_memory_access<R>(f: impl FnOnce() -> R) -> R {
-    // Legacy no-op shim kept for old internal call sites outside the hardened
-    // syscall copy path. New user-memory access must use copy_from_user/
-    // copy_to_user so permission checks happen through the page-table walker.
-    f()
 }
 
 fn current_user_page_table() -> Option<u64> {
@@ -331,19 +321,6 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     SUCCESS
 }
 
-fn debug_serial_write_str(s: &str) {
-    unsafe {
-        // SAFETY: COM1 is the conventional debug serial port in this kernel,
-        // and this helper is used only for temporary debugging without locks.
-        let mut data = Port::<u8>::new(0x3F8);
-        let mut line_status = Port::<u8>::new(0x3F8 + 5);
-        for byte in s.bytes() {
-            while line_status.read() & 0x20 == 0 {}
-            data.write(byte);
-        }
-    }
-}
-
 /// ユーザー空間からバイト列をコピーする（コピー先はカーネル空間）。
 pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
     if dst.is_empty() {
@@ -478,10 +455,7 @@ pub fn write_user_u16(ptr: u64, value: u16) -> Result<(), u64> {
 
 pub use types::*;
 
-use crate::info;
-use crate::syscall::syscall_entry::switch_to_current_thread_user_page_table;
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::structures::idt::InterruptStackFrame;
 
 static LAST_SYSCALL_NUM: AtomicU64 = AtomicU64::new(0);
 static LAST_SYSCALL_ARG0: AtomicU64 = AtomicU64::new(0);
@@ -623,7 +597,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
         x if x == SyscallNumber::PortIn as u64 => io::port_in(arg0, arg1),
         x if x == SyscallNumber::PortOut as u64 => io::port_out(arg0, arg1, arg2),
-        x if x == SyscallNumber::Dup2 as u64 => fs::dup2(arg0, arg1),
         x if x == SyscallNumber::Execve as u64 => exec::execve_syscall(arg0, arg1, arg2),
         x if x == SyscallNumber::FileOpen as u64 => fs::file_open(arg0, arg1),
         x if x == SyscallNumber::FileOpenAt as u64 => {

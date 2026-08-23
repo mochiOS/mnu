@@ -3,6 +3,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// stdin / stdout / stderr の予約 FD 番号
@@ -176,71 +177,47 @@ impl Drop for FileHandle {
 
 /// プロセスごとのファイルディスクリプタテーブル
 ///
-/// エントリは `Box<FileHandle>` の生ポインタ（0 = 未使用）。
-/// サイズが大きいため必ず `Box<FdTable>` として使用すること。
+/// エントリの所有権はテーブル自身が持つ。
 pub struct FdTable {
-    /// FD ごとの FileHandle 生ポインタ (0 = 空き)
-    pub(crate) entries: [u64; PROCESS_MAX_FDS],
+    /// FD ごとのハンドル (`None` = 空き)
+    entries: Box<[Option<Box<FileHandle>>]>,
     /// FD ごとのフラグ (FD_CLOEXEC など)
-    pub(crate) flags: [u8; PROCESS_MAX_FDS],
+    flags: Box<[u8]>,
 }
 
 impl FdTable {
-    /// ヒープ上に FdTable をゼロ初期化して作成する。
-    ///
-    /// `Box::new(FdTable { ... })` はスタック上への一時配置を招くため、
-    /// `alloc_zeroed` で直接ヒープに確保する。
+    /// 配列本体を直接ヒープへ確保して空のテーブルを作成する。
     pub fn new_boxed() -> Box<Self> {
-        unsafe {
-            let layout = core::alloc::Layout::new::<Self>();
-            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut Self;
-            Box::from_raw(ptr)
-        }
+        let entries = core::iter::repeat_with(|| None)
+            .take(PROCESS_MAX_FDS)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let flags = alloc::vec![0; PROCESS_MAX_FDS].into_boxed_slice();
+        Box::new(Self { entries, flags })
     }
 
     /// 新しい FileHandle を割り当て、使用した FD 番号 (>= FD_BASE) を返す。
     ///
     /// 空きスロットがない場合は `None`。
     pub fn alloc(&mut self, handle: Box<FileHandle>, cloexec: bool) -> Option<usize> {
-        let ptr = Box::into_raw(handle) as u64;
         for i in FD_BASE..PROCESS_MAX_FDS {
-            if self.entries[i] == 0 {
-                self.entries[i] = ptr;
+            if self.entries[i].is_none() {
+                self.entries[i] = Some(handle);
                 self.flags[i] = if cloexec { FD_CLOEXEC } else { 0 };
                 return Some(i);
             }
         }
-        // スロット不足: ハンドルを解放
-        unsafe {
-            drop(Box::from_raw(ptr as *mut FileHandle));
-        }
         None
-    }
-
-    /// FD に対応する FileHandle の生ポインタを返す（所有権は移動しない）。
-    ///
-    /// # Safety
-    /// 呼び出し元はポインタが有効な間に close_fd() を呼ばないことを保証すること。
-    pub fn get_raw(&self, fd: usize) -> Option<*mut FileHandle> {
-        if fd < FD_BASE || fd >= PROCESS_MAX_FDS {
-            return None;
-        }
-        let ptr = self.entries[fd];
-        if ptr == 0 {
-            None
-        } else {
-            Some(ptr as *mut FileHandle)
-        }
     }
 
     /// FD に対応する FileHandle の参照を返す。
     pub fn get(&self, fd: usize) -> Option<&FileHandle> {
-        self.get_raw(fd).map(|ptr| unsafe { &*ptr })
+        self.entries.get(fd)?.as_deref()
     }
 
     /// FD に対応する FileHandle の可変参照を返す。
     pub fn get_mut(&mut self, fd: usize) -> Option<&mut FileHandle> {
-        self.get_raw(fd).map(|ptr| unsafe { &mut *ptr })
+        self.entries.get_mut(fd)?.as_deref_mut()
     }
 
     /// FD の所有権を取り出す（close に相当）。
@@ -248,13 +225,18 @@ impl FdTable {
         if fd < FD_BASE || fd >= PROCESS_MAX_FDS {
             return None;
         }
-        let ptr = self.entries[fd];
-        if ptr == 0 {
-            return None;
-        }
-        self.entries[fd] = 0;
         self.flags[fd] = 0;
-        Some(unsafe { Box::from_raw(ptr as *mut FileHandle) })
+        self.entries[fd].take()
+    }
+
+    /// 指定したFDへハンドルを設定する。既存のハンドルはここで閉じる。
+    pub fn replace(&mut self, fd: usize, handle: Box<FileHandle>, cloexec: bool) -> bool {
+        if fd < FD_BASE || fd >= PROCESS_MAX_FDS {
+            return false;
+        }
+        self.entries[fd] = Some(handle);
+        self.flags[fd] = if cloexec { FD_CLOEXEC } else { 0 };
+        true
     }
 
     /// FD を閉じる。閉じた場合 `true`、既に空きの場合 `false`。
@@ -265,13 +247,9 @@ impl FdTable {
     /// FD_CLOEXEC が設定されているすべての FD を閉じる（execve 時に呼ぶ）。
     pub fn close_cloexec_fds(&mut self) {
         for i in FD_BASE..PROCESS_MAX_FDS {
-            if self.entries[i] != 0 && (self.flags[i] & FD_CLOEXEC) != 0 {
-                let ptr = self.entries[i];
-                self.entries[i] = 0;
+            if self.entries[i].is_some() && (self.flags[i] & FD_CLOEXEC) != 0 {
+                self.entries[i] = None;
                 self.flags[i] = 0;
-                unsafe {
-                    drop(Box::from_raw(ptr as *mut FileHandle));
-                }
             }
         }
     }
@@ -279,13 +257,8 @@ impl FdTable {
     /// すべての FD を閉じる（Drop で自動的に呼ばれる）。
     pub fn close_all(&mut self) {
         for i in FD_BASE..PROCESS_MAX_FDS {
-            if self.entries[i] != 0 {
-                let ptr = self.entries[i];
-                self.entries[i] = 0;
-                unsafe {
-                    drop(Box::from_raw(ptr as *mut FileHandle));
-                }
-            }
+            self.entries[i] = None;
+            self.flags[i] = 0;
         }
     }
 
@@ -295,11 +268,9 @@ impl FdTable {
     pub fn clone_for_fork(&self) -> Box<FdTable> {
         let mut new_table = FdTable::new_boxed();
         for i in 0..PROCESS_MAX_FDS {
-            let ptr = self.entries[i];
-            if ptr == 0 {
+            let Some(fh) = self.entries[i].as_deref() else {
                 continue;
-            }
-            let fh = unsafe { &*(ptr as *const FileHandle) };
+            };
             if let Some(pipe_id) = fh.pipe_id {
                 crate::syscall::fs::clone_pipe_endpoint_from_kernel(pipe_id, fh.pipe_write);
             }
@@ -316,7 +287,7 @@ impl FdTable {
                 open_flags: fh.open_flags,
                 cap: fh.cap,
             });
-            new_table.entries[i] = Box::into_raw(new_fh) as u64;
+            new_table.entries[i] = Some(new_fh);
             new_table.flags[i] = self.flags[i];
         }
         new_table
@@ -327,7 +298,7 @@ impl FdTable {
         if fd < FD_BASE || fd >= PROCESS_MAX_FDS {
             return None;
         }
-        if self.entries[fd] == 0 {
+        if self.entries[fd].is_none() {
             return None;
         }
         Some(self.flags[fd])
@@ -338,7 +309,7 @@ impl FdTable {
         if fd < FD_BASE || fd >= PROCESS_MAX_FDS {
             return false;
         }
-        if self.entries[fd] == 0 {
+        if self.entries[fd].is_none() {
             return false;
         }
         self.flags[fd] = flags;

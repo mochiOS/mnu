@@ -76,19 +76,6 @@ pub fn close_pipe_endpoint_from_kernel(pipe_id: usize, write_end: bool) {
     }
 }
 
-fn debug_serial_write_str(s: &str) {
-    use x86_64::instructions::port::Port;
-
-    unsafe {
-        let mut lsr = Port::<u8>::new(0x3FD);
-        let mut data = Port::<u8>::new(0x3F8);
-        for byte in s.bytes() {
-            while (lsr.read() & 0x20) == 0 {}
-            data.write(byte);
-        }
-    }
-}
-
 // グローバル FD テーブルは廃止。各プロセスの Process::fd_table を使用する。
 
 #[inline]
@@ -564,8 +551,6 @@ fn open_required_rights(path: &str, flags: u64, is_dir: bool) -> u32 {
     const O_ACCMODE: u64 = 0o3;
     const O_WRONLY: u64 = 0o1;
     const O_RDWR: u64 = 0o2;
-    const O_CREAT: u64 = 0o100;
-    const O_EXCL: u64 = 0o200;
     const O_TRUNC: u64 = 0o1000;
     const O_APPEND: u64 = 0o2000;
     let _ = path;
@@ -605,17 +590,6 @@ fn access_mode_rights(mode: u64) -> Option<u32> {
     Some(rights)
 }
 
-fn required_rights_for_path_op(op: &str) -> u32 {
-    match op {
-        "read" | "stat" | "readlink" => PATH_READ,
-        "write" | "truncate" => PATH_WRITE,
-        "list" | "readdir" | "chdir" => PATH_LIST,
-        "create" | "mkdir" => PATH_CREATE,
-        "delete" | "rmdir" | "unlink" | "rename" => PATH_DELETE,
-        _ => PATH_READ,
-    }
-}
-
 pub(crate) fn close_remote_fd_from_kernel(_fd_remote: u64) {}
 
 #[inline]
@@ -639,11 +613,6 @@ pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64, u32, u32)> 
 }
 
 #[inline]
-pub(crate) fn is_directory_rootfs_first(path: &str) -> bool {
-    crate::cext::fs::is_directory(path) || crate::init::fs::is_directory(path)
-}
-
-#[inline]
 pub(crate) fn readdir_rootfs_first(path: &str) -> Option<Vec<String>> {
     crate::cext::fs::readdir_path(path).or_else(|| crate::init::fs::readdir_path(path))
 }
@@ -653,43 +622,6 @@ fn read_file_range_rootfs_first(path: &str, offset: u64, buf: &mut [u8]) -> Opti
     crate::cext::fs::read_range(path, offset, buf)
         .or_else(|| crate::init::fs::read_range_rootfs(path, offset, buf))
         .or_else(|| crate::init::fs::read_range(path, offset, buf))
-}
-
-fn parse_readdir_names(bytes: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    for raw in bytes.split(|&b| b == b'\n') {
-        if raw.is_empty() {
-            continue;
-        }
-        if let Ok(name) = core::str::from_utf8(raw) {
-            if !name.is_empty() {
-                out.push(name.to_string());
-            }
-        }
-    }
-    out
-}
-
-fn parse_readdir_typed(bytes: &[u8]) -> Vec<(String, u8)> {
-    let mut out = Vec::new();
-    for record in bytes.split(|&b| b == b'\n') {
-        if record.len() < 2 {
-            continue;
-        }
-        let dtype = record[record.len() - 1];
-        if dtype == 0 {
-            continue;
-        }
-        if record.len() >= 2 && record[record.len() - 2] == 0 {
-            let name_bytes = &record[..record.len() - 2];
-            if let Ok(name) = core::str::from_utf8(name_bytes) {
-                if !name.is_empty() {
-                    out.push((name.to_string(), dtype));
-                }
-            }
-        }
-    }
-    out
 }
 
 /// パスを正規化する（`.` / `..` を解決し重複スラッシュを除去）
@@ -728,7 +660,9 @@ fn resolve_path(pid_raw: u64, path: &str) -> String {
 }
 
 const O_ACCMODE: u64 = 0o3;
+#[cfg(test)]
 const O_WRONLY: u64 = 0o1;
+#[cfg(test)]
 const O_RDWR: u64 = 0o2;
 const O_CREAT: u64 = 0o100;
 const O_EXCL: u64 = 0o200;
@@ -1910,10 +1844,7 @@ pub fn dup2(old_fd: u64, new_fd: u64) -> u64 {
 
     // new_fd が使用中なら閉じる
     with_fd_table_mut(pid, |t| {
-        t.close_fd(new_idx);
-        let ptr = alloc::boxed::Box::into_raw(new_handle) as u64;
-        t.entries[new_idx] = ptr;
-        t.flags[new_idx] = 0;
+        let _ = t.replace(new_idx, new_handle, false);
     });
 
     new_fd

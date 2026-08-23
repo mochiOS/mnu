@@ -186,20 +186,6 @@ impl BitmapFrameAllocator {
         (self.usable_memory() / 4096) as usize
     }
 
-    fn usable_frames_iter(&self) -> impl Iterator<Item = PhysFrame> + '_ {
-        self.memory_map
-            .iter()
-            .filter(|r| r.region_type == MemoryType::Usable)
-            .flat_map(|r| {
-                let start_addr = r.start;
-                let end_addr = r.start + r.len;
-                let start_frame = start_addr / 4096;
-                let end_frame = end_addr / 4096;
-                (start_frame..end_frame)
-                    .map(|f| PhysFrame::containing_address(PhysAddr::new(f * 4096)))
-            })
-    }
-
     fn align_up(value: u64, align: u64) -> u64 {
         if align == 0 {
             return value;
@@ -242,9 +228,7 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
         }
 
         // フリーリストから再利用
-        let mut attempts = 0;
-        while self.free_list_head != 0 && attempts < 128 {
-            attempts += 1;
+        if self.free_list_head != 0 {
             let phys = self.free_list_head;
             if phys & 0xfff != 0 || !self.is_usable_frame_addr(phys) {
                 crate::warn!("frame allocator free list corruption at {:#x}", phys);
@@ -253,27 +237,28 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
                     "frame free list corruption",
                 );
                 self.free_list_head = 0;
-                break;
-            }
-            let Some((next, cookie)) = self.read_frame_meta(phys) else {
-                break;
-            };
-            if cookie != self.free_cookie(phys) {
-                crate::warn!("frame allocator cookie mismatch at {:#x}", phys);
-                crate::audit::log(
-                    crate::audit::AuditEventKind::Memory,
-                    "frame cookie mismatch",
-                );
-                self.free_list_head = 0;
-                break;
-            }
-            if next != 0 && next & 0xfff == 0 && self.is_usable_frame_addr(next) {
-                self.free_list_head = next;
             } else {
-                self.free_list_head = 0;
+                match self.read_frame_meta(phys) {
+                    Some((next, cookie)) if cookie == self.free_cookie(phys) => {
+                        if next != 0 && next & 0xfff == 0 && self.is_usable_frame_addr(next) {
+                            self.free_list_head = next;
+                        } else {
+                            self.free_list_head = 0;
+                        }
+                        self.clear_frame_meta(phys);
+                        return Some(PhysFrame::containing_address(PhysAddr::new(phys)));
+                    }
+                    Some(_) => {
+                        crate::warn!("frame allocator cookie mismatch at {:#x}", phys);
+                        crate::audit::log(
+                            crate::audit::AuditEventKind::Memory,
+                            "frame cookie mismatch",
+                        );
+                        self.free_list_head = 0;
+                    }
+                    None => self.free_list_head = 0,
+                }
             }
-            self.clear_frame_meta(phys);
-            return Some(PhysFrame::containing_address(PhysAddr::new(phys)));
         }
 
         // バンプアロケータから新規割り当て

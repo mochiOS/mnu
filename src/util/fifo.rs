@@ -3,7 +3,6 @@
 //! 割込みハンドラとカーネルの間でデータをやり取りするための
 //! リングバッファ
 
-use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 /// FIFOバッファ

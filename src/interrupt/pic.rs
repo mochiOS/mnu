@@ -25,21 +25,21 @@ impl Pic {
 
 /// マスタPICとスレーブPICの定義
 pub const PIC_MASTER: Pic = Pic {
-    /// 割込みベクタオフセット
+    // 割込みベクタオフセット
     offset: 32,
-    /// コマンドポート
+    // コマンドポート
     command: 0x20,
-    /// データポート
+    // データポート
     data: 0x21,
 };
 
 /// スレーブPIC
 pub const PIC_SLAVE: Pic = Pic {
-    /// 割込みベクタオフセット
+    // 割込みベクタオフセット
     offset: 40,
-    /// コマンドポート
+    // コマンドポート
     command: 0xa0,
-    /// データポート
+    // データポート
     data: 0xa1,
 };
 

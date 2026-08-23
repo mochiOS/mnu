@@ -19,19 +19,6 @@ fn ops_ptr() -> *const McxFsOps {
     OPS.load(Ordering::Acquire)
 }
 
-fn debug_serial_write_str(s: &str) {
-    use x86_64::instructions::port::Port;
-
-    unsafe {
-        let mut lsr = Port::<u8>::new(0x3FD);
-        let mut data = Port::<u8>::new(0x3F8);
-        for byte in s.bytes() {
-            while (lsr.read() & 0x20) == 0 {}
-            data.write(byte);
-        }
-    }
-}
-
 fn path_arg(path: &str) -> McxPath {
     McxPath {
         ptr: path.as_ptr(),

@@ -713,7 +713,6 @@ fn exec_internal(
         exec_path,
     }) = loaded
     {
-        let fingerprint = fingerprint_exec_bytes(&data);
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",
             exec_path,
@@ -736,25 +735,6 @@ fn exec_internal(
     } else {
         crate::warn!("exec: file not found: {}", path);
         crate::syscall::types::ENOENT
-    }
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
-}
-
-fn fingerprint_exec_bytes(data: &[u8]) -> &'static str {
-    if contains_bytes(data, b"raw syscall write: start") {
-        "RAW SYSCALL BUILD"
-    } else if contains_bytes(data, b"userland self-test: start") {
-        "OLD SELFTEST BUILD"
-    } else {
-        "UNKNOWN BUILD"
     }
 }
 
@@ -1817,7 +1797,6 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         argv_strings.push(path_owned.clone());
     }
     let envp_strings = read_user_ptr_array(envp, 1024);
-    let argc = argv_strings.len();
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
     let auxv_entries = [
