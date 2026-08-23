@@ -31,6 +31,13 @@ test = false
 bench = false
 required-features = ["kernel-bin"]
 
+[[bin]]
+name = "domain-bootstrap"
+path = "src/domain_entry.rs"
+test = false
+bench = false
+required-features = ["domain-guest"]
+
 [target.'cfg(any(target_os = "none", target_os = "uefi"))'.dependencies]
 linked_list_allocator = "0.10.5"
 mochios-csprng = { path = "crates/csprng" }
@@ -45,6 +52,7 @@ mnu-abi = { path = "crates/abi" }
 [features]
 default = ["kernel-bin"]
 kernel-bin = []
+domain-guest = []
 kcfi = []
 cet-ibt = []
 cet-shadow-stack = []

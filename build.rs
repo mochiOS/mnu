@@ -25,6 +25,11 @@ fn main() {
             std::process::exit(0);
         }
     };
-    println!("cargo:rustc-link-arg=-T{}/kernel.ld", manifest_dir);
-    println!("cargo:rerun-if-changed=kernel.ld");
+    let linker_script = if std::env::var_os("CARGO_FEATURE_DOMAIN_GUEST").is_some() {
+        "domain.ld"
+    } else {
+        "kernel.ld"
+    };
+    println!("cargo:rustc-link-arg=-T{}/{}", manifest_dir, linker_script);
+    println!("cargo:rerun-if-changed={}", linker_script);
 }
