@@ -28,6 +28,7 @@ static REQUEST_MESSAGE: &[u8] = b"Shared Ring request handled\n";
 static RESPONSE_MESSAGE: &[u8] = b"Shared Ring response verified\n";
 static IRQ_MESSAGE: &[u8] = b"Event Channel IRQ received\n";
 static X2APIC_MESSAGE: &[u8] = b"x2APIC MSR interface verified\n";
+static MSR_FAULT_MESSAGE: &[u8] = b"Rejected MSR delivered #GP\n";
 
 const IA32_APIC_BASE: u32 = 0x1b;
 const APIC_BASE_X2APIC: u64 = 1 << 10;
@@ -63,7 +64,9 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
     });
     unsafe { domain_interrupt::install() };
     if boot_info.domain_role == DOMAIN_ROLE_HARDWARE {
+        unsafe { domain_interrupt::install_general_protection_test_handler() };
         configure_x2apic(boot_info);
+        verify_rejected_msr(boot_info);
     }
     require_success(boot_info.hypervisor_backend, unsafe {
         invoke(
@@ -264,6 +267,19 @@ fn configure_x2apic(boot_info: &DomainBootInfo) {
             ShutdownReason::InitializationFailed,
         )
     }
+}
+
+fn verify_rejected_msr(boot_info: &DomainBootInfo) {
+    let count = domain_interrupt::general_protection_count();
+    let _ = unsafe { read_msr(0x801) };
+    unsafe { write_msr(0x801, 0) };
+    if domain_interrupt::general_protection_count() != count + 2 {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+    console_write(boot_info.hypervisor_backend, MSR_FAULT_MESSAGE);
 }
 
 unsafe fn read_msr(msr: u32) -> u64 {

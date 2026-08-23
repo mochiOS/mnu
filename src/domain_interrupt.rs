@@ -8,16 +8,28 @@ const INTERRUPT_GATE: u8 = 0x8e;
 
 #[unsafe(no_mangle)]
 static mut MNU_DOMAIN_EVENT_IRQ_COUNT: u64 = 0;
+#[unsafe(no_mangle)]
+static mut MNU_DOMAIN_GENERAL_PROTECTION_COUNT: u64 = 0;
 
 global_asm!(
     ".global mnu_domain_event_irq",
     "mnu_domain_event_irq:",
     "lock inc qword ptr [rip + MNU_DOMAIN_EVENT_IRQ_COUNT]",
     "iretq",
+    ".global mnu_domain_general_protection",
+    "mnu_domain_general_protection:",
+    // Skip the two-byte RDMSR/WRMSR used by the bootstrap fault test. The
+    // error code is at RSP and the saved RIP is at RSP+8.
+    "add qword ptr [rsp + 8], 2",
+    "add rsp, 8",
+    "lock inc qword ptr [rip + MNU_DOMAIN_GENERAL_PROTECTION_COUNT]",
+    "iretq",
 );
 
 unsafe extern "C" {
     fn mnu_domain_event_irq();
+    #[allow(dead_code)]
+    fn mnu_domain_general_protection();
 }
 
 #[derive(Clone, Copy)]
@@ -88,7 +100,22 @@ pub unsafe fn install() {
     }
 }
 
+/// Installs the bootstrap-only #GP handler that skips one RDMSR/WRMSR.
+#[allow(dead_code)]
+pub unsafe fn install_general_protection_test_handler() {
+    let idt = &raw mut IDT;
+    unsafe {
+        (*idt)[13] =
+            IdtEntry::interrupt(mnu_domain_general_protection as *const () as usize as u64);
+    }
+}
+
 #[allow(dead_code)]
 pub fn event_count() -> u64 {
     unsafe { (&raw const MNU_DOMAIN_EVENT_IRQ_COUNT).read_volatile() }
+}
+
+#[allow(dead_code)]
+pub fn general_protection_count() -> u64 {
+    unsafe { (&raw const MNU_DOMAIN_GENERAL_PROTECTION_COUNT).read_volatile() }
 }
