@@ -6,6 +6,9 @@ pub mod boot;
 /// mBootのDomainとして起動するときに使うABIです。
 pub mod hypervisor;
 
+/// Grantで共有するrequest/response ringの固定ABIです。
+pub mod shared_ring;
+
 /// システムコール番号 (Linux x86_64 互換 + mochiOS 拡張)
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

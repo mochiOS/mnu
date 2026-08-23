@@ -17,6 +17,7 @@ pub const DOMAIN_FEATURE_READY: u64 = 1 << 3;
 pub const DOMAIN_FEATURE_WAIT: u64 = 1 << 4;
 pub const DOMAIN_FEATURE_EVENT_CHANNEL: u64 = 1 << 5;
 pub const DOMAIN_FEATURE_GRANT_TABLE: u64 = 1 << 6;
+pub const DOMAIN_FEATURE_SHARED_RING: u64 = 1 << 7;
 
 pub const EVENT_CHANNEL_NO_EVENT: u64 = 0;
 pub const GRANT_REF_INVALID: u64 = 0;
@@ -108,7 +109,8 @@ impl DomainBootInfo {
                 | DOMAIN_FEATURE_READY
                 | DOMAIN_FEATURE_WAIT
                 | DOMAIN_FEATURE_EVENT_CHANNEL
-                | DOMAIN_FEATURE_GRANT_TABLE,
+                | DOMAIN_FEATURE_GRANT_TABLE
+                | DOMAIN_FEATURE_SHARED_RING,
             grant_window_start,
             grant_window_size,
             _reserved1: [0; 2],
