@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 3;
+pub const DOMAIN_BOOT_VERSION: u32 = 4;
 
 pub const HYPERVISOR_BACKEND_INTEL_VMX: u32 = 1;
 pub const HYPERVISOR_BACKEND_AMD_SVM: u32 = 2;
@@ -18,6 +18,9 @@ pub const DOMAIN_FEATURE_WAIT: u64 = 1 << 4;
 pub const DOMAIN_FEATURE_EVENT_CHANNEL: u64 = 1 << 5;
 pub const DOMAIN_FEATURE_GRANT_TABLE: u64 = 1 << 6;
 pub const DOMAIN_FEATURE_SHARED_RING: u64 = 1 << 7;
+pub const DOMAIN_FEATURE_EVENT_IRQ: u64 = 1 << 8;
+
+pub const EVENT_CHANNEL_VECTOR: u8 = 0x40;
 
 pub const EVENT_CHANNEL_NO_EVENT: u64 = 0;
 pub const GRANT_REF_INVALID: u64 = 0;
@@ -41,6 +44,7 @@ pub enum HypercallNumber {
     GrantMap = 8,
     GrantUnmap = 9,
     GrantRevoke = 10,
+    EventIrqEnable = 11,
 }
 
 #[repr(u64)]
@@ -110,7 +114,8 @@ impl DomainBootInfo {
                 | DOMAIN_FEATURE_WAIT
                 | DOMAIN_FEATURE_EVENT_CHANNEL
                 | DOMAIN_FEATURE_GRANT_TABLE
-                | DOMAIN_FEATURE_SHARED_RING,
+                | DOMAIN_FEATURE_SHARED_RING
+                | DOMAIN_FEATURE_EVENT_IRQ,
             grant_window_start,
             grant_window_size,
             _reserved1: [0; 2],

@@ -3,11 +3,12 @@
 
 use core::panic::PanicInfo;
 mod domain_hypercall;
+mod domain_interrupt;
 use domain_hypercall::{halt_forever, invoke, shutdown};
 use mnu_abi::hypervisor::{
     DomainBootInfo, HypercallNumber, ShutdownReason, DOMAIN_FEATURE_EVENT_CHANNEL,
-    DOMAIN_FEATURE_GRANT_TABLE, DOMAIN_FEATURE_SHARED_RING, DOMAIN_ROLE_HARDWARE,
-    DOMAIN_ROLE_SYSTEM, GRANT_FLAG_WRITABLE, HYPERCALL_SUCCESS,
+    DOMAIN_FEATURE_EVENT_IRQ, DOMAIN_FEATURE_GRANT_TABLE, DOMAIN_FEATURE_SHARED_RING,
+    DOMAIN_ROLE_HARDWARE, DOMAIN_ROLE_SYSTEM, GRANT_FLAG_WRITABLE, HYPERCALL_SUCCESS,
 };
 use mnu_abi::shared_ring::{
     initialize, pop_request, pop_response, push_request, push_response, validate,
@@ -23,6 +24,7 @@ const REQUEST_ID: u64 = 42;
 static START_MESSAGE: &[u8] = b"Shared Ring bootstrap entered\n";
 static REQUEST_MESSAGE: &[u8] = b"Shared Ring request handled\n";
 static RESPONSE_MESSAGE: &[u8] = b"Shared Ring response verified\n";
+static IRQ_MESSAGE: &[u8] = b"Event Channel IRQ received\n";
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.domain_entry")]
@@ -30,8 +32,10 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
     let Some(boot_info) = (unsafe { boot_info_ptr.as_ref() }) else {
         halt_forever()
     };
-    let required =
-        DOMAIN_FEATURE_EVENT_CHANNEL | DOMAIN_FEATURE_GRANT_TABLE | DOMAIN_FEATURE_SHARED_RING;
+    let required = DOMAIN_FEATURE_EVENT_CHANNEL
+        | DOMAIN_FEATURE_EVENT_IRQ
+        | DOMAIN_FEATURE_GRANT_TABLE
+        | DOMAIN_FEATURE_SHARED_RING;
     if boot_info.validate().is_err() || boot_info.feature_flags & required != required {
         shutdown(
             boot_info.hypervisor_backend,
@@ -45,6 +49,16 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
             HypercallNumber::ConsoleWrite,
             START_MESSAGE.as_ptr() as u64,
             START_MESSAGE.len() as u64,
+            0,
+        )
+    });
+    unsafe { domain_interrupt::install() };
+    require_success(boot_info.hypervisor_backend, unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::EventIrqEnable,
+            0,
+            0,
             0,
         )
     });
@@ -121,7 +135,23 @@ fn system_endpoint(boot_info: &DomainBootInfo) {
 }
 
 fn hardware_endpoint(boot_info: &DomainBootInfo) {
+    require_success(boot_info.hypervisor_backend, unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::Yield,
+            0,
+            0,
+            0,
+        )
+    });
     wait_event(boot_info.hypervisor_backend);
+    if domain_interrupt::event_count() == 0 {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+    console_write(boot_info.hypervisor_backend, IRQ_MESSAGE);
     require_success(boot_info.hypervisor_backend, unsafe {
         invoke(
             boot_info.hypervisor_backend,
