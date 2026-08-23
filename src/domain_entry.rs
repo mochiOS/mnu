@@ -32,6 +32,15 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
     let _ = unsafe {
         hypercall(
             boot_info.hypervisor_backend,
+            HypercallNumber::Yield,
+            0,
+            0,
+            0,
+        )
+    };
+    let _ = unsafe {
+        hypercall(
+            boot_info.hypervisor_backend,
             HypercallNumber::Shutdown,
             ShutdownReason::Completed as u64,
             0,
