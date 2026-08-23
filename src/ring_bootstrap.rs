@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use core::arch::asm;
 use core::panic::PanicInfo;
 mod domain_hypercall;
 mod domain_interrupt;
@@ -26,6 +27,12 @@ static START_MESSAGE: &[u8] = b"Shared Ring bootstrap entered\n";
 static REQUEST_MESSAGE: &[u8] = b"Shared Ring request handled\n";
 static RESPONSE_MESSAGE: &[u8] = b"Shared Ring response verified\n";
 static IRQ_MESSAGE: &[u8] = b"Event Channel IRQ received\n";
+static X2APIC_MESSAGE: &[u8] = b"x2APIC MSR interface verified\n";
+
+const IA32_APIC_BASE: u32 = 0x1b;
+const APIC_BASE_X2APIC: u64 = 1 << 10;
+const X2APIC_TPR: u32 = 0x808;
+const X2APIC_EOI: u32 = 0x80b;
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.domain_entry")]
@@ -55,6 +62,9 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
         )
     });
     unsafe { domain_interrupt::install() };
+    if boot_info.domain_role == DOMAIN_ROLE_HARDWARE {
+        configure_x2apic(boot_info);
+    }
     require_success(boot_info.hypervisor_backend, unsafe {
         invoke(
             boot_info.hypervisor_backend,
@@ -137,15 +147,13 @@ fn system_endpoint(boot_info: &DomainBootInfo) {
 }
 
 fn hardware_endpoint(boot_info: &DomainBootInfo) {
-    require_success(boot_info.hypervisor_backend, unsafe {
-        invoke(
+    if unsafe { read_msr(X2APIC_TPR) } != u64::from(EVENT_CHANNEL_VECTOR) {
+        shutdown(
             boot_info.hypervisor_backend,
-            HypercallNumber::IrqSetTpr,
-            u64::from(EVENT_CHANNEL_VECTOR),
-            0,
-            0,
+            ShutdownReason::InitializationFailed,
         )
-    });
+    }
+    console_write(boot_info.hypervisor_backend, X2APIC_MESSAGE);
     require_success(boot_info.hypervisor_backend, unsafe {
         invoke(
             boot_info.hypervisor_backend,
@@ -170,15 +178,7 @@ fn hardware_endpoint(boot_info: &DomainBootInfo) {
             ShutdownReason::InitializationFailed,
         )
     }
-    require_success(boot_info.hypervisor_backend, unsafe {
-        invoke(
-            boot_info.hypervisor_backend,
-            HypercallNumber::IrqSetTpr,
-            0,
-            0,
-            0,
-        )
-    });
+    unsafe { write_msr(X2APIC_TPR, 0) };
     require_success(boot_info.hypervisor_backend, unsafe {
         invoke(
             boot_info.hypervisor_backend,
@@ -195,15 +195,7 @@ fn hardware_endpoint(boot_info: &DomainBootInfo) {
             ShutdownReason::InitializationFailed,
         )
     }
-    require_success(boot_info.hypervisor_backend, unsafe {
-        invoke(
-            boot_info.hypervisor_backend,
-            HypercallNumber::IrqEoi,
-            0,
-            0,
-            0,
-        )
-    });
+    unsafe { write_msr(X2APIC_EOI, 0) };
     console_write(boot_info.hypervisor_backend, IRQ_MESSAGE);
     require_success(boot_info.hypervisor_backend, unsafe {
         invoke(
@@ -260,6 +252,45 @@ fn hardware_endpoint(boot_info: &DomainBootInfo) {
         )
     });
     send_event(boot_info.hypervisor_backend);
+}
+
+fn configure_x2apic(boot_info: &DomainBootInfo) {
+    let apic_base = unsafe { read_msr(IA32_APIC_BASE) };
+    unsafe { write_msr(IA32_APIC_BASE, apic_base | APIC_BASE_X2APIC) };
+    unsafe { write_msr(X2APIC_TPR, u64::from(EVENT_CHANNEL_VECTOR)) };
+    if unsafe { read_msr(X2APIC_TPR) } != u64::from(EVENT_CHANNEL_VECTOR) {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+}
+
+unsafe fn read_msr(msr: u32) -> u64 {
+    let low: u32;
+    let high: u32;
+    unsafe {
+        asm!(
+            "rdmsr",
+            in("ecx") msr,
+            lateout("eax") low,
+            lateout("edx") high,
+            options(nostack)
+        )
+    };
+    u64::from(low) | (u64::from(high) << 32)
+}
+
+unsafe fn write_msr(msr: u32, value: u64) {
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("eax") value as u32,
+            in("edx") (value >> 32) as u32,
+            options(nostack)
+        )
+    };
 }
 
 fn send_event(backend: u32) {
