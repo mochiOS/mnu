@@ -15,6 +15,9 @@ pub const DOMAIN_FEATURE_YIELD: u64 = 1 << 1;
 pub const DOMAIN_FEATURE_SHUTDOWN: u64 = 1 << 2;
 pub const DOMAIN_FEATURE_READY: u64 = 1 << 3;
 pub const DOMAIN_FEATURE_WAIT: u64 = 1 << 4;
+pub const DOMAIN_FEATURE_EVENT_CHANNEL: u64 = 1 << 5;
+
+pub const EVENT_CHANNEL_NO_EVENT: u64 = 0;
 
 pub const HYPERCALL_SUCCESS: u64 = 0;
 pub const HYPERCALL_UNSUPPORTED: u64 = u64::MAX;
@@ -28,6 +31,8 @@ pub enum HypercallNumber {
     Shutdown = 2,
     Ready = 3,
     Wait = 4,
+    EventSend = 5,
+    EventWait = 6,
 }
 
 #[repr(u64)]
@@ -90,7 +95,8 @@ impl DomainBootInfo {
                 | DOMAIN_FEATURE_YIELD
                 | DOMAIN_FEATURE_SHUTDOWN
                 | DOMAIN_FEATURE_READY
-                | DOMAIN_FEATURE_WAIT,
+                | DOMAIN_FEATURE_WAIT
+                | DOMAIN_FEATURE_EVENT_CHANNEL,
             _reserved1: [0; 4],
         }
     }
