@@ -29,8 +29,11 @@ struct ApBootStack {
     _bytes: [u8; AP_BOOT_STACK_SIZE],
 }
 
-static mut AP_BOOT_STACKS: [ApBootStack; MAX_SMP_STACKS] =
-    [const { ApBootStack { _bytes: [0; AP_BOOT_STACK_SIZE] } }; MAX_SMP_STACKS];
+static mut AP_BOOT_STACKS: [ApBootStack; MAX_SMP_STACKS] = [const {
+    ApBootStack {
+        _bytes: [0; AP_BOOT_STACK_SIZE],
+    }
+}; MAX_SMP_STACKS];
 
 static BOOT_INFO_PTR: AtomicU64 = AtomicU64::new(0);
 static SMP_HANDOFF_ADDR: AtomicU64 = AtomicU64::new(0);

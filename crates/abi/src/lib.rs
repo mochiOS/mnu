@@ -1,5 +1,8 @@
 #![no_std]
 
+/// mBootからmnuへ渡す起動情報のABIです。
+pub mod boot;
+
 /// システムコール番号 (Linux x86_64 互換 + mochiOS 拡張)
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

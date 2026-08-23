@@ -97,7 +97,7 @@ pub mod random;
 /// SMP/マルチコアの共有ハンドオフ
 pub mod smp;
 
-pub use mnu_boot_abi::{
+pub use mnu_abi::boot::{
     BootInfo, BootInfoError, MemoryRegion, MemoryType, SmpHandoff, BOOT_ABI_MAGIC,
     BOOT_ABI_VERSION, BOOT_FEATURE_ENTROPY, BOOT_FEATURE_FRAMEBUFFER, BOOT_FEATURE_INITFS,
     BOOT_FEATURE_ROOTFS_IMAGE, BOOT_FEATURE_SMP, MAX_CPU_IDS,

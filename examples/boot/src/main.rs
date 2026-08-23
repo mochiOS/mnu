@@ -9,7 +9,7 @@ use core::fmt::Write;
 use core::mem::size_of;
 use core::ptr::{copy_nonoverlapping, write_bytes};
 use core::sync::atomic::Ordering;
-use mnu_boot_abi::{
+use mnu_abi::boot::{
     BootInfo, MemoryRegion, MemoryType as MemoryRegionKind, SmpHandoff, MAX_CPU_IDS,
 };
 use spin::Mutex;

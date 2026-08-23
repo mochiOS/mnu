@@ -6,8 +6,8 @@ build = "build.rs"
 
 [workspace]
 members = [
+    "crates/abi",
     "crates/csprng",
-    "crates/boot-abi",
     "crates/PlugKit/plugkit",
     "crates/PlugKit/plugkit-macros",
     "crates/PlugKit/plugkit-sys",
@@ -32,7 +32,6 @@ bench = false
 required-features = ["kernel-bin"]
 
 [target.'cfg(any(target_os = "none", target_os = "uefi"))'.dependencies]
-mnu-abi = { path = "crates/abi" }
 linked_list_allocator = "0.10.5"
 mochios-csprng = { path = "crates/csprng" }
 mochios-time-core = { path = "crates/time-core" }
@@ -41,7 +40,7 @@ spin = "0.9"
 x86_64 = "0.15"
 
 [dependencies]
-mnu-boot-abi = { path = "crates/boot-abi" }
+mnu-abi = { path = "crates/abi" }
 
 [features]
 default = ["kernel-bin"]

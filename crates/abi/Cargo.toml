@@ -8,7 +8,6 @@ description = "mnu ABI definitions"
 [lib]
 name = "mnu_abi"
 path = "src/lib.rs"
-test = false
 bench = false
 
 [features]

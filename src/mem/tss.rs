@@ -25,10 +25,16 @@ struct Ring0Stack {
 
 static TSS: [Once<TaskStateSegment>; crate::percpu::MAX_CPUS] =
     [const { Once::new() }; crate::percpu::MAX_CPUS];
-static mut IST_STACKS: [IstStack; crate::percpu::MAX_CPUS] =
-    [const { IstStack { _bytes: [0; IST_STACK_SIZE] } }; crate::percpu::MAX_CPUS];
-static mut RING0_STACKS: [Ring0Stack; crate::percpu::MAX_CPUS] =
-    [const { Ring0Stack { _bytes: [0; RING0_STACK_SIZE] } }; crate::percpu::MAX_CPUS];
+static mut IST_STACKS: [IstStack; crate::percpu::MAX_CPUS] = [const {
+    IstStack {
+        _bytes: [0; IST_STACK_SIZE],
+    }
+}; crate::percpu::MAX_CPUS];
+static mut RING0_STACKS: [Ring0Stack; crate::percpu::MAX_CPUS] = [const {
+    Ring0Stack {
+        _bytes: [0; RING0_STACK_SIZE],
+    }
+}; crate::percpu::MAX_CPUS];
 
 /// TSSを初期化して返す
 ///

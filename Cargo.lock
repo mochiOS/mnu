@@ -104,7 +104,6 @@ version = "0.1.0"
 dependencies = [
  "linked_list_allocator",
  "mnu-abi",
- "mnu-boot-abi",
  "mochios-csprng",
  "mochios-time-core",
  "sha2",
@@ -114,10 +113,6 @@ dependencies = [
 
 [[package]]
 name = "mnu-abi"
-version = "0.1.0"
-
-[[package]]
-name = "mnu-boot-abi"
 version = "0.1.0"
 
 [[package]]

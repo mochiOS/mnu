@@ -1030,12 +1030,7 @@ fn send_to_thread_id(dest_thread_id: u64, sender_handle: u64, buf_ptr: u64, len:
     send_to_thread_id_with_kind(dest_thread_id, sender_handle, buf_ptr, len, false, false)
 }
 
-fn send_call_to_thread_id(
-    dest_thread_id: u64,
-    sender_handle: u64,
-    buf_ptr: u64,
-    len: u64,
-) -> u64 {
+fn send_call_to_thread_id(dest_thread_id: u64, sender_handle: u64, buf_ptr: u64, len: u64) -> u64 {
     send_to_thread_id_with_kind(dest_thread_id, sender_handle, buf_ptr, len, false, true)
 }
 

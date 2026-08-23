@@ -1,5 +1,3 @@
-#![no_std]
-
 use core::mem::size_of;
 use core::sync::atomic::AtomicU64;
 
