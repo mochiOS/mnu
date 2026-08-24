@@ -46,6 +46,13 @@ bench = false
 required-features = ["domain-guest"]
 
 [[bin]]
+name = "hardware-bootstrap"
+path = "src/hardware_bootstrap.rs"
+test = false
+bench = false
+required-features = ["domain-guest"]
+
+[[bin]]
 name = "event-bootstrap"
 path = "src/event_bootstrap.rs"
 test = false

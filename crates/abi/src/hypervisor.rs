@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 6;
+pub const DOMAIN_BOOT_VERSION: u32 = 7;
 pub const DOMAIN_CRASH_MAGIC: u64 = u64::from_le_bytes(*b"MNUCRSH\0");
 pub const DOMAIN_CRASH_VERSION: u16 = 1;
 
@@ -23,6 +23,12 @@ pub const DOMAIN_FEATURE_SHARED_RING: u64 = 1 << 7;
 pub const DOMAIN_FEATURE_EVENT_IRQ: u64 = 1 << 8;
 pub const DOMAIN_FEATURE_VIRTUAL_APIC: u64 = 1 << 9;
 pub const DOMAIN_FEATURE_CRASH_QUERY: u64 = 1 << 10;
+pub const DOMAIN_FEATURE_DEVICE_QUERY: u64 = 1 << 11;
+
+pub const DOMAIN_CAPABILITY_DEVICE_QUERY: u64 = 1 << 0;
+
+pub const PCI_DEVICE_STATE_QUARANTINED: u8 = 1;
+pub const PCI_DEVICE_STATE_FIRMWARE_DEFERRED: u8 = 2;
 
 pub const EVENT_CHANNEL_VECTOR: u8 = 0x40;
 pub const DOMAIN_MANAGEMENT_VECTOR: u8 = 0x41;
@@ -57,6 +63,7 @@ pub enum HypercallNumber {
     IrqMask = 13,
     IrqSetTpr = 14,
     DomainCrashQuery = 15,
+    DeviceQuery = 16,
 }
 
 #[repr(u64)]
@@ -99,7 +106,7 @@ pub struct DomainBootInfo {
     pub grant_window_size: u64,
     pub restart_count: u32,
     pub _reserved0: u32,
-    pub _reserved1: u64,
+    pub capabilities: u64,
 }
 
 impl DomainBootInfo {
@@ -112,6 +119,7 @@ impl DomainBootInfo {
         grant_window_start: u64,
         grant_window_size: u64,
         restart_count: u32,
+        capabilities: u64,
     ) -> Self {
         Self {
             magic: DOMAIN_BOOT_MAGIC,
@@ -132,12 +140,13 @@ impl DomainBootInfo {
                 | DOMAIN_FEATURE_SHARED_RING
                 | DOMAIN_FEATURE_EVENT_IRQ
                 | DOMAIN_FEATURE_VIRTUAL_APIC
-                | DOMAIN_FEATURE_CRASH_QUERY,
+                | DOMAIN_FEATURE_CRASH_QUERY
+                | DOMAIN_FEATURE_DEVICE_QUERY,
             grant_window_start,
             grant_window_size,
             restart_count,
             _reserved0: 0,
-            _reserved1: 0,
+            capabilities,
         }
     }
 
@@ -181,6 +190,29 @@ impl DomainBootInfo {
             return Err(DomainBootInfoError::InvalidMemorySize);
         }
         Ok(())
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciDeviceInfo {
+    pub requester: u16,
+    pub class: u8,
+    pub subclass: u8,
+    pub state: u8,
+    pub _reserved0: [u8; 3],
+    pub owner_domain: u32,
+    pub _reserved1: u32,
+}
+
+impl PciDeviceInfo {
+    pub fn validate(&self) -> bool {
+        matches!(
+            self.state,
+            PCI_DEVICE_STATE_QUARANTINED | PCI_DEVICE_STATE_FIRMWARE_DEFERRED
+        ) && self._reserved0 == [0; 3]
+            && self._reserved1 == 0
+            && self.owner_domain == 0
     }
 }
 
@@ -253,8 +285,15 @@ mod tests {
             0x1f_0000,
             0x1_0000,
             0,
+            0,
         );
         assert_eq!(info.validate(), Ok(()));
+    }
+
+    #[test]
+    fn pci_device_info_layout_is_fixed() {
+        assert_eq!(size_of::<PciDeviceInfo>(), 16);
+        assert_eq!(core::mem::align_of::<PciDeviceInfo>(), 4);
     }
 
     #[test]
@@ -267,6 +306,7 @@ mod tests {
             4096,
             0,
             4096,
+            0,
             0,
         );
         info.hypervisor_backend = 9;
@@ -284,6 +324,7 @@ mod tests {
             0,
             4096,
             0,
+            0,
         );
         assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidMemorySize));
     }
@@ -298,6 +339,7 @@ mod tests {
             4096,
             0,
             4096,
+            0,
             0,
         );
         info.domain_role = 99;
