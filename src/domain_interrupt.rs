@@ -1,7 +1,7 @@
 use core::arch::{asm, global_asm};
 use core::ptr::addr_of;
 
-use mnu_abi::hypervisor::EVENT_CHANNEL_VECTOR;
+use mnu_abi::hypervisor::{DOMAIN_MANAGEMENT_VECTOR, EVENT_CHANNEL_VECTOR};
 
 const CODE_SELECTOR: u16 = 0x08;
 const INTERRUPT_GATE: u8 = 0x8e;
@@ -14,11 +14,17 @@ static mut MNU_DOMAIN_GENERAL_PROTECTION_COUNT: u64 = 0;
 static mut MNU_DOMAIN_APIC_TIMER_COUNT: u64 = 0;
 #[unsafe(no_mangle)]
 static mut MNU_DOMAIN_SELF_IPI_COUNT: u64 = 0;
+#[unsafe(no_mangle)]
+static mut MNU_DOMAIN_MANAGEMENT_IRQ_COUNT: u64 = 0;
 
 global_asm!(
     ".global mnu_domain_event_irq",
     "mnu_domain_event_irq:",
     "lock inc qword ptr [rip + MNU_DOMAIN_EVENT_IRQ_COUNT]",
+    "iretq",
+    ".global mnu_domain_management_irq",
+    "mnu_domain_management_irq:",
+    "lock inc qword ptr [rip + MNU_DOMAIN_MANAGEMENT_IRQ_COUNT]",
     "iretq",
     ".global mnu_domain_general_protection",
     "mnu_domain_general_protection:",
@@ -40,6 +46,7 @@ global_asm!(
 
 unsafe extern "C" {
     fn mnu_domain_event_irq();
+    fn mnu_domain_management_irq();
     #[allow(dead_code)]
     fn mnu_domain_general_protection();
     #[allow(dead_code)]
@@ -100,6 +107,8 @@ pub unsafe fn install() {
     unsafe {
         (*idt)[EVENT_CHANNEL_VECTOR as usize] =
             IdtEntry::interrupt(mnu_domain_event_irq as *const () as usize as u64);
+        (*idt)[DOMAIN_MANAGEMENT_VECTOR as usize] =
+            IdtEntry::interrupt(mnu_domain_management_irq as *const () as usize as u64);
     }
     let pointer = DescriptorTablePointer {
         limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -140,6 +149,11 @@ pub unsafe fn install_apic_test_handlers(timer_vector: u8, ipi_vector: u8) {
 #[allow(dead_code)]
 pub fn event_count() -> u64 {
     unsafe { (&raw const MNU_DOMAIN_EVENT_IRQ_COUNT).read_volatile() }
+}
+
+#[allow(dead_code)]
+pub fn management_count() -> u64 {
+    unsafe { (&raw const MNU_DOMAIN_MANAGEMENT_IRQ_COUNT).read_volatile() }
 }
 
 #[allow(dead_code)]

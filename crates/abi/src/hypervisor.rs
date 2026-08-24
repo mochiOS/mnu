@@ -1,7 +1,9 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 5;
+pub const DOMAIN_BOOT_VERSION: u32 = 6;
+pub const DOMAIN_CRASH_MAGIC: u64 = u64::from_le_bytes(*b"MNUCRSH\0");
+pub const DOMAIN_CRASH_VERSION: u16 = 1;
 
 pub const HYPERVISOR_BACKEND_INTEL_VMX: u32 = 1;
 pub const HYPERVISOR_BACKEND_AMD_SVM: u32 = 2;
@@ -20,8 +22,13 @@ pub const DOMAIN_FEATURE_GRANT_TABLE: u64 = 1 << 6;
 pub const DOMAIN_FEATURE_SHARED_RING: u64 = 1 << 7;
 pub const DOMAIN_FEATURE_EVENT_IRQ: u64 = 1 << 8;
 pub const DOMAIN_FEATURE_VIRTUAL_APIC: u64 = 1 << 9;
+pub const DOMAIN_FEATURE_CRASH_QUERY: u64 = 1 << 10;
 
 pub const EVENT_CHANNEL_VECTOR: u8 = 0x40;
+pub const DOMAIN_MANAGEMENT_VECTOR: u8 = 0x41;
+
+pub const DOMAIN_CRASH_STATUS_CRASHED: u32 = 1;
+pub const DOMAIN_CRASH_STATUS_RESTARTED: u32 = 2;
 
 pub const EVENT_CHANNEL_NO_EVENT: u64 = 0;
 pub const GRANT_REF_INVALID: u64 = 0;
@@ -49,6 +56,7 @@ pub enum HypercallNumber {
     IrqEoi = 12,
     IrqMask = 13,
     IrqSetTpr = 14,
+    DomainCrashQuery = 15,
 }
 
 #[repr(u64)]
@@ -89,7 +97,9 @@ pub struct DomainBootInfo {
     pub feature_flags: u64,
     pub grant_window_start: u64,
     pub grant_window_size: u64,
-    pub _reserved1: [u64; 2],
+    pub restart_count: u32,
+    pub _reserved0: u32,
+    pub _reserved1: u64,
 }
 
 impl DomainBootInfo {
@@ -101,6 +111,7 @@ impl DomainBootInfo {
         memory_size: u64,
         grant_window_start: u64,
         grant_window_size: u64,
+        restart_count: u32,
     ) -> Self {
         Self {
             magic: DOMAIN_BOOT_MAGIC,
@@ -120,10 +131,13 @@ impl DomainBootInfo {
                 | DOMAIN_FEATURE_GRANT_TABLE
                 | DOMAIN_FEATURE_SHARED_RING
                 | DOMAIN_FEATURE_EVENT_IRQ
-                | DOMAIN_FEATURE_VIRTUAL_APIC,
+                | DOMAIN_FEATURE_VIRTUAL_APIC
+                | DOMAIN_FEATURE_CRASH_QUERY,
             grant_window_start,
             grant_window_size,
-            _reserved1: [0; 2],
+            restart_count,
+            _reserved0: 0,
+            _reserved1: 0,
         }
     }
 
@@ -170,6 +184,54 @@ impl DomainBootInfo {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainCrashInfo {
+    pub magic: u64,
+    pub version: u16,
+    pub struct_size: u16,
+    pub domain_id: u32,
+    pub raw_reason: u64,
+    pub fault_address: u64,
+    pub fault_info: u64,
+    pub restart_count: u32,
+    pub status: u32,
+}
+
+impl DomainCrashInfo {
+    pub const fn new(
+        domain_id: u32,
+        raw_reason: u64,
+        fault_address: u64,
+        fault_info: u64,
+        restart_count: u32,
+        status: u32,
+    ) -> Self {
+        Self {
+            magic: DOMAIN_CRASH_MAGIC,
+            version: DOMAIN_CRASH_VERSION,
+            struct_size: size_of::<Self>() as u16,
+            domain_id,
+            raw_reason,
+            fault_address,
+            fault_info,
+            restart_count,
+            status,
+        }
+    }
+
+    pub fn validate(&self) -> bool {
+        self.magic == DOMAIN_CRASH_MAGIC
+            && self.version == DOMAIN_CRASH_VERSION
+            && usize::from(self.struct_size) >= size_of::<Self>()
+            && self.domain_id != 0
+            && matches!(
+                self.status,
+                DOMAIN_CRASH_STATUS_CRASHED | DOMAIN_CRASH_STATUS_RESTARTED
+            )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +252,7 @@ mod tests {
             2 * 1024 * 1024,
             0x1f_0000,
             0x1_0000,
+            0,
         );
         assert_eq!(info.validate(), Ok(()));
     }
@@ -204,6 +267,7 @@ mod tests {
             4096,
             0,
             4096,
+            0,
         );
         info.hypervisor_backend = 9;
         assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidBackend));
@@ -219,6 +283,7 @@ mod tests {
             4097,
             0,
             4096,
+            0,
         );
         assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidMemorySize));
     }
@@ -233,8 +298,16 @@ mod tests {
             4096,
             0,
             4096,
+            0,
         );
         info.domain_role = 99;
         assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidRole));
+    }
+
+    #[test]
+    fn crash_info_layout_and_identity_are_fixed() {
+        let info = DomainCrashInfo::new(3, 0x400, 0x4000_0000, 4, 1, DOMAIN_CRASH_STATUS_RESTARTED);
+        assert_eq!(size_of::<DomainCrashInfo>(), 48);
+        assert!(info.validate());
     }
 }

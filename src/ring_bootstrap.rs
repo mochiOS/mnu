@@ -2,12 +2,14 @@
 #![no_main]
 
 use core::arch::{asm, global_asm, x86_64::__cpuid_count};
+use core::mem::{size_of, MaybeUninit};
 use core::panic::PanicInfo;
 mod domain_hypercall;
 mod domain_interrupt;
 use domain_hypercall::{halt_forever, invoke, shutdown};
 use mnu_abi::hypervisor::{
-    DomainBootInfo, HypercallNumber, ShutdownReason, DOMAIN_FEATURE_EVENT_CHANNEL,
+    DomainBootInfo, DomainCrashInfo, HypercallNumber, ShutdownReason,
+    DOMAIN_CRASH_STATUS_RESTARTED, DOMAIN_FEATURE_CRASH_QUERY, DOMAIN_FEATURE_EVENT_CHANNEL,
     DOMAIN_FEATURE_EVENT_IRQ, DOMAIN_FEATURE_GRANT_TABLE, DOMAIN_FEATURE_SHARED_RING,
     DOMAIN_FEATURE_VIRTUAL_APIC, DOMAIN_ROLE_APPLICATION, DOMAIN_ROLE_HARDWARE, DOMAIN_ROLE_SYSTEM,
     EVENT_CHANNEL_VECTOR, GRANT_FLAG_WRITABLE, HYPERCALL_SUCCESS,
@@ -32,6 +34,8 @@ static MSR_FAULT_MESSAGE: &[u8] = b"Rejected MSR delivered #GP\n";
 static APIC_TIMER_MESSAGE: &[u8] = b"Local APIC timer IRQ received\n";
 static SELF_IPI_MESSAGE: &[u8] = b"x2APIC self IPI received\n";
 static CPUID_MESSAGE: &[u8] = b"Virtual CPUID model verified\n";
+static APPLICATION_RESTART_MESSAGE: &[u8] = b"Application Domain restarted\n";
+static CRASH_NOTIFICATION_MESSAGE: &[u8] = b"Domain crash notification verified\n";
 
 const IA32_APIC_BASE: u32 = 0x1b;
 const APIC_BASE_X2APIC: u64 = 1 << 10;
@@ -93,7 +97,8 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
         | DOMAIN_FEATURE_EVENT_IRQ
         | DOMAIN_FEATURE_GRANT_TABLE
         | DOMAIN_FEATURE_SHARED_RING
-        | DOMAIN_FEATURE_VIRTUAL_APIC;
+        | DOMAIN_FEATURE_VIRTUAL_APIC
+        | DOMAIN_FEATURE_CRASH_QUERY;
     if boot_info.validate().is_err() || boot_info.feature_flags & required != required {
         shutdown(
             boot_info.hypervisor_backend,
@@ -112,7 +117,11 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
     });
     unsafe { domain_interrupt::install() };
     if boot_info.domain_role == DOMAIN_ROLE_APPLICATION {
-        trigger_nested_page_fault()
+        if boot_info.restart_count == 0 {
+            trigger_nested_page_fault()
+        }
+        console_write(boot_info.hypervisor_backend, APPLICATION_RESTART_MESSAGE);
+        shutdown(boot_info.hypervisor_backend, ShutdownReason::Completed)
     }
     if boot_info.domain_role == DOMAIN_ROLE_HARDWARE {
         unsafe { domain_interrupt::install_general_protection_test_handler() };
@@ -278,6 +287,7 @@ fn system_endpoint(boot_info: &DomainBootInfo) {
         )
     }
     console_write(boot_info.hypervisor_backend, RESPONSE_MESSAGE);
+    verify_crash_notification(boot_info);
     require_success(boot_info.hypervisor_backend, unsafe {
         invoke(
             boot_info.hypervisor_backend,
@@ -287,6 +297,48 @@ fn system_endpoint(boot_info: &DomainBootInfo) {
             0,
         )
     });
+}
+
+fn verify_crash_notification(boot_info: &DomainBootInfo) {
+    let mut crash_info = MaybeUninit::<DomainCrashInfo>::uninit();
+    require_success(boot_info.hypervisor_backend, unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::DomainCrashQuery,
+            3,
+            crash_info.as_mut_ptr() as u64,
+            size_of::<DomainCrashInfo>() as u64,
+        )
+    });
+    let crash_info = unsafe { crash_info.assume_init() };
+    let expected_reason = match boot_info.hypervisor_backend {
+        mnu_abi::hypervisor::HYPERVISOR_BACKEND_INTEL_VMX => 48,
+        mnu_abi::hypervisor::HYPERVISOR_BACKEND_AMD_SVM => 0x400,
+        _ => 0,
+    };
+    if !crash_info.validate()
+        || crash_info.domain_id != 3
+        || crash_info.raw_reason != expected_reason
+        || crash_info.fault_address != 0x4000_0000
+        || crash_info.restart_count != 1
+        || crash_info.status != DOMAIN_CRASH_STATUS_RESTARTED
+        || domain_interrupt::management_count() == 0
+    {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+    require_success(boot_info.hypervisor_backend, unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::IrqEoi,
+            0,
+            0,
+            0,
+        )
+    });
+    console_write(boot_info.hypervisor_backend, CRASH_NOTIFICATION_MESSAGE);
 }
 
 fn hardware_endpoint(boot_info: &DomainBootInfo) {
