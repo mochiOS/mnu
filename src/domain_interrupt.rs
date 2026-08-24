@@ -16,6 +16,8 @@ static mut MNU_DOMAIN_APIC_TIMER_COUNT: u64 = 0;
 static mut MNU_DOMAIN_SELF_IPI_COUNT: u64 = 0;
 #[unsafe(no_mangle)]
 static mut MNU_DOMAIN_MANAGEMENT_IRQ_COUNT: u64 = 0;
+#[unsafe(no_mangle)]
+static mut MNU_DOMAIN_DEVICE_IRQ_COUNT: u64 = 0;
 
 global_asm!(
     ".global mnu_domain_event_irq",
@@ -42,6 +44,10 @@ global_asm!(
     "mnu_domain_self_ipi:",
     "lock inc qword ptr [rip + MNU_DOMAIN_SELF_IPI_COUNT]",
     "iretq",
+    ".global mnu_domain_device_irq",
+    "mnu_domain_device_irq:",
+    "lock inc qword ptr [rip + MNU_DOMAIN_DEVICE_IRQ_COUNT]",
+    "iretq",
 );
 
 unsafe extern "C" {
@@ -53,6 +59,7 @@ unsafe extern "C" {
     fn mnu_domain_apic_timer();
     #[allow(dead_code)]
     fn mnu_domain_self_ipi();
+    fn mnu_domain_device_irq();
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +154,15 @@ pub unsafe fn install_apic_test_handlers(timer_vector: u8, ipi_vector: u8) {
 }
 
 #[allow(dead_code)]
+pub unsafe fn install_device_handler(vector: u8) {
+    let idt = &raw mut IDT;
+    unsafe {
+        (*idt)[vector as usize] =
+            IdtEntry::interrupt(mnu_domain_device_irq as *const () as usize as u64);
+    }
+}
+
+#[allow(dead_code)]
 pub fn event_count() -> u64 {
     unsafe { (&raw const MNU_DOMAIN_EVENT_IRQ_COUNT).read_volatile() }
 }
@@ -169,4 +185,9 @@ pub fn apic_timer_count() -> u64 {
 #[allow(dead_code)]
 pub fn self_ipi_count() -> u64 {
     unsafe { (&raw const MNU_DOMAIN_SELF_IPI_COUNT).read_volatile() }
+}
+
+#[allow(dead_code)]
+pub fn device_count() -> u64 {
+    unsafe { (&raw const MNU_DOMAIN_DEVICE_IRQ_COUNT).read_volatile() }
 }

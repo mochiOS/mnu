@@ -5,6 +5,8 @@ use core::mem::size_of;
 use core::panic::PanicInfo;
 
 mod domain_hypercall;
+mod domain_interrupt;
+mod virtio_block;
 
 use domain_hypercall::{halt_forever, invoke, shutdown};
 use mnu_abi::hypervisor::{
@@ -17,6 +19,7 @@ use mnu_abi::hypervisor::{
 };
 
 static START_MESSAGE: &[u8] = b"Hardware Domain bootstrap entered\n";
+static VIRTIO_SUCCESS_MESSAGE: &[u8] = b"virtio-blk DMA and MSI-X IRQ verified\n";
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.domain_entry")]
@@ -41,6 +44,8 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
         )
     }
     console_write(boot_info, START_MESSAGE);
+    unsafe { domain_interrupt::install_device_handler(virtio_block::device_irq_vector()) };
+    unsafe { domain_interrupt::install() };
 
     let info_address = boot_info.grant_window_start;
     for index in 0..256_u64 {
@@ -87,7 +92,18 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
             if identity == HYPERCALL_INVALID_ARGUMENT || identity as u16 == 0xffff {
                 initialization_failed(boot_info)
             }
+            let identity =
+                u32::try_from(identity).unwrap_or_else(|_| initialization_failed(boot_info));
             let mut resource_count = 0;
+            let mut resources = [PciDeviceResource {
+                requester: 0,
+                bar_index: 0,
+                kind: 0,
+                flags: 0,
+                guest_address: 0,
+                length: 0,
+                _reserved0: 0,
+            }; 6];
             for resource_index in 0..6_u64 {
                 let result = unsafe {
                     invoke(
@@ -114,6 +130,7 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
                 {
                     initialization_failed(boot_info)
                 }
+                resources[resource_count] = resource;
                 resource_count += 1;
             }
             if resource_count == 0
@@ -143,6 +160,15 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
             };
             if command_status == HYPERCALL_INVALID_ARGUMENT || command_status & (1 << 2) == 0 {
                 initialization_failed(boot_info)
+            }
+            if virtio_block::is_virtio_block(identity) {
+                if let Err(error) =
+                    virtio_block::verify(boot_info, claimed.requester, &resources[..resource_count])
+                {
+                    console_write(boot_info, error.message());
+                    initialization_failed(boot_info)
+                }
+                console_write(boot_info, VIRTIO_SUCCESS_MESSAGE);
             }
             if unsafe {
                 invoke(
