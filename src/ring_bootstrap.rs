@@ -29,11 +29,22 @@ static RESPONSE_MESSAGE: &[u8] = b"Shared Ring response verified\n";
 static IRQ_MESSAGE: &[u8] = b"Event Channel IRQ received\n";
 static X2APIC_MESSAGE: &[u8] = b"x2APIC MSR interface verified\n";
 static MSR_FAULT_MESSAGE: &[u8] = b"Rejected MSR delivered #GP\n";
+static APIC_TIMER_MESSAGE: &[u8] = b"Local APIC timer IRQ received\n";
+static SELF_IPI_MESSAGE: &[u8] = b"x2APIC self IPI received\n";
 
 const IA32_APIC_BASE: u32 = 0x1b;
 const APIC_BASE_X2APIC: u64 = 1 << 10;
 const X2APIC_TPR: u32 = 0x808;
 const X2APIC_EOI: u32 = 0x80b;
+const X2APIC_ICR: u32 = 0x830;
+const X2APIC_LVT_TIMER: u32 = 0x832;
+const X2APIC_INITIAL_COUNT: u32 = 0x838;
+const X2APIC_CURRENT_COUNT: u32 = 0x839;
+const X2APIC_DIVIDE_CONFIGURATION: u32 = 0x83e;
+const X2APIC_SELF_IPI: u32 = 0x83f;
+const APIC_TIMER_VECTOR: u8 = 0x50;
+const SELF_IPI_VECTOR: u8 = 0x51;
+const ICR_SELF: u64 = 1 << 18;
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.domain_entry")]
@@ -65,8 +76,11 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
     unsafe { domain_interrupt::install() };
     if boot_info.domain_role == DOMAIN_ROLE_HARDWARE {
         unsafe { domain_interrupt::install_general_protection_test_handler() };
+        unsafe { domain_interrupt::install_apic_test_handlers(APIC_TIMER_VECTOR, SELF_IPI_VECTOR) };
         configure_x2apic(boot_info);
         verify_rejected_msr(boot_info);
+        verify_self_ipi(boot_info);
+        verify_apic_timer(boot_info);
     }
     require_success(boot_info.hypervisor_backend, unsafe {
         invoke(
@@ -280,6 +294,54 @@ fn verify_rejected_msr(boot_info: &DomainBootInfo) {
         )
     }
     console_write(boot_info.hypervisor_backend, MSR_FAULT_MESSAGE);
+}
+
+fn verify_self_ipi(boot_info: &DomainBootInfo) {
+    let count = domain_interrupt::self_ipi_count();
+    unsafe { write_msr(X2APIC_SELF_IPI, u64::from(SELF_IPI_VECTOR)) };
+    if domain_interrupt::self_ipi_count() != count + 1 {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+    unsafe { write_msr(X2APIC_EOI, 0) };
+    unsafe { write_msr(X2APIC_ICR, ICR_SELF | u64::from(SELF_IPI_VECTOR)) };
+    if domain_interrupt::self_ipi_count() != count + 2 {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+    unsafe { write_msr(X2APIC_EOI, 0) };
+    console_write(boot_info.hypervisor_backend, SELF_IPI_MESSAGE);
+}
+
+fn verify_apic_timer(boot_info: &DomainBootInfo) {
+    let count = domain_interrupt::apic_timer_count();
+    unsafe { write_msr(X2APIC_DIVIDE_CONFIGURATION, 0xb) };
+    unsafe { write_msr(X2APIC_LVT_TIMER, u64::from(APIC_TIMER_VECTOR)) };
+    unsafe { write_msr(X2APIC_INITIAL_COUNT, 1_000) };
+    if unsafe { read_msr(X2APIC_CURRENT_COUNT) } > 1_000 {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+    for _ in 0..64 {
+        if domain_interrupt::apic_timer_count() == count + 1 {
+            break;
+        }
+        let _ = unsafe { read_msr(X2APIC_CURRENT_COUNT) };
+    }
+    if domain_interrupt::apic_timer_count() != count + 1 {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+    unsafe { write_msr(X2APIC_EOI, 0) };
+    console_write(boot_info.hypervisor_backend, APIC_TIMER_MESSAGE);
 }
 
 unsafe fn read_msr(msr: u32) -> u64 {
