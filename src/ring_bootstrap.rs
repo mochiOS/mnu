@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use core::arch::asm;
+use core::arch::{asm, global_asm, x86_64::__cpuid_count};
 use core::panic::PanicInfo;
 mod domain_hypercall;
 mod domain_interrupt;
@@ -31,6 +31,7 @@ static X2APIC_MESSAGE: &[u8] = b"x2APIC MSR interface verified\n";
 static MSR_FAULT_MESSAGE: &[u8] = b"Rejected MSR delivered #GP\n";
 static APIC_TIMER_MESSAGE: &[u8] = b"Local APIC timer IRQ received\n";
 static SELF_IPI_MESSAGE: &[u8] = b"x2APIC self IPI received\n";
+static CPUID_MESSAGE: &[u8] = b"Virtual CPUID model verified\n";
 
 const IA32_APIC_BASE: u32 = 0x1b;
 const APIC_BASE_X2APIC: u64 = 1 << 10;
@@ -45,6 +46,42 @@ const X2APIC_SELF_IPI: u32 = 0x83f;
 const APIC_TIMER_VECTOR: u8 = 0x50;
 const SELF_IPI_VECTOR: u8 = 0x51;
 const ICR_SELF: u64 = 1 << 18;
+
+global_asm!(
+    ".global mnu_domain_verify_cpuid_scratch",
+    "mnu_domain_verify_cpuid_scratch:",
+    "push rbx",
+    "movabs r8, 0x1827364554637281",
+    "movabs r9, 0x2938475665748392",
+    "movabs r10, 0x3a495867768594a3",
+    "movabs r11, 0x4b5a69788796a5b4",
+    "xor eax, eax",
+    "xor ecx, ecx",
+    "cpuid",
+    "movabs rax, 0x1827364554637281",
+    "cmp r8, rax",
+    "jne 2f",
+    "movabs rax, 0x2938475665748392",
+    "cmp r9, rax",
+    "jne 2f",
+    "movabs rax, 0x3a495867768594a3",
+    "cmp r10, rax",
+    "jne 2f",
+    "movabs rax, 0x4b5a69788796a5b4",
+    "cmp r11, rax",
+    "jne 2f",
+    "mov eax, 1",
+    "pop rbx",
+    "ret",
+    "2:",
+    "xor eax, eax",
+    "pop rbx",
+    "ret",
+);
+
+unsafe extern "sysv64" {
+    fn mnu_domain_verify_cpuid_scratch() -> u64;
+}
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.domain_entry")]
@@ -77,6 +114,7 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
     if boot_info.domain_role == DOMAIN_ROLE_HARDWARE {
         unsafe { domain_interrupt::install_general_protection_test_handler() };
         unsafe { domain_interrupt::install_apic_test_handlers(APIC_TIMER_VECTOR, SELF_IPI_VECTOR) };
+        verify_cpuid(boot_info);
         configure_x2apic(boot_info);
         verify_rejected_msr(boot_info);
         verify_self_ipi(boot_info);
@@ -100,6 +138,70 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
         ),
     }
     shutdown(boot_info.hypervisor_backend, ShutdownReason::Completed)
+}
+
+fn verify_cpuid(boot_info: &DomainBootInfo) {
+    if unsafe { mnu_domain_verify_cpuid_scratch() } != 1 {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+    let basic = __cpuid_count(0, 0);
+    let cpu_vendor = *b"MochiOS CPU ";
+    if basic.eax < 0x0b
+        || basic.ebx != u32::from_le_bytes(cpu_vendor[0..4].try_into().unwrap())
+        || basic.edx != u32::from_le_bytes(cpu_vendor[4..8].try_into().unwrap())
+        || basic.ecx != u32::from_le_bytes(cpu_vendor[8..12].try_into().unwrap())
+    {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+
+    let features = __cpuid_count(1, 0);
+    let required = (1 << 21) | (1 << 31);
+    if features.ecx & required != required || features.ecx & (1 << 5) != 0 {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+
+    let extended_max = __cpuid_count(0x8000_0000, 0).eax;
+    let extended = __cpuid_count(0x8000_0001, 0);
+    if extended_max < 0x8000_0008
+        || extended.ecx & (1 << 2) != 0
+        || extended.edx & ((1 << 20) | (1 << 29)) != ((1 << 20) | (1 << 29))
+    {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+
+    let hypervisor = __cpuid_count(0x4000_0000, 0);
+    let hypervisor_vendor = *b"MochiOSmBoot";
+    if hypervisor.eax < 0x4000_0001
+        || hypervisor.ebx != u32::from_le_bytes(hypervisor_vendor[0..4].try_into().unwrap())
+        || hypervisor.ecx != u32::from_le_bytes(hypervisor_vendor[4..8].try_into().unwrap())
+        || hypervisor.edx != u32::from_le_bytes(hypervisor_vendor[8..12].try_into().unwrap())
+    {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+
+    let topology = __cpuid_count(0x0b, 1);
+    if topology.eax != 0 || topology.ebx != 1 || topology.edx != 0 {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+    console_write(boot_info.hypervisor_backend, CPUID_MESSAGE);
 }
 
 fn system_endpoint(boot_info: &DomainBootInfo) {
