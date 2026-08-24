@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 8;
+pub const DOMAIN_BOOT_VERSION: u32 = 9;
 pub const DOMAIN_CRASH_MAGIC: u64 = u64::from_le_bytes(*b"MNUCRSH\0");
 pub const DOMAIN_CRASH_VERSION: u16 = 1;
 
@@ -25,6 +25,8 @@ pub const DOMAIN_FEATURE_VIRTUAL_APIC: u64 = 1 << 9;
 pub const DOMAIN_FEATURE_CRASH_QUERY: u64 = 1 << 10;
 pub const DOMAIN_FEATURE_DEVICE_QUERY: u64 = 1 << 11;
 pub const DOMAIN_FEATURE_DEVICE_OWNERSHIP: u64 = 1 << 12;
+pub const DOMAIN_FEATURE_DEVICE_RESOURCES: u64 = 1 << 13;
+pub const DOMAIN_FEATURE_DEVICE_ACTIVATION: u64 = 1 << 14;
 
 pub const DOMAIN_CAPABILITY_DEVICE_QUERY: u64 = 1 << 0;
 pub const DOMAIN_CAPABILITY_DEVICE_CLAIM: u64 = 1 << 1;
@@ -32,7 +34,11 @@ pub const DOMAIN_CAPABILITY_DEVICE_CLAIM: u64 = 1 << 1;
 pub const PCI_DEVICE_STATE_QUARANTINED: u8 = 1;
 pub const PCI_DEVICE_STATE_FIRMWARE_DEFERRED: u8 = 2;
 pub const PCI_DEVICE_STATE_CLAIMED_DISABLED: u8 = 3;
+pub const PCI_DEVICE_STATE_ACTIVE: u8 = 4;
 pub const PCI_DEVICE_FLAG_CLAIMABLE: u32 = 1 << 0;
+pub const PCI_RESOURCE_KIND_MMIO: u8 = 1;
+pub const PCI_RESOURCE_FLAG_READABLE: u32 = 1 << 0;
+pub const PCI_RESOURCE_FLAG_WRITABLE: u32 = 1 << 1;
 
 pub const EVENT_CHANNEL_VECTOR: u8 = 0x40;
 pub const DOMAIN_MANAGEMENT_VECTOR: u8 = 0x41;
@@ -70,6 +76,9 @@ pub enum HypercallNumber {
     DeviceQuery = 16,
     DeviceClaim = 17,
     DeviceRelease = 18,
+    DeviceConfigRead = 19,
+    DeviceResourceQuery = 20,
+    DeviceActivate = 21,
 }
 
 #[repr(u64)]
@@ -110,12 +119,15 @@ pub struct DomainBootInfo {
     pub feature_flags: u64,
     pub grant_window_start: u64,
     pub grant_window_size: u64,
+    pub device_window_start: u64,
+    pub device_window_size: u64,
     pub restart_count: u32,
     pub _reserved0: u32,
     pub capabilities: u64,
 }
 
 impl DomainBootInfo {
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         domain_id: u32,
         vcpu_id: u32,
@@ -124,6 +136,8 @@ impl DomainBootInfo {
         memory_size: u64,
         grant_window_start: u64,
         grant_window_size: u64,
+        device_window_start: u64,
+        device_window_size: u64,
         restart_count: u32,
         capabilities: u64,
     ) -> Self {
@@ -148,9 +162,13 @@ impl DomainBootInfo {
                 | DOMAIN_FEATURE_VIRTUAL_APIC
                 | DOMAIN_FEATURE_CRASH_QUERY
                 | DOMAIN_FEATURE_DEVICE_QUERY
-                | DOMAIN_FEATURE_DEVICE_OWNERSHIP,
+                | DOMAIN_FEATURE_DEVICE_OWNERSHIP
+                | DOMAIN_FEATURE_DEVICE_RESOURCES
+                | DOMAIN_FEATURE_DEVICE_ACTIVATION,
             grant_window_start,
             grant_window_size,
+            device_window_start,
+            device_window_size,
             restart_count,
             _reserved0: 0,
             capabilities,
@@ -196,6 +214,20 @@ impl DomainBootInfo {
         {
             return Err(DomainBootInfoError::InvalidMemorySize);
         }
+        let Some(device_window_end) = self
+            .device_window_start
+            .checked_add(self.device_window_size)
+        else {
+            return Err(DomainBootInfoError::InvalidMemorySize);
+        };
+        if self.device_window_start == 0
+            || self.device_window_start & 0xfff != 0
+            || self.device_window_size == 0
+            || self.device_window_size & 0xfff != 0
+            || device_window_end > self.grant_window_start
+        {
+            return Err(DomainBootInfoError::InvalidMemorySize);
+        }
         Ok(())
     }
 }
@@ -221,8 +253,35 @@ impl PciDeviceInfo {
                 }
                 PCI_DEVICE_STATE_FIRMWARE_DEFERRED => self.owner_domain == 0 && self.flags == 0,
                 PCI_DEVICE_STATE_CLAIMED_DISABLED => self.owner_domain != 0 && self.flags == 0,
+                PCI_DEVICE_STATE_ACTIVE => self.owner_domain != 0 && self.flags == 0,
                 _ => false,
             }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciDeviceResource {
+    pub requester: u16,
+    pub bar_index: u8,
+    pub kind: u8,
+    pub flags: u32,
+    pub guest_address: u64,
+    pub length: u64,
+    pub _reserved0: u64,
+}
+
+impl PciDeviceResource {
+    pub fn validate(&self) -> bool {
+        self.requester != 0
+            && self.bar_index < 6
+            && self.kind == PCI_RESOURCE_KIND_MMIO
+            && self.flags & !(PCI_RESOURCE_FLAG_READABLE | PCI_RESOURCE_FLAG_WRITABLE) == 0
+            && self.flags & PCI_RESOURCE_FLAG_READABLE != 0
+            && self.guest_address & 0xfff == 0
+            && self.length != 0
+            && self.length & 0xfff == 0
+            && self._reserved0 == 0
     }
 }
 
@@ -280,7 +339,7 @@ mod tests {
 
     #[test]
     fn domain_boot_info_layout_is_fixed() {
-        assert_eq!(size_of::<DomainBootInfo>(), 80);
+        assert_eq!(size_of::<DomainBootInfo>(), 96);
         assert_eq!(core::mem::align_of::<DomainBootInfo>(), 8);
     }
 
@@ -294,6 +353,8 @@ mod tests {
             2 * 1024 * 1024,
             0x1f_0000,
             0x1_0000,
+            0x1b_0000,
+            0x4_0000,
             0,
             0,
         );
@@ -324,9 +385,28 @@ mod tests {
         assert!(info.validate());
         info.owner_domain = 0;
         assert!(!info.validate());
+        info.owner_domain = 2;
+        info.state = PCI_DEVICE_STATE_ACTIVE;
+        assert!(info.validate());
         info.state = PCI_DEVICE_STATE_FIRMWARE_DEFERRED;
+        info.owner_domain = 0;
         info.flags = PCI_DEVICE_FLAG_CLAIMABLE;
         assert!(!info.validate());
+    }
+
+    #[test]
+    fn pci_device_resource_layout_is_fixed() {
+        assert_eq!(size_of::<PciDeviceResource>(), 32);
+        let resource = PciDeviceResource {
+            requester: 0x10,
+            bar_index: 0,
+            kind: PCI_RESOURCE_KIND_MMIO,
+            flags: PCI_RESOURCE_FLAG_READABLE | PCI_RESOURCE_FLAG_WRITABLE,
+            guest_address: 0x1b_0000,
+            length: 0x4000,
+            _reserved0: 0,
+        };
+        assert!(resource.validate());
     }
 
     #[test]
@@ -339,6 +419,8 @@ mod tests {
             4096,
             0,
             4096,
+            0,
+            0,
             0,
             0,
         );
@@ -358,6 +440,8 @@ mod tests {
             4096,
             0,
             0,
+            0,
+            0,
         );
         assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidMemorySize));
     }
@@ -372,6 +456,8 @@ mod tests {
             4096,
             0,
             4096,
+            0,
+            0,
             0,
             0,
         );

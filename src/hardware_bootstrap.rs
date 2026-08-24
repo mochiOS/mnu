@@ -8,11 +8,12 @@ mod domain_hypercall;
 
 use domain_hypercall::{halt_forever, invoke, shutdown};
 use mnu_abi::hypervisor::{
-    DomainBootInfo, HypercallNumber, PciDeviceInfo, ShutdownReason, DOMAIN_CAPABILITY_DEVICE_CLAIM,
-    DOMAIN_CAPABILITY_DEVICE_QUERY, DOMAIN_FEATURE_DEVICE_OWNERSHIP, DOMAIN_FEATURE_DEVICE_QUERY,
-    DOMAIN_FEATURE_READY, DOMAIN_FEATURE_WAIT, DOMAIN_ROLE_HARDWARE, HYPERCALL_INVALID_ARGUMENT,
-    HYPERCALL_SUCCESS, PCI_DEVICE_FLAG_CLAIMABLE, PCI_DEVICE_STATE_CLAIMED_DISABLED,
-    PCI_DEVICE_STATE_QUARANTINED,
+    DomainBootInfo, HypercallNumber, PciDeviceInfo, PciDeviceResource, ShutdownReason,
+    DOMAIN_CAPABILITY_DEVICE_CLAIM, DOMAIN_CAPABILITY_DEVICE_QUERY,
+    DOMAIN_FEATURE_DEVICE_ACTIVATION, DOMAIN_FEATURE_DEVICE_OWNERSHIP, DOMAIN_FEATURE_DEVICE_QUERY,
+    DOMAIN_FEATURE_DEVICE_RESOURCES, DOMAIN_FEATURE_READY, DOMAIN_FEATURE_WAIT,
+    DOMAIN_ROLE_HARDWARE, HYPERCALL_INVALID_ARGUMENT, HYPERCALL_SUCCESS, PCI_DEVICE_FLAG_CLAIMABLE,
+    PCI_DEVICE_STATE_ACTIVE, PCI_DEVICE_STATE_CLAIMED_DISABLED, PCI_DEVICE_STATE_QUARANTINED,
 };
 
 static START_MESSAGE: &[u8] = b"Hardware Domain bootstrap entered\n";
@@ -25,6 +26,8 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
     };
     let required_features = DOMAIN_FEATURE_DEVICE_QUERY
         | DOMAIN_FEATURE_DEVICE_OWNERSHIP
+        | DOMAIN_FEATURE_DEVICE_RESOURCES
+        | DOMAIN_FEATURE_DEVICE_ACTIVATION
         | DOMAIN_FEATURE_READY
         | DOMAIN_FEATURE_WAIT;
     if boot_info.validate().is_err()
@@ -45,7 +48,7 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
         if result == HYPERCALL_INVALID_ARGUMENT {
             break;
         }
-        let info = unsafe { &*(info_address as *const PciDeviceInfo) };
+        let info = unsafe { *(info_address as *const PciDeviceInfo) };
         if result != HYPERCALL_SUCCESS || !info.validate() {
             initialization_failed(boot_info)
         }
@@ -66,10 +69,79 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
             if query_device(boot_info, index, info_address) != HYPERCALL_SUCCESS {
                 initialization_failed(boot_info)
             }
-            let claimed = unsafe { &*(info_address as *const PciDeviceInfo) };
+            let claimed = unsafe { *(info_address as *const PciDeviceInfo) };
             if claimed.state != PCI_DEVICE_STATE_CLAIMED_DISABLED
                 || claimed.owner_domain != boot_info.domain_id
             {
+                initialization_failed(boot_info)
+            }
+            let identity = unsafe {
+                invoke(
+                    boot_info.hypervisor_backend,
+                    HypercallNumber::DeviceConfigRead,
+                    u64::from(claimed.requester),
+                    0,
+                    0,
+                )
+            };
+            if identity == HYPERCALL_INVALID_ARGUMENT || identity as u16 == 0xffff {
+                initialization_failed(boot_info)
+            }
+            let mut resource_count = 0;
+            for resource_index in 0..6_u64 {
+                let result = unsafe {
+                    invoke(
+                        boot_info.hypervisor_backend,
+                        HypercallNumber::DeviceResourceQuery,
+                        u64::from(claimed.requester),
+                        resource_index,
+                        info_address,
+                    )
+                };
+                if result == HYPERCALL_INVALID_ARGUMENT {
+                    break;
+                }
+                let resource = unsafe { *(info_address as *const PciDeviceResource) };
+                let window_end = boot_info.device_window_start + boot_info.device_window_size;
+                if result != HYPERCALL_SUCCESS
+                    || !resource.validate()
+                    || resource.requester != claimed.requester
+                    || resource.guest_address < boot_info.device_window_start
+                    || resource
+                        .guest_address
+                        .checked_add(resource.length)
+                        .is_none_or(|end| end > window_end)
+                {
+                    initialization_failed(boot_info)
+                }
+                resource_count += 1;
+            }
+            if resource_count == 0
+                || unsafe {
+                    invoke(
+                        boot_info.hypervisor_backend,
+                        HypercallNumber::DeviceActivate,
+                        u64::from(claimed.requester),
+                        0x42,
+                        0,
+                    )
+                } != HYPERCALL_SUCCESS
+                || query_device(boot_info, index, info_address) != HYPERCALL_SUCCESS
+                || unsafe { &*(info_address as *const PciDeviceInfo) }.state
+                    != PCI_DEVICE_STATE_ACTIVE
+            {
+                initialization_failed(boot_info)
+            }
+            let command_status = unsafe {
+                invoke(
+                    boot_info.hypervisor_backend,
+                    HypercallNumber::DeviceConfigRead,
+                    u64::from(claimed.requester),
+                    4,
+                    0,
+                )
+            };
+            if command_status == HYPERCALL_INVALID_ARGUMENT || command_status & (1 << 2) == 0 {
                 initialization_failed(boot_info)
             }
             if unsafe {
