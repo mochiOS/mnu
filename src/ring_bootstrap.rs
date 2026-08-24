@@ -9,8 +9,8 @@ use domain_hypercall::{halt_forever, invoke, shutdown};
 use mnu_abi::hypervisor::{
     DomainBootInfo, HypercallNumber, ShutdownReason, DOMAIN_FEATURE_EVENT_CHANNEL,
     DOMAIN_FEATURE_EVENT_IRQ, DOMAIN_FEATURE_GRANT_TABLE, DOMAIN_FEATURE_SHARED_RING,
-    DOMAIN_FEATURE_VIRTUAL_APIC, DOMAIN_ROLE_HARDWARE, DOMAIN_ROLE_SYSTEM, EVENT_CHANNEL_VECTOR,
-    GRANT_FLAG_WRITABLE, HYPERCALL_SUCCESS,
+    DOMAIN_FEATURE_VIRTUAL_APIC, DOMAIN_ROLE_APPLICATION, DOMAIN_ROLE_HARDWARE, DOMAIN_ROLE_SYSTEM,
+    EVENT_CHANNEL_VECTOR, GRANT_FLAG_WRITABLE, HYPERCALL_SUCCESS,
 };
 use mnu_abi::shared_ring::{
     initialize, pop_request, pop_response, push_request, push_response, validate,
@@ -111,6 +111,9 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
         )
     });
     unsafe { domain_interrupt::install() };
+    if boot_info.domain_role == DOMAIN_ROLE_APPLICATION {
+        trigger_nested_page_fault()
+    }
     if boot_info.domain_role == DOMAIN_ROLE_HARDWARE {
         unsafe { domain_interrupt::install_general_protection_test_handler() };
         unsafe { domain_interrupt::install_apic_test_handlers(APIC_TIMER_VECTOR, SELF_IPI_VECTOR) };
@@ -138,6 +141,27 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
         ),
     }
     shutdown(boot_info.hypervisor_backend, ShutdownReason::Completed)
+}
+
+fn trigger_nested_page_fault() -> ! {
+    const SECOND_PDE: *mut u64 = (0x2000 + 8) as *mut u64;
+    const TEST_VIRTUAL_ADDRESS: u64 = 0x20_0000;
+    const UNOWNED_GPA: u64 = 0x4000_0000;
+    const PRESENT_WRITE_USER_LARGE: u64 = 0b111 | (1 << 7);
+
+    // The initial guest tables map one 2 MiB page. Add another guest mapping
+    // whose GPA is outside this Domain so the second translation, not the guest
+    // page walk, is what faults.
+    unsafe { SECOND_PDE.write_volatile(UNOWNED_GPA | PRESENT_WRITE_USER_LARGE) };
+    unsafe {
+        asm!(
+            "invlpg [{address}]",
+            address = in(reg) TEST_VIRTUAL_ADDRESS,
+            options(nostack, preserves_flags)
+        )
+    };
+    let _ = unsafe { (TEST_VIRTUAL_ADDRESS as *const u64).read_volatile() };
+    halt_forever()
 }
 
 fn verify_cpuid(boot_info: &DomainBootInfo) {
