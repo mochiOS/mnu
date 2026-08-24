@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 7;
+pub const DOMAIN_BOOT_VERSION: u32 = 8;
 pub const DOMAIN_CRASH_MAGIC: u64 = u64::from_le_bytes(*b"MNUCRSH\0");
 pub const DOMAIN_CRASH_VERSION: u16 = 1;
 
@@ -24,11 +24,15 @@ pub const DOMAIN_FEATURE_EVENT_IRQ: u64 = 1 << 8;
 pub const DOMAIN_FEATURE_VIRTUAL_APIC: u64 = 1 << 9;
 pub const DOMAIN_FEATURE_CRASH_QUERY: u64 = 1 << 10;
 pub const DOMAIN_FEATURE_DEVICE_QUERY: u64 = 1 << 11;
+pub const DOMAIN_FEATURE_DEVICE_OWNERSHIP: u64 = 1 << 12;
 
 pub const DOMAIN_CAPABILITY_DEVICE_QUERY: u64 = 1 << 0;
+pub const DOMAIN_CAPABILITY_DEVICE_CLAIM: u64 = 1 << 1;
 
 pub const PCI_DEVICE_STATE_QUARANTINED: u8 = 1;
 pub const PCI_DEVICE_STATE_FIRMWARE_DEFERRED: u8 = 2;
+pub const PCI_DEVICE_STATE_CLAIMED_DISABLED: u8 = 3;
+pub const PCI_DEVICE_FLAG_CLAIMABLE: u32 = 1 << 0;
 
 pub const EVENT_CHANNEL_VECTOR: u8 = 0x40;
 pub const DOMAIN_MANAGEMENT_VECTOR: u8 = 0x41;
@@ -64,6 +68,8 @@ pub enum HypercallNumber {
     IrqSetTpr = 14,
     DomainCrashQuery = 15,
     DeviceQuery = 16,
+    DeviceClaim = 17,
+    DeviceRelease = 18,
 }
 
 #[repr(u64)]
@@ -141,7 +147,8 @@ impl DomainBootInfo {
                 | DOMAIN_FEATURE_EVENT_IRQ
                 | DOMAIN_FEATURE_VIRTUAL_APIC
                 | DOMAIN_FEATURE_CRASH_QUERY
-                | DOMAIN_FEATURE_DEVICE_QUERY,
+                | DOMAIN_FEATURE_DEVICE_QUERY
+                | DOMAIN_FEATURE_DEVICE_OWNERSHIP,
             grant_window_start,
             grant_window_size,
             restart_count,
@@ -202,17 +209,20 @@ pub struct PciDeviceInfo {
     pub state: u8,
     pub _reserved0: [u8; 3],
     pub owner_domain: u32,
-    pub _reserved1: u32,
+    pub flags: u32,
 }
 
 impl PciDeviceInfo {
     pub fn validate(&self) -> bool {
-        matches!(
-            self.state,
-            PCI_DEVICE_STATE_QUARANTINED | PCI_DEVICE_STATE_FIRMWARE_DEFERRED
-        ) && self._reserved0 == [0; 3]
-            && self._reserved1 == 0
-            && self.owner_domain == 0
+        self._reserved0 == [0; 3]
+            && match self.state {
+                PCI_DEVICE_STATE_QUARANTINED => {
+                    self.owner_domain == 0 && self.flags & !PCI_DEVICE_FLAG_CLAIMABLE == 0
+                }
+                PCI_DEVICE_STATE_FIRMWARE_DEFERRED => self.owner_domain == 0 && self.flags == 0,
+                PCI_DEVICE_STATE_CLAIMED_DISABLED => self.owner_domain != 0 && self.flags == 0,
+                _ => false,
+            }
     }
 }
 
@@ -294,6 +304,29 @@ mod tests {
     fn pci_device_info_layout_is_fixed() {
         assert_eq!(size_of::<PciDeviceInfo>(), 16);
         assert_eq!(core::mem::align_of::<PciDeviceInfo>(), 4);
+    }
+
+    #[test]
+    fn pci_device_ownership_states_are_consistent() {
+        let mut info = PciDeviceInfo {
+            requester: 0x10,
+            class: 1,
+            subclass: 8,
+            state: PCI_DEVICE_STATE_QUARANTINED,
+            _reserved0: [0; 3],
+            owner_domain: 0,
+            flags: PCI_DEVICE_FLAG_CLAIMABLE,
+        };
+        assert!(info.validate());
+        info.state = PCI_DEVICE_STATE_CLAIMED_DISABLED;
+        info.owner_domain = 2;
+        info.flags = 0;
+        assert!(info.validate());
+        info.owner_domain = 0;
+        assert!(!info.validate());
+        info.state = PCI_DEVICE_STATE_FIRMWARE_DEFERRED;
+        info.flags = PCI_DEVICE_FLAG_CLAIMABLE;
+        assert!(!info.validate());
     }
 
     #[test]
