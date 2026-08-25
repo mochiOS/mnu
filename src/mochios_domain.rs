@@ -10,10 +10,13 @@ use mnu_abi::hypervisor::{
     DOMAIN_FEATURE_EVENT_IRQ, DOMAIN_FEATURE_GRANT_TABLE, DOMAIN_FEATURE_READY,
     DOMAIN_FEATURE_SHARED_RING, DOMAIN_FEATURE_VIRTUAL_APIC, DOMAIN_ROLE_SYSTEM,
     HYPERCALL_INVALID_ARGUMENT, HYPERCALL_SUCCESS, HYPERCALL_UNSUPPORTED,
-    HYPERVISOR_BACKEND_AMD_SVM, HYPERVISOR_BACKEND_INTEL_VMX,
+    HYPERVISOR_BACKEND_AMD_SVM, HYPERVISOR_BACKEND_INTEL_VMX, MDRIVER_CONTROL_IRQ_PORT,
+    MDRIVER_CONTROL_PORT,
 };
 
 static START_MESSAGE: &[u8] = b"mochiOS System Domain entered\n";
+static MDRIVER_EVENT_MESSAGE: &[u8] = b"mDriver control Event Channel verified\n";
+const CONTROL_IRQ_YIELD_LIMIT: usize = 1024;
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.domain_entry")]
@@ -65,6 +68,25 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
         )
     }
 
+    require_success(boot_info, unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::EventSend,
+            u64::from(MDRIVER_CONTROL_PORT),
+            0,
+            0,
+        )
+    });
+    require_port(boot_info, MDRIVER_CONTROL_PORT, unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::EventWait,
+            0,
+            0,
+            0,
+        )
+    });
+
     unsafe { domain_interrupt::install() };
     if unsafe {
         invoke(
@@ -82,7 +104,57 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
         )
     }
 
-    let mut acknowledged_interrupts = 0;
+    let mut acknowledged_interrupts = domain_interrupt::event_count();
+    require_success(boot_info, unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::EventSend,
+            u64::from(MDRIVER_CONTROL_IRQ_PORT),
+            0,
+            0,
+        )
+    });
+    for _ in 0..CONTROL_IRQ_YIELD_LIMIT {
+        if domain_interrupt::event_count() != acknowledged_interrupts {
+            break;
+        }
+        require_success(boot_info, unsafe {
+            invoke(
+                boot_info.hypervisor_backend,
+                HypercallNumber::Yield,
+                0,
+                0,
+                0,
+            )
+        });
+    }
+    if domain_interrupt::event_count() == acknowledged_interrupts {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+    require_port(boot_info, MDRIVER_CONTROL_IRQ_PORT, unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::EventWait,
+            0,
+            0,
+            0,
+        )
+    });
+    require_success(boot_info, unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::IrqEoi,
+            0,
+            0,
+            0,
+        )
+    });
+    acknowledged_interrupts = domain_interrupt::event_count();
+    console_write(boot_info, MDRIVER_EVENT_MESSAGE);
+
     loop {
         let result = unsafe {
             invoke(
@@ -119,6 +191,36 @@ pub unsafe extern "sysv64" fn domain_entry(boot_info_ptr: *const DomainBootInfo)
             acknowledged_interrupts = delivered_interrupts;
         }
     }
+}
+
+fn require_success(boot_info: &DomainBootInfo, result: u64) {
+    if result != HYPERCALL_SUCCESS {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+}
+
+fn require_port(boot_info: &DomainBootInfo, expected: u32, result: u64) {
+    if result != u64::from(expected) {
+        shutdown(
+            boot_info.hypervisor_backend,
+            ShutdownReason::InitializationFailed,
+        )
+    }
+}
+
+fn console_write(boot_info: &DomainBootInfo, message: &[u8]) {
+    require_success(boot_info, unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::ConsoleWrite,
+            message.as_ptr() as u64,
+            message.len() as u64,
+            0,
+        )
+    });
 }
 
 fn invalid_boot_info(backend: u32) -> ! {
