@@ -27,6 +27,7 @@ pub const DOMAIN_FEATURE_DEVICE_QUERY: u64 = 1 << 11;
 pub const DOMAIN_FEATURE_DEVICE_OWNERSHIP: u64 = 1 << 12;
 pub const DOMAIN_FEATURE_DEVICE_RESOURCES: u64 = 1 << 13;
 pub const DOMAIN_FEATURE_DEVICE_ACTIVATION: u64 = 1 << 14;
+pub const DOMAIN_FEATURE_GRANT_QUERY: u64 = 1 << 15;
 
 pub const DOMAIN_CAPABILITY_DEVICE_QUERY: u64 = 1 << 0;
 pub const DOMAIN_CAPABILITY_DEVICE_CLAIM: u64 = 1 << 1;
@@ -47,6 +48,11 @@ pub const EVENT_CHANNEL_VECTOR: u8 = 0x40;
 pub const DOMAIN_MANAGEMENT_VECTOR: u8 = 0x41;
 pub const MDRIVER_CONTROL_PORT: u32 = 1;
 pub const MDRIVER_CONTROL_IRQ_PORT: u32 = 2;
+pub const MDRIVER_CONTROL_RING_PORT: u32 = 3;
+pub const MDRIVER_DOMAIN_ID: u32 = 2;
+pub const MDRIVER_CONTROL_RING_GENERATION: u64 = 1;
+pub const MDRIVER_CONTROL_REQUEST_KIND: u16 = 1;
+pub const MDRIVER_CONTROL_RESPONSE_KIND: u16 = 2;
 
 pub const DOMAIN_CRASH_STATUS_CRASHED: u32 = 1;
 pub const DOMAIN_CRASH_STATUS_RESTARTED: u32 = 2;
@@ -84,6 +90,7 @@ pub enum HypercallNumber {
     DeviceConfigRead = 19,
     DeviceResourceQuery = 20,
     DeviceActivate = 21,
+    GrantQuery = 22,
 }
 
 #[repr(u64)]
@@ -169,7 +176,8 @@ impl DomainBootInfo {
                 | DOMAIN_FEATURE_DEVICE_QUERY
                 | DOMAIN_FEATURE_DEVICE_OWNERSHIP
                 | DOMAIN_FEATURE_DEVICE_RESOURCES
-                | DOMAIN_FEATURE_DEVICE_ACTIVATION,
+                | DOMAIN_FEATURE_DEVICE_ACTIVATION
+                | DOMAIN_FEATURE_GRANT_QUERY,
             grant_window_start,
             grant_window_size,
             device_window_start,
