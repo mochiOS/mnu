@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 9;
+pub const DOMAIN_BOOT_VERSION: u32 = 10;
 pub const DOMAIN_CRASH_MAGIC: u64 = u64::from_le_bytes(*b"MNUCRSH\0");
 pub const DOMAIN_CRASH_VERSION: u16 = 1;
 
@@ -39,6 +39,9 @@ pub const PCI_DEVICE_FLAG_CLAIMABLE: u32 = 1 << 0;
 pub const PCI_RESOURCE_KIND_MMIO: u8 = 1;
 pub const PCI_RESOURCE_FLAG_READABLE: u32 = 1 << 0;
 pub const PCI_RESOURCE_FLAG_WRITABLE: u32 = 1 << 1;
+pub const PCI_DEVICE_INTERRUPT_CONFIG: usize = 0;
+pub const PCI_DEVICE_INTERRUPT_QUEUE: usize = 1;
+pub const PCI_DEVICE_INTERRUPT_COUNT: usize = 2;
 
 pub const EVENT_CHANNEL_VECTOR: u8 = 0x40;
 pub const DOMAIN_MANAGEMENT_VECTOR: u8 = 0x41;
