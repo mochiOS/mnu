@@ -6,6 +6,9 @@ pub mod boot;
 /// mBootのDomainとして起動するときに使うABIです。
 pub mod hypervisor;
 
+/// mochiOSとmDriverの間で使うデバイス制御プロトコルです。
+pub mod mdriver_control;
+
 /// Grantで共有するrequest/response ringの固定ABIです。
 pub mod shared_ring;
 

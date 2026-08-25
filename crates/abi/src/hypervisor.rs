@@ -28,6 +28,7 @@ pub const DOMAIN_FEATURE_DEVICE_OWNERSHIP: u64 = 1 << 12;
 pub const DOMAIN_FEATURE_DEVICE_RESOURCES: u64 = 1 << 13;
 pub const DOMAIN_FEATURE_DEVICE_ACTIVATION: u64 = 1 << 14;
 pub const DOMAIN_FEATURE_GRANT_QUERY: u64 = 1 << 15;
+pub const DOMAIN_FEATURE_EVENT_POLL: u64 = 1 << 16;
 
 pub const DOMAIN_CAPABILITY_DEVICE_QUERY: u64 = 1 << 0;
 pub const DOMAIN_CAPABILITY_DEVICE_CLAIM: u64 = 1 << 1;
@@ -91,6 +92,7 @@ pub enum HypercallNumber {
     DeviceResourceQuery = 20,
     DeviceActivate = 21,
     GrantQuery = 22,
+    EventPoll = 23,
 }
 
 #[repr(u64)]
@@ -177,7 +179,8 @@ impl DomainBootInfo {
                 | DOMAIN_FEATURE_DEVICE_OWNERSHIP
                 | DOMAIN_FEATURE_DEVICE_RESOURCES
                 | DOMAIN_FEATURE_DEVICE_ACTIVATION
-                | DOMAIN_FEATURE_GRANT_QUERY,
+                | DOMAIN_FEATURE_GRANT_QUERY
+                | DOMAIN_FEATURE_EVENT_POLL,
             grant_window_start,
             grant_window_size,
             device_window_start,
