@@ -38,7 +38,8 @@ use mnu_abi::mdriver_control::{
     MDRIVER_DEVICE_FEATURE_BLOCK_READ, MDRIVER_DEVICE_FEATURE_BLOCK_WRITE,
     MDRIVER_DEVICE_FEATURE_DMA_ISOLATED, MDRIVER_DEVICE_FEATURE_EPHEMERAL,
     MDRIVER_DEVICE_FEATURE_INTERRUPT_ACTIVE, MDRIVER_DEVICE_FEATURE_PHYSICAL,
-    MDRIVER_DEVICE_KIND_BLOCK, MDRIVER_DEVICE_KIND_SOUND, MDRIVER_DEVICE_STATE_ONLINE,
+    MDRIVER_DEVICE_FEATURE_READ_ONLY, MDRIVER_DEVICE_KIND_BLOCK, MDRIVER_DEVICE_KIND_SOUND,
+    MDRIVER_DEVICE_STATE_ONLINE,
 };
 use mnu_abi::shared_ring::{
     initialize, pop_response, push_request, SharedRingMessage, SharedRingPage,
@@ -386,9 +387,8 @@ fn verify_block_data_path(
     device_id: u32,
     features: u64,
 ) {
-    const REQUIRED_FEATURES: u64 = MDRIVER_DEVICE_FEATURE_BLOCK_READ
-        | MDRIVER_DEVICE_FEATURE_BLOCK_WRITE
-        | MDRIVER_DEVICE_FEATURE_BLOCK_FLUSH;
+    const REQUIRED_FEATURES: u64 = MDRIVER_DEVICE_FEATURE_BLOCK_READ;
+    verify_block_access_mode(boot_info, features);
     if features & REQUIRED_FEATURES != REQUIRED_FEATURES
         || boot_info.grant_window_size < (MDRIVER_BLOCK_DATA_PAGE + 1) * 4096
     {
@@ -546,10 +546,9 @@ fn verify_async_block_queue(
     device_id: u32,
     features: u64,
 ) {
-    const REQUIRED_FEATURES: u64 = MDRIVER_DEVICE_FEATURE_BLOCK_READ
-        | MDRIVER_DEVICE_FEATURE_BLOCK_WRITE
-        | MDRIVER_DEVICE_FEATURE_BLOCK_FLUSH
-        | MDRIVER_DEVICE_FEATURE_BLOCK_ASYNC_QUEUE;
+    const REQUIRED_FEATURES: u64 =
+        MDRIVER_DEVICE_FEATURE_BLOCK_READ | MDRIVER_DEVICE_FEATURE_BLOCK_ASYNC_QUEUE;
+    verify_block_access_mode(boot_info, features);
     let required_pages = MDRIVER_BLOCK_BUFFER_FIRST_PAGE + MDRIVER_BLOCK_BUFFER_COUNT as u64;
     if features & REQUIRED_FEATURES != REQUIRED_FEATURES
         || MDRIVER_BLOCK_QUEUE_DEPTH != MDRIVER_BLOCK_BUFFER_COUNT as u64
@@ -736,6 +735,18 @@ fn verify_async_block_queue(
     }
     revoke_grant(boot_info, ring_reference);
     console_write(boot_info, MDRIVER_ASYNC_BLOCK_MESSAGE);
+}
+
+fn verify_block_access_mode(boot_info: &DomainBootInfo, features: u64) {
+    let write_features = MDRIVER_DEVICE_FEATURE_BLOCK_WRITE | MDRIVER_DEVICE_FEATURE_BLOCK_FLUSH;
+    let ephemeral = features & MDRIVER_DEVICE_FEATURE_EPHEMERAL != 0;
+    let read_only = features & MDRIVER_DEVICE_FEATURE_READ_ONLY != 0;
+    if ephemeral == read_only
+        || (ephemeral && features & write_features != write_features)
+        || (read_only && features & write_features != 0)
+    {
+        initialization_failed(boot_info)
+    }
 }
 
 fn block_buffer_address(boot_info: &DomainBootInfo, buffer_id: usize) -> u64 {

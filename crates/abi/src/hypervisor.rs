@@ -39,6 +39,7 @@ pub const PCI_DEVICE_STATE_CLAIMED_DISABLED: u8 = 3;
 pub const PCI_DEVICE_STATE_ACTIVE: u8 = 4;
 pub const PCI_DEVICE_FLAG_CLAIMABLE: u32 = 1 << 0;
 pub const PCI_DEVICE_FLAG_EPHEMERAL: u32 = 1 << 1;
+pub const PCI_DEVICE_FLAG_READ_ONLY: u32 = 1 << 2;
 pub const PCI_RESOURCE_KIND_MMIO: u8 = 1;
 pub const PCI_RESOURCE_FLAG_READABLE: u32 = 1 << 0;
 pub const PCI_RESOURCE_FLAG_WRITABLE: u32 = 1 << 1;
@@ -275,12 +276,17 @@ impl PciDeviceInfo {
             && match self.state {
                 PCI_DEVICE_STATE_QUARANTINED => {
                     self.owner_domain == 0
-                        && self.flags & !(PCI_DEVICE_FLAG_CLAIMABLE | PCI_DEVICE_FLAG_EPHEMERAL)
+                        && self.flags
+                            & !(PCI_DEVICE_FLAG_CLAIMABLE
+                                | PCI_DEVICE_FLAG_EPHEMERAL
+                                | PCI_DEVICE_FLAG_READ_ONLY)
                             == 0
                 }
                 PCI_DEVICE_STATE_FIRMWARE_DEFERRED => self.owner_domain == 0 && self.flags == 0,
                 PCI_DEVICE_STATE_CLAIMED_DISABLED | PCI_DEVICE_STATE_ACTIVE => {
-                    self.owner_domain != 0 && self.flags & !PCI_DEVICE_FLAG_EPHEMERAL == 0
+                    self.owner_domain != 0
+                        && self.flags & !(PCI_DEVICE_FLAG_EPHEMERAL | PCI_DEVICE_FLAG_READ_ONLY)
+                            == 0
                 }
                 _ => false,
             }
@@ -415,6 +421,8 @@ mod tests {
         assert!(!info.validate());
         info.owner_domain = 2;
         info.state = PCI_DEVICE_STATE_ACTIVE;
+        assert!(info.validate());
+        info.flags = PCI_DEVICE_FLAG_READ_ONLY;
         assert!(info.validate());
         info.state = PCI_DEVICE_STATE_FIRMWARE_DEFERRED;
         info.owner_domain = 0;
