@@ -9,6 +9,9 @@ pub mod hypervisor;
 /// mochiOSとmDriverの間で使うデバイス制御プロトコルです。
 pub mod mdriver_control;
 
+/// mochiOSとmDriverの間で使う非同期ブロックI/Oプロトコルです。
+pub mod mdriver_block;
+
 /// Grantで共有するrequest/response ringの固定ABIです。
 pub mod shared_ring;
 
