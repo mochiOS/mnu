@@ -38,6 +38,7 @@ pub const PCI_DEVICE_STATE_FIRMWARE_DEFERRED: u8 = 2;
 pub const PCI_DEVICE_STATE_CLAIMED_DISABLED: u8 = 3;
 pub const PCI_DEVICE_STATE_ACTIVE: u8 = 4;
 pub const PCI_DEVICE_FLAG_CLAIMABLE: u32 = 1 << 0;
+pub const PCI_DEVICE_FLAG_EPHEMERAL: u32 = 1 << 1;
 pub const PCI_RESOURCE_KIND_MMIO: u8 = 1;
 pub const PCI_RESOURCE_FLAG_READABLE: u32 = 1 << 0;
 pub const PCI_RESOURCE_FLAG_WRITABLE: u32 = 1 << 1;
@@ -50,6 +51,7 @@ pub const DOMAIN_MANAGEMENT_VECTOR: u8 = 0x41;
 pub const MDRIVER_CONTROL_PORT: u32 = 1;
 pub const MDRIVER_CONTROL_IRQ_PORT: u32 = 2;
 pub const MDRIVER_CONTROL_RING_PORT: u32 = 3;
+pub const MDRIVER_BLOCK_DATA_PAGE: u64 = 1;
 pub const MDRIVER_DOMAIN_ID: u32 = 2;
 pub const MDRIVER_CONTROL_RING_GENERATION: u64 = 1;
 pub const MDRIVER_CONTROL_REQUEST_KIND: u16 = 1;
@@ -265,11 +267,14 @@ impl PciDeviceInfo {
         self._reserved0 == [0; 3]
             && match self.state {
                 PCI_DEVICE_STATE_QUARANTINED => {
-                    self.owner_domain == 0 && self.flags & !PCI_DEVICE_FLAG_CLAIMABLE == 0
+                    self.owner_domain == 0
+                        && self.flags & !(PCI_DEVICE_FLAG_CLAIMABLE | PCI_DEVICE_FLAG_EPHEMERAL)
+                            == 0
                 }
                 PCI_DEVICE_STATE_FIRMWARE_DEFERRED => self.owner_domain == 0 && self.flags == 0,
-                PCI_DEVICE_STATE_CLAIMED_DISABLED => self.owner_domain != 0 && self.flags == 0,
-                PCI_DEVICE_STATE_ACTIVE => self.owner_domain != 0 && self.flags == 0,
+                PCI_DEVICE_STATE_CLAIMED_DISABLED | PCI_DEVICE_STATE_ACTIVE => {
+                    self.owner_domain != 0 && self.flags & !PCI_DEVICE_FLAG_EPHEMERAL == 0
+                }
                 _ => false,
             }
     }
@@ -397,7 +402,7 @@ mod tests {
         assert!(info.validate());
         info.state = PCI_DEVICE_STATE_CLAIMED_DISABLED;
         info.owner_domain = 2;
-        info.flags = 0;
+        info.flags = PCI_DEVICE_FLAG_EPHEMERAL;
         assert!(info.validate());
         info.owner_domain = 0;
         assert!(!info.validate());

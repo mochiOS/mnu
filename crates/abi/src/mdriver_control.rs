@@ -5,6 +5,11 @@ pub const MDRIVER_CONTROL_ENUMERATE: u16 = 2;
 pub const MDRIVER_CONTROL_DESCRIBE: u16 = 3;
 pub const MDRIVER_CONTROL_PING: u16 = 4;
 pub const MDRIVER_CONTROL_START_SESSION: u16 = 5;
+pub const MDRIVER_CONTROL_OPEN_DEVICE: u16 = 6;
+pub const MDRIVER_CONTROL_CLOSE_DEVICE: u16 = 7;
+pub const MDRIVER_CONTROL_BLOCK_READ: u16 = 8;
+pub const MDRIVER_CONTROL_BLOCK_WRITE: u16 = 9;
+pub const MDRIVER_CONTROL_BLOCK_FLUSH: u16 = 10;
 
 pub const MDRIVER_CONTROL_STATUS_OK: u32 = 0;
 pub const MDRIVER_CONTROL_STATUS_UNSUPPORTED_VERSION: u32 = 1;
@@ -14,15 +19,19 @@ pub const MDRIVER_CONTROL_STATUS_NOT_FOUND: u32 = 4;
 pub const MDRIVER_CONTROL_STATUS_BAD_STATE: u32 = 5;
 pub const MDRIVER_CONTROL_STATUS_END: u32 = 6;
 pub const MDRIVER_CONTROL_STATUS_INTERNAL_ERROR: u32 = 7;
+pub const MDRIVER_CONTROL_STATUS_IO_ERROR: u32 = 8;
+pub const MDRIVER_CONTROL_STATUS_OUT_OF_RANGE: u32 = 9;
 
 pub const MDRIVER_CONTROL_CAP_INVENTORY: u64 = 1 << 0;
 pub const MDRIVER_CONTROL_CAP_DEVICE_STATUS: u64 = 1 << 1;
 pub const MDRIVER_CONTROL_CAP_SESSION: u64 = 1 << 2;
 pub const MDRIVER_CONTROL_CAP_PING: u64 = 1 << 3;
+pub const MDRIVER_CONTROL_CAP_BLOCK_IO: u64 = 1 << 4;
 pub const MDRIVER_CONTROL_CAPABILITIES: u64 = MDRIVER_CONTROL_CAP_INVENTORY
     | MDRIVER_CONTROL_CAP_DEVICE_STATUS
     | MDRIVER_CONTROL_CAP_SESSION
-    | MDRIVER_CONTROL_CAP_PING;
+    | MDRIVER_CONTROL_CAP_PING
+    | MDRIVER_CONTROL_CAP_BLOCK_IO;
 
 pub const MDRIVER_DEVICE_KIND_OTHER: u64 = 0;
 pub const MDRIVER_DEVICE_KIND_BLOCK: u64 = 1;
@@ -34,6 +43,13 @@ pub const MDRIVER_DEVICE_STATE_ONLINE: u64 = 1;
 pub const MDRIVER_DEVICE_FEATURE_DMA_ISOLATED: u64 = 1 << 0;
 pub const MDRIVER_DEVICE_FEATURE_INTERRUPT_ACTIVE: u64 = 1 << 1;
 pub const MDRIVER_DEVICE_FEATURE_PHYSICAL: u64 = 1 << 2;
+pub const MDRIVER_DEVICE_FEATURE_EPHEMERAL: u64 = 1 << 3;
+pub const MDRIVER_DEVICE_FEATURE_BLOCK_READ: u64 = 1 << 8;
+pub const MDRIVER_DEVICE_FEATURE_BLOCK_WRITE: u64 = 1 << 9;
+pub const MDRIVER_DEVICE_FEATURE_BLOCK_FLUSH: u64 = 1 << 10;
+
+pub const MDRIVER_BLOCK_SECTOR_SIZE: u64 = 512;
+pub const MDRIVER_BLOCK_MAX_TRANSFER: u64 = 4096;
 
 pub const MDRIVER_CONTROL_PAYLOAD_SIZE: usize = 48;
 
@@ -96,12 +112,7 @@ pub struct MdriverControlResponse {
 }
 
 impl MdriverControlResponse {
-    pub const fn new(
-        operation: u16,
-        status: u32,
-        device_id: u32,
-        values: [u64; 4],
-    ) -> Self {
+    pub const fn new(operation: u16, status: u32, device_id: u32, values: [u64; 4]) -> Self {
         Self {
             version: MDRIVER_CONTROL_VERSION,
             operation,
