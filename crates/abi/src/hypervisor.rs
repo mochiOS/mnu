@@ -40,6 +40,7 @@ pub const PCI_DEVICE_STATE_ACTIVE: u8 = 4;
 pub const PCI_DEVICE_FLAG_CLAIMABLE: u32 = 1 << 0;
 pub const PCI_DEVICE_FLAG_EPHEMERAL: u32 = 1 << 1;
 pub const PCI_DEVICE_FLAG_READ_ONLY: u32 = 1 << 2;
+pub const PCI_DEVICE_FLAG_PARTITIONED: u32 = 1 << 3;
 pub const PCI_RESOURCE_KIND_MMIO: u8 = 1;
 pub const PCI_RESOURCE_FLAG_READABLE: u32 = 1 << 0;
 pub const PCI_RESOURCE_FLAG_WRITABLE: u32 = 1 << 1;
@@ -268,6 +269,12 @@ pub struct PciDeviceInfo {
     pub _reserved0: [u8; 3],
     pub owner_domain: u32,
     pub flags: u32,
+    /// GPT disk GUID in the byte order used on disk.
+    pub storage_disk_guid: [u8; 16],
+    /// GPT partition type GUID in the byte order used on disk.
+    pub storage_partition_type_guid: [u8; 16],
+    /// GPT unique partition GUID in the byte order used on disk.
+    pub storage_partition_guid: [u8; 16],
 }
 
 impl PciDeviceInfo {
@@ -279,16 +286,30 @@ impl PciDeviceInfo {
                         && self.flags
                             & !(PCI_DEVICE_FLAG_CLAIMABLE
                                 | PCI_DEVICE_FLAG_EPHEMERAL
-                                | PCI_DEVICE_FLAG_READ_ONLY)
+                                | PCI_DEVICE_FLAG_READ_ONLY
+                                | PCI_DEVICE_FLAG_PARTITIONED)
                             == 0
                 }
                 PCI_DEVICE_STATE_FIRMWARE_DEFERRED => self.owner_domain == 0 && self.flags == 0,
                 PCI_DEVICE_STATE_CLAIMED_DISABLED | PCI_DEVICE_STATE_ACTIVE => {
                     self.owner_domain != 0
-                        && self.flags & !(PCI_DEVICE_FLAG_EPHEMERAL | PCI_DEVICE_FLAG_READ_ONLY)
+                        && self.flags
+                            & !(PCI_DEVICE_FLAG_EPHEMERAL
+                                | PCI_DEVICE_FLAG_READ_ONLY
+                                | PCI_DEVICE_FLAG_PARTITIONED)
                             == 0
                 }
                 _ => false,
+            }
+            && if self.flags & PCI_DEVICE_FLAG_PARTITIONED != 0 {
+                self.flags & (PCI_DEVICE_FLAG_EPHEMERAL | PCI_DEVICE_FLAG_READ_ONLY) == 0
+                    && self.storage_disk_guid != [0; 16]
+                    && self.storage_partition_type_guid != [0; 16]
+                    && self.storage_partition_guid != [0; 16]
+            } else {
+                self.storage_disk_guid == [0; 16]
+                    && self.storage_partition_type_guid == [0; 16]
+                    && self.storage_partition_guid == [0; 16]
             }
     }
 }
@@ -397,7 +418,7 @@ mod tests {
 
     #[test]
     fn pci_device_info_layout_is_fixed() {
-        assert_eq!(size_of::<PciDeviceInfo>(), 16);
+        assert_eq!(size_of::<PciDeviceInfo>(), 64);
         assert_eq!(core::mem::align_of::<PciDeviceInfo>(), 4);
     }
 
@@ -411,6 +432,9 @@ mod tests {
             _reserved0: [0; 3],
             owner_domain: 0,
             flags: PCI_DEVICE_FLAG_CLAIMABLE,
+            storage_disk_guid: [0; 16],
+            storage_partition_type_guid: [0; 16],
+            storage_partition_guid: [0; 16],
         };
         assert!(info.validate());
         info.state = PCI_DEVICE_STATE_CLAIMED_DISABLED;
@@ -424,9 +448,17 @@ mod tests {
         assert!(info.validate());
         info.flags = PCI_DEVICE_FLAG_READ_ONLY;
         assert!(info.validate());
+        info.flags = PCI_DEVICE_FLAG_PARTITIONED;
+        info.storage_disk_guid[0] = 1;
+        info.storage_partition_type_guid[0] = 2;
+        info.storage_partition_guid[0] = 3;
+        assert!(info.validate());
         info.state = PCI_DEVICE_STATE_FIRMWARE_DEFERRED;
         info.owner_domain = 0;
         info.flags = PCI_DEVICE_FLAG_CLAIMABLE;
+        info.storage_disk_guid = [0; 16];
+        info.storage_partition_type_guid = [0; 16];
+        info.storage_partition_guid = [0; 16];
         assert!(!info.validate());
     }
 

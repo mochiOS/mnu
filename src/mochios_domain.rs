@@ -37,9 +37,9 @@ use mnu_abi::mdriver_control::{
     MDRIVER_DEVICE_FEATURE_BLOCK_ASYNC_QUEUE, MDRIVER_DEVICE_FEATURE_BLOCK_FLUSH,
     MDRIVER_DEVICE_FEATURE_BLOCK_READ, MDRIVER_DEVICE_FEATURE_BLOCK_WRITE,
     MDRIVER_DEVICE_FEATURE_DMA_ISOLATED, MDRIVER_DEVICE_FEATURE_EPHEMERAL,
-    MDRIVER_DEVICE_FEATURE_INTERRUPT_ACTIVE, MDRIVER_DEVICE_FEATURE_PHYSICAL,
-    MDRIVER_DEVICE_FEATURE_READ_ONLY, MDRIVER_DEVICE_KIND_BLOCK, MDRIVER_DEVICE_KIND_SOUND,
-    MDRIVER_DEVICE_STATE_ONLINE,
+    MDRIVER_DEVICE_FEATURE_INTERRUPT_ACTIVE, MDRIVER_DEVICE_FEATURE_PARTITIONED,
+    MDRIVER_DEVICE_FEATURE_PHYSICAL, MDRIVER_DEVICE_FEATURE_READ_ONLY, MDRIVER_DEVICE_KIND_BLOCK,
+    MDRIVER_DEVICE_KIND_SOUND, MDRIVER_DEVICE_STATE_ONLINE,
 };
 use mnu_abi::shared_ring::{
     initialize, pop_response, push_request, SharedRingMessage, SharedRingPage,
@@ -462,7 +462,7 @@ fn verify_block_data_path(
         initialization_failed(boot_info)
     }
 
-    if features & MDRIVER_DEVICE_FEATURE_EPHEMERAL != 0 {
+    if features & (MDRIVER_DEVICE_FEATURE_EPHEMERAL | MDRIVER_DEVICE_FEATURE_PARTITIONED) != 0 {
         let sectors_per_block = logical_block_size / MDRIVER_BLOCK_SECTOR_SIZE;
         let test_sector = 16_u64.max(sectors_per_block);
         if capacity < test_sector + sectors_per_block {
@@ -677,7 +677,7 @@ fn verify_async_block_queue(
         );
     }
 
-    if features & MDRIVER_DEVICE_FEATURE_EPHEMERAL != 0 {
+    if features & (MDRIVER_DEVICE_FEATURE_EPHEMERAL | MDRIVER_DEVICE_FEATURE_PARTITIONED) != 0 {
         let test_sector = 16_u64.max(sectors_per_block);
         if capacity < test_sector + sectors_per_block {
             initialization_failed(boot_info)
@@ -741,8 +741,9 @@ fn verify_block_access_mode(boot_info: &DomainBootInfo, features: u64) {
     let write_features = MDRIVER_DEVICE_FEATURE_BLOCK_WRITE | MDRIVER_DEVICE_FEATURE_BLOCK_FLUSH;
     let ephemeral = features & MDRIVER_DEVICE_FEATURE_EPHEMERAL != 0;
     let read_only = features & MDRIVER_DEVICE_FEATURE_READ_ONLY != 0;
-    if ephemeral == read_only
-        || (ephemeral && features & write_features != write_features)
+    let partitioned = features & MDRIVER_DEVICE_FEATURE_PARTITIONED != 0;
+    if ephemeral as u8 + read_only as u8 + partitioned as u8 != 1
+        || ((ephemeral || partitioned) && features & write_features != write_features)
         || (read_only && features & write_features != 0)
     {
         initialization_failed(boot_info)
