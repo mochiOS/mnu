@@ -33,13 +33,15 @@ use mnu_abi::mdriver_control::{
     MDRIVER_CONTROL_PING, MDRIVER_CONTROL_REGISTER_BLOCK_BUFFER, MDRIVER_CONTROL_START_BLOCK_QUEUE,
     MDRIVER_CONTROL_START_SESSION, MDRIVER_CONTROL_STATUS_END, MDRIVER_CONTROL_STATUS_OK,
     MDRIVER_CONTROL_STATUS_OUT_OF_RANGE, MDRIVER_CONTROL_STATUS_UNSUPPORTED_OPERATION,
-    MDRIVER_CONTROL_STOP_BLOCK_QUEUE, MDRIVER_CONTROL_VERSION,
+    MDRIVER_CONTROL_STOP_BLOCK_QUEUE, MDRIVER_CONTROL_VERSION, MDRIVER_CONTROL_INSPECT_STORAGE,
     MDRIVER_DEVICE_FEATURE_BLOCK_ASYNC_QUEUE, MDRIVER_DEVICE_FEATURE_BLOCK_FLUSH,
     MDRIVER_DEVICE_FEATURE_BLOCK_READ, MDRIVER_DEVICE_FEATURE_BLOCK_WRITE,
     MDRIVER_DEVICE_FEATURE_DMA_ISOLATED, MDRIVER_DEVICE_FEATURE_EPHEMERAL,
     MDRIVER_DEVICE_FEATURE_INTERRUPT_ACTIVE, MDRIVER_DEVICE_FEATURE_PARTITIONED,
     MDRIVER_DEVICE_FEATURE_PHYSICAL, MDRIVER_DEVICE_FEATURE_READ_ONLY, MDRIVER_DEVICE_KIND_BLOCK,
     MDRIVER_DEVICE_KIND_SOUND, MDRIVER_DEVICE_STATE_ONLINE,
+    MDRIVER_STORAGE_QUERY_DISK, MDRIVER_STORAGE_QUERY_PARTITION_GUIDS,
+    MDRIVER_STORAGE_QUERY_PARTITION_RANGE,
 };
 use mnu_abi::shared_ring::{
     initialize, pop_response, push_request, SharedRingMessage, SharedRingPage,
@@ -50,6 +52,7 @@ static MDRIVER_EVENT_MESSAGE: &[u8] = b"mDriver control Event Channel verified\n
 static MDRIVER_PROTOCOL_MESSAGE: &[u8] = b"mDriver device control protocol ready\n";
 static MDRIVER_BLOCK_MESSAGE: &[u8] = b"mDriver block data path ready\n";
 static MDRIVER_ASYNC_BLOCK_MESSAGE: &[u8] = b"mDriver asynchronous block queue ready\n";
+static MDRIVER_STORAGE_MESSAGE: &[u8] = b"mDriver read-only storage inspection ready\n";
 const CONTROL_IRQ_YIELD_LIMIT: usize = 1024;
 const CONTROL_REQUEST_ID: u64 = 1;
 
@@ -374,10 +377,164 @@ fn start_control_protocol(boot_info: &DomainBootInfo) {
         initialization_failed(boot_info)
     }
     if let Some((device_id, features)) = block_device {
+        if features & MDRIVER_DEVICE_FEATURE_READ_ONLY != 0 {
+            inspect_read_only_storage(boot_info, ring, &mut request_id, device_id);
+        }
         verify_block_data_path(boot_info, ring, &mut request_id, device_id, features);
         verify_async_block_queue(boot_info, ring, &mut request_id, device_id, features);
     }
     console_write(boot_info, MDRIVER_PROTOCOL_MESSAGE);
+}
+
+fn inspect_read_only_storage(
+    boot_info: &DomainBootInfo,
+    ring: *mut SharedRingPage,
+    request_id: &mut u64,
+    device_id: u32,
+) {
+    let mut report = [0_u8; 4096];
+    let mut report_len = 0;
+    append_report(&mut report, &mut report_len, b"DISPLAY\nSTORAGE READ ONLY\n");
+    let disk = transact(
+        boot_info,
+        ring,
+        request_id,
+        MdriverControlRequest::new(
+            MDRIVER_CONTROL_INSPECT_STORAGE,
+            device_id,
+            [MDRIVER_STORAGE_QUERY_DISK, 0, 0, 0],
+        ),
+    );
+    if disk.status != MDRIVER_CONTROL_STATUS_OK
+        || disk.values[2] == 0
+        || disk.values[3] < MDRIVER_BLOCK_SECTOR_SIZE
+        || !disk.values[3].is_power_of_two()
+    {
+        initialization_failed(boot_info)
+    }
+    let (line, line_len) = storage_guid_line(b"STORAGE DISK ", 0, disk.values[0], disk.values[1]);
+    console_write(boot_info, &line[..line_len]);
+    append_report(&mut report, &mut report_len, &line[..line_len]);
+
+    for ordinal in 0..128_u64 {
+        let guids = transact(
+            boot_info,
+            ring,
+            request_id,
+            MdriverControlRequest::new(
+                MDRIVER_CONTROL_INSPECT_STORAGE,
+                device_id,
+                [MDRIVER_STORAGE_QUERY_PARTITION_GUIDS, ordinal, 0, 0],
+            ),
+        );
+        if guids.status == MDRIVER_CONTROL_STATUS_END {
+            if ordinal > 9 {
+                append_report(&mut report, &mut report_len, b"MORE IN SERIAL\n");
+            }
+            console_write(boot_info, &report[..report_len]);
+            console_write(boot_info, MDRIVER_STORAGE_MESSAGE);
+            return;
+        }
+        if guids.status != MDRIVER_CONTROL_STATUS_OK {
+            initialization_failed(boot_info)
+        }
+        let (type_line, type_len) =
+            storage_guid_line(b"STORAGE TYPE ", ordinal, guids.values[0], guids.values[1]);
+        console_write(boot_info, &type_line[..type_len]);
+        if ordinal < 9 {
+            append_report(&mut report, &mut report_len, &type_line[..type_len]);
+        }
+        let (part_line, part_len) =
+            storage_guid_line(b"STORAGE PART ", ordinal, guids.values[2], guids.values[3]);
+        console_write(boot_info, &part_line[..part_len]);
+        if ordinal < 9 {
+            append_report(&mut report, &mut report_len, &part_line[..part_len]);
+        }
+
+        let range = transact(
+            boot_info,
+            ring,
+            request_id,
+            MdriverControlRequest::new(
+                MDRIVER_CONTROL_INSPECT_STORAGE,
+                device_id,
+                [MDRIVER_STORAGE_QUERY_PARTITION_RANGE, ordinal, 0, 0],
+            ),
+        );
+        if range.status != MDRIVER_CONTROL_STATUS_OK || range.values[1] == 0 {
+            initialization_failed(boot_info)
+        }
+        let range_line = storage_range_line(ordinal, range.values[0], range.values[1]);
+        console_write(boot_info, &range_line);
+        if ordinal < 9 {
+            append_report(&mut report, &mut report_len, &range_line);
+        }
+    }
+    initialization_failed(boot_info)
+}
+
+fn storage_guid_line(
+    label: &[u8; 13],
+    ordinal: u64,
+    low: u64,
+    high: u64,
+) -> ([u8; 54], usize) {
+    let mut line = [b' '; 54];
+    line[..13].copy_from_slice(label);
+    let mut guid = [0_u8; 16];
+    guid[..8].copy_from_slice(&low.to_le_bytes());
+    guid[8..].copy_from_slice(&high.to_le_bytes());
+    if label == b"STORAGE DISK " {
+        write_gpt_guid(&mut line[14..50], &guid);
+        line[50] = b'\n';
+        (line, 51)
+    } else {
+        write_hex_byte(&mut line[13..15], ordinal as u8);
+        write_gpt_guid(&mut line[16..52], &guid);
+        line[52] = b'\n';
+        (line, 53)
+    }
+}
+
+fn storage_range_line(ordinal: u64, first: u64, count: u64) -> [u8; 52] {
+    let mut line = *b"STORAGE P00 RANGE 0000000000000000 0000000000000000\n";
+    write_hex_byte(&mut line[9..11], ordinal as u8);
+    write_hex_u64(&mut line[18..34], first);
+    write_hex_u64(&mut line[35..51], count);
+    line
+}
+
+fn append_report(buffer: &mut [u8], length: &mut usize, value: &[u8]) {
+    if value.len() <= buffer.len().saturating_sub(*length) {
+        buffer[*length..*length + value.len()].copy_from_slice(value);
+        *length += value.len();
+    }
+}
+
+fn write_gpt_guid(output: &mut [u8], guid: &[u8; 16]) {
+    const ORDER: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+    let mut position = 0;
+    for (index, byte) in ORDER.iter().copied().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            output[position] = b'-';
+            position += 1;
+        }
+        write_hex_byte(&mut output[position..position + 2], guid[byte]);
+        position += 2;
+    }
+}
+
+fn write_hex_byte(output: &mut [u8], value: u8) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    output[0] = HEX[(value >> 4) as usize];
+    output[1] = HEX[(value & 0xf) as usize];
+}
+
+fn write_hex_u64(output: &mut [u8], value: u64) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for (index, digit) in output.iter_mut().enumerate() {
+        *digit = HEX[((value >> ((15 - index) * 4)) & 0xf) as usize];
+    }
 }
 
 fn verify_block_data_path(
