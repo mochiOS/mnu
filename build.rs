@@ -25,7 +25,9 @@ fn main() {
             std::process::exit(0);
         }
     };
-    let linker_script = if std::env::var_os("CARGO_FEATURE_DOMAIN_GUEST").is_some() {
+    let linker_script = if std::env::var_os("CARGO_FEATURE_DOMAIN_GUEST").is_some()
+        || std::env::var_os("CARGO_FEATURE_SYSTEM_DOMAIN").is_some()
+    {
         "domain.ld"
     } else {
         "kernel.ld"

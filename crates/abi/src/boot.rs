@@ -10,6 +10,7 @@ pub const BOOT_FEATURE_INITFS: u64 = 1 << 1;
 pub const BOOT_FEATURE_ROOTFS_IMAGE: u64 = 1 << 2;
 pub const BOOT_FEATURE_SMP: u64 = 1 << 3;
 pub const BOOT_FEATURE_ENTROPY: u64 = 1 << 4;
+pub const BOOT_FEATURE_HYPERVISOR_DOMAIN: u64 = 1 << 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootInfoError {

@@ -95,15 +95,60 @@ impl fmt::Write for SerialPort {
 
 /// シリアルポートを初期化
 pub fn init() {
+    if crate::hypervisor_guest::is_active() {
+        return;
+    }
     lock_serial(|serial| serial.init());
 }
 
 /// シリアルポートに文字列を出力（割込み対応）
 pub fn print(args: fmt::Arguments) {
     use core::fmt::Write;
+    if crate::hypervisor_guest::is_active() {
+        let mut writer = HypervisorConsole::new();
+        let _ = writer.write_fmt(args);
+        writer.flush();
+        return;
+    }
     lock_serial(|serial| {
         let _ = serial.write_fmt(args);
     });
+}
+
+struct HypervisorConsole {
+    bytes: [u8; 1024],
+    len: usize,
+}
+
+impl HypervisorConsole {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; 1024],
+            len: 0,
+        }
+    }
+
+    fn flush(&self) {
+        if self.len == 0 {
+            return;
+        }
+        let _ = crate::hypervisor_guest::invoke(
+            mnu_abi::hypervisor::HypercallNumber::ConsoleWrite,
+            self.bytes.as_ptr() as u64,
+            self.len as u64,
+            0,
+        );
+    }
+}
+
+impl fmt::Write for HypervisorConsole {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let available = self.bytes.len().saturating_sub(self.len);
+        let count = available.min(value.len());
+        self.bytes[self.len..self.len + count].copy_from_slice(&value.as_bytes()[..count]);
+        self.len += count;
+        Ok(())
+    }
 }
 
 /// シリアル出力マクロ

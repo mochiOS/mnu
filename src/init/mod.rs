@@ -21,8 +21,10 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     {
         crate::warn!("CSPRNG unavailable: {:?}", error);
     }
-    if let Err(error) = crate::syscall::time::initialize_realtime() {
-        crate::warn!("UTC wall clock unavailable: {:?}", error);
+    if !crate::hypervisor_guest::is_active() {
+        if let Err(error) = crate::syscall::time::initialize_realtime() {
+            crate::warn!("UTC wall clock unavailable: {:?}", error);
+        }
     }
 
     let memory_map = unsafe {
@@ -61,22 +63,26 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     fs::init();
     crate::config::init();
     crate::capability::path::init_from_kernel_config();
-    crate::cext::init_runtime_config();
-    crate::cext::register_builtin_cext("disk", crate::cext::CextKind::BlockDevice);
-    crate::cext::register_builtin_cext("ext2", crate::cext::CextKind::Filesystem);
-    crate::cext::load_modules();
-    if crate::cext::fs::is_loaded() {
-        if crate::cext::disk::is_loaded() {
-            let rc = crate::cext::fs::set_disk_ops(crate::cext::disk::serialized_ops_ptr());
-            if rc != 0 {
-                crate::warn!("cext: fs set_disk_ops failed rc={}", rc);
+    if crate::hypervisor_guest::is_active() {
+        crate::info!("Physical storage cexts disabled; waiting for mDriver block backend");
+    } else {
+        crate::cext::init_runtime_config();
+        crate::cext::register_builtin_cext("disk", crate::cext::CextKind::BlockDevice);
+        crate::cext::register_builtin_cext("ext2", crate::cext::CextKind::Filesystem);
+        crate::cext::load_modules();
+        if crate::cext::fs::is_loaded() {
+            if crate::cext::disk::is_loaded() {
+                let rc = crate::cext::fs::set_disk_ops(crate::cext::disk::serialized_ops_ptr());
+                if rc != 0 {
+                    crate::warn!("cext: fs set_disk_ops failed rc={}", rc);
+                }
             }
-        }
-        let rc = crate::cext::fs::mount(0, 0);
-        if rc != 0 {
-            crate::warn!("cext: fs mount failed rc={}", rc);
-        } else {
-            crate::audit::flush_to_disk();
+            let rc = crate::cext::fs::mount(0, 0);
+            if rc != 0 {
+                crate::warn!("cext: fs mount failed rc={}", rc);
+            } else {
+                crate::audit::flush_to_disk();
+            }
         }
     }
 
@@ -84,8 +90,16 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     // 以前は enable() が init_pit() より先だったため、PIT未初期化状態でタイマー割り込みが
     // 発生する可能性があった。正しい初期化順序: PIT→スケジューラ→タイマー→割り込み有効化
     task::init_scheduler();
-    interrupt::init_pit();
-    interrupt::enable_timer_interrupt();
+    if crate::hypervisor_guest::is_active() {
+        if crate::smp::enable_hypervisor_scheduler_timer() {
+            crate::info!("mBoot virtual scheduler timer initialized");
+        } else {
+            crate::warn!("mBoot virtual scheduler timer unavailable");
+        }
+    } else {
+        interrupt::init_pit();
+        interrupt::enable_timer_interrupt();
+    }
 
     x86_64::instructions::interrupts::enable();
 

@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 10;
+pub const DOMAIN_BOOT_VERSION: u32 = 11;
 pub const DOMAIN_CRASH_MAGIC: u64 = u64::from_le_bytes(*b"MNUCRSH\0");
 pub const DOMAIN_CRASH_VERSION: u16 = 1;
 
@@ -141,6 +141,10 @@ pub struct DomainBootInfo {
     pub hypervisor_backend: u32,
     pub domain_role: u32,
     pub memory_size: u64,
+    /// mBootがDomain RAMへ配置した、署名検証済みの起動モジュールです。
+    /// モジュールを使わないDomainでは、両方とも0です。
+    pub boot_module_start: u64,
+    pub boot_module_size: u64,
     pub feature_flags: u64,
     pub grant_window_start: u64,
     pub grant_window_size: u64,
@@ -159,6 +163,8 @@ impl DomainBootInfo {
         hypervisor_backend: u32,
         domain_role: u32,
         memory_size: u64,
+        boot_module_start: u64,
+        boot_module_size: u64,
         grant_window_start: u64,
         grant_window_size: u64,
         device_window_start: u64,
@@ -175,6 +181,8 @@ impl DomainBootInfo {
             hypervisor_backend,
             domain_role,
             memory_size,
+            boot_module_start,
+            boot_module_size,
             feature_flags: DOMAIN_FEATURE_CONSOLE_WRITE
                 | DOMAIN_FEATURE_YIELD
                 | DOMAIN_FEATURE_SHUTDOWN
@@ -230,6 +238,16 @@ impl DomainBootInfo {
         if self.memory_size == 0 || self.memory_size & 0xfff != 0 {
             return Err(DomainBootInfoError::InvalidMemorySize);
         }
+        let module_end = self
+            .boot_module_start
+            .checked_add(self.boot_module_size)
+            .ok_or(DomainBootInfoError::InvalidMemorySize)?;
+        if (self.boot_module_start == 0) != (self.boot_module_size == 0)
+            || self.boot_module_start & 0xfff != 0
+            || module_end > self.memory_size
+        {
+            return Err(DomainBootInfoError::InvalidMemorySize);
+        }
         let Some(grant_window_end) = self.grant_window_start.checked_add(self.grant_window_size)
         else {
             return Err(DomainBootInfoError::InvalidMemorySize);
@@ -238,6 +256,7 @@ impl DomainBootInfo {
             || self.grant_window_size == 0
             || self.grant_window_size & 0xfff != 0
             || grant_window_end > self.memory_size
+            || self.boot_module_size != 0 && module_end > self.grant_window_start
         {
             return Err(DomainBootInfoError::InvalidMemorySize);
         }
@@ -397,7 +416,7 @@ mod tests {
 
     #[test]
     fn domain_boot_info_layout_is_fixed() {
-        assert_eq!(size_of::<DomainBootInfo>(), 96);
+        assert_eq!(size_of::<DomainBootInfo>(), 112);
         assert_eq!(core::mem::align_of::<DomainBootInfo>(), 8);
     }
 
@@ -409,9 +428,11 @@ mod tests {
             HYPERVISOR_BACKEND_AMD_SVM,
             DOMAIN_ROLE_SYSTEM,
             2 * 1024 * 1024,
+            0x18_0000,
+            0x2_0000,
             0x1f_0000,
             0x1_0000,
-            0x1b_0000,
+            0x1000_0000,
             0x4_0000,
             0,
             0,
@@ -462,7 +483,7 @@ mod tests {
         info.storage_disk_guid = [0; 16];
         info.storage_partition_type_guid = [0; 16];
         info.storage_partition_guid = [0; 16];
-        assert!(!info.validate());
+        assert!(info.validate());
     }
 
     #[test]
@@ -489,6 +510,8 @@ mod tests {
             DOMAIN_ROLE_SYSTEM,
             4096,
             0,
+            0,
+            0,
             4096,
             0,
             0,
@@ -508,6 +531,8 @@ mod tests {
             DOMAIN_ROLE_SYSTEM,
             4097,
             0,
+            0,
+            0,
             4096,
             0,
             0,
@@ -525,6 +550,8 @@ mod tests {
             HYPERVISOR_BACKEND_INTEL_VMX,
             DOMAIN_ROLE_SYSTEM,
             4096,
+            0,
+            0,
             0,
             4096,
             0,

@@ -45,7 +45,7 @@ pub fn log(level: LogLevel, args: core::fmt::Arguments) {
         return;
     }
 
-    use crate::{sprint, sprintln};
+    use crate::sprintln;
 
     let prefix = match level {
         LogLevel::Trace => "[TRACE]",
@@ -55,8 +55,7 @@ pub fn log(level: LogLevel, args: core::fmt::Arguments) {
         LogLevel::Error => "[ERROR]",
     };
 
-    sprint!("{} ", prefix);
-    sprintln!("{}", args);
+    sprintln!("{} {}", prefix, args);
 }
 
 /// トレースログ

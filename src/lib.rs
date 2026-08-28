@@ -88,6 +88,8 @@ pub mod cext;
 /// CPU機能の初期化
 pub mod cpu;
 #[cfg(not(test))]
+pub mod hypervisor_guest;
+#[cfg(not(test))]
 /// per-CPU状態管理
 pub mod percpu;
 #[cfg(not(test))]
@@ -99,8 +101,9 @@ pub mod smp;
 
 pub use mnu_abi::boot::{
     BootInfo, BootInfoError, MemoryRegion, MemoryType, SmpHandoff, BOOT_ABI_MAGIC,
-    BOOT_ABI_VERSION, BOOT_FEATURE_ENTROPY, BOOT_FEATURE_FRAMEBUFFER, BOOT_FEATURE_INITFS,
-    BOOT_FEATURE_ROOTFS_IMAGE, BOOT_FEATURE_SMP, MAX_CPU_IDS,
+    BOOT_ABI_VERSION, BOOT_FEATURE_ENTROPY, BOOT_FEATURE_FRAMEBUFFER,
+    BOOT_FEATURE_HYPERVISOR_DOMAIN, BOOT_FEATURE_INITFS, BOOT_FEATURE_ROOTFS_IMAGE,
+    BOOT_FEATURE_SMP, MAX_CPU_IDS,
 };
 
 #[cfg(not(test))]

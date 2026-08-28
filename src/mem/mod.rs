@@ -104,9 +104,11 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
 
     crate::debug!("Heap initialized, disabling PIT");
     // PITを停止してからPICを初期化
-    interrupt::disable_pit();
-    crate::debug!("PIT disabled, initializing PIC");
-    interrupt::init_pic();
+    if !crate::hypervisor_guest::is_active() {
+        interrupt::disable_pit();
+        crate::debug!("PIT disabled, initializing PIC");
+        interrupt::init_pic();
+    }
 
     debug!("Memory initialized");
     Ok(())

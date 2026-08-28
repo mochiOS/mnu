@@ -6,8 +6,10 @@ SECTIONS
 
     .text : ALIGN(4096)
     {
+        __text_start = .;
         KEEP(*(.text.domain_entry))
         *(.text .text.*)
+        __text_end = .;
     }
 
     .rodata : ALIGN(4096)

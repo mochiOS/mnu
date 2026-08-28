@@ -24,6 +24,9 @@ pub static PAGE_TABLE: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None
 pub static PHYS_OFFSET: Mutex<Option<u64>> = Mutex::new(None);
 /// カーネルの元のL4ページテーブルの物理アドレス（init時に設定）
 pub static KERNEL_L4_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// `KERNEL_L4_PHYS` has been initialized. Physical address zero is valid for an
+/// mBoot guest, so the address itself cannot double as an initialization sentinel.
+static KERNEL_L4_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// x86-64 canonical ユーザー空間上限
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 
@@ -87,6 +90,7 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
     // グローバル状態を設定
     *PHYS_OFFSET.lock() = Some(physical_memory_offset);
     KERNEL_L4_PHYS.store(old_l4_phys, core::sync::atomic::Ordering::Relaxed);
+    KERNEL_L4_READY.store(true, core::sync::atomic::Ordering::Release);
 
     // フレームアロケータに HHDM オフセットを伝えてフリーリストを有効化
     frame::set_phys_offset(physical_memory_offset);
@@ -764,7 +768,7 @@ pub fn create_user_page_table() -> Result<u64> {
 
     // カーネルの「元の」L4テーブルを使用する（syscall中はCR3がユーザープロセスのテーブルなため）
     let kernel_l4_phys = KERNEL_L4_PHYS.load(core::sync::atomic::Ordering::Relaxed);
-    if kernel_l4_phys == 0 {
+    if !KERNEL_L4_READY.load(core::sync::atomic::Ordering::Acquire) {
         return Err(Kernel::Memory(Memory::NotMapped));
     }
     let kernel_l4 = unsafe { &*((kernel_l4_phys + phys_off) as *const PageTable) };
@@ -842,8 +846,20 @@ pub fn create_user_page_table() -> Result<u64> {
         );
     }
 
-    map_cpu_descriptor_tables_in_user_table(new_l4_phys)?;
-    crate::percpu::map_syscall_shared_region_in_table(new_l4_phys)?;
+    if let Err(error) = map_cpu_descriptor_tables_in_user_table(new_l4_phys) {
+        crate::warn!(
+            "Failed to map CPU descriptor tables into user page table: {:?}",
+            error
+        );
+        return Err(error);
+    }
+    if let Err(error) = crate::percpu::map_syscall_shared_region_in_table(new_l4_phys) {
+        crate::warn!(
+            "Failed to map syscall shared region into user page table: {:?}",
+            error
+        );
+        return Err(error);
+    }
 
     Ok(new_l4_phys)
 }
@@ -951,8 +967,24 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
         idtr[2], idtr[3], idtr[4], idtr[5], idtr[6], idtr[7], idtr[8], idtr[9],
     ]);
 
-    map_current_range(table_phys, gdt_base, gdt_limit)?;
-    map_current_range(table_phys, idt_base, idt_limit)?;
+    if let Err(error) = map_current_range(table_phys, gdt_base, gdt_limit) {
+        crate::warn!(
+            "Failed to map GDT range {:#x}+{:#x}: {:?}",
+            gdt_base,
+            gdt_limit,
+            error
+        );
+        return Err(error);
+    }
+    if let Err(error) = map_current_range(table_phys, idt_base, idt_limit) {
+        crate::warn!(
+            "Failed to map IDT range {:#x}+{:#x}: {:?}",
+            idt_base,
+            idt_limit,
+            error
+        );
+        return Err(error);
+    }
     Ok(())
 }
 

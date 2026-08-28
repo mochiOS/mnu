@@ -427,6 +427,40 @@ pub fn enable_local_scheduler_timer() -> bool {
         && local_apic_write(X2APIC_TIMER_INITIAL_COUNT_MSR, 0x380, count)
 }
 
+/// Starts the mBoot-provided virtual x2APIC timer for the boot vCPU.
+///
+/// Unlike physical APIC calibration, the virtual timer advances directly from
+/// the stable TSC frequency published by mBoot's CPUID interface.
+pub fn enable_hypervisor_scheduler_timer() -> bool {
+    if !crate::hypervisor_guest::is_active() {
+        return false;
+    }
+
+    let tsc_khz = crate::hypervisor_guest::tsc_frequency_khz();
+    if tsc_khz == 0 {
+        return false;
+    }
+    let ticks_per_period = u64::from(tsc_khz)
+        .saturating_mul(1000)
+        .saturating_div(crate::interrupt::timer::ticks_per_second())
+        .saturating_div(16);
+    let Ok(initial_count) = u32::try_from(ticks_per_period) else {
+        return false;
+    };
+    if initial_count == 0 {
+        return false;
+    }
+
+    init_local_apic();
+    local_apic_write(X2APIC_TIMER_DIVIDE_MSR, 0x3e0, APIC_TIMER_DIVIDE_BY_16)
+        && local_apic_write(
+            X2APIC_LVT_TIMER_MSR,
+            0x320,
+            APIC_TIMER_PERIODIC | u32::from(APIC_TIMER_VECTOR),
+        )
+        && local_apic_write(X2APIC_TIMER_INITIAL_COUNT_MSR, 0x380, initial_count)
+}
+
 #[inline]
 fn wait_for_icr_idle_x2apic() {
     loop {

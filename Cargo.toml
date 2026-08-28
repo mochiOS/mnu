@@ -46,6 +46,13 @@ bench = false
 required-features = ["domain-guest"]
 
 [[bin]]
+name = "mochios-system"
+path = "src/system_domain_entry.rs"
+test = false
+bench = false
+required-features = ["system-domain"]
+
+[[bin]]
 name = "hardware-bootstrap"
 path = "src/hardware_bootstrap.rs"
 test = false
@@ -88,6 +95,7 @@ mnu-abi = { path = "crates/abi" }
 default = ["kernel-bin"]
 kernel-bin = []
 domain-guest = []
+system-domain = ["kernel-bin"]
 kcfi = []
 cet-ibt = []
 cet-shadow-stack = []
