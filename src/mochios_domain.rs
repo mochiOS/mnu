@@ -28,20 +28,23 @@ use mnu_abi::mdriver_control::{
     MdriverControlRequest, MdriverControlResponse, MDRIVER_BLOCK_MAX_TRANSFER,
     MDRIVER_BLOCK_QUEUE_DEPTH, MDRIVER_BLOCK_SECTOR_SIZE, MDRIVER_CONTROL_BLOCK_FLUSH,
     MDRIVER_CONTROL_BLOCK_READ, MDRIVER_CONTROL_BLOCK_WRITE, MDRIVER_CONTROL_CAPABILITIES,
-    MDRIVER_CONTROL_CLOSE_DEVICE, MDRIVER_CONTROL_DESCRIBE, MDRIVER_CONTROL_ENUMERATE,
+    MDRIVER_CONTROL_CLOSE_DEVICE, MDRIVER_CONTROL_CLOSE_DISPLAY, MDRIVER_CONTROL_DESCRIBE,
+    MDRIVER_CONTROL_DISPLAY_INFO, MDRIVER_CONTROL_ENUMERATE, MDRIVER_CONTROL_INSPECT_STORAGE,
     MDRIVER_CONTROL_NEGOTIATE, MDRIVER_CONTROL_OPEN_BLOCK_QUEUE, MDRIVER_CONTROL_OPEN_DEVICE,
-    MDRIVER_CONTROL_PING, MDRIVER_CONTROL_REGISTER_BLOCK_BUFFER, MDRIVER_CONTROL_START_BLOCK_QUEUE,
+    MDRIVER_CONTROL_OPEN_DISPLAY, MDRIVER_CONTROL_PING, MDRIVER_CONTROL_PRESENT_DISPLAY,
+    MDRIVER_CONTROL_REGISTER_BLOCK_BUFFER, MDRIVER_CONTROL_START_BLOCK_QUEUE,
     MDRIVER_CONTROL_START_SESSION, MDRIVER_CONTROL_STATUS_END, MDRIVER_CONTROL_STATUS_OK,
     MDRIVER_CONTROL_STATUS_OUT_OF_RANGE, MDRIVER_CONTROL_STATUS_UNSUPPORTED_OPERATION,
-    MDRIVER_CONTROL_STOP_BLOCK_QUEUE, MDRIVER_CONTROL_VERSION, MDRIVER_CONTROL_INSPECT_STORAGE,
+    MDRIVER_CONTROL_STOP_BLOCK_QUEUE, MDRIVER_CONTROL_VERSION,
     MDRIVER_DEVICE_FEATURE_BLOCK_ASYNC_QUEUE, MDRIVER_DEVICE_FEATURE_BLOCK_FLUSH,
     MDRIVER_DEVICE_FEATURE_BLOCK_READ, MDRIVER_DEVICE_FEATURE_BLOCK_WRITE,
-    MDRIVER_DEVICE_FEATURE_DMA_ISOLATED, MDRIVER_DEVICE_FEATURE_EPHEMERAL,
-    MDRIVER_DEVICE_FEATURE_INTERRUPT_ACTIVE, MDRIVER_DEVICE_FEATURE_PARTITIONED,
-    MDRIVER_DEVICE_FEATURE_PHYSICAL, MDRIVER_DEVICE_FEATURE_READ_ONLY, MDRIVER_DEVICE_KIND_BLOCK,
-    MDRIVER_DEVICE_KIND_SOUND, MDRIVER_DEVICE_STATE_ONLINE,
-    MDRIVER_STORAGE_QUERY_DISK, MDRIVER_STORAGE_QUERY_PARTITION_GUIDS,
-    MDRIVER_STORAGE_QUERY_PARTITION_RANGE,
+    MDRIVER_DEVICE_FEATURE_DISPLAY_TILE, MDRIVER_DEVICE_FEATURE_DMA_ISOLATED,
+    MDRIVER_DEVICE_FEATURE_EPHEMERAL, MDRIVER_DEVICE_FEATURE_INTERRUPT_ACTIVE,
+    MDRIVER_DEVICE_FEATURE_PARTITIONED, MDRIVER_DEVICE_FEATURE_PHYSICAL,
+    MDRIVER_DEVICE_FEATURE_READ_ONLY, MDRIVER_DEVICE_KIND_BLOCK, MDRIVER_DEVICE_KIND_DISPLAY,
+    MDRIVER_DEVICE_KIND_SOUND, MDRIVER_DEVICE_STATE_ONLINE, MDRIVER_DISPLAY_BUFFER_PAGE,
+    MDRIVER_DISPLAY_MAX_TRANSFER, MDRIVER_DISPLAY_PIXEL_BYTES, MDRIVER_STORAGE_QUERY_DISK,
+    MDRIVER_STORAGE_QUERY_PARTITION_GUIDS, MDRIVER_STORAGE_QUERY_PARTITION_RANGE,
 };
 use mnu_abi::shared_ring::{
     initialize, pop_response, push_request, SharedRingMessage, SharedRingPage,
@@ -53,6 +56,7 @@ static MDRIVER_PROTOCOL_MESSAGE: &[u8] = b"mDriver device control protocol ready
 static MDRIVER_BLOCK_MESSAGE: &[u8] = b"mDriver block data path ready\n";
 static MDRIVER_ASYNC_BLOCK_MESSAGE: &[u8] = b"mDriver asynchronous block queue ready\n";
 static MDRIVER_STORAGE_MESSAGE: &[u8] = b"mDriver read-only storage inspection ready\n";
+static MDRIVER_DISPLAY_MESSAGE: &[u8] = b"mDriver display tile path ready\n";
 const CONTROL_IRQ_YIELD_LIMIT: usize = 1024;
 const CONTROL_REQUEST_ID: u64 = 1;
 
@@ -284,6 +288,7 @@ fn start_control_protocol(boot_info: &DomainBootInfo) {
 
     let mut cursor = 0;
     let mut block_device = None;
+    let mut display_device = None;
     for _ in 0..negotiate.values[2] {
         let enumerated = transact(
             boot_info,
@@ -322,6 +327,9 @@ fn start_control_protocol(boot_info: &DomainBootInfo) {
         }
         if enumerated.values[1] == MDRIVER_DEVICE_KIND_BLOCK && block_device.is_none() {
             block_device = Some((enumerated.device_id, enumerated.values[3]));
+        }
+        if enumerated.values[1] == MDRIVER_DEVICE_KIND_DISPLAY && display_device.is_none() {
+            display_device = Some((enumerated.device_id, enumerated.values[3]));
         }
         cursor = enumerated.values[0];
     }
@@ -383,7 +391,109 @@ fn start_control_protocol(boot_info: &DomainBootInfo) {
         verify_block_data_path(boot_info, ring, &mut request_id, device_id, features);
         verify_async_block_queue(boot_info, ring, &mut request_id, device_id, features);
     }
+    if let Some((device_id, features)) = display_device {
+        verify_display_data_path(boot_info, ring, &mut request_id, device_id, features);
+    }
     console_write(boot_info, MDRIVER_PROTOCOL_MESSAGE);
+}
+
+fn verify_display_data_path(
+    boot_info: &DomainBootInfo,
+    ring: *mut SharedRingPage,
+    request_id: &mut u64,
+    device_id: u32,
+    features: u64,
+) {
+    if features & MDRIVER_DEVICE_FEATURE_DISPLAY_TILE == 0
+        || boot_info.grant_window_size < (MDRIVER_DISPLAY_BUFFER_PAGE + 1) * 4096
+    {
+        initialization_failed(boot_info)
+    }
+    let buffer_address = boot_info.grant_window_start + MDRIVER_DISPLAY_BUFFER_PAGE * 4096;
+    let reference = unsafe {
+        invoke(
+            boot_info.hypervisor_backend,
+            HypercallNumber::GrantCreate,
+            buffer_address,
+            u64::from(MDRIVER_DOMAIN_ID),
+            0,
+        )
+    };
+    if reference == GRANT_REF_INVALID
+        || matches!(
+            reference,
+            HYPERCALL_UNSUPPORTED | HYPERCALL_INVALID_ARGUMENT
+        )
+    {
+        initialization_failed(boot_info)
+    }
+    let opened = transact(
+        boot_info,
+        ring,
+        request_id,
+        MdriverControlRequest::new(
+            MDRIVER_CONTROL_OPEN_DISPLAY,
+            device_id,
+            [reference, 0, 0, 0],
+        ),
+    );
+    if opened.status != MDRIVER_CONTROL_STATUS_OK
+        || opened.values[0] != MDRIVER_DISPLAY_MAX_TRANSFER
+        || opened.values[1] != MDRIVER_DISPLAY_PIXEL_BYTES
+    {
+        initialization_failed(boot_info)
+    }
+    let info = transact(
+        boot_info,
+        ring,
+        request_id,
+        MdriverControlRequest::new(MDRIVER_CONTROL_DISPLAY_INFO, device_id, [0; 4]),
+    );
+    if info.status != MDRIVER_CONTROL_STATUS_OK
+        || info.values[0] == 0
+        || info.values[1] == 0
+        || info.values[3] & 0xff != 32
+    {
+        initialization_failed(boot_info)
+    }
+
+    let width = info.values[0].min(64);
+    let height = info.values[1].min(MDRIVER_DISPLAY_MAX_TRANSFER / (width * 4));
+    let red_offset = (info.values[3] >> 8) & 0xff;
+    let green_offset = (info.values[3] >> 16) & 0xff;
+    let blue_offset = (info.values[3] >> 24) & 0xff;
+    if red_offset > 24 || green_offset > 24 || blue_offset > 24 {
+        initialization_failed(boot_info)
+    }
+    let pixel = (0x7a_u32 << red_offset) | (0x5c_u32 << green_offset) | (0xd6_u32 << blue_offset);
+    let pixels = (width * height) as usize;
+    let buffer = buffer_address as *mut u32;
+    for index in 0..pixels {
+        unsafe { write_volatile(buffer.add(index), pixel) };
+    }
+    let presented = transact(
+        boot_info,
+        ring,
+        request_id,
+        MdriverControlRequest::new(
+            MDRIVER_CONTROL_PRESENT_DISPLAY,
+            device_id,
+            [0, 0, width, height],
+        ),
+    );
+    if presented.status != MDRIVER_CONTROL_STATUS_OK {
+        initialization_failed(boot_info)
+    }
+    let closed = transact(
+        boot_info,
+        ring,
+        request_id,
+        MdriverControlRequest::new(MDRIVER_CONTROL_CLOSE_DISPLAY, device_id, [0; 4]),
+    );
+    if closed.status != MDRIVER_CONTROL_STATUS_OK {
+        initialization_failed(boot_info)
+    }
+    console_write(boot_info, MDRIVER_DISPLAY_MESSAGE);
 }
 
 fn inspect_read_only_storage(
@@ -394,7 +504,11 @@ fn inspect_read_only_storage(
 ) {
     let mut report = [0_u8; 4096];
     let mut report_len = 0;
-    append_report(&mut report, &mut report_len, b"DISPLAY\nSTORAGE READ ONLY\n");
+    append_report(
+        &mut report,
+        &mut report_len,
+        b"DISPLAY\nSTORAGE READ ONLY\n",
+    );
     let disk = transact(
         boot_info,
         ring,
@@ -473,12 +587,7 @@ fn inspect_read_only_storage(
     initialization_failed(boot_info)
 }
 
-fn storage_guid_line(
-    label: &[u8; 13],
-    ordinal: u64,
-    low: u64,
-    high: u64,
-) -> ([u8; 54], usize) {
+fn storage_guid_line(label: &[u8; 13], ordinal: u64, low: u64, high: u64) -> ([u8; 54], usize) {
     let mut line = [b' '; 54];
     line[..13].copy_from_slice(label);
     let mut guid = [0_u8; 16];

@@ -251,7 +251,8 @@ impl DomainBootInfo {
             || self.device_window_start & 0xfff != 0
             || self.device_window_size == 0
             || self.device_window_size & 0xfff != 0
-            || device_window_end > self.grant_window_start
+            || self.device_window_start < self.memory_size
+            || device_window_end > (1_u64 << 39)
         {
             return Err(DomainBootInfoError::InvalidMemorySize);
         }
@@ -290,7 +291,9 @@ impl PciDeviceInfo {
                                 | PCI_DEVICE_FLAG_PARTITIONED)
                             == 0
                 }
-                PCI_DEVICE_STATE_FIRMWARE_DEFERRED => self.owner_domain == 0 && self.flags == 0,
+                PCI_DEVICE_STATE_FIRMWARE_DEFERRED => {
+                    self.owner_domain == 0 && self.flags & !PCI_DEVICE_FLAG_CLAIMABLE == 0
+                }
                 PCI_DEVICE_STATE_CLAIMED_DISABLED | PCI_DEVICE_STATE_ACTIVE => {
                     self.owner_domain != 0
                         && self.flags
