@@ -195,6 +195,7 @@ pub enum SyscallNumber {
     RandomFill = 607,
     ExecManifestWithCredentials = 608,
     ExecManifestForRequester = 609,
+    PresentFramebuffer = 610,
     CheckGravityExist = 999,
 }
 

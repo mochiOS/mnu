@@ -57,6 +57,8 @@ pub unsafe extern "sysv64" fn domain_entry(domain_info_ptr: *const DomainBootInf
         KERNEL_BOOT_INFO.cpu_enabled = 1;
         KERNEL_BOOT_INFO.cpu_apic_ids[0] = 0;
         KERNEL_BOOT_INFO.cpu_apic_id_count = 1;
+        KERNEL_BOOT_INFO.entropy_seed = domain_info.entropy_seed;
+        KERNEL_BOOT_INFO.entropy_seed_valid = domain_info.entropy_seed_valid;
     }
 
     if mnu::hypervisor_guest::invoke(HypercallNumber::Ready, 0, 0, 0) != HYPERCALL_SUCCESS {

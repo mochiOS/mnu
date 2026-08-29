@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 11;
+pub const DOMAIN_BOOT_VERSION: u32 = 12;
 pub const DOMAIN_CRASH_MAGIC: u64 = u64::from_le_bytes(*b"MNUCRSH\0");
 pub const DOMAIN_CRASH_VERSION: u16 = 1;
 
@@ -154,6 +154,9 @@ pub struct DomainBootInfo {
     pub restart_count: u32,
     pub _reserved0: u32,
     pub capabilities: u64,
+    pub entropy_seed: [u8; 32],
+    pub entropy_seed_valid: u8,
+    pub _reserved1: [u8; 7],
 }
 
 impl DomainBootInfo {
@@ -208,7 +211,16 @@ impl DomainBootInfo {
             restart_count,
             _reserved0: 0,
             capabilities,
+            entropy_seed: [0; 32],
+            entropy_seed_valid: 0,
+            _reserved1: [0; 7],
         }
+    }
+
+    pub const fn with_entropy_seed(mut self, entropy_seed: [u8; 32]) -> Self {
+        self.entropy_seed = entropy_seed;
+        self.entropy_seed_valid = 1;
+        self
     }
 
     pub fn validate(&self) -> Result<(), DomainBootInfoError> {
@@ -219,6 +231,13 @@ impl DomainBootInfo {
             return Err(DomainBootInfoError::UnsupportedVersion);
         }
         if self.struct_size < size_of::<Self>() as u32 {
+            return Err(DomainBootInfoError::InvalidStructSize);
+        }
+        if self._reserved0 != 0
+            || self._reserved1 != [0; 7]
+            || self.entropy_seed_valid > 1
+            || self.entropy_seed_valid == 1 && self.entropy_seed == [0; 32]
+        {
             return Err(DomainBootInfoError::InvalidStructSize);
         }
         if !matches!(
@@ -417,7 +436,7 @@ mod tests {
 
     #[test]
     fn domain_boot_info_layout_is_fixed() {
-        assert_eq!(size_of::<DomainBootInfo>(), 112);
+        assert_eq!(size_of::<DomainBootInfo>(), 152);
         assert_eq!(core::mem::align_of::<DomainBootInfo>(), 8);
     }
 
@@ -439,6 +458,30 @@ mod tests {
             0,
         );
         assert_eq!(info.validate(), Ok(()));
+    }
+
+    #[test]
+    fn domain_entropy_seed_is_explicit_and_nonzero() {
+        let mut info = DomainBootInfo::new(
+            1,
+            0,
+            HYPERVISOR_BACKEND_AMD_SVM,
+            DOMAIN_ROLE_SYSTEM,
+            2 * 1024 * 1024,
+            0x18_0000,
+            0x2_0000,
+            0x1f_0000,
+            0x1_0000,
+            0x1000_0000,
+            0x4_0000,
+            0,
+            0,
+        );
+        assert_eq!(info.entropy_seed_valid, 0);
+        info = info.with_entropy_seed([7; 32]);
+        assert_eq!(info.validate(), Ok(()));
+        info.entropy_seed = [0; 32];
+        assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidStructSize));
     }
 
     #[test]

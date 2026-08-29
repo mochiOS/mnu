@@ -259,16 +259,35 @@ struct UserFramebufferInfo {
 pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
     use crate::syscall::types::{ENXIO, SUCCESS};
 
-    let Some(info) = crate::util::vga::get_info() else {
+    let mdriver_info = crate::hypervisor_guest::is_active()
+        .then(crate::mdriver::display_info)
+        .transpose()
+        .ok()
+        .flatten();
+    let out = if let Some(info) = mdriver_info {
+        UserFramebufferInfo {
+            addr: 0,
+            size: u64::from(info.stride)
+                .saturating_mul(u64::from(info.height))
+                .saturating_mul(4),
+            width: info.width,
+            height: info.height,
+            stride: info.stride,
+            format: 1,
+        }
+    } else if crate::hypervisor_guest::is_active() {
         return ENXIO;
-    };
-    let out = UserFramebufferInfo {
-        addr: info.addr,
-        size: info.size as u64,
-        width: info.width as u32,
-        height: info.height as u32,
-        stride: info.stride as u32,
-        format: 1,
+    } else if let Some(info) = crate::util::vga::get_info() {
+        UserFramebufferInfo {
+            addr: info.addr,
+            size: info.size as u64,
+            width: info.width as u32,
+            height: info.height as u32,
+            stride: info.stride as u32,
+            format: 1,
+        }
+    } else {
+        return ENXIO;
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -279,6 +298,37 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
     match copy_to_user(out_ptr, bytes) {
         Ok(()) => SUCCESS,
         Err(err) => err,
+    }
+}
+
+pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len: u64) -> u64 {
+    use crate::capability::Capability;
+    use crate::syscall::types::{EACCES, EFAULT, EINVAL, EIO, SUCCESS};
+
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
+        return EACCES;
+    }
+    let x = position as u32;
+    let y = (position >> 32) as u32;
+    let width = size as u32;
+    let height = (size >> 32) as u32;
+    let Some(expected) = usize::try_from(width)
+        .ok()
+        .and_then(|width| usize::try_from(height).ok().and_then(|height| width.checked_mul(height)))
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return EINVAL;
+    };
+    if pixels_ptr == 0 || pixels_len != expected as u64 || expected == 0 || expected > 4096 {
+        return EINVAL;
+    }
+    let mut pixels = alloc::vec![0u8; expected];
+    if copy_from_user(pixels_ptr, &mut pixels).is_err() {
+        return EFAULT;
+    }
+    match crate::mdriver::present_display(x, y, width, height, &pixels) {
+        Ok(()) => SUCCESS,
+        Err(_) => EIO,
     }
 }
 
@@ -541,6 +591,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::MemoryMap as u64 => process::mmap(arg0, arg1, arg2, arg3, arg4),
         x if x == SyscallNumber::GetFramebufferInfo as u64 => get_framebuffer_info(arg0),
         x if x == SyscallNumber::MapFramebuffer as u64 => map_framebuffer(arg0, arg1),
+        x if x == SyscallNumber::PresentFramebuffer as u64 => {
+            present_framebuffer(arg0, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryProtect as u64 => pgroup::mprotect(arg0, arg1, arg2),
