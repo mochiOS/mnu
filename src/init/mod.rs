@@ -1,6 +1,6 @@
 //! 起動時に実行する初期化処理をまとめたモジュール
 
-use crate::{debug, interrupt, mem, task, util, BootInfo, MemoryRegion, Result};
+use crate::{BootInfo, MemoryRegion, Result, debug, interrupt, mem, task, util};
 
 pub mod fs;
 
@@ -126,23 +126,16 @@ fn initialize_mdriver_storage() {
         summary.device_count
     );
     if !summary.block_device {
-        crate::info!("mDriver has not assigned storage to the System Domain");
+        crate::info!("mDriver has no unambiguous installed mochiOS partition");
         return;
     }
 
-    // mDriver owns the physical controller. Only the filesystem cext is loaded here;
-    // registering disk.cext would create a second, direct hardware path from mochiOS.
     crate::cext::register_builtin_cext("ext2", crate::cext::CextKind::Filesystem);
     crate::cext::load_modules();
-    if !crate::cext::fs::is_loaded() {
-        crate::warn!("mDriver storage: ext2 cext is unavailable");
+    if !crate::cext::fs::is_loaded() || !crate::cext::disk::is_loaded() {
+        crate::warn!("mDriver installed filesystem cext is unavailable");
         return;
     }
-    if !crate::cext::disk::is_loaded() {
-        crate::warn!("mDriver storage: block frontend is unavailable");
-        return;
-    }
-
     let rc = crate::cext::fs::set_disk_ops(crate::cext::disk::serialized_ops_ptr());
     if rc != 0 {
         crate::warn!("mDriver storage: fs set_disk_ops failed rc={}", rc);
@@ -155,18 +148,10 @@ fn initialize_mdriver_storage() {
     };
     let rc = crate::cext::fs::mount(0, flags);
     if rc != 0 {
-        crate::warn!("mDriver storage: fs mount failed rc={}", rc);
+        crate::warn!("mDriver installed filesystem mount failed rc={}", rc);
         return;
     }
-
-    crate::info!(
-        "mDriver storage mounted ({})",
-        if summary.block_read_only {
-            "read-only"
-        } else {
-            "read-write"
-        }
-    );
+    crate::info!("mDriver installed mochiOS filesystem mounted");
     if !summary.block_read_only {
         crate::audit::flush_to_disk();
     }

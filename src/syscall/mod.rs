@@ -11,6 +11,7 @@ pub mod pgroup;
 pub mod process;
 pub mod security;
 pub mod signal;
+pub mod storage;
 pub mod syscall_entry;
 pub mod task;
 pub mod time;
@@ -314,7 +315,11 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
     let height = (size >> 32) as u32;
     let Some(expected) = usize::try_from(width)
         .ok()
-        .and_then(|width| usize::try_from(height).ok().and_then(|height| width.checked_mul(height)))
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
         .and_then(|pixels| pixels.checked_mul(4))
     else {
         return EINVAL;
@@ -594,6 +599,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::PresentFramebuffer as u64 => {
             present_framebuffer(arg0, arg1, arg2, arg3)
         }
+        x if x == SyscallNumber::StorageControl as u64 => storage::control(arg0, arg1),
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryProtect as u64 => pgroup::mprotect(arg0, arg1, arg2),

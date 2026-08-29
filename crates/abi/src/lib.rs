@@ -196,8 +196,31 @@ pub enum SyscallNumber {
     ExecManifestWithCredentials = 608,
     ExecManifestForRequester = 609,
     PresentFramebuffer = 610,
+    StorageControl = 611,
     CheckGravityExist = 999,
 }
+
+/// `StorageControl` が受け取る、mDriverストレージ操作の固定長要求です。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageControlRequest {
+    pub operation: u16,
+    pub reserved0: u16,
+    pub device_id: u32,
+    pub arguments: [u64; 4],
+}
+
+/// `StorageControl` が返す固定長応答です。`status` はmDriverプロトコルの状態値です。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageControlResponse {
+    pub status: u32,
+    pub device_id: u32,
+    pub values: [u64; 4],
+}
+
+/// `arguments[0]` 番目のストレージ候補を返します。
+pub const STORAGE_CONTROL_LIST_DEVICE: u16 = 0;
 
 /// `ExecManifestWithCredentials` に渡す固定長の資格情報指定。
 #[repr(C)]
@@ -220,7 +243,10 @@ pub struct ExecManifestRequester {
 
 #[cfg(test)]
 mod credential_spawn_tests {
-    use super::{ExecManifestCredentials, ExecManifestRequester};
+    use super::{
+        ExecManifestCredentials, ExecManifestRequester, StorageControlRequest,
+        StorageControlResponse,
+    };
 
     #[test]
     fn credential_request_layout_is_fixed() {
@@ -232,6 +258,14 @@ mod credential_spawn_tests {
     fn requester_request_layout_is_fixed() {
         assert_eq!(core::mem::size_of::<ExecManifestRequester>(), 24);
         assert_eq!(core::mem::align_of::<ExecManifestRequester>(), 8);
+    }
+
+    #[test]
+    fn storage_control_layout_is_fixed() {
+        assert_eq!(core::mem::size_of::<StorageControlRequest>(), 40);
+        assert_eq!(core::mem::align_of::<StorageControlRequest>(), 8);
+        assert_eq!(core::mem::size_of::<StorageControlResponse>(), 40);
+        assert_eq!(core::mem::align_of::<StorageControlResponse>(), 8);
     }
 }
 

@@ -1,28 +1,28 @@
 use core::ptr::copy_nonoverlapping;
 
 use mnu_abi::hypervisor::{
-    HypercallNumber, DOMAIN_FEATURE_EVENT_CHANNEL, DOMAIN_FEATURE_EVENT_POLL,
-    DOMAIN_FEATURE_GRANT_TABLE, DOMAIN_FEATURE_SHARED_RING, EVENT_CHANNEL_NO_EVENT,
-    GRANT_FLAG_WRITABLE, GRANT_REF_INVALID, HYPERCALL_SUCCESS, MDRIVER_BLOCK_DATA_PAGE,
-    MDRIVER_CONTROL_IRQ_PORT, MDRIVER_CONTROL_PORT, MDRIVER_CONTROL_REQUEST_KIND,
-    MDRIVER_CONTROL_RESPONSE_KIND, MDRIVER_CONTROL_RING_GENERATION, MDRIVER_CONTROL_RING_PORT,
-    MDRIVER_DOMAIN_ID,
+    DOMAIN_FEATURE_EVENT_CHANNEL, DOMAIN_FEATURE_EVENT_POLL, DOMAIN_FEATURE_GRANT_TABLE,
+    DOMAIN_FEATURE_SHARED_RING, EVENT_CHANNEL_NO_EVENT, GRANT_FLAG_WRITABLE, GRANT_REF_INVALID,
+    HYPERCALL_SUCCESS, HypercallNumber, MDRIVER_BLOCK_DATA_PAGE, MDRIVER_CONTROL_IRQ_PORT,
+    MDRIVER_CONTROL_PORT, MDRIVER_CONTROL_REQUEST_KIND, MDRIVER_CONTROL_RESPONSE_KIND,
+    MDRIVER_CONTROL_RING_GENERATION, MDRIVER_CONTROL_RING_PORT, MDRIVER_DOMAIN_ID,
+    MDRIVER_INSTALL_METADATA_PAGE,
 };
 use mnu_abi::mdriver_control::{
-    MdriverControlRequest, MdriverControlResponse, MDRIVER_BLOCK_MAX_TRANSFER,
-    MDRIVER_BLOCK_SECTOR_SIZE, MDRIVER_CONTROL_BLOCK_FLUSH, MDRIVER_CONTROL_BLOCK_READ,
-    MDRIVER_CONTROL_BLOCK_WRITE, MDRIVER_CONTROL_CAPABILITIES, MDRIVER_CONTROL_CLOSE_DEVICE,
-    MDRIVER_CONTROL_DISPLAY_INFO, MDRIVER_CONTROL_ENUMERATE, MDRIVER_CONTROL_NEGOTIATE,
-    MDRIVER_CONTROL_OPEN_DEVICE, MDRIVER_CONTROL_OPEN_DISPLAY, MDRIVER_CONTROL_PING,
-    MDRIVER_CONTROL_PRESENT_DISPLAY, MDRIVER_CONTROL_START_SESSION, MDRIVER_CONTROL_STATUS_END,
-    MDRIVER_CONTROL_STATUS_OK, MDRIVER_CONTROL_VERSION, MDRIVER_DEVICE_FEATURE_BLOCK_FLUSH,
-    MDRIVER_DEVICE_FEATURE_BLOCK_READ, MDRIVER_DEVICE_FEATURE_BLOCK_WRITE,
-    MDRIVER_DEVICE_FEATURE_DISPLAY_TILE, MDRIVER_DEVICE_FEATURE_READ_ONLY,
-    MDRIVER_DEVICE_KIND_BLOCK, MDRIVER_DEVICE_KIND_DISPLAY, MDRIVER_DISPLAY_BUFFER_PAGE,
-    MDRIVER_DISPLAY_MAX_TRANSFER, MDRIVER_DISPLAY_PIXEL_BYTES,
+    MDRIVER_BLOCK_MAX_TRANSFER, MDRIVER_BLOCK_SECTOR_SIZE, MDRIVER_CONTROL_BLOCK_FLUSH,
+    MDRIVER_CONTROL_BLOCK_READ, MDRIVER_CONTROL_BLOCK_WRITE, MDRIVER_CONTROL_CAPABILITIES,
+    MDRIVER_CONTROL_CLOSE_DEVICE, MDRIVER_CONTROL_DISPLAY_INFO, MDRIVER_CONTROL_ENUMERATE,
+    MDRIVER_CONTROL_NEGOTIATE, MDRIVER_CONTROL_OPEN_DEVICE, MDRIVER_CONTROL_OPEN_DISPLAY,
+    MDRIVER_CONTROL_OPEN_PARTITION, MDRIVER_CONTROL_PING, MDRIVER_CONTROL_PRESENT_DISPLAY,
+    MDRIVER_CONTROL_START_SESSION, MDRIVER_CONTROL_STATUS_END, MDRIVER_CONTROL_STATUS_OK,
+    MDRIVER_CONTROL_VERSION, MDRIVER_DEVICE_FEATURE_BLOCK_FLUSH, MDRIVER_DEVICE_FEATURE_BLOCK_READ,
+    MDRIVER_DEVICE_FEATURE_BLOCK_WRITE, MDRIVER_DEVICE_FEATURE_DISPLAY_TILE,
+    MDRIVER_DEVICE_FEATURE_READ_ONLY, MDRIVER_DEVICE_KIND_BLOCK, MDRIVER_DEVICE_KIND_DISPLAY,
+    MDRIVER_DISPLAY_BUFFER_PAGE, MDRIVER_DISPLAY_MAX_TRANSFER, MDRIVER_DISPLAY_PIXEL_BYTES,
+    MDRIVER_STORAGE_QUERY_PARTITION_GUIDS, MdriverControlRequest, MdriverControlResponse,
 };
 use mnu_abi::shared_ring::{
-    initialize, pop_response, push_request, SharedRingError, SharedRingMessage, SharedRingPage,
+    SharedRingError, SharedRingMessage, SharedRingPage, initialize, pop_response, push_request,
 };
 
 use crate::cext::disk::McxDiskOps;
@@ -42,6 +42,7 @@ const EIO: i32 = -5;
 const ENXIO: i32 = -6;
 const EINVAL: i32 = -22;
 const EROFS: i32 = -30;
+const MOCHIOS_PARTITION_TYPE: [u64; 2] = [0x5300_694f_6d6f_6368, 0x0174_7261_506d_0080];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -95,10 +96,20 @@ struct DisplayCandidate {
     grant_reference: Option<u32>,
 }
 
+const MAX_BLOCK_CANDIDATES: usize = 16;
+
+#[derive(Clone, Copy)]
+struct BlockCandidate {
+    device_id: u32,
+    features: u64,
+}
+
 struct Client {
     ring_address: u64,
     request_id: u64,
     block: Option<BlockState>,
+    install_metadata_reference: Option<u32>,
+    block_candidates: [Option<BlockCandidate>; MAX_BLOCK_CANDIDATES],
     display_candidate: Option<DisplayCandidate>,
     display: Option<DisplayState>,
 }
@@ -112,7 +123,7 @@ pub fn initialize_client() -> Result<Summary, Error> {
     let (grant_start, grant_size) =
         hypervisor_guest::grant_window().ok_or(Error::MissingGrantWindow)?;
     if grant_size
-        < (core::cmp::max(MDRIVER_BLOCK_DATA_PAGE, MDRIVER_DISPLAY_BUFFER_PAGE) + 1) * 4096
+        < (core::cmp::max(MDRIVER_INSTALL_METADATA_PAGE, MDRIVER_DISPLAY_BUFFER_PAGE) + 1) * 4096
     {
         return Err(Error::MissingGrantWindow);
     }
@@ -136,6 +147,8 @@ pub fn initialize_client() -> Result<Summary, Error> {
         ring_address: grant_start,
         request_id: 1,
         block: None,
+        install_metadata_reference: None,
+        block_candidates: [None; MAX_BLOCK_CANDIDATES],
         display_candidate: None,
         display: None,
     };
@@ -162,7 +175,7 @@ pub fn initialize_client() -> Result<Summary, Error> {
     }
 
     let device_count = negotiated.values[2] as u32;
-    let mut block_candidate = None;
+    let mut block_candidate_count = 0usize;
     let mut display_candidate = None;
     let mut cursor = 0_u64;
     for _ in 0..device_count {
@@ -176,8 +189,14 @@ pub fn initialize_client() -> Result<Summary, Error> {
         {
             return Err(Error::Protocol);
         }
-        if response.values[1] == MDRIVER_DEVICE_KIND_BLOCK && block_candidate.is_none() {
-            block_candidate = Some((response.device_id, response.values[3]));
+        if response.values[1] == MDRIVER_DEVICE_KIND_BLOCK
+            && block_candidate_count < MAX_BLOCK_CANDIDATES
+        {
+            client.block_candidates[block_candidate_count] = Some(BlockCandidate {
+                device_id: response.device_id,
+                features: response.values[3],
+            });
+            block_candidate_count += 1;
         }
         if response.values[1] == MDRIVER_DEVICE_KIND_DISPLAY && display_candidate.is_none() {
             display_candidate = Some((response.device_id, response.values[3]));
@@ -213,8 +232,20 @@ pub fn initialize_client() -> Result<Summary, Error> {
         device_count,
         ..Summary::default()
     };
-    if let Some((device_id, features)) = block_candidate {
-        let block = open_block_device(&mut client, grant_start, device_id, features)?;
+    if block_candidate_count != 0 {
+        summary.block_read_only = client.block_candidates[..block_candidate_count]
+            .iter()
+            .flatten()
+            .all(|candidate| candidate.features & MDRIVER_DEVICE_FEATURE_READ_ONLY != 0);
+    }
+    if let Some((candidate, unique_guid)) = find_installed_partition(&mut client)? {
+        let block = open_block_device(
+            &mut client,
+            grant_start,
+            candidate.device_id,
+            candidate.features,
+            Some(unique_guid),
+        )?;
         summary.block_device = true;
         summary.block_read_only = block.features & MDRIVER_DEVICE_FEATURE_READ_ONLY != 0;
         client.block = Some(block);
@@ -233,6 +264,143 @@ pub fn initialize_client() -> Result<Summary, Error> {
         return Err(Error::Device);
     }
     Ok(summary)
+}
+
+fn find_installed_partition(
+    client: &mut Client,
+) -> Result<Option<(BlockCandidate, [u64; 2])>, Error> {
+    let mut selected = None;
+    for candidate_index in 0..MAX_BLOCK_CANDIDATES {
+        let Some(candidate) = client.block_candidates[candidate_index] else {
+            continue;
+        };
+        for ordinal in 0..128_u64 {
+            let response = transact(
+                client,
+                MdriverControlRequest::new(
+                    mnu_abi::mdriver_control::MDRIVER_CONTROL_INSPECT_STORAGE,
+                    candidate.device_id,
+                    [MDRIVER_STORAGE_QUERY_PARTITION_GUIDS, ordinal, 0, 0],
+                ),
+            )?;
+            if response.status == MDRIVER_CONTROL_STATUS_END {
+                break;
+            }
+            if response.status != MDRIVER_CONTROL_STATUS_OK {
+                break;
+            }
+            if [response.values[0], response.values[1]] != MOCHIOS_PARTITION_TYPE {
+                continue;
+            }
+            let found = (candidate, [response.values[2], response.values[3]]);
+            if selected.is_some() {
+                return Ok(None);
+            }
+            selected = Some(found);
+        }
+    }
+    Ok(selected)
+}
+
+pub fn storage_control(
+    operation: u16,
+    device_id: u32,
+    mut arguments: [u64; 4],
+) -> Result<MdriverControlResponse, Error> {
+    use mnu_abi::mdriver_control::{
+        MDRIVER_CONTROL_CREATE_PARTITION, MDRIVER_CONTROL_DELETE_PARTITION,
+        MDRIVER_CONTROL_INSPECT_STORAGE, MDRIVER_CONTROL_INSTALL_PARTITION,
+    };
+
+    if operation == mnu_abi::STORAGE_CONTROL_LIST_DEVICE {
+        let index = usize::try_from(arguments[0]).map_err(|_| Error::Protocol)?;
+        if arguments[1..] != [0; 3] {
+            return Err(Error::Protocol);
+        }
+        let guard = CLIENT.lock();
+        let client = guard.as_ref().ok_or(Error::Device)?;
+        return Ok(match client.block_candidates.iter().flatten().nth(index) {
+            Some(candidate) => MdriverControlResponse::new(
+                operation,
+                MDRIVER_CONTROL_STATUS_OK,
+                candidate.device_id,
+                [candidate.features, 0, 0, 0],
+            ),
+            None => MdriverControlResponse::new(operation, MDRIVER_CONTROL_STATUS_END, 0, [0; 4]),
+        });
+    }
+    if !matches!(
+        operation,
+        MDRIVER_CONTROL_INSPECT_STORAGE
+            | MDRIVER_CONTROL_CREATE_PARTITION
+            | MDRIVER_CONTROL_DELETE_PARTITION
+            | MDRIVER_CONTROL_INSTALL_PARTITION
+    ) {
+        return Err(Error::Protocol);
+    }
+    let mut guard = CLIENT.lock();
+    let client = guard.as_mut().ok_or(Error::Device)?;
+    if client.block.is_some()
+        || !client
+            .block_candidates
+            .iter()
+            .flatten()
+            .any(|candidate| candidate.device_id == device_id)
+    {
+        return Err(Error::Device);
+    }
+    if operation == MDRIVER_CONTROL_INSTALL_PARTITION {
+        if arguments[3] != 0 {
+            return Err(Error::Protocol);
+        }
+        arguments[3] = u64::from(install_metadata_reference(client)?);
+    }
+    transact(
+        client,
+        MdriverControlRequest::new(operation, device_id, arguments),
+    )
+}
+
+fn install_metadata_reference(client: &mut Client) -> Result<u32, Error> {
+    if let Some(reference) = client.install_metadata_reference {
+        return Ok(reference);
+    }
+    let digest = crate::init::fs::kernel_read_initfs("/install/rootfs.sha256")
+        .filter(|bytes| bytes.len() == 32)
+        .ok_or(Error::Protocol)?;
+    let address = client.ring_address + MDRIVER_INSTALL_METADATA_PAGE * 4096;
+    unsafe {
+        core::ptr::write_bytes(address as *mut u8, 0, 4096);
+        copy_nonoverlapping(digest.as_ptr(), address as *mut u8, digest.len());
+    }
+    let reference = hypervisor_guest::invoke(
+        HypercallNumber::GrantCreate,
+        address,
+        u64::from(MDRIVER_DOMAIN_ID),
+        0,
+    );
+    if reference == GRANT_REF_INVALID || reference > u64::from(u32::MAX) {
+        return Err(Error::Hypercall);
+    }
+    let reference = reference as u32;
+    client.install_metadata_reference = Some(reference);
+    Ok(reference)
+}
+
+pub fn block_candidates(out: &mut [(u32, u64)]) -> usize {
+    let guard = CLIENT.lock();
+    let Some(client) = guard.as_ref() else {
+        return 0;
+    };
+    let mut count = 0;
+    for candidate in client.block_candidates.iter().flatten() {
+        if count == out.len() {
+            break;
+        }
+        out[count] = (candidate.device_id, candidate.features);
+        count += 1;
+    }
+    count
 }
 
 fn handshake_port(port: u32) -> Result<(), Error> {
@@ -306,6 +474,7 @@ fn open_block_device(
     grant_start: u64,
     device_id: u32,
     features: u64,
+    partition_guid: Option<[u64; 2]>,
 ) -> Result<BlockState, Error> {
     if features & MDRIVER_DEVICE_FEATURE_BLOCK_READ == 0 {
         return Err(Error::Device);
@@ -320,13 +489,19 @@ fn open_block_device(
     if reference == GRANT_REF_INVALID || reference > u64::from(u32::MAX) {
         return Err(Error::Hypercall);
     }
-    let opened = transact(
-        client,
-        MdriverControlRequest::new(
+    let (operation, arguments) = match partition_guid {
+        Some(guid) => (
+            MDRIVER_CONTROL_OPEN_PARTITION,
+            [reference, MDRIVER_BLOCK_MAX_TRANSFER, guid[0], guid[1]],
+        ),
+        None => (
             MDRIVER_CONTROL_OPEN_DEVICE,
-            device_id,
             [reference, MDRIVER_BLOCK_MAX_TRANSFER, 0, 0],
         ),
+    };
+    let opened = transact(
+        client,
+        MdriverControlRequest::new(operation, device_id, arguments),
     )?;
     let logical_block_size = opened.values[1];
     if opened.status != MDRIVER_CONTROL_STATUS_OK
@@ -558,11 +733,7 @@ fn ensure_display(client: &mut Client) -> Result<DisplayState, Error> {
     }
     let response = transact(
         client,
-        MdriverControlRequest::new(
-            MDRIVER_CONTROL_DISPLAY_INFO,
-            candidate.device_id,
-            [0; 4],
-        ),
+        MdriverControlRequest::new(MDRIVER_CONTROL_DISPLAY_INFO, candidate.device_id, [0; 4]),
     )?;
     let format = response.values[3];
     let width = u32::try_from(response.values[0]).map_err(|_| Error::Protocol)?;
@@ -614,7 +785,11 @@ pub fn present_display(
 ) -> Result<(), Error> {
     let expected = usize::try_from(width)
         .ok()
-        .and_then(|width| usize::try_from(height).ok().and_then(|height| width.checked_mul(height)))
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
         .and_then(|pixels| pixels.checked_mul(MDRIVER_DISPLAY_PIXEL_BYTES as usize))
         .ok_or(Error::Protocol)?;
     if width == 0 || height == 0 || expected != pixels.len() || expected > 4096 {
@@ -623,20 +798,31 @@ pub fn present_display(
     let mut guard = CLIENT.lock();
     let client = guard.as_mut().ok_or(Error::Device)?;
     let display = ensure_display(client)?;
-    if x.checked_add(width).is_none_or(|right| right > display.info.width)
-        || y.checked_add(height).is_none_or(|bottom| bottom > display.info.height)
+    if x.checked_add(width)
+        .is_none_or(|right| right > display.info.width)
+        || y.checked_add(height)
+            .is_none_or(|bottom| bottom > display.info.height)
     {
         return Err(Error::Protocol);
     }
     unsafe {
-        copy_nonoverlapping(pixels.as_ptr(), display.data_address as *mut u8, pixels.len())
+        copy_nonoverlapping(
+            pixels.as_ptr(),
+            display.data_address as *mut u8,
+            pixels.len(),
+        )
     };
     let response = transact(
         client,
         MdriverControlRequest::new(
             MDRIVER_CONTROL_PRESENT_DISPLAY,
             display.device_id,
-            [u64::from(x), u64::from(y), u64::from(width), u64::from(height)],
+            [
+                u64::from(x),
+                u64::from(y),
+                u64::from(width),
+                u64::from(height),
+            ],
         ),
     )?;
     if response.status == MDRIVER_CONTROL_STATUS_OK {
