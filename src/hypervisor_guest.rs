@@ -1,24 +1,47 @@
 use core::arch::asm;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use mnu_abi::hypervisor::{
-    HypercallNumber, HYPERVISOR_BACKEND_AMD_SVM, HYPERVISOR_BACKEND_INTEL_VMX,
+    DomainBootInfo, HypercallNumber, HYPERVISOR_BACKEND_AMD_SVM, HYPERVISOR_BACKEND_INTEL_VMX,
 };
 
 static BACKEND: AtomicU32 = AtomicU32::new(0);
+static DOMAIN_ID: AtomicU32 = AtomicU32::new(0);
+static FEATURE_FLAGS: AtomicU64 = AtomicU64::new(0);
+static GRANT_WINDOW_START: AtomicU64 = AtomicU64::new(0);
+static GRANT_WINDOW_SIZE: AtomicU64 = AtomicU64::new(0);
 
-pub fn configure(backend: u32) -> bool {
+pub fn configure(info: &DomainBootInfo) -> bool {
+    let backend = info.hypervisor_backend;
     if !matches!(
         backend,
         HYPERVISOR_BACKEND_INTEL_VMX | HYPERVISOR_BACKEND_AMD_SVM
     ) {
         return false;
     }
+    DOMAIN_ID.store(info.domain_id, Ordering::Release);
+    FEATURE_FLAGS.store(info.feature_flags, Ordering::Release);
+    GRANT_WINDOW_START.store(info.grant_window_start, Ordering::Release);
+    GRANT_WINDOW_SIZE.store(info.grant_window_size, Ordering::Release);
     BACKEND.store(backend, Ordering::Release);
     true
 }
 
 pub fn is_active() -> bool {
     BACKEND.load(Ordering::Acquire) != 0
+}
+
+pub fn domain_id() -> u32 {
+    DOMAIN_ID.load(Ordering::Acquire)
+}
+
+pub fn feature_flags() -> u64 {
+    FEATURE_FLAGS.load(Ordering::Acquire)
+}
+
+pub fn grant_window() -> Option<(u64, u64)> {
+    let start = GRANT_WINDOW_START.load(Ordering::Acquire);
+    let size = GRANT_WINDOW_SIZE.load(Ordering::Acquire);
+    (start != 0 && size != 0).then_some((start, size))
 }
 
 /// Returns the virtual TSC frequency advertised by mBoot, in kHz.

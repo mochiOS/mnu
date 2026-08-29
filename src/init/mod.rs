@@ -64,7 +64,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     crate::config::init();
     crate::capability::path::init_from_kernel_config();
     if crate::hypervisor_guest::is_active() {
-        crate::info!("Physical storage cexts disabled; waiting for mDriver block backend");
+        initialize_mdriver_storage();
     } else {
         crate::cext::init_runtime_config();
         crate::cext::register_builtin_cext("disk", crate::cext::CextKind::BlockDevice);
@@ -109,4 +109,65 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     crate::syscall::syscall_entry::init_syscall();
 
     Ok(memory_map)
+}
+
+fn initialize_mdriver_storage() {
+    crate::cext::init_runtime_config();
+    let summary = match crate::mdriver::initialize_client() {
+        Ok(summary) => summary,
+        Err(error) => {
+            crate::warn!("mDriver control channel unavailable: {:?}", error);
+            return;
+        }
+    };
+
+    crate::info!(
+        "mDriver control channel ready ({} devices)",
+        summary.device_count
+    );
+    if !summary.block_device {
+        crate::info!("mDriver has not assigned storage to the System Domain");
+        return;
+    }
+
+    // mDriver owns the physical controller. Only the filesystem cext is loaded here;
+    // registering disk.cext would create a second, direct hardware path from mochiOS.
+    crate::cext::register_builtin_cext("ext2", crate::cext::CextKind::Filesystem);
+    crate::cext::load_modules();
+    if !crate::cext::fs::is_loaded() {
+        crate::warn!("mDriver storage: ext2 cext is unavailable");
+        return;
+    }
+    if !crate::cext::disk::is_loaded() {
+        crate::warn!("mDriver storage: block frontend is unavailable");
+        return;
+    }
+
+    let rc = crate::cext::fs::set_disk_ops(crate::cext::disk::serialized_ops_ptr());
+    if rc != 0 {
+        crate::warn!("mDriver storage: fs set_disk_ops failed rc={}", rc);
+        return;
+    }
+    let flags = if summary.block_read_only {
+        crate::cext::fs::MOUNT_READ_ONLY
+    } else {
+        0
+    };
+    let rc = crate::cext::fs::mount(0, flags);
+    if rc != 0 {
+        crate::warn!("mDriver storage: fs mount failed rc={}", rc);
+        return;
+    }
+
+    crate::info!(
+        "mDriver storage mounted ({})",
+        if summary.block_read_only {
+            "read-only"
+        } else {
+            "read-write"
+        }
+    );
+    if !summary.block_read_only {
+        crate::audit::flush_to_disk();
+    }
 }

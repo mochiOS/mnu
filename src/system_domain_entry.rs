@@ -38,7 +38,7 @@ pub unsafe extern "sysv64" fn domain_entry(domain_info_ptr: *const DomainBootInf
         || domain_info.domain_role != DOMAIN_ROLE_SYSTEM
         || domain_info.boot_module_start < KERNEL_RESERVED_END
         || domain_info.boot_module_size == 0
-        || !mnu::hypervisor_guest::configure(domain_info.hypervisor_backend)
+        || !mnu::hypervisor_guest::configure(domain_info)
     {
         halt()
     }

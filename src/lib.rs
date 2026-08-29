@@ -48,6 +48,8 @@ pub mod kernel;
 #[cfg(not(test))]
 /// メモリ管理、GDT、TSSを含む
 pub mod mem;
+#[cfg(not(test))]
+pub mod mdriver;
 
 #[cfg(not(test))]
 /// ELF周り

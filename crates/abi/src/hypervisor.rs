@@ -72,6 +72,7 @@ pub const DOMAIN_CRASH_STATUS_RESTARTED: u32 = 2;
 pub const EVENT_CHANNEL_NO_EVENT: u64 = 0;
 pub const GRANT_REF_INVALID: u64 = 0;
 pub const GRANT_FLAG_WRITABLE: u64 = 1 << 0;
+pub const DOMAIN_DEVICE_ADDRESS_LIMIT: u64 = 1_u64 << 40;
 
 pub const HYPERCALL_SUCCESS: u64 = 0;
 pub const HYPERCALL_UNSUPPORTED: u64 = u64::MAX;
@@ -271,7 +272,7 @@ impl DomainBootInfo {
             || self.device_window_size == 0
             || self.device_window_size & 0xfff != 0
             || self.device_window_start < self.memory_size
-            || device_window_end > (1_u64 << 39)
+            || device_window_end > DOMAIN_DEVICE_ADDRESS_LIMIT
         {
             return Err(DomainBootInfoError::InvalidMemorySize);
         }
