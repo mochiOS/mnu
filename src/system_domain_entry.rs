@@ -8,7 +8,9 @@ use mnu::{
 };
 use mnu_abi::hypervisor::{DomainBootInfo, HypercallNumber, DOMAIN_ROLE_SYSTEM, HYPERCALL_SUCCESS};
 
-const KERNEL_RESERVED_END: u64 = 128 * 1024 * 1024;
+unsafe extern "C" {
+    static __kernel_end: u8;
+}
 
 #[global_allocator]
 static KERNEL_ALLOCATOR: HardenedKernelHeap = HardenedKernelHeap::empty();
@@ -16,11 +18,11 @@ static KERNEL_ALLOCATOR: HardenedKernelHeap = HardenedKernelHeap::empty();
 static mut MEMORY_MAP: [MemoryRegion; 2] = [
     MemoryRegion {
         start: 0,
-        len: KERNEL_RESERVED_END,
+        len: 0,
         region_type: MemoryType::Reserved,
     },
     MemoryRegion {
-        start: KERNEL_RESERVED_END,
+        start: 0,
         len: 0,
         region_type: MemoryType::Usable,
     },
@@ -31,12 +33,13 @@ static mut KERNEL_BOOT_INFO: BootInfo = BootInfo::empty();
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.domain_entry")]
 pub unsafe extern "sysv64" fn domain_entry(domain_info_ptr: *const DomainBootInfo) -> ! {
+    let kernel_reserved_end = core::ptr::addr_of!(__kernel_end) as u64;
     let Some(domain_info) = (unsafe { domain_info_ptr.as_ref() }) else {
         halt()
     };
     if domain_info.validate().is_err()
         || domain_info.domain_role != DOMAIN_ROLE_SYSTEM
-        || domain_info.boot_module_start < KERNEL_RESERVED_END
+        || domain_info.boot_module_start < kernel_reserved_end
         || domain_info.boot_module_size == 0
         || !mnu::hypervisor_guest::configure(domain_info)
     {
@@ -44,7 +47,9 @@ pub unsafe extern "sysv64" fn domain_entry(domain_info_ptr: *const DomainBootInf
     }
 
     unsafe {
-        MEMORY_MAP[1].len = domain_info.boot_module_start - KERNEL_RESERVED_END;
+        MEMORY_MAP[0].len = kernel_reserved_end;
+        MEMORY_MAP[1].start = kernel_reserved_end;
+        MEMORY_MAP[1].len = domain_info.boot_module_start - kernel_reserved_end;
         KERNEL_BOOT_INFO.feature_flags = BOOT_FEATURE_INITFS | BOOT_FEATURE_HYPERVISOR_DOMAIN;
         KERNEL_BOOT_INFO.physical_memory_offset = 0;
         KERNEL_BOOT_INFO.memory_map_addr = core::ptr::addr_of!(MEMORY_MAP) as u64;

@@ -28,6 +28,8 @@ SECTIONS
         *(COMMON)
     }
 
+    __kernel_end = ALIGN(4096);
+
     /DISCARD/ :
     {
         *(.eh_frame .eh_frame_hdr)
