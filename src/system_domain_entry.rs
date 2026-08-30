@@ -4,9 +4,13 @@
 use core::mem::size_of;
 use mnu::mem::allocator::HardenedKernelHeap;
 use mnu::{
-    BootInfo, MemoryRegion, MemoryType, BOOT_FEATURE_HYPERVISOR_DOMAIN, BOOT_FEATURE_INITFS,
+    BootInfo, MemoryRegion, MemoryType, BOOT_FEATURE_FRAMEBUFFER, BOOT_FEATURE_HYPERVISOR_DOMAIN,
+    BOOT_FEATURE_INITFS,
 };
-use mnu_abi::hypervisor::{DomainBootInfo, HypercallNumber, DOMAIN_ROLE_SYSTEM, HYPERCALL_SUCCESS};
+use mnu_abi::hypervisor::{
+    DomainBootInfo, HypercallNumber, DOMAIN_FEATURE_FRAMEBUFFER, DOMAIN_ROLE_SYSTEM,
+    HYPERCALL_SUCCESS,
+};
 
 unsafe extern "C" {
     static __kernel_end: u8;
@@ -15,7 +19,7 @@ unsafe extern "C" {
 #[global_allocator]
 static KERNEL_ALLOCATOR: HardenedKernelHeap = HardenedKernelHeap::empty();
 
-static mut MEMORY_MAP: [MemoryRegion; 2] = [
+static mut MEMORY_MAP: [MemoryRegion; 3] = [
     MemoryRegion {
         start: 0,
         len: 0,
@@ -25,6 +29,11 @@ static mut MEMORY_MAP: [MemoryRegion; 2] = [
         start: 0,
         len: 0,
         region_type: MemoryType::Usable,
+    },
+    MemoryRegion {
+        start: 0,
+        len: 0,
+        region_type: MemoryType::Framebuffer,
     },
 ];
 
@@ -64,6 +73,20 @@ pub unsafe extern "sysv64" fn domain_entry(domain_info_ptr: *const DomainBootInf
         KERNEL_BOOT_INFO.cpu_apic_id_count = 1;
         KERNEL_BOOT_INFO.entropy_seed = domain_info.entropy_seed;
         KERNEL_BOOT_INFO.entropy_seed_valid = domain_info.entropy_seed_valid;
+        if domain_info.feature_flags & DOMAIN_FEATURE_FRAMEBUFFER != 0 {
+            let framebuffer_base = domain_info.framebuffer_addr & !0xfff;
+            let framebuffer_offset = domain_info.framebuffer_addr - framebuffer_base;
+            MEMORY_MAP[2].start = framebuffer_base;
+            MEMORY_MAP[2].len =
+                (domain_info.framebuffer_size + framebuffer_offset + 0xfff) & !0xfff;
+            KERNEL_BOOT_INFO.memory_map_len = 3;
+            KERNEL_BOOT_INFO.feature_flags |= BOOT_FEATURE_FRAMEBUFFER;
+            KERNEL_BOOT_INFO.framebuffer_addr = domain_info.framebuffer_addr;
+            KERNEL_BOOT_INFO.framebuffer_size = domain_info.framebuffer_size;
+            KERNEL_BOOT_INFO.screen_width = u64::from(domain_info.framebuffer_width);
+            KERNEL_BOOT_INFO.screen_height = u64::from(domain_info.framebuffer_height);
+            KERNEL_BOOT_INFO.stride = u64::from(domain_info.framebuffer_stride);
+        }
     }
 
     if mnu::hypervisor_guest::invoke(HypercallNumber::Ready, 0, 0, 0) != HYPERCALL_SUCCESS {

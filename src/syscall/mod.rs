@@ -276,8 +276,6 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
             stride: info.stride,
             format: 1,
         }
-    } else if crate::hypervisor_guest::is_active() {
-        return ENXIO;
     } else if let Some(info) = crate::util::vga::get_info() {
         UserFramebufferInfo {
             addr: info.addr,

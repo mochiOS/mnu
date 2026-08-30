@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 12;
+pub const DOMAIN_BOOT_VERSION: u32 = 13;
 pub const DOMAIN_CRASH_MAGIC: u64 = u64::from_le_bytes(*b"MNUCRSH\0");
 pub const DOMAIN_CRASH_VERSION: u16 = 1;
 
@@ -29,6 +29,10 @@ pub const DOMAIN_FEATURE_DEVICE_RESOURCES: u64 = 1 << 13;
 pub const DOMAIN_FEATURE_DEVICE_ACTIVATION: u64 = 1 << 14;
 pub const DOMAIN_FEATURE_GRANT_QUERY: u64 = 1 << 15;
 pub const DOMAIN_FEATURE_EVENT_POLL: u64 = 1 << 16;
+pub const DOMAIN_FEATURE_FRAMEBUFFER: u64 = 1 << 17;
+
+pub const FRAMEBUFFER_FORMAT_RGB: u32 = 1;
+pub const FRAMEBUFFER_FORMAT_BGR: u32 = 2;
 
 pub const DOMAIN_CAPABILITY_DEVICE_QUERY: u64 = 1 << 0;
 pub const DOMAIN_CAPABILITY_DEVICE_CLAIM: u64 = 1 << 1;
@@ -155,6 +159,14 @@ pub struct DomainBootInfo {
     pub restart_count: u32,
     pub _reserved0: u32,
     pub capabilities: u64,
+    /// System Domainへだけ公開される、UEFI GOP由来の表示領域です。
+    /// アドレスはDomain内のゲスト物理アドレスです。
+    pub framebuffer_addr: u64,
+    pub framebuffer_size: u64,
+    pub framebuffer_width: u32,
+    pub framebuffer_height: u32,
+    pub framebuffer_stride: u32,
+    pub framebuffer_format: u32,
     pub entropy_seed: [u8; 32],
     pub entropy_seed_valid: u8,
     pub _reserved1: [u8; 7],
@@ -212,6 +224,12 @@ impl DomainBootInfo {
             restart_count,
             _reserved0: 0,
             capabilities,
+            framebuffer_addr: 0,
+            framebuffer_size: 0,
+            framebuffer_width: 0,
+            framebuffer_height: 0,
+            framebuffer_stride: 0,
+            framebuffer_format: 0,
             entropy_seed: [0; 32],
             entropy_seed_valid: 0,
             _reserved1: [0; 7],
@@ -221,6 +239,26 @@ impl DomainBootInfo {
     pub const fn with_entropy_seed(mut self, entropy_seed: [u8; 32]) -> Self {
         self.entropy_seed = entropy_seed;
         self.entropy_seed_valid = 1;
+        self
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub const fn with_framebuffer(
+        mut self,
+        address: u64,
+        size: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: u32,
+    ) -> Self {
+        self.feature_flags |= DOMAIN_FEATURE_FRAMEBUFFER;
+        self.framebuffer_addr = address;
+        self.framebuffer_size = size;
+        self.framebuffer_width = width;
+        self.framebuffer_height = height;
+        self.framebuffer_stride = stride;
+        self.framebuffer_format = format;
         self
     }
 
@@ -255,6 +293,39 @@ impl DomainBootInfo {
         }
         if self.feature_flags & DOMAIN_FEATURE_SHUTDOWN == 0 {
             return Err(DomainBootInfoError::MissingRequiredHypercall);
+        }
+        let has_framebuffer = self.feature_flags & DOMAIN_FEATURE_FRAMEBUFFER != 0;
+        let framebuffer_fields_are_zero = self.framebuffer_addr == 0
+            && self.framebuffer_size == 0
+            && self.framebuffer_width == 0
+            && self.framebuffer_height == 0
+            && self.framebuffer_stride == 0
+            && self.framebuffer_format == 0;
+        let framebuffer_end = self
+            .framebuffer_addr
+            .checked_add(self.framebuffer_size)
+            .unwrap_or(u64::MAX);
+        let minimum_size = u64::from(self.framebuffer_stride)
+            .saturating_mul(u64::from(self.framebuffer_height))
+            .saturating_mul(4);
+        if has_framebuffer {
+            if self.domain_role != DOMAIN_ROLE_SYSTEM
+                || self.framebuffer_addr < self.device_window_start
+                || self.framebuffer_size == 0
+                || self.framebuffer_width == 0
+                || self.framebuffer_height == 0
+                || self.framebuffer_stride < self.framebuffer_width
+                || self.framebuffer_size < minimum_size
+                || framebuffer_end > self.device_window_start + self.device_window_size
+                || !matches!(
+                    self.framebuffer_format,
+                    FRAMEBUFFER_FORMAT_RGB | FRAMEBUFFER_FORMAT_BGR
+                )
+            {
+                return Err(DomainBootInfoError::InvalidMemorySize);
+            }
+        } else if !framebuffer_fields_are_zero {
+            return Err(DomainBootInfoError::InvalidStructSize);
         }
         if self.memory_size == 0 || self.memory_size & 0xfff != 0 {
             return Err(DomainBootInfoError::InvalidMemorySize);
@@ -437,7 +508,7 @@ mod tests {
 
     #[test]
     fn domain_boot_info_layout_is_fixed() {
-        assert_eq!(size_of::<DomainBootInfo>(), 152);
+        assert_eq!(size_of::<DomainBootInfo>(), 184);
         assert_eq!(core::mem::align_of::<DomainBootInfo>(), 8);
     }
 
@@ -483,6 +554,62 @@ mod tests {
         assert_eq!(info.validate(), Ok(()));
         info.entropy_seed = [0; 32];
         assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidStructSize));
+    }
+
+    #[test]
+    fn system_domain_accepts_a_bounded_firmware_framebuffer() {
+        let info = DomainBootInfo::new(
+            1,
+            0,
+            HYPERVISOR_BACKEND_INTEL_VMX,
+            DOMAIN_ROLE_SYSTEM,
+            256 * 1024 * 1024,
+            0x0800_0000,
+            0x0100_0000,
+            0x0fff_0000,
+            0x1_0000,
+            0x1000_0000,
+            0x1000_0000,
+            0,
+            0,
+        )
+        .with_framebuffer(
+            0x1000_0000,
+            1920 * 1080 * 4,
+            1920,
+            1080,
+            1920,
+            FRAMEBUFFER_FORMAT_BGR,
+        );
+        assert_eq!(info.validate(), Ok(()));
+    }
+
+    #[test]
+    fn hardware_domain_cannot_receive_the_firmware_framebuffer() {
+        let info = DomainBootInfo::new(
+            2,
+            0,
+            HYPERVISOR_BACKEND_INTEL_VMX,
+            DOMAIN_ROLE_HARDWARE,
+            128 * 1024 * 1024,
+            0,
+            0,
+            0x07ff_0000,
+            0x1_0000,
+            0x1000_0000,
+            0x1000_0000,
+            0,
+            0,
+        )
+        .with_framebuffer(
+            0x1000_0000,
+            1024 * 768 * 4,
+            1024,
+            768,
+            1024,
+            FRAMEBUFFER_FORMAT_BGR,
+        );
+        assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidMemorySize));
     }
 
     #[test]
