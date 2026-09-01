@@ -1,4 +1,6 @@
 use crate::interrupt::spinlock::{SpinLock, SpinLockGuard};
+use alloc::alloc::{alloc, Layout};
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -522,7 +524,7 @@ impl ExternalPages {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct Message {
     from: u64,
     to: u64,
@@ -551,13 +553,13 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct Mailbox {
     head: usize,
     tail: usize,
     count: usize,
     queue: [u8; MAILBOX_CAP],
-    slots: [Message; MAILBOX_CAP],
+    slots: [Option<Box<Message>>; MAILBOX_CAP],
     free: [u8; MAILBOX_CAP],
     free_count: usize,
     /// メッセージ待ちでスリープ中のスレッドID (0=なし)
@@ -578,7 +580,7 @@ impl Mailbox {
             tail: 0,
             count: 0,
             queue: [0; MAILBOX_CAP],
-            slots: [Message::empty(); MAILBOX_CAP],
+            slots: [const { None }; MAILBOX_CAP],
             free,
             free_count: MAILBOX_CAP,
             waiter: 0,
@@ -590,12 +592,22 @@ impl Mailbox {
         if self.free_count == 0 || self.count >= ipc_mailbox_cap() {
             return None;
         }
+        let message = allocate_message()?;
         self.free_count -= 1;
-        Some(self.free[self.free_count] as usize)
+        let idx = self.free[self.free_count] as usize;
+        if idx >= MAILBOX_CAP || self.slots[idx].is_some() {
+            self.quarantine("ipc mailbox free list points to an occupied slot");
+            return None;
+        }
+        self.slots[idx] = Some(message);
+        Some(idx)
     }
 
     fn quarantine(&mut self, reason: &'static str) {
         crate::audit::log(crate::audit::AuditEventKind::Quarantine, reason);
+        for message in self.slots.iter_mut().filter_map(Option::take) {
+            wipe_message(message);
+        }
         *self = Self::new();
     }
 
@@ -615,7 +627,11 @@ impl Mailbox {
             }
         }
 
-        self.slots[idx] = Message::empty();
+        let Some(message) = self.slots[idx].take() else {
+            self.quarantine("ipc mailbox slot missing during free");
+            return false;
+        };
+        wipe_message(message);
         self.free[self.free_count] = idx as u8;
         self.free_count += 1;
         true
@@ -658,7 +674,10 @@ impl Mailbox {
             Some(i) => i,
             None => return Err(()),
         };
-        let msg = &mut self.slots[slot_idx];
+        let Some(msg) = self.slots[slot_idx].as_deref_mut() else {
+            self.quarantine("ipc mailbox allocated slot is missing");
+            return Err(());
+        };
         msg.from = from;
         msg.to = to;
         msg.to_slot = to_slot;
@@ -686,7 +705,10 @@ impl Mailbox {
         out: &mut [u8],
     ) -> Option<(u64, usize, ExternalPages, bool)> {
         while let Some(slot_idx) = self.dequeue_slot() {
-            let msg = &self.slots[slot_idx];
+            let Some(msg) = self.slots[slot_idx].as_deref() else {
+                self.quarantine("ipc mailbox queue points to an empty slot");
+                return None;
+            };
             if msg.to == receiver
                 && msg.to_slot == receiver_slot
                 && msg.to_generation == receiver_generation
@@ -738,7 +760,10 @@ impl Mailbox {
         let original = self.count;
         for _ in 0..original {
             let slot_idx = self.dequeue_slot()?;
-            let msg = &self.slots[slot_idx];
+            let Some(msg) = self.slots[slot_idx].as_deref() else {
+                self.quarantine("ipc mailbox queue points to an empty slot");
+                return None;
+            };
             if msg.from != sender
                 || msg.to != receiver
                 || msg.to_slot != receiver_slot
@@ -782,7 +807,10 @@ impl Mailbox {
         let original = self.count;
         for _ in 0..original {
             let slot_idx = self.dequeue_slot()?;
-            let msg = &self.slots[slot_idx];
+            let Some(msg) = self.slots[slot_idx].as_deref() else {
+                self.quarantine("ipc mailbox queue points to an empty slot");
+                return None;
+            };
             if msg.to != receiver
                 || msg.to_slot != receiver_slot
                 || msg.to_generation != receiver_generation
@@ -818,7 +846,32 @@ impl Mailbox {
     }
 }
 
-static MAILBOXES: SpinLock<[Mailbox; MAX_THREADS]> = SpinLock::new([Mailbox::new(); MAX_THREADS]);
+fn wipe_message(mut message: Box<Message>) {
+    // The volatile replacement keeps message contents from surviving in a
+    // reusable kernel heap allocation after the queue releases them.
+    unsafe {
+        core::ptr::write_volatile(message.as_mut(), Message::empty());
+    }
+}
+
+fn allocate_message() -> Option<Box<Message>> {
+    let layout = Layout::new::<Message>();
+    // SAFETY: The returned pointer is checked before it is initialized and
+    // converted into a Box with the same global allocator and layout.
+    let pointer = unsafe { alloc(layout) }.cast::<Message>();
+    if pointer.is_null() {
+        return None;
+    }
+    // SAFETY: `pointer` is non-null, suitably aligned for Message, and owns one
+    // allocation of exactly `Layout::new::<Message>()` bytes.
+    unsafe {
+        pointer.write(Message::empty());
+        Some(Box::from_raw(pointer))
+    }
+}
+
+static MAILBOXES: SpinLock<[Mailbox; MAX_THREADS]> =
+    SpinLock::new([const { Mailbox::new() }; MAX_THREADS]);
 
 #[inline]
 fn lock_mailboxes() -> SpinLockGuard<'static, [Mailbox; MAX_THREADS]> {
@@ -894,8 +947,14 @@ pub fn send_pages_from_kernel(
         .unwrap_or(0);
     let mut boxes = lock_mailboxes();
     boxes.get_mut(idx).map_or(false, |mb| {
+        if 16 > ipc_max_msg_size() {
+            return false;
+        }
         if let Some(slot_idx) = mb.alloc_slot() {
-            let msg = &mut mb.slots[slot_idx];
+            let Some(msg) = mb.slots[slot_idx].as_deref_mut() else {
+                mb.quarantine("ipc mailbox allocated slot is missing");
+                return false;
+            };
             msg.from = sender;
             msg.to = dest_thread_id;
             msg.to_slot = idx as u16;
@@ -904,16 +963,9 @@ pub fn send_pages_from_kernel(
             msg.expects_reply = false;
             // serialize map_start, total only.
             // 物理ページ配列は data に露出させず ext_pages 側だけに保持する。
-            let mut off = 0usize;
-            if 16 > ipc_max_msg_size() {
-                let _ = mb.free_slot(slot_idx);
-                return false;
-            }
-            msg.data[off..off + 8].copy_from_slice(&map_start.to_le_bytes());
-            off += 8;
-            msg.data[off..off + 8].copy_from_slice(&(total).to_le_bytes());
-            off += 8;
-            msg.len = off;
+            msg.data[0..8].copy_from_slice(&map_start.to_le_bytes());
+            msg.data[8..16].copy_from_slice(&total.to_le_bytes());
+            msg.len = 16;
             msg.ext_pages = ExternalPages::empty();
             msg.ext_pages.count = pages.len() as u32;
             msg.ext_pages.total = total;
@@ -964,18 +1016,20 @@ fn send_virtual_pages_from_kernel(
         .unwrap_or(0);
     let mut boxes = lock_mailboxes();
     boxes.get_mut(idx).map_or(false, |mb| {
+        if 16 > ipc_max_msg_size() {
+            return false;
+        }
         if let Some(slot_idx) = mb.alloc_slot() {
-            let msg = &mut mb.slots[slot_idx];
+            let Some(msg) = mb.slots[slot_idx].as_deref_mut() else {
+                mb.quarantine("ipc mailbox allocated slot is missing");
+                return false;
+            };
             msg.from = sender;
             msg.to = dest_thread_id;
             msg.to_slot = idx as u16;
             msg.to_generation = dest_generation;
             msg.is_reply = false;
             msg.expects_reply = false;
-            if 16 > ipc_max_msg_size() {
-                let _ = mb.free_slot(slot_idx);
-                return false;
-            }
             msg.data[0..8].copy_from_slice(&map_start.to_le_bytes());
             msg.data[8..16].copy_from_slice(&total.to_le_bytes());
             msg.len = 16;
@@ -1018,8 +1072,14 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
         .unwrap_or(0);
     let mut boxes = lock_mailboxes();
     boxes.get_mut(idx).map_or(false, |mb| {
+        if 20 > ipc_max_msg_size() {
+            return false;
+        }
         if let Some(slot_idx) = mb.alloc_slot() {
-            let msg = &mut mb.slots[slot_idx];
+            let Some(msg) = mb.slots[slot_idx].as_deref_mut() else {
+                mb.quarantine("ipc mailbox allocated slot is missing");
+                return false;
+            };
             msg.from = sender;
             msg.to = dest_thread_id;
             msg.to_slot = idx as u16;
@@ -1028,10 +1088,6 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
             msg.expects_reply = false;
             // New format: [magic:u32][map_start:u64][total:u64] (20 bytes)
             let mut off = 0usize;
-            if 20 > ipc_max_msg_size() {
-                let _ = mb.free_slot(slot_idx);
-                return false;
-            }
             msg.data[off..off + 4].copy_from_slice(&MAP_HEADER_MAGIC.to_le_bytes());
             off += 4;
             msg.data[off..off + 8].copy_from_slice(&map_start.to_le_bytes());
