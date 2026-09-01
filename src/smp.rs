@@ -28,6 +28,16 @@ static SMP_HANDOFF_ADDR: AtomicU64 = AtomicU64::new(0);
 static TRAMPOLINE_PHYS: AtomicU64 = AtomicU64::new(0);
 static TRAMPOLINE_SIZE: AtomicUsize = AtomicUsize::new(0);
 static APIC_TIMER_INITIAL_COUNT: AtomicU64 = AtomicU64::new(0);
+static AP_BOOT_STACK_STATE: [AtomicU64; crate::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::percpu::MAX_CPUS];
+const AP_BOOT_STACK_RELEASED: u64 = 1;
+
+#[derive(Clone, Copy)]
+struct ApBootStack {
+    first_frame: PhysFrame<Size4KiB>,
+    page_count: usize,
+    top: u64,
+}
 
 #[derive(Clone, Copy)]
 struct TrampolineLayout {
@@ -48,22 +58,61 @@ struct TrampolineLayout {
 
 static TRAMPOLINE_LAYOUT: Once<TrampolineLayout> = Once::new();
 
-fn allocate_ap_boot_stack() -> Option<u64> {
+fn allocate_ap_boot_stack() -> Option<ApBootStack> {
     let page_count = AP_BOOT_STACK_SIZE.checked_add(0xfff)? / 0x1000;
-    let frame = crate::mem::frame::allocate_contiguous_frames(page_count).ok()?;
-    let stack_start = frame
+    let first_frame = crate::mem::frame::allocate_contiguous_frames(page_count).ok()?;
+    let stack_start = first_frame
         .start_address()
         .as_u64()
         .checked_add(crate::mem::paging::physical_memory_offset()?)?;
-    // SAFETY: The frame allocator has reserved `page_count` contiguous frames
-    // for this AP. They remain reserved after startup because the BSP cannot
-    // prove that a late AP has stopped using its bootstrap stack.
+    // SAFETY: The frame allocator reserved `page_count` contiguous frames for
+    // this AP, and no other CPU can observe them before the trampoline is
+    // patched below.
     unsafe {
         (stack_start as *mut u8).write_bytes(0, AP_BOOT_STACK_SIZE);
     }
-    stack_start
+    let top = stack_start
         .checked_add(AP_BOOT_STACK_SIZE as u64)
-        .map(|top| top & !0xf)
+        .map(|top| top & !0xf)?;
+    Some(ApBootStack {
+        first_frame,
+        page_count,
+        top,
+    })
+}
+
+fn free_ap_boot_stack(stack: ApBootStack) {
+    let first_phys = stack.first_frame.start_address().as_u64();
+    for page_index in 0..stack.page_count {
+        let phys = first_phys + (page_index as u64) * 0x1000;
+        let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys));
+        if let Err(err) = crate::mem::frame::deallocate_frame(frame) {
+            crate::warn!(
+                "AP boot stack frame release failed at {:#x}: {:?}",
+                phys,
+                err
+            );
+        }
+    }
+}
+
+pub(crate) fn register_current_ap_boot_stack(stack_top: u64) {
+    debug_assert_eq!(stack_top & AP_BOOT_STACK_RELEASED, 0);
+    AP_BOOT_STACK_STATE[crate::percpu::current_cpu_id()].store(stack_top, Ordering::Release);
+}
+
+pub(crate) fn mark_current_ap_boot_stack_released() {
+    let cpu_id = crate::percpu::current_cpu_id();
+    AP_BOOT_STACK_STATE[cpu_id].fetch_or(AP_BOOT_STACK_RELEASED, Ordering::Release);
+}
+
+fn take_released_ap_boot_stack(stack_top: u64) -> bool {
+    let released_state = stack_top | AP_BOOT_STACK_RELEASED;
+    AP_BOOT_STACK_STATE.iter().any(|state| {
+        state
+            .compare_exchange(released_state, 0, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    })
 }
 
 global_asm!(
@@ -135,6 +184,7 @@ __mochi_ap_trampoline_lm64_entry:
     mov rsp, qword ptr [rbx]
     sub rsp, 8
     mov rdi, qword ptr [rbx - 16]
+    mov rsi, qword ptr [rbx]
     mov rax, qword ptr [rbx - 8]
     jmp rax
 
@@ -749,7 +799,7 @@ pub fn start_secondary_cpus() {
             continue;
         }
 
-        let Some(stack_top) = allocate_ap_boot_stack() else {
+        let Some(boot_stack) = allocate_ap_boot_stack() else {
             crate::warn!("AP boot stack allocation failed for APIC ID {}", apic_id);
             continue;
         };
@@ -762,10 +812,11 @@ pub fn start_secondary_cpus() {
         );
 
         unsafe {
-            write_trampoline_field(trampoline_virt, layout.stack_top_off, stack_top);
+            write_trampoline_field(trampoline_virt, layout.stack_top_off, boot_stack.top);
         }
         if !start_ap(apic_id, vector) {
             crate::warn!("APIC IPI start failed for APIC ID {}", apic_id);
+            free_ap_boot_stack(boot_stack);
             continue;
         }
 
@@ -780,6 +831,25 @@ pub fn start_secondary_cpus() {
                     after
                 );
                 started += 1;
+                let release_start_tick = crate::interrupt::timer::get_ticks();
+                let released = loop {
+                    if take_released_ap_boot_stack(boot_stack.top) {
+                        break true;
+                    }
+                    if crate::interrupt::timer::get_ticks().saturating_sub(release_start_tick) > 250
+                    {
+                        crate::warn!(
+                            "APIC ID {} did not release bootstrap stack at {:#x}; retaining it",
+                            apic_id,
+                            boot_stack.top
+                        );
+                        break false;
+                    }
+                    core::hint::spin_loop();
+                };
+                if released {
+                    free_ap_boot_stack(boot_stack);
+                }
                 break;
             }
             if crate::interrupt::timer::get_ticks().saturating_sub(start_tick) > 250 {

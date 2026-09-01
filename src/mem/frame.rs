@@ -35,6 +35,8 @@ pub struct BitmapFrameAllocator {
     free_cookie_seed: u64,
     /// HHDM オフセット（phys → virt 変換用）
     phys_offset: u64,
+    /// `phys_offset == 0` もidentity mappingとして有効なので、初期化状態は分けて持つ。
+    phys_mapping_ready: bool,
 }
 
 const FRAME_QUARANTINE_CAP: usize = 32;
@@ -56,6 +58,7 @@ impl BitmapFrameAllocator {
             quarantine_len: 0,
             free_cookie_seed: seed,
             phys_offset,
+            phys_mapping_ready: false,
         }
     }
 
@@ -69,7 +72,7 @@ impl BitmapFrameAllocator {
     }
 
     fn frame_meta_ptr(&self, phys_addr: u64) -> Option<*mut u64> {
-        if self.phys_offset == 0 {
+        if !self.phys_mapping_ready {
             return None;
         }
         Some((phys_addr + self.phys_offset) as *mut u64)
@@ -151,14 +154,21 @@ impl BitmapFrameAllocator {
 
     pub fn deallocate_frame(&mut self, frame: PhysFrame) -> bool {
         let phys_addr = frame.start_address().as_u64();
-        if phys_addr & 0xfff != 0 || !self.is_usable_frame_addr(phys_addr) {
+        if phys_addr & 0xfff != 0 {
             crate::audit::log(
                 crate::audit::AuditEventKind::Memory,
                 "frame deallocation rejected",
             );
             return false;
         }
-        if self.phys_offset == 0 {
+        if !self.is_usable_frame_addr(phys_addr) {
+            crate::audit::log(
+                crate::audit::AuditEventKind::Memory,
+                "frame deallocation rejected",
+            );
+            return false;
+        }
+        if !self.phys_mapping_ready {
             return false;
         }
         let expected_cookie = self.free_cookie(phys_addr);
@@ -307,6 +317,7 @@ pub fn init(memory_map: &'static [MemoryRegion]) {
 pub fn set_phys_offset(offset: u64) {
     if let Some(alloc) = FRAME_ALLOCATOR.lock().as_mut() {
         alloc.phys_offset = offset;
+        alloc.phys_mapping_ready = true;
     }
 }
 

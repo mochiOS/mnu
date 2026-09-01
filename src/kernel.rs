@@ -28,6 +28,7 @@ fn kernel_process_id() -> Option<task::ProcessId> {
 }
 
 fn ap_idle_loop() -> ! {
+    crate::smp::mark_current_ap_boot_stack_released();
     loop {
         task::schedule_and_switch();
         x86_64::instructions::hlt();
@@ -190,11 +191,12 @@ pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo) -> ! {
+pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo, boot_stack_top: u64) -> ! {
     let Some(boot_info) = (unsafe { boot_info.as_ref() }) else {
         halt_forever();
     };
     crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
+    crate::smp::register_current_ap_boot_stack(boot_stack_top);
     info!(
         "Secondary CPU entering kernel: boot_info={:#x} handoff={:#x}",
         boot_info as *const BootInfo as u64, boot_info.smp_handoff_addr
@@ -242,7 +244,7 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo) -> ! {
 
 #[used]
 #[unsafe(no_mangle)]
-pub static SECONDARY_CPU_ENTRY: unsafe extern "sysv64" fn(*const BootInfo) -> ! =
+pub static SECONDARY_CPU_ENTRY: unsafe extern "sysv64" fn(*const BootInfo, u64) -> ! =
     secondary_cpu_entry;
 
 /// カーネルメインプロセスの作成
