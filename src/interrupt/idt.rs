@@ -767,6 +767,7 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
+    crate::performance::increment(crate::performance::CounterMetric::PageFaults, 1);
     use x86_64::registers::control::Cr2;
     use x86_64::VirtAddr;
 

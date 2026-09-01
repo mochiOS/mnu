@@ -574,7 +574,10 @@ pub fn last_syscall_snapshot() -> (u64, [u64; 5]) {
 /// システムコールのディスパッチ
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
     record_syscall(num, arg0, arg1, arg2, arg3, arg4);
-    match num {
+    #[cfg(feature = "performance-instrumentation")]
+    let latency = vfs_latency_metric(num).map(|metric| (metric, crate::performance::timestamp()));
+
+    let result = match num {
         x if x == SyscallNumber::ProcessExit as u64 => process::exit(arg0),
         x if x == SyscallNumber::ProcessSpawn as u64 => process::spawn(arg0, arg1),
         x if x == SyscallNumber::ServiceSpawn as u64 => ENOSYS,
@@ -713,6 +716,37 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Chdir as u64 => fs::chdir(arg0),
         x if x == SyscallNumber::Getcwd as u64 => fs::getcwd(arg0, arg1),
         _ => ENOSYS,
+    };
+
+    #[cfg(feature = "performance-instrumentation")]
+    if let Some((metric, start)) = latency {
+        crate::performance::record_latency(metric, start);
+    }
+
+    result
+}
+
+#[cfg(feature = "performance-instrumentation")]
+fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
+    use crate::performance::LatencyMetric;
+
+    match num {
+        x if x == SyscallNumber::Open as u64
+            || x == SyscallNumber::FileOpen as u64
+            || x == SyscallNumber::FileOpenAt as u64 => Some(LatencyMetric::VfsOpen),
+        x if x == SyscallNumber::Read as u64 || x == SyscallNumber::FileRead as u64 => {
+            Some(LatencyMetric::VfsRead)
+        }
+        x if x == SyscallNumber::Write as u64 || x == SyscallNumber::FileWrite as u64 => {
+            Some(LatencyMetric::VfsWrite)
+        }
+        x if x == SyscallNumber::Close as u64 || x == SyscallNumber::FileClose as u64 => {
+            Some(LatencyMetric::VfsClose)
+        }
+        x if x == SyscallNumber::FileStat as u64
+            || x == SyscallNumber::FileStatAt as u64
+            || x == SyscallNumber::FileFstat as u64 => Some(LatencyMetric::VfsStat),
+        _ => None,
     }
 }
 

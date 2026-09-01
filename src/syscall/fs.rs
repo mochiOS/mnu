@@ -645,7 +645,10 @@ fn normalize_path(path: &str) -> String {
 
 /// プロセスの CWD を基に相対パスを絶対パスへ解決する
 fn resolve_path(pid_raw: u64, path: &str) -> String {
-    if path.starts_with('/') {
+    #[cfg(feature = "performance-instrumentation")]
+    let start = crate::performance::timestamp();
+
+    let resolved = if path.starts_with('/') {
         normalize_path(path)
     } else {
         let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
@@ -656,7 +659,12 @@ fn resolve_path(pid_raw: u64, path: &str) -> String {
         })
         .unwrap_or_else(|| "/".to_string());
         normalize_path(&alloc::format!("{}/{}", cwd.trim_end_matches('/'), path))
-    }
+    };
+
+    #[cfg(feature = "performance-instrumentation")]
+    crate::performance::record_latency(crate::performance::LatencyMetric::VfsPathLookup, start);
+
+    resolved
 }
 
 const O_ACCMODE: u64 = 0o3;

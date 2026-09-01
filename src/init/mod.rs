@@ -71,6 +71,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     crate::performance::mark_boot(crate::performance::BootMilestone::EarlyMemoryReady);
 
     fs::init();
+    crate::performance::mark_boot(crate::performance::BootMilestone::FilesystemMounted);
     crate::config::init();
     crate::capability::path::init_from_kernel_config();
     if crate::hypervisor_guest::is_active() {

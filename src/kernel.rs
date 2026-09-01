@@ -153,6 +153,8 @@ fn kernel_main() -> ! {
     }
 
     // カーネルはアイドル状態に入る
+    crate::performance::mark_boot(crate::performance::BootMilestone::SystemServicesStarted);
+    crate::performance::mark_boot(crate::performance::BootMilestone::Idle);
     info!("Kernel initialization complete. Entering idle loop...");
     loop {
         x86_64::instructions::hlt();

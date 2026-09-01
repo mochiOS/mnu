@@ -20,6 +20,7 @@ static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 /// ## Arguments
 /// - `_stack_frame`: 割り込み発生時のスタックフレーム
 pub extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
+    crate::performance::increment(crate::performance::CounterMetric::TimerInterrupts, 1);
     let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(
         stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3,
     );
@@ -51,6 +52,7 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: Interrupt
 
 /// Per-CPU Local APIC timer handler used by secondary processors.
 pub extern "x86-interrupt" fn local_timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
+    crate::performance::increment(crate::performance::CounterMetric::TimerInterrupts, 1);
     let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(
         stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3,
     );
