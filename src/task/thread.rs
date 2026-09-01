@@ -262,28 +262,20 @@ pub struct Thread {
 
 // Simple kernel stack pool for creating kernel stacks for threads
 const KSTACK_SLOT_BYTES: usize = 4096 * 16;
-const KSTACK_POOL_SIZE: usize = 4096 * 4096;
 const KSTACK_PAGE_BYTES: usize = 4096;
 const KSTACK_GUARD_BYTES: usize = KSTACK_PAGE_BYTES;
+const KSTACK_SLOT_STRIDE: usize = KSTACK_GUARD_BYTES + KSTACK_SLOT_BYTES;
+const KSTACK_SLOT_COUNT: usize = ThreadQueue::MAX_THREADS;
+const KSTACK_POOL_SIZE: usize = KSTACK_SLOT_STRIDE * KSTACK_SLOT_COUNT;
 
-/// 解放済みカーネルスタックのフリーリスト
-/// 各エントリは guard_addr（= スタックベース - KSTACK_GUARD_BYTES）を格納。0 = 空き
-const KSTACK_FREE_LIST_CAP: usize = 32;
-static KSTACK_FREE_LIST: SpinLock<[u64; KSTACK_FREE_LIST_CAP]> =
-    SpinLock::new([0u64; KSTACK_FREE_LIST_CAP]);
+const _: () = assert!(KSTACK_SLOT_COUNT <= u64::BITS as usize);
 
 #[repr(align(4096))]
 struct KernelStackPool([u8; KSTACK_POOL_SIZE]);
 
 static KSTACK_POOL: SpinLock<KernelStackPool> =
     SpinLock::new(KernelStackPool([0; KSTACK_POOL_SIZE]));
-static NEXT_KSTACK_OFFSET: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-
-fn kstack_free_list_contains(guard_addr: u64) -> bool {
-    let list = KSTACK_FREE_LIST.lock();
-    list.iter().any(|slot| *slot == guard_addr)
-}
+static KSTACK_USED_SLOTS: SpinLock<u64> = SpinLock::new(0);
 
 fn unmap_guard_page(guard_addr: u64) -> bool {
     use x86_64::structures::paging::mapper::TranslateError;
@@ -353,52 +345,38 @@ fn unmap_guard_page(guard_addr: u64) -> bool {
 }
 
 /// カーネルスタックを内部プールから割り当てます。
-/// 全スレッドで固定長スロットを使い、フリーリストの異なるサイズ間での再利用を防ぐ。
-/// フリーリストに空きがあれば再利用し、なければバンプアロケータから新規割り当て。
+/// 全スレッドで固定長スロットを使い、異なるサイズ間での再利用を防ぐ。
 /// Returns base address (bottom) of stack.
 pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
     if size == 0 || size > KSTACK_SLOT_BYTES {
         return None;
     }
 
-    // フリーリストから再利用を試みる（guard ページは既に unmap 済み）
-    {
-        let mut list = KSTACK_FREE_LIST.lock();
-        for slot in list.iter_mut() {
-            if *slot != 0 {
-                let guard_addr = *slot;
-                *slot = 0;
-                crate::debug!(
-                    "allocate_kernel_stack: reused from free list at {:#x}",
-                    guard_addr
-                );
-                return guard_addr.checked_add(KSTACK_GUARD_BYTES as u64);
-            }
+    let slot_index = {
+        let mut used = KSTACK_USED_SLOTS.lock();
+        let free = !*used;
+        if free == 0 {
+            return None;
         }
-    }
-
-    // バンプアロケータから新規割り当て
-    let alloc_size = KSTACK_SLOT_BYTES.checked_add(KSTACK_GUARD_BYTES)?;
-    let off = NEXT_KSTACK_OFFSET.fetch_add(alloc_size, core::sync::atomic::Ordering::SeqCst);
-    if off + alloc_size > KSTACK_POOL_SIZE {
-        crate::debug!(
-            "allocate_kernel_stack: pool exhausted, need {}, have {}",
-            off + alloc_size,
-            KSTACK_POOL_SIZE
-        );
-        return None;
-    }
+        let index = free.trailing_zeros() as usize;
+        *used |= 1u64 << index;
+        index
+    };
 
     let pool_base = {
         let pool = KSTACK_POOL.lock();
         pool.0.as_ptr() as u64
     };
-    let guard_addr = pool_base.checked_add(off as u64)?;
+    let Some(guard_addr) = pool_base.checked_add((slot_index * KSTACK_SLOT_STRIDE) as u64) else {
+        *KSTACK_USED_SLOTS.lock() &= !(1u64 << slot_index);
+        return None;
+    };
     crate::debug!(
         "allocate_kernel_stack: allocated from pool at {:#x}, calling unmap_guard_page",
         guard_addr
     );
     if !unmap_guard_page(guard_addr) {
+        *KSTACK_USED_SLOTS.lock() &= !(1u64 << slot_index);
         crate::debug!(
             "allocate_kernel_stack: unmap_guard_page failed at {:#x}",
             guard_addr
@@ -435,7 +413,25 @@ pub fn free_kernel_stack(base: u64) {
         );
         return;
     }
-    if kstack_free_list_contains(guard_addr) {
+    let offset = (guard_addr - pool_base) as usize;
+    if offset % KSTACK_SLOT_STRIDE != 0 {
+        crate::audit::log(
+            crate::audit::AuditEventKind::Fault,
+            "unaligned kernel stack free rejected",
+        );
+        return;
+    }
+    let slot_index = offset / KSTACK_SLOT_STRIDE;
+    if slot_index >= KSTACK_SLOT_COUNT {
+        crate::audit::log(
+            crate::audit::AuditEventKind::Fault,
+            "kernel stack slot free rejected",
+        );
+        return;
+    }
+    let mut used = KSTACK_USED_SLOTS.lock();
+    let bit = 1u64 << slot_index;
+    if (*used & bit) == 0 {
         crate::warn!(
             "free_kernel_stack: double free detected at {:#x}",
             guard_addr
@@ -446,14 +442,7 @@ pub fn free_kernel_stack(base: u64) {
         );
         return;
     }
-    let mut list = KSTACK_FREE_LIST.lock();
-    for slot in list.iter_mut() {
-        if *slot == 0 {
-            *slot = guard_addr;
-            return;
-        }
-    }
-    // フリーリストが満杯の場合はリークさせる（通常は発生しない）
+    *used &= !bit;
 }
 
 impl Thread {
