@@ -23,18 +23,69 @@ struct Ring0Stack {
     _bytes: [u8; RING0_STACK_SIZE],
 }
 
+#[derive(Clone, Copy)]
+struct CpuStacks {
+    ist_start: u64,
+    ring0_start: u64,
+}
+
 static TSS: [Once<TaskStateSegment>; crate::percpu::MAX_CPUS] =
     [const { Once::new() }; crate::percpu::MAX_CPUS];
-static mut IST_STACKS: [IstStack; crate::percpu::MAX_CPUS] = [const {
-    IstStack {
-        _bytes: [0; IST_STACK_SIZE],
+static CPU_STACKS: [Once<CpuStacks>; crate::percpu::MAX_CPUS] =
+    [const { Once::new() }; crate::percpu::MAX_CPUS];
+static mut BSP_IST_STACK: IstStack = IstStack {
+    _bytes: [0; IST_STACK_SIZE],
+};
+static mut BSP_RING0_STACK: Ring0Stack = Ring0Stack {
+    _bytes: [0; RING0_STACK_SIZE],
+};
+
+fn halt_on_stack_allocation_failure() -> ! {
+    crate::audit::log(
+        crate::audit::AuditEventKind::Fault,
+        "TSS stack allocation failed",
+    );
+    crate::warn!("TSS stack allocation failed");
+    x86_64::instructions::interrupts::disable();
+    loop {
+        x86_64::instructions::hlt();
     }
-}; crate::percpu::MAX_CPUS];
-static mut RING0_STACKS: [Ring0Stack; crate::percpu::MAX_CPUS] = [const {
-    Ring0Stack {
-        _bytes: [0; RING0_STACK_SIZE],
+}
+
+fn allocate_stack(size: usize) -> Option<u64> {
+    let page_count = size.checked_add(4095)? / 4096;
+    let frame = crate::mem::frame::allocate_contiguous_frames(page_count).ok()?;
+    let pointer = frame
+        .start_address()
+        .as_u64()
+        .checked_add(crate::mem::paging::physical_memory_offset()?)? as *mut u8;
+    // SAFETY: The contiguous frames are owned permanently by this CPU's TSS,
+    // and the HHDM pointer spans at least `size` writable bytes.
+    unsafe {
+        pointer.write_bytes(0, size);
     }
-}; crate::percpu::MAX_CPUS];
+    Some(pointer as u64)
+}
+
+fn cpu_stacks(cpu: usize) -> CpuStacks {
+    if cpu == 0 {
+        return CpuStacks {
+            ist_start: core::ptr::addr_of_mut!(BSP_IST_STACK) as u64,
+            ring0_start: core::ptr::addr_of_mut!(BSP_RING0_STACK) as u64,
+        };
+    }
+
+    *CPU_STACKS[cpu].call_once(|| {
+        let ist_start =
+            allocate_stack(IST_STACK_SIZE).unwrap_or_else(|| halt_on_stack_allocation_failure());
+        let ring0_start =
+            allocate_stack(RING0_STACK_SIZE).unwrap_or_else(|| halt_on_stack_allocation_failure());
+        CpuStacks {
+            ist_start,
+            ring0_start,
+        }
+    })
+}
 
 /// TSSを初期化して返す
 ///
@@ -47,10 +98,11 @@ pub fn init() -> &'static TaskStateSegment {
     let cpu = crate::percpu::current_cpu_id();
     TSS[cpu].call_once(|| {
         let mut tss = TaskStateSegment::new();
+        let stacks = cpu_stacks(cpu);
 
         // ダブルフォルト用の専用スタックを設定
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            let stack_start = VirtAddr::from_ptr(unsafe { &raw const IST_STACKS[cpu] });
+            let stack_start = VirtAddr::new(stacks.ist_start);
             let stack_end = stack_start + IST_STACK_SIZE as u64;
             info!(
                 "  IST[{}] stack: {:#x}",
@@ -62,7 +114,7 @@ pub fn init() -> &'static TaskStateSegment {
 
         // ユーザーモードからカーネルモードへの遷移用のRing0スタックを設定
         tss.privilege_stack_table[0] = {
-            let stack_start = VirtAddr::from_ptr(unsafe { &raw const RING0_STACKS[cpu] });
+            let stack_start = VirtAddr::new(stacks.ring0_start);
             let stack_end = stack_start + RING0_STACK_SIZE as u64;
             info!("  Ring0 stack (RSP0): {:#x}", stack_end.as_u64());
             stack_end
