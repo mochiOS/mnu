@@ -1,5 +1,5 @@
 use core::arch::{asm, x86_64::__cpuid_count};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 #[cfg(feature = "performance-instrumentation")]
 use core::sync::atomic::AtomicU64;
@@ -42,8 +42,8 @@ static TSC_FREQUENCY_KHZ: AtomicU32 = AtomicU32::new(0);
 static TSC_FREQUENCY_SOURCE: AtomicU8 = AtomicU8::new(ClockSource::Unavailable as u8);
 
 #[cfg(feature = "performance-instrumentation")]
-static LATENCIES: [AtomicHistogram; LatencyMetric::COUNT] =
-    [const { AtomicHistogram::new() }; LatencyMetric::COUNT];
+static LATENCIES: [[AtomicHistogram; LatencyMetric::COUNT]; crate::percpu::MAX_CPUS] =
+    [const { [const { AtomicHistogram::new() }; LatencyMetric::COUNT] }; crate::percpu::MAX_CPUS];
 #[cfg(feature = "performance-instrumentation")]
 static COUNTERS: [AtomicU64; CounterMetric::COUNT] =
     [const { AtomicU64::new(0) }; CounterMetric::COUNT];
@@ -110,7 +110,7 @@ pub fn cycles_to_nanoseconds(cycles: u64) -> Option<u64> {
 #[inline]
 pub fn record_latency(metric: LatencyMetric, start: u64) {
     #[cfg(feature = "performance-instrumentation")]
-    LATENCIES[metric as usize].record(elapsed_cycles(start));
+    LATENCIES[crate::percpu::current_cpu_id()][metric as usize].record(elapsed_cycles(start));
 
     #[cfg(not(feature = "performance-instrumentation"))]
     let _ = (metric, start);
@@ -118,7 +118,7 @@ pub fn record_latency(metric: LatencyMetric, start: u64) {
 
 #[cfg(feature = "performance-instrumentation")]
 pub fn latency_snapshot(metric: LatencyMetric) -> HistogramSnapshot {
-    LATENCIES[metric as usize].snapshot()
+    merged_latency(metric as usize)
 }
 
 #[inline]
@@ -228,11 +228,20 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
         heap_capacity_bytes: crate::mem::allocator::HEAP_SIZE as u64,
         counters: core::array::from_fn(|index| COUNTERS[index].load(Ordering::Relaxed)),
         gauges,
-        latencies: core::array::from_fn(|index| distribution_snapshot(LATENCIES[index].snapshot())),
+        latencies: core::array::from_fn(|index| distribution_snapshot(merged_latency(index))),
         boot_timestamps: core::array::from_fn(|index| {
             BOOT_MILESTONES[index].load(Ordering::Relaxed)
         }),
     }
+}
+
+#[cfg(feature = "performance-instrumentation")]
+fn merged_latency(metric_index: usize) -> HistogramSnapshot {
+    let mut merged = HistogramSnapshot::empty();
+    for cpu in &LATENCIES {
+        merged.merge(&cpu[metric_index].snapshot());
+    }
+    merged
 }
 
 #[cfg(feature = "performance-instrumentation")]

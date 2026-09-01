@@ -110,6 +110,24 @@ pub struct HistogramSnapshot {
 }
 
 impl HistogramSnapshot {
+    pub const fn empty() -> Self {
+        Self {
+            buckets: [0; HISTOGRAM_BUCKETS],
+            count: 0,
+            sum: 0,
+            max: 0,
+        }
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        for (target, source) in self.buckets.iter_mut().zip(other.buckets.iter()) {
+            *target = target.saturating_add(*source);
+        }
+        self.count = self.count.saturating_add(other.count);
+        self.sum = self.sum.saturating_add(other.sum);
+        self.max = self.max.max(other.max);
+    }
+
     pub fn percentile(&self, numerator: u64, denominator: u64) -> Option<u64> {
         if self.count == 0 || denominator == 0 || numerator > denominator {
             return None;
@@ -201,6 +219,25 @@ mod tests {
         assert_eq!(snapshot.percentile(1, 0), None);
         assert_eq!(snapshot.percentile(101, 100), None);
         assert_eq!(snapshot.mean(), None);
+    }
+
+    #[test]
+    fn merges_independent_histograms() {
+        let first = AtomicHistogram::new();
+        let second = AtomicHistogram::new();
+        first.record(10);
+        first.record(20);
+        second.record(100);
+
+        let mut combined = HistogramSnapshot::empty();
+        combined.merge(&first.snapshot());
+        combined.merge(&second.snapshot());
+
+        assert_eq!(combined.count, 3);
+        assert_eq!(combined.sum, 130);
+        assert_eq!(combined.max, 100);
+        assert_eq!(combined.mean(), Some(43));
+        assert_eq!(combined.percentile(95, 100), Some(127));
     }
 
     #[test]
