@@ -3,96 +3,11 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 #[cfg(feature = "performance-instrumentation")]
 use core::sync::atomic::AtomicU64;
+pub use mnu_abi::performance::{BootMilestone, CounterMetric, GaugeMetric, LatencyMetric};
 #[cfg(feature = "performance-instrumentation")]
-use mnu_metrics::{AtomicGauge, AtomicHistogram, GaugeSnapshot, HistogramSnapshot};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(usize)]
-pub enum LatencyMetric {
-    IpcSmallOneWay,
-    IpcSmallRoundTrip,
-    IpcFourKilobytes,
-    IpcLockWait,
-    IpcWakeup,
-    ContextSwitch,
-    SchedulerRunQueue,
-    SchedulerWakeup,
-    VfsPathLookup,
-    VfsOpen,
-    VfsRead,
-    VfsWrite,
-    VfsClose,
-    VfsStat,
-    ExecParse,
-    ExecLoad,
-    ExecRelocate,
-    ExecEntry,
-}
-
-#[cfg(feature = "performance-instrumentation")]
-impl LatencyMetric {
-    const COUNT: usize = Self::ExecEntry as usize + 1;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(usize)]
-pub enum CounterMetric {
-    HeapAllocations,
-    HeapAllocationBytes,
-    HeapFrees,
-    HeapFreedBytes,
-    HeapAllocationFailures,
-    FrameAllocations,
-    FrameFrees,
-    IpcBytesCopied,
-    IpcSendAllocations,
-    IpcReceiveAllocations,
-    TimerInterrupts,
-    PageFaults,
-    ExecutableBytesRead,
-}
-
-#[cfg(feature = "performance-instrumentation")]
-impl CounterMetric {
-    const COUNT: usize = Self::ExecutableBytesRead as usize + 1;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(usize)]
-pub enum GaugeMetric {
-    HeapLiveBytes,
-    HeapReservedBytes,
-    HeapQuarantinedBytes,
-    FramesInUse,
-    FramesQuarantined,
-}
-
-#[cfg(feature = "performance-instrumentation")]
-impl GaugeMetric {
-    const COUNT: usize = Self::FramesQuarantined as usize + 1;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(usize)]
-pub enum BootMilestone {
-    MnuEntry,
-    EarlyMemoryReady,
-    PageAllocatorReady,
-    BspReady,
-    ApReady,
-    SchedulerStarted,
-    FilesystemMounted,
-    SystemServicesStarted,
-    CompositorStarted,
-    BinderStarted,
-    BinderFirstFrame,
-    Idle,
-}
-
-#[cfg(feature = "performance-instrumentation")]
-impl BootMilestone {
-    const COUNT: usize = Self::Idle as usize + 1;
-}
+use mnu_metrics::{
+    AtomicGauge, AtomicHistogram, GaugeSnapshot as MetricGaugeSnapshot, HistogramSnapshot,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -244,7 +159,7 @@ pub fn gauge_subtract(metric: GaugeMetric, value: u64) {
 }
 
 #[cfg(feature = "performance-instrumentation")]
-pub fn gauge_snapshot(metric: GaugeMetric) -> GaugeSnapshot {
+pub fn gauge_snapshot(metric: GaugeMetric) -> MetricGaugeSnapshot {
     GAUGES[metric as usize].snapshot()
 }
 
@@ -269,6 +184,69 @@ pub fn mark_boot(milestone: BootMilestone) {
 pub fn boot_milestone(milestone: BootMilestone) -> Option<u64> {
     let timestamp = BOOT_MILESTONES[milestone as usize].load(Ordering::Relaxed);
     (timestamp != 0).then_some(timestamp)
+}
+
+#[cfg(feature = "performance-instrumentation")]
+pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
+    use mnu_abi::performance::{
+        GaugeSnapshot, KernelPerformanceSnapshot, PERFORMANCE_FLAG_INSTRUMENTED,
+        PERFORMANCE_FLAG_INVARIANT_TSC, PERFORMANCE_FLAG_RDTSCP, PERFORMANCE_FLAG_WEAK_SNAPSHOT,
+        PERFORMANCE_SNAPSHOT_VERSION,
+    };
+
+    let clock = clock_info();
+    let mut flags = PERFORMANCE_FLAG_INSTRUMENTED | PERFORMANCE_FLAG_WEAK_SNAPSHOT;
+    if clock.invariant_tsc {
+        flags |= PERFORMANCE_FLAG_INVARIANT_TSC;
+    }
+    if clock.rdtscp {
+        flags |= PERFORMANCE_FLAG_RDTSCP;
+    }
+
+    let gauges: [GaugeSnapshot; GaugeMetric::COUNT] = core::array::from_fn(|index| {
+        let snapshot = GAUGES[index].snapshot();
+        GaugeSnapshot {
+            current: snapshot.current,
+            peak: snapshot.peak,
+        }
+    });
+    let frames_in_use = gauges[GaugeMetric::FramesInUse as usize].current;
+    let frames_quarantined = gauges[GaugeMetric::FramesQuarantined as usize].current;
+    let usable_frames = crate::mem::frame::get_memory_info()
+        .map(|(_, frames)| frames as u64)
+        .unwrap_or(0);
+
+    KernelPerformanceSnapshot {
+        version: PERFORMANCE_SNAPSHOT_VERSION,
+        size: core::mem::size_of::<KernelPerformanceSnapshot>() as u32,
+        flags,
+        tsc_frequency_khz: u64::from(clock.frequency_khz),
+        clock_source: clock.source as u32,
+        reserved0: 0,
+        usable_frames,
+        free_frames: usable_frames.saturating_sub(frames_in_use.saturating_add(frames_quarantined)),
+        heap_capacity_bytes: crate::mem::allocator::HEAP_SIZE as u64,
+        counters: core::array::from_fn(|index| COUNTERS[index].load(Ordering::Relaxed)),
+        gauges,
+        latencies: core::array::from_fn(|index| distribution_snapshot(LATENCIES[index].snapshot())),
+        boot_timestamps: core::array::from_fn(|index| {
+            BOOT_MILESTONES[index].load(Ordering::Relaxed)
+        }),
+    }
+}
+
+#[cfg(feature = "performance-instrumentation")]
+fn distribution_snapshot(
+    snapshot: HistogramSnapshot,
+) -> mnu_abi::performance::DistributionSnapshot {
+    mnu_abi::performance::DistributionSnapshot {
+        count: snapshot.count,
+        sum_cycles: snapshot.sum,
+        max_cycles: snapshot.max,
+        p50_cycles: snapshot.percentile(50, 100).unwrap_or(0),
+        p95_cycles: snapshot.percentile(95, 100).unwrap_or(0),
+        p99_cycles: snapshot.percentile(99, 100).unwrap_or(0),
+    }
 }
 
 fn tsc_frequency() -> (u32, ClockSource) {

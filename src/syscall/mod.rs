@@ -7,6 +7,7 @@ pub mod exec;
 pub mod fs;
 pub mod io;
 pub mod ipc;
+pub mod performance;
 pub mod pgroup;
 pub mod process;
 pub mod security;
@@ -629,6 +630,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
             present_framebuffer(arg0, arg1, arg2, arg3)
         }
         x if x == SyscallNumber::StorageControl as u64 => storage::control(arg0, arg1),
+        x if x == SyscallNumber::PerformanceSnapshot as u64 => {
+            performance::snapshot(arg0, arg1)
+        }
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryProtect as u64 => pgroup::mprotect(arg0, arg1, arg2),

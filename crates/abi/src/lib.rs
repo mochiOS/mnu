@@ -12,6 +12,9 @@ pub mod mdriver_control;
 /// mochiOSとmDriverの間で使う非同期ブロックI/Oプロトコルです。
 pub mod mdriver_block;
 
+/// mnuの性能計測結果をユーザー空間へ渡す固定ABIです。
+pub mod performance;
+
 /// Grantで共有するrequest/response ringの固定ABIです。
 pub mod shared_ring;
 
@@ -197,6 +200,7 @@ pub enum SyscallNumber {
     ExecManifestForRequester = 609,
     PresentFramebuffer = 610,
     StorageControl = 611,
+    PerformanceSnapshot = 612,
     CheckGravityExist = 999,
 }
 
