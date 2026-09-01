@@ -2,7 +2,7 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     mem::{align_of, size_of},
     ptr::{self, NonNull},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use linked_list_allocator::LockedHeap;
 use spin::Mutex;
@@ -19,10 +19,13 @@ use crate::performance::{self, CounterMetric, GaugeMetric};
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 /// ヒープのサイズ
 pub const HEAP_SIZE: usize = 32 * 1024 * 1024; // 32 MiB
+const HEAP_INITIAL_SIZE: usize = 256 * 1024;
+const HEAP_GROWTH_SIZE: usize = 256 * 1024;
 const HEAP_QUARANTINE_CAP: usize = 64;
 const HEAP_HEADER_MAGIC: u64 = 0x9d7d_5f1b_1b7d_2b41;
 const HEAP_TAIL_MAGIC: u64 = 0xc6c4_19b8_4d7f_53a9;
 const HEAP_HEADER_ALIGNMENT: usize = 16;
+static KERNEL_HEAP_PTR: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
 struct QuarantinedBlock {
@@ -123,6 +126,8 @@ impl HeapQuarantine {
 pub struct HardenedKernelHeap {
     inner: LockedHeap,
     quarantine: Mutex<HeapQuarantine>,
+    growth: Mutex<()>,
+    committed_bytes: AtomicUsize,
     cookie_seed: AtomicU64,
 }
 
@@ -133,12 +138,16 @@ impl HardenedKernelHeap {
         Self {
             inner: LockedHeap::empty(),
             quarantine: Mutex::new(HeapQuarantine::new()),
+            growth: Mutex::new(()),
+            committed_bytes: AtomicUsize::new(0),
             cookie_seed: AtomicU64::new(0),
         }
     }
 
     pub unsafe fn init(&mut self, heap_bottom: *mut u8, heap_size: usize) {
         self.inner = LockedHeap::new(heap_bottom, heap_size);
+        self.committed_bytes.store(heap_size, Ordering::Release);
+        KERNEL_HEAP_PTR.store(self as *const Self as usize, Ordering::Release);
     }
 
     fn release_block(&self, block: QuarantinedBlock) {
@@ -160,6 +169,71 @@ impl HardenedKernelHeap {
             );
         }
         block
+    }
+
+    fn grow(&self, minimum_bytes: usize) -> bool {
+        let _growth = self.growth.lock();
+        let committed = self.committed_bytes.load(Ordering::Acquire);
+        if committed >= HEAP_SIZE {
+            return false;
+        }
+        let wanted = minimum_bytes
+            .max(HEAP_GROWTH_SIZE)
+            .saturating_add(4095)
+            & !4095;
+        let grow_by = wanted.min(HEAP_SIZE - committed);
+        let mut mapped = 0usize;
+        let mut page_table = crate::mem::paging::PAGE_TABLE.lock();
+        let Some(mapper) = page_table.as_mut() else {
+            return false;
+        };
+        let mut frame_allocator = crate::mem::frame::FRAME_ALLOCATOR.lock();
+        let Some(frames) = frame_allocator.as_mut() else {
+            return false;
+        };
+        while mapped < grow_by {
+            let Some(frame) = frames.allocate_frame() else {
+                break;
+            };
+            if !zero_frame(frame) {
+                if frames.deallocate_frame(frame) {
+                    performance::increment(CounterMetric::FrameFrees, 1);
+                    performance::gauge_subtract(GaugeMetric::FramesInUse, 1);
+                    performance::gauge_add(GaugeMetric::FramesQuarantined, 1);
+                }
+                break;
+            }
+            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(
+                (HEAP_START + committed + mapped) as u64,
+            ));
+            let flags =
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+            match unsafe { mapper.map_to(page, frame, flags, &mut *frames) } {
+                Ok(flush) => {
+                    flush.flush();
+                    mapped += 4096;
+                }
+                Err(_) => {
+                    if frames.deallocate_frame(frame) {
+                        performance::increment(CounterMetric::FrameFrees, 1);
+                        performance::gauge_subtract(GaugeMetric::FramesInUse, 1);
+                        performance::gauge_add(GaugeMetric::FramesQuarantined, 1);
+                    }
+                    break;
+                }
+            }
+        }
+        drop(frame_allocator);
+        drop(page_table);
+        if mapped == 0 {
+            return false;
+        }
+        unsafe {
+            self.inner.lock().extend(mapped);
+        }
+        self.committed_bytes
+            .store(committed + mapped, Ordering::Release);
+        true
     }
 }
 
@@ -186,7 +260,7 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
             Err(_) => return ptr::null_mut(),
         };
 
-        for _ in 0..=HEAP_QUARANTINE_CAP {
+        loop {
             let raw_ptr = GlobalAlloc::alloc(&self.inner, raw_layout);
             if !raw_ptr.is_null() {
                 let cookie = self.cookie_seed();
@@ -216,10 +290,13 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
                 return user_ptr;
             }
 
-            let Some(block) = self.release_one_quarantine_block() else {
+            if let Some(block) = self.release_one_quarantine_block() {
+                self.release_block(block);
+                continue;
+            }
+            if !self.grow(raw_layout.size()) {
                 break;
-            };
-            self.release_block(block);
+            }
         }
 
         performance::increment(CounterMetric::HeapAllocationFailures, 1);
@@ -348,6 +425,28 @@ fn align_user_ptr(raw_ptr: *mut u8, header_size: usize, user_align: usize) -> *m
     aligned as *mut u8
 }
 
+pub fn heap_committed_bytes() -> usize {
+    let ptr = KERNEL_HEAP_PTR.load(Ordering::Acquire) as *const HardenedKernelHeap;
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).committed_bytes.load(Ordering::Acquire) }
+}
+
+fn zero_frame(frame: x86_64::structures::paging::PhysFrame<Size4KiB>) -> bool {
+    let Some(offset) = crate::mem::paging::physical_memory_offset() else {
+        return false;
+    };
+    unsafe {
+        ptr::write_bytes(
+            (frame.start_address().as_u64() + offset) as *mut u8,
+            0,
+            4096,
+        );
+    }
+    true
+}
+
 /// ヒープを初期化
 ///
 /// ## Arguments
@@ -363,9 +462,12 @@ pub fn init_heap(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     heap_allocator_ptr: u64,
 ) -> Result<(), MapToError<Size4KiB>> {
+    if crate::mem::paging::physical_memory_offset().is_none() {
+        return Err(MapToError::FrameAllocationFailed);
+    }
     let page_range = {
         let heap_start = VirtAddr::new(HEAP_START as u64);
-        let heap_end = heap_start + HEAP_SIZE as u64 - 1u64;
+        let heap_end = heap_start + HEAP_INITIAL_SIZE as u64 - 1u64;
         let heap_start_page = Page::containing_address(heap_start);
         let heap_end_page = Page::containing_address(heap_end);
         Page::range_inclusive(heap_start_page, heap_end_page)
@@ -376,6 +478,7 @@ pub fn init_heap(
         let frame = frame_allocator
             .allocate_frame()
             .ok_or(MapToError::FrameAllocationFailed)?;
+        let _ = zero_frame(frame);
         // カーネルヒープは実行不可（W^X: NO_EXECUTE でコード実行を防ぐ）
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
         unsafe {
@@ -386,7 +489,7 @@ pub fn init_heap(
     // ヒープアロケータを初期化
     unsafe {
         let allocator = &mut *(heap_allocator_ptr as *mut HardenedKernelHeap);
-        allocator.init(HEAP_START as *mut u8, HEAP_SIZE);
+        allocator.init(HEAP_START as *mut u8, HEAP_INITIAL_SIZE);
     }
 
     Ok(())
