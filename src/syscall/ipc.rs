@@ -589,19 +589,40 @@ impl Mailbox {
         }
     }
 
-    fn alloc_slot(&mut self) -> Option<usize> {
+    fn reserve_slot(&mut self) -> Option<usize> {
         if self.free_count == 0 || self.count >= ipc_mailbox_cap() {
             return None;
         }
-        let message = allocate_message()?;
         self.free_count -= 1;
         let idx = self.free[self.free_count] as usize;
         if idx >= MAILBOX_CAP || self.slots[idx].is_some() {
             self.quarantine("ipc mailbox free list points to an occupied slot");
             return None;
         }
+        Some(idx)
+    }
+
+    fn alloc_slot(&mut self) -> Option<usize> {
+        let message = allocate_message()?;
+        let Some(idx) = self.reserve_slot() else {
+            release_message(message);
+            return None;
+        };
         self.slots[idx] = Some(message);
         Some(idx)
+    }
+
+    fn enqueue_message(&mut self, message: Box<Message>) -> Result<(), ()> {
+        let Some(slot_idx) = self.reserve_slot() else {
+            release_message(message);
+            return Err(());
+        };
+        self.slots[slot_idx] = Some(message);
+        if self.enqueue_slot(slot_idx).is_err() {
+            let _ = self.free_slot(slot_idx);
+            return Err(());
+        }
+        Ok(())
     }
 
     fn quarantine(&mut self, reason: &'static str) {
@@ -925,10 +946,12 @@ fn allocate_message() -> Option<Box<Message>> {
     }
     // SAFETY: `pointer` is non-null, suitably aligned for Message, and owns one
     // allocation of exactly `Layout::new::<Message>()` bytes.
-    unsafe {
+    let message = unsafe {
         pointer.write(Message::empty());
-        Some(Box::from_raw(pointer))
-    }
+        Box::from_raw(pointer)
+    };
+    crate::performance::increment(crate::performance::CounterMetric::IpcSendAllocations, 1);
+    Some(message)
 }
 
 static MESSAGE_CACHE: SpinLock<MessageCache> = SpinLock::new(MessageCache::new());
@@ -1234,28 +1257,28 @@ fn send_to_thread_id_with_kind(
     // - これにより、送信先終了後に同一スロットへ別スレッドが再利用されても誤配送されない。
     // - 送信時点と受信時点で世代不一致なら古いメッセージとして破棄される。
 
-    // データをユーザー空間からコピー
-    let mut data = vec![0u8; MAX_MSG_SIZE];
-    crate::performance::increment(crate::performance::CounterMetric::IpcSendAllocations, 1);
+    let Some(mut message) = allocate_message() else {
+        return EAGAIN;
+    };
+    message.from = sender_handle;
+    message.to = dest_thread_id;
+    message.to_slot = idx as u16;
+    message.to_generation = dest_generation;
+    message.is_reply = is_reply;
+    message.expects_reply = expects_reply;
+    message.len = len;
+    message.ext_pages = ExternalPages::empty();
+
+    // ユーザー空間から、キューが所有する領域へ直接コピーする。
     if len > 0 && buf_ptr != 0 {
-        if let Err(err) = crate::syscall::copy_from_user(buf_ptr, &mut data[..len]) {
+        if let Err(err) = crate::syscall::copy_from_user(buf_ptr, &mut message.data[..len]) {
+            release_message(message);
             return err;
         }
         record_ipc_copy(len);
     }
     let mut boxes = lock_mailboxes();
-    if boxes[idx]
-        .push_message(
-            sender_handle,
-            dest_thread_id,
-            idx as u16,
-            dest_generation,
-            &data[..len],
-            is_reply,
-            expects_reply,
-        )
-        .is_err()
-    {
+    if boxes[idx].enqueue_message(message).is_err() {
         return EAGAIN;
     }
     crate::debug!(
