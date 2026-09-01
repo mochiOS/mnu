@@ -8,6 +8,7 @@ build = "build.rs"
 members = [
     "crates/abi",
     "crates/csprng",
+    "crates/metrics",
     "crates/PlugKit/plugkit",
     "crates/PlugKit/plugkit-macros",
     "crates/PlugKit/plugkit-sys",
@@ -90,12 +91,14 @@ x86_64 = "0.15"
 
 [dependencies]
 mnu-abi = { path = "crates/abi" }
+mnu-metrics = { path = "crates/metrics" }
 
 [features]
 default = ["kernel-bin"]
 kernel-bin = []
 domain-guest = []
 system-domain = ["kernel-bin"]
+performance-instrumentation = []
 kcfi = []
 cet-ibt = []
 cet-shadow-stack = []

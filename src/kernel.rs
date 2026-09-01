@@ -161,6 +161,7 @@ fn kernel_main() -> ! {
 
 /// カーネルエントリポイント（kernel binary から呼ばれる）
 pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
+    crate::performance::mark_boot(crate::performance::BootMilestone::MnuEntry);
     crate::util::console::init();
     if let Err(error) = boot_info.validate() {
         crate::error!("Boot ABI validation failed: {:?}", error);

@@ -95,6 +95,8 @@ pub mod hypervisor_guest;
 /// per-CPU状態管理
 pub mod percpu;
 #[cfg(not(test))]
+pub mod performance;
+#[cfg(not(test))]
 /// Kernel cryptographic random generator.
 pub mod random;
 #[cfg(not(test))]

@@ -1,0 +1,14 @@
+[package]
+name = "mnu-metrics"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Bounded metrics primitives for the mnu kernel"
+
+[lib]
+name = "mnu_metrics"
+path = "src/lib.rs"
+bench = false
+
+[features]
+default = []

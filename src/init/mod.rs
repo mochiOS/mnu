@@ -16,6 +16,14 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
 
     // CPU機能の初期化（SSE/FPU有効化）
     crate::cpu::init();
+    let clock = crate::performance::initialize_clock();
+    crate::info!(
+        "Performance clock: invariant_tsc={} rdtscp={} frequency_khz={} source={:?}",
+        clock.invariant_tsc,
+        clock.rdtscp,
+        clock.frequency_khz,
+        clock.source
+    );
     if let Err(error) =
         crate::random::initialize(&boot_info.entropy_seed, boot_info.entropy_seed_valid != 0)
     {
@@ -56,9 +64,11 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
 
     // 先にフレームアロケータを初期化
     mem::init_frame_allocator(memory_map)?;
+    crate::performance::mark_boot(crate::performance::BootMilestone::PageAllocatorReady);
 
     // メモリ管理の初期化
     mem::init(boot_info)?;
+    crate::performance::mark_boot(crate::performance::BootMilestone::EarlyMemoryReady);
 
     fs::init();
     crate::config::init();
@@ -94,6 +104,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     // 以前は enable() が init_pit() より先だったため、PIT未初期化状態でタイマー割り込みが
     // 発生する可能性があった。正しい初期化順序: PIT→スケジューラ→タイマー→割り込み有効化
     task::init_scheduler();
+    crate::performance::mark_boot(crate::performance::BootMilestone::SchedulerStarted);
     if crate::hypervisor_guest::is_active() {
         if crate::smp::enable_hypervisor_scheduler_timer() {
             crate::info!("mBoot virtual scheduler timer initialized");
@@ -111,6 +122,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
 
     // SYSCALL/SYSRET 命令サポートを初期化
     crate::syscall::syscall_entry::init_syscall();
+    crate::performance::mark_boot(crate::performance::BootMilestone::BspReady);
 
     Ok(memory_map)
 }
