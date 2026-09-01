@@ -13,6 +13,8 @@ use x86_64::{
     VirtAddr,
 };
 
+use crate::performance::{self, CounterMetric, GaugeMetric};
+
 /// 仮想アドレス空間のどこからヒープを開始するか
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 /// ヒープのサイズ
@@ -140,13 +142,24 @@ impl HardenedKernelHeap {
     }
 
     fn release_block(&self, block: QuarantinedBlock) {
+        performance::gauge_subtract(
+            GaugeMetric::HeapReservedBytes,
+            block.raw_layout.size() as u64,
+        );
         unsafe {
             GlobalAlloc::dealloc(&self.inner, block.raw_ptr, block.raw_layout);
         }
     }
 
     fn release_one_quarantine_block(&self) -> Option<QuarantinedBlock> {
-        self.quarantine.lock().pop_oldest()
+        let block = self.quarantine.lock().pop_oldest();
+        if let Some(block) = block {
+            performance::gauge_subtract(
+                GaugeMetric::HeapQuarantinedBytes,
+                block.raw_layout.size() as u64,
+            );
+        }
+        block
     }
 }
 
@@ -196,6 +209,10 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
                     user_ptr.add(layout.size()) as *mut u64,
                     cookie ^ HEAP_TAIL_MAGIC,
                 );
+                performance::increment(CounterMetric::HeapAllocations, 1);
+                performance::increment(CounterMetric::HeapAllocationBytes, layout.size() as u64);
+                performance::gauge_add(GaugeMetric::HeapLiveBytes, layout.size() as u64);
+                performance::gauge_add(GaugeMetric::HeapReservedBytes, raw_layout.size() as u64);
                 return user_ptr;
             }
 
@@ -205,6 +222,7 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
             self.release_block(block);
         }
 
+        performance::increment(CounterMetric::HeapAllocationFailures, 1);
         ptr::null_mut()
     }
 
@@ -276,7 +294,16 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
             quarantine.push(block)
         };
 
+        performance::increment(CounterMetric::HeapFrees, 1);
+        performance::increment(CounterMetric::HeapFreedBytes, header.user_size as u64);
+        performance::gauge_subtract(GaugeMetric::HeapLiveBytes, header.user_size as u64);
+        performance::gauge_add(GaugeMetric::HeapQuarantinedBytes, raw_layout.size() as u64);
+
         if let Some(evicted) = evicted {
+            performance::gauge_subtract(
+                GaugeMetric::HeapQuarantinedBytes,
+                evicted.raw_layout.size() as u64,
+            );
             self.release_block(evicted);
         }
     }

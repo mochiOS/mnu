@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 #[cfg(feature = "performance-instrumentation")]
 use core::sync::atomic::AtomicU64;
 #[cfg(feature = "performance-instrumentation")]
-use mnu_metrics::{AtomicHistogram, HistogramSnapshot};
+use mnu_metrics::{AtomicGauge, AtomicHistogram, GaugeSnapshot, HistogramSnapshot};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
@@ -55,6 +55,21 @@ pub enum CounterMetric {
 #[cfg(feature = "performance-instrumentation")]
 impl CounterMetric {
     const COUNT: usize = Self::ExecutableBytesRead as usize + 1;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum GaugeMetric {
+    HeapLiveBytes,
+    HeapReservedBytes,
+    HeapQuarantinedBytes,
+    FramesInUse,
+    FramesQuarantined,
+}
+
+#[cfg(feature = "performance-instrumentation")]
+impl GaugeMetric {
+    const COUNT: usize = Self::FramesQuarantined as usize + 1;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +132,9 @@ static LATENCIES: [AtomicHistogram; LatencyMetric::COUNT] =
 #[cfg(feature = "performance-instrumentation")]
 static COUNTERS: [AtomicU64; CounterMetric::COUNT] =
     [const { AtomicU64::new(0) }; CounterMetric::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static GAUGES: [AtomicGauge; GaugeMetric::COUNT] =
+    [const { AtomicGauge::new() }; GaugeMetric::COUNT];
 #[cfg(feature = "performance-instrumentation")]
 static BOOT_MILESTONES: [AtomicU64; BootMilestone::COUNT] =
     [const { AtomicU64::new(0) }; BootMilestone::COUNT];
@@ -205,6 +223,29 @@ pub fn increment(metric: CounterMetric, value: u64) {
 #[cfg(feature = "performance-instrumentation")]
 pub fn counter(metric: CounterMetric) -> u64 {
     COUNTERS[metric as usize].load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn gauge_add(metric: GaugeMetric, value: u64) {
+    #[cfg(feature = "performance-instrumentation")]
+    GAUGES[metric as usize].add(value);
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = (metric, value);
+}
+
+#[inline]
+pub fn gauge_subtract(metric: GaugeMetric, value: u64) {
+    #[cfg(feature = "performance-instrumentation")]
+    GAUGES[metric as usize].subtract(value);
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = (metric, value);
+}
+
+#[cfg(feature = "performance-instrumentation")]
+pub fn gauge_snapshot(metric: GaugeMetric) -> GaugeSnapshot {
+    GAUGES[metric as usize].snapshot()
 }
 
 #[inline]

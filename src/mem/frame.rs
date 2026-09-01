@@ -12,6 +12,8 @@ use x86_64::{
     PhysAddr,
 };
 
+use crate::performance::{self, CounterMetric, GaugeMetric};
+
 /// グローバルフレームアロケータ
 pub static FRAME_ALLOCATOR: Mutex<Option<BitmapFrameAllocator>> = Mutex::new(None);
 
@@ -136,6 +138,7 @@ impl BitmapFrameAllocator {
         self.quarantine_head = (self.quarantine_head + 1) % FRAME_QUARANTINE_CAP;
         self.quarantine_len -= 1;
         self.push_free_list(phys_addr);
+        performance::gauge_subtract(GaugeMetric::FramesQuarantined, 1);
     }
 
     fn is_usable_frame_addr(&self, phys_addr: u64) -> bool {
@@ -215,9 +218,15 @@ impl BitmapFrameAllocator {
                 continue;
             }
             self.next_frame = (end / 4096) as usize;
+            self.record_allocation(page_count);
             return Some(PhysFrame::containing_address(PhysAddr::new(phys_addr)));
         }
         None
+    }
+
+    fn record_allocation(&self, page_count: usize) {
+        performance::increment(CounterMetric::FrameAllocations, page_count as u64);
+        performance::gauge_add(GaugeMetric::FramesInUse, page_count as u64);
     }
 }
 
@@ -246,6 +255,7 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
                             self.free_list_head = 0;
                         }
                         self.clear_frame_meta(phys);
+                        self.record_allocation(1);
                         return Some(PhysFrame::containing_address(PhysAddr::new(phys)));
                     }
                     Some(_) => {
@@ -280,6 +290,7 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
             }
 
             self.next_frame = (phys_addr / 4096 + 1) as usize;
+            self.record_allocation(1);
             return Some(PhysFrame::containing_address(PhysAddr::new(phys_addr)));
         }
         None
@@ -321,6 +332,9 @@ pub fn deallocate_frame(frame: PhysFrame) -> Result<()> {
     let mut guard = FRAME_ALLOCATOR.lock();
     let allocator = guard.as_mut().ok_or(Kernel::Memory(Memory::OutOfMemory))?;
     if allocator.deallocate_frame(frame) {
+        performance::increment(CounterMetric::FrameFrees, 1);
+        performance::gauge_subtract(GaugeMetric::FramesInUse, 1);
+        performance::gauge_add(GaugeMetric::FramesQuarantined, 1);
         Ok(())
     } else {
         Err(Kernel::Memory(Memory::InvalidAddress))

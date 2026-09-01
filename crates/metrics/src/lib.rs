@@ -12,6 +12,61 @@ pub struct AtomicHistogram {
     max: AtomicU64,
 }
 
+pub struct AtomicGauge {
+    current: AtomicU64,
+    peak: AtomicU64,
+}
+
+impl AtomicGauge {
+    pub const fn new() -> Self {
+        Self {
+            current: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
+        }
+    }
+
+    pub fn add(&self, value: u64) {
+        let previous =
+            match self
+                .current
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_add(value))
+                }) {
+                Ok(previous) => previous,
+                Err(current) => current,
+            };
+        self.peak
+            .fetch_max(previous.saturating_add(value), Ordering::Relaxed);
+    }
+
+    pub fn subtract(&self, value: u64) {
+        let _ = self
+            .current
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(value))
+            });
+    }
+
+    pub fn snapshot(&self) -> GaugeSnapshot {
+        GaugeSnapshot {
+            current: self.current.load(Ordering::Relaxed),
+            peak: self.peak.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Default for AtomicGauge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GaugeSnapshot {
+    pub current: u64,
+    pub peak: u64,
+}
+
 impl AtomicHistogram {
     pub const fn new() -> Self {
         Self {
@@ -146,5 +201,32 @@ mod tests {
         assert_eq!(snapshot.percentile(1, 0), None);
         assert_eq!(snapshot.percentile(101, 100), None);
         assert_eq!(snapshot.mean(), None);
+    }
+
+    #[test]
+    fn gauge_tracks_current_and_peak_values() {
+        let gauge = AtomicGauge::new();
+        gauge.add(40);
+        gauge.add(2);
+        gauge.subtract(10);
+        gauge.add(5);
+
+        assert_eq!(
+            gauge.snapshot(),
+            GaugeSnapshot {
+                current: 37,
+                peak: 42,
+            }
+        );
+    }
+
+    #[test]
+    fn gauge_does_not_underflow() {
+        let gauge = AtomicGauge::new();
+        gauge.add(4);
+        gauge.subtract(10);
+
+        assert_eq!(gauge.snapshot().current, 0);
+        assert_eq!(gauge.snapshot().peak, 4);
     }
 }
