@@ -182,6 +182,7 @@ pub fn is_scheduler_enabled() -> bool {
 /// # Returns
 /// スケジューリングが必要な場合はtrue
 pub fn scheduler_tick() -> bool {
+    crate::task::reclaim_current_cpu_kernel_stack();
     if let Some(slot) = current_thread_slot() {
         if with_thread_at_slot(slot, |t| t.in_syscall()).unwrap_or(false) {
             return false;
@@ -429,16 +430,32 @@ fn wake_parent_ipc_waiter(exited_pid: crate::task::ProcessId) {
 ///
 /// 指定されたスレッドをTerminated状態にして削除
 pub fn terminate_thread(id: ThreadId) {
-    set_thread_state(id, ThreadState::Terminated);
+    let previous_state = super::thread::replace_thread_state(id, ThreadState::Terminated);
+    let running_elsewhere = Some(id) != current_thread_id()
+        && previous_state == Some(ThreadState::Running);
 
-    // 現在のスレッドの場合は次のスレッドにスケジューリング
     if Some(id) == current_thread_id() {
+        crate::syscall::process::clear_futex_waiter(id);
+        let kernel_stack = remove_thread(id)
+            .map(|thread| thread.kernel_stack_base())
+            .unwrap_or(0);
+        crate::task::retire_current_kernel_stack(kernel_stack);
         set_current_thread(None, None);
         yield_now();
+        x86_64::instructions::interrupts::disable();
+        loop {
+            x86_64::instructions::hlt();
+        }
     }
 
     crate::syscall::process::clear_futex_waiter(id);
-    // スレッドをキューから削除し、カーネルスタックを解放
+    if running_elsewhere {
+        crate::warn!(
+            "retaining remotely running terminated thread {:?} until CPU handoff",
+            id
+        );
+        return;
+    }
     if let Some(thread) = remove_thread(id) {
         crate::task::free_kernel_stack(thread.kernel_stack_base());
     }
@@ -488,8 +505,8 @@ pub fn exit_current_task(exit_code: u64) -> ! {
                 let kstack_base = with_thread(current_id, |t| t.kernel_stack_base()).unwrap_or(0);
                 remove_thread(current_id);
 
-                // カーネルスタックをフリーリストへ返却（スイッチ直前、まだスタックは有効）
-                crate::task::free_kernel_stack(kstack_base);
+                // 実際の切替が終わるまでは現在のstackを再利用しない。
+                crate::task::retire_current_kernel_stack(kstack_base);
 
                 // コンテキストスイッチを実行（終了したスレッドのコンテキストは保存しない）
                 // old_context_ptr = None を渡すことで、現在のコンテキストを保存せずに次のスレッドにジャンプ
@@ -511,7 +528,7 @@ pub fn exit_current_task(exit_code: u64) -> ! {
         // スレッドをキューから削除
         crate::syscall::process::clear_futex_waiter(current_id);
         if let Some(thread) = remove_thread(current_id) {
-            crate::task::free_kernel_stack(thread.kernel_stack_base());
+            crate::task::retire_current_kernel_stack(thread.kernel_stack_base());
         }
     }
 

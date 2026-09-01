@@ -1,4 +1,5 @@
 use crate::interrupt::spinlock::SpinLock;
+use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::VirtAddr;
 
 use super::context::Context;
@@ -276,6 +277,29 @@ struct KernelStackPool([u8; KSTACK_POOL_SIZE]);
 static KSTACK_POOL: SpinLock<KernelStackPool> =
     SpinLock::new(KernelStackPool([0; KSTACK_POOL_SIZE]));
 static KSTACK_USED_SLOTS: SpinLock<u64> = SpinLock::new(0);
+static RETIRED_KERNEL_STACKS: [AtomicU64; crate::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::percpu::MAX_CPUS];
+
+/// 現在のCPUがまだ使用しているstackを、次のstackへ切り替わるまで保持します。
+pub fn retire_current_kernel_stack(base: u64) {
+    if base == 0 {
+        return;
+    }
+    let retired = &RETIRED_KERNEL_STACKS[crate::percpu::current_cpu_id()];
+    let previous = retired.swap(base, Ordering::AcqRel);
+    if previous != 0 {
+        free_kernel_stack(previous);
+    }
+}
+
+/// 前回のcontext switchより前に退役したstackを回収します。
+pub fn reclaim_current_cpu_kernel_stack() {
+    let retired = &RETIRED_KERNEL_STACKS[crate::percpu::current_cpu_id()];
+    let base = retired.swap(0, Ordering::AcqRel);
+    if base != 0 {
+        free_kernel_stack(base);
+    }
+}
 
 fn unmap_guard_page(guard_addr: u64) -> bool {
     use x86_64::structures::paging::mapper::TranslateError;
@@ -348,6 +372,7 @@ fn unmap_guard_page(guard_addr: u64) -> bool {
 /// 全スレッドで固定長スロットを使い、異なるサイズ間での再利用を防ぐ。
 /// Returns base address (bottom) of stack.
 pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
+    reclaim_current_cpu_kernel_stack();
     if size == 0 || size > KSTACK_SLOT_BYTES {
         return None;
     }
@@ -1429,6 +1454,12 @@ pub fn set_current_thread_by_id(id: Option<ThreadId>) {
 /// 現在スレッドの状態を更新
 pub fn set_thread_state(id: ThreadId, state: ThreadState) -> bool {
     THREAD_QUEUE.lock().set_state(id, state)
+}
+
+pub(super) fn replace_thread_state(id: ThreadId, state: ThreadState) -> Option<ThreadState> {
+    let mut queue = THREAD_QUEUE.lock();
+    let previous = queue.get(id)?.state();
+    queue.set_state(id, state).then_some(previous)
 }
 
 /// 指定スロットのスレッド状態を更新
