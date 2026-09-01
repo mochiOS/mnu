@@ -64,7 +64,11 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     crate::config::init();
     crate::capability::path::init_from_kernel_config();
     if crate::hypervisor_guest::is_active() {
-        initialize_mdriver_storage();
+        // mDriver may need to wait for Linux driver probing and physical I/O.
+        // Keep that work out of the single-threaded boot path: the scheduler
+        // and the desktop must be able to start even when hardware is slow or
+        // unavailable.
+        crate::cext::init_runtime_config();
     } else {
         crate::cext::init_runtime_config();
         crate::cext::register_builtin_cext("disk", crate::cext::CextKind::BlockDevice);
@@ -109,50 +113,4 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     crate::syscall::syscall_entry::init_syscall();
 
     Ok(memory_map)
-}
-
-fn initialize_mdriver_storage() {
-    crate::cext::init_runtime_config();
-    let summary = match crate::mdriver::initialize_client() {
-        Ok(summary) => summary,
-        Err(error) => {
-            crate::warn!("mDriver control channel unavailable: {:?}", error);
-            return;
-        }
-    };
-
-    crate::info!(
-        "mDriver control channel ready ({} devices)",
-        summary.device_count
-    );
-    if !summary.block_device {
-        crate::info!("mDriver has no unambiguous installed mochiOS partition");
-        return;
-    }
-
-    crate::cext::register_builtin_cext("ext2", crate::cext::CextKind::Filesystem);
-    crate::cext::load_modules();
-    if !crate::cext::fs::is_loaded() || !crate::cext::disk::is_loaded() {
-        crate::warn!("mDriver installed filesystem cext is unavailable");
-        return;
-    }
-    let rc = crate::cext::fs::set_disk_ops(crate::cext::disk::serialized_ops_ptr());
-    if rc != 0 {
-        crate::warn!("mDriver storage: fs set_disk_ops failed rc={}", rc);
-        return;
-    }
-    let flags = if summary.block_read_only {
-        crate::cext::fs::MOUNT_READ_ONLY
-    } else {
-        0
-    };
-    let rc = crate::cext::fs::mount(0, flags);
-    if rc != 0 {
-        crate::warn!("mDriver installed filesystem mount failed rc={}", rc);
-        return;
-    }
-    crate::info!("mDriver installed mochiOS filesystem mounted");
-    if !summary.block_read_only {
-        crate::audit::flush_to_disk();
-    }
 }

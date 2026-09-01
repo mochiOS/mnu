@@ -33,6 +33,8 @@ pub const DOMAIN_FEATURE_FRAMEBUFFER: u64 = 1 << 17;
 
 pub const FRAMEBUFFER_FORMAT_RGB: u32 = 1;
 pub const FRAMEBUFFER_FORMAT_BGR: u32 = 2;
+pub const FRAMEBUFFER_FORMAT_MEDIATED: u32 = 1 << 31;
+pub const FIRMWARE_FRAMEBUFFER_MAX_TRANSFER: usize = 64 * 1024;
 
 pub const DOMAIN_CAPABILITY_DEVICE_QUERY: u64 = 1 << 0;
 pub const DOMAIN_CAPABILITY_DEVICE_CLAIM: u64 = 1 << 1;
@@ -110,6 +112,7 @@ pub enum HypercallNumber {
     DeviceActivate = 21,
     GrantQuery = 22,
     EventPoll = 23,
+    FirmwareFramebufferPresent = 24,
 }
 
 #[repr(u64)]

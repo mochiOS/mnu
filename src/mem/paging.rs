@@ -2000,7 +2000,15 @@ pub fn map_physical_range_to_user(
     let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
     let mut pt = unsafe { OffsetPageTable::new(l4, VirtAddr::new(phys_off)) };
 
-    let flags = Flags::PRESENT | Flags::WRITABLE | Flags::USER_ACCESSIBLE | Flags::NO_EXECUTE;
+    // This helper is reserved for device-backed user mappings such as the GOP
+    // framebuffer.  Mapping PCI MMIO as normal write-back RAM can retain or
+    // combine stores in CPU caches instead of delivering them to the device.
+    let flags = Flags::PRESENT
+        | Flags::WRITABLE
+        | Flags::USER_ACCESSIBLE
+        | Flags::NO_EXECUTE
+        | Flags::WRITE_THROUGH
+        | Flags::NO_CACHE;
 
     let virt_start = virt_addr & !0xfffu64;
     let phys_start = phys_addr & !0xfffu64;

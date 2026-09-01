@@ -53,7 +53,14 @@ struct EndpointRecord {
     rights: EndpointRights,
 }
 
-static NEXT_ENDPOINT_HANDLE: AtomicU64 = AtomicU64::new(1);
+// Endpoint handles and legacy thread IDs are both accepted by IPC syscalls.
+// Keep handles in a disjoint opaque range so a thread ID can never resolve to
+// an unrelated endpoint merely because both counters reached the same value.
+// The sender handle is carried in the upper 32 bits of a successful syscall
+// result, so it must also stay below bit 31 to keep that result non-negative.
+const ENDPOINT_HANDLE_BASE: u64 = 0x4000_0000;
+const ENDPOINT_HANDLE_LIMIT: u64 = 0x7fff_ffff;
+static NEXT_ENDPOINT_HANDLE: AtomicU64 = AtomicU64::new(ENDPOINT_HANDLE_BASE);
 static ENDPOINTS: Mutex<Option<BTreeMap<u64, EndpointRecord>>> = Mutex::new(None);
 static THREAD_DEFAULT_ENDPOINTS: Mutex<Option<BTreeMap<u64, u64>>> = Mutex::new(None);
 
@@ -174,6 +181,9 @@ fn ensure_endpoint_for_thread(thread_id: u64) -> Option<u64> {
     let (slot, generation) = crate::task::thread_slot_index_and_generation_by_u64(thread_id)?;
     let rights = endpoint_rights_for_thread(thread_id);
     let handle = NEXT_ENDPOINT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    if handle > ENDPOINT_HANDLE_LIMIT {
+        return None;
+    }
     let record = EndpointRecord {
         thread_id,
         slot: slot as u16,

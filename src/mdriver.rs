@@ -312,6 +312,13 @@ pub fn storage_control(
         MDRIVER_CONTROL_INSPECT_STORAGE, MDRIVER_CONTROL_INSTALL_PARTITION,
     };
 
+    // Physical storage discovery is demand-driven. It must never delay the
+    // scheduler, service manager, or desktop during boot.
+    let initialized = CLIENT.lock().is_some();
+    if !initialized {
+        initialize_client()?;
+    }
+
     if operation == mnu_abi::STORAGE_CONTROL_LIST_DEVICE {
         let index = usize::try_from(arguments[0]).map_err(|_| Error::Protocol)?;
         if arguments[1..] != [0; 3] {
@@ -423,6 +430,12 @@ fn wait_for_port(expected: u32) -> Result<(), Error> {
         }
         if hypervisor_guest::invoke(HypercallNumber::Yield, 0, 0, 0) != HYPERCALL_SUCCESS {
             return Err(Error::Hypercall);
+        }
+        // Hypervisor Yield schedules another Domain, not another mochiOS
+        // thread. Explicitly yield here as well so a slow hardware response
+        // cannot starve the service manager and desktop on a single vCPU.
+        if crate::task::is_scheduler_enabled() {
+            crate::task::yield_now();
         }
     }
     Err(Error::Timeout)
@@ -830,6 +843,45 @@ pub fn present_display(
     } else {
         Err(Error::Device)
     }
+}
+
+/// Draws a bounded startup marker through mDriver after the control protocol
+/// is usable. The userspace display service replaces it during normal boot.
+pub fn present_startup_marker(color: u32) -> Result<(), Error> {
+    const MARKER_WIDTH: u32 = 512;
+    const MARKER_HEIGHT: u32 = 128;
+    let info = display_info()?;
+    let width = info.width.min(MARKER_WIDTH);
+    let height = info.height.min(MARKER_HEIGHT);
+    if width == 0 || height == 0 {
+        return Err(Error::Protocol);
+    }
+    let origin_x = info.width.saturating_sub(width) / 2;
+    let origin_y = info.height.saturating_sub(height) / 2;
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(MDRIVER_DISPLAY_PIXEL_BYTES as usize))
+        .ok_or(Error::Protocol)?;
+    let rows_per_tile = (4096 / row_bytes).max(1);
+    let mut tile = [0u8; 4096];
+    let pixel = color.to_le_bytes();
+    for chunk in tile.chunks_exact_mut(MDRIVER_DISPLAY_PIXEL_BYTES as usize) {
+        chunk.copy_from_slice(&pixel);
+    }
+    let mut y = 0usize;
+    while y < height as usize {
+        let rows = core::cmp::min(height as usize - y, rows_per_tile);
+        let byte_len = row_bytes.checked_mul(rows).ok_or(Error::Protocol)?;
+        present_display(
+            origin_x,
+            origin_y + u32::try_from(y).map_err(|_| Error::Protocol)?,
+            width,
+            u32::try_from(rows).map_err(|_| Error::Protocol)?,
+            &tile[..byte_len],
+        )?;
+        y += rows;
+    }
+    Ok(())
 }
 
 pub fn close_block_device() -> Result<(), Error> {

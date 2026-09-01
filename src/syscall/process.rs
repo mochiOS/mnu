@@ -1255,6 +1255,7 @@ pub fn alloc_shared_pages(
         mapped += 1;
     }
 
+
     if phys_pages_ptr != 0 {
         let bytes = unsafe {
             core::slice::from_raw_parts(phys_pages.as_ptr().cast::<u8>(), page_count * 8)

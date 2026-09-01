@@ -24,6 +24,11 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
+const FIRMWARE_PRESENT_MAX: usize = mnu_abi::hypervisor::FIRMWARE_FRAMEBUFFER_MAX_TRANSFER;
+static FIRMWARE_PRESENT_BUFFER: crate::interrupt::spinlock::SpinLock<
+    [u8; FIRMWARE_PRESENT_MAX],
+> = crate::interrupt::spinlock::SpinLock::new([0; FIRMWARE_PRESENT_MAX]);
+
 /// ユーザー空間ポインタの有効性を検証する
 ///
 /// ポインタが null でなく、ユーザー空間のアドレス範囲内にあること、
@@ -260,12 +265,24 @@ struct UserFramebufferInfo {
 pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
     use crate::syscall::types::{ENXIO, SUCCESS};
 
-    let mdriver_info = crate::hypervisor_guest::is_active()
+    let out = if let Some(info) = crate::util::vga::get_info() {
+        UserFramebufferInfo {
+            // The firmware address is a guest-visible token, not a stable
+            // userspace MMIO mapping after GPU quarantine and resume.  Pixels
+            // are submitted to mBoot in bounded batches instead.
+            addr: 0,
+            size: info.size as u64,
+            width: info.width as u32,
+            height: info.height as u32,
+            stride: info.stride as u32,
+            format: 1 | mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_MEDIATED,
+        }
+    } else if let Some(info) = crate::hypervisor_guest::is_active()
         .then(crate::mdriver::display_info)
         .transpose()
         .ok()
-        .flatten();
-    let out = if let Some(info) = mdriver_info {
+        .flatten()
+    {
         UserFramebufferInfo {
             addr: 0,
             size: u64::from(info.stride)
@@ -274,15 +291,6 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
             width: info.width,
             height: info.height,
             stride: info.stride,
-            format: 1,
-        }
-    } else if let Some(info) = crate::util::vga::get_info() {
-        UserFramebufferInfo {
-            addr: info.addr,
-            size: info.size as u64,
-            width: info.width as u32,
-            height: info.height as u32,
-            stride: info.stride as u32,
             format: 1,
         }
     } else {
@@ -322,7 +330,30 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
     else {
         return EINVAL;
     };
-    if pixels_ptr == 0 || pixels_len != expected as u64 || expected == 0 || expected > 4096 {
+    if pixels_ptr == 0 || pixels_len != expected as u64 || expected == 0 {
+        return EINVAL;
+    }
+    if crate::hypervisor_guest::is_active() && crate::util::vga::get_info().is_some() {
+        if expected > FIRMWARE_PRESENT_MAX {
+            return EINVAL;
+        }
+        let mut buffer = FIRMWARE_PRESENT_BUFFER.lock();
+        if copy_from_user(pixels_ptr, &mut buffer[..expected]).is_err() {
+            return EFAULT;
+        }
+        let result = crate::hypervisor_guest::invoke(
+            mnu_abi::hypervisor::HypercallNumber::FirmwareFramebufferPresent,
+            position,
+            size,
+            buffer.as_ptr() as u64,
+        );
+        return if result == mnu_abi::hypervisor::HYPERCALL_SUCCESS {
+            SUCCESS
+        } else {
+            EIO
+        };
+    }
+    if expected > 4096 {
         return EINVAL;
     }
     let mut pixels = alloc::vec![0u8; expected];
