@@ -1,4 +1,4 @@
-use crate::interrupt::spinlock::SpinLock;
+use crate::interrupt::spinlock::{SpinLock, SpinLockGuard};
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -240,8 +240,10 @@ pub fn call(
         Some(handle) => handle,
         None => return EINVAL,
     };
+    #[cfg(feature = "performance-instrumentation")]
+    let round_trip_start = crate::performance::timestamp();
     let saved_reply_to = {
-        let mut boxes = MAILBOXES.lock();
+        let mut boxes = lock_mailboxes();
         let (idx, _) = match crate::task::thread_slot_index_and_generation_by_u64(caller) {
             Some(v) => v,
             None => return EINVAL,
@@ -261,7 +263,7 @@ pub fn call(
         crate::task::yield_now();
     };
     if sent != 0 {
-        let mut boxes = MAILBOXES.lock();
+        let mut boxes = lock_mailboxes();
         if let Some((idx, _)) = crate::task::thread_slot_index_and_generation_by_u64(caller) {
             if idx < MAX_THREADS {
                 boxes[idx].reply_to = saved_reply_to;
@@ -270,11 +272,18 @@ pub fn call(
         return sent;
     }
     let result = recv_blocking_reply_for_thread(caller, caller, reply_ptr, reply_len);
-    let mut boxes = MAILBOXES.lock();
+    let mut boxes = lock_mailboxes();
     if let Some((idx, _)) = crate::task::thread_slot_index_and_generation_by_u64(caller) {
         if idx < MAX_THREADS {
             boxes[idx].reply_to = saved_reply_to;
         }
+    }
+    #[cfg(feature = "performance-instrumentation")]
+    if (result as i64) >= 0 {
+        crate::performance::record_latency(
+            crate::performance::LatencyMetric::IpcSmallRoundTrip,
+            round_trip_start,
+        );
     }
     result
 }
@@ -289,7 +298,7 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         None => return EINVAL,
     };
     let target_handle = {
-        let mut boxes = MAILBOXES.lock();
+        let mut boxes = lock_mailboxes();
         let (idx, _) = match crate::task::thread_slot_index_and_generation_by_u64(current) {
             Some(v) => v,
             None => return EINVAL,
@@ -332,10 +341,11 @@ fn recv_blocking_reply_for_thread(
     }
 
     let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
+    crate::performance::increment(crate::performance::CounterMetric::IpcReceiveAllocations, 1);
     loop {
         let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
         let recv = {
-            let mut boxes = MAILBOXES.lock();
+            let mut boxes = lock_mailboxes();
             match boxes[idx].pop_reply_copy(
                 receiver_thread_id,
                 idx as u16,
@@ -365,12 +375,13 @@ fn recv_blocking_reply_for_thread(
                     if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len]) {
                         return err;
                     }
+                    record_ipc_copy(copy_len);
                 }
                 return (from << 32) | (copy_len as u64);
             }
             None => {
                 {
-                    let mut boxes = MAILBOXES.lock();
+                    let mut boxes = lock_mailboxes();
                     if let Some((from, copy_len)) = boxes[idx].pop_reply_copy(
                         receiver_thread_id,
                         idx as u16,
@@ -394,6 +405,7 @@ fn recv_blocking_reply_for_thread(
                             {
                                 return err;
                             }
+                            record_ipc_copy(copy_len);
                         }
                         return (from << 32) | (copy_len as u64);
                     }
@@ -405,7 +417,7 @@ fn recv_blocking_reply_for_thread(
                 } else {
                     // The caller's mailbox also carries ordinary events. A wakeup
                     // without a reply must not abort an already-delivered IPC call.
-                    let mut boxes = MAILBOXES.lock();
+                    let mut boxes = lock_mailboxes();
                     if boxes[idx].waiter == caller_thread_id {
                         boxes[idx].waiter = 0;
                     }
@@ -473,6 +485,14 @@ fn ipc_max_external_pages() -> usize {
         .ipc
         .max_external_pages
         .min(MAX_EXT_PAGES)
+}
+
+#[inline]
+fn record_ipc_copy(bytes: usize) {
+    crate::performance::increment(
+        crate::performance::CounterMetric::IpcBytesCopied,
+        bytes as u64,
+    );
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -649,6 +669,7 @@ impl Mailbox {
         msg.ext_pages = ExternalPages::empty();
         if !data.is_empty() {
             msg.data[..data.len()].copy_from_slice(data);
+            record_ipc_copy(data.len());
         }
         if self.enqueue_slot(slot_idx).is_err() {
             let _ = self.free_slot(slot_idx);
@@ -682,6 +703,7 @@ impl Mailbox {
                 }
                 if copy_len > 0 {
                     out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
+                    record_ipc_copy(copy_len);
                 }
                 let from = msg.from;
                 let ext_pages = msg.ext_pages;
@@ -733,6 +755,7 @@ impl Mailbox {
             let copy_len = core::cmp::min(msg.len, out.len());
             if copy_len > 0 {
                 out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
+                record_ipc_copy(copy_len);
             }
             let from = msg.from;
             let expects_reply = msg.expects_reply;
@@ -775,6 +798,7 @@ impl Mailbox {
             let copy_len = core::cmp::min(msg.len, out.len());
             if copy_len > 0 {
                 out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
+                record_ipc_copy(copy_len);
             }
             let from = msg.from;
             if !self.free_slot(slot_idx) {
@@ -796,6 +820,16 @@ impl Mailbox {
 
 static MAILBOXES: SpinLock<[Mailbox; MAX_THREADS]> = SpinLock::new([Mailbox::new(); MAX_THREADS]);
 
+#[inline]
+fn lock_mailboxes() -> SpinLockGuard<'static, [Mailbox; MAX_THREADS]> {
+    #[cfg(feature = "performance-instrumentation")]
+    let start = crate::performance::timestamp();
+    let guard = MAILBOXES.lock();
+    #[cfg(feature = "performance-instrumentation")]
+    crate::performance::record_latency(crate::performance::LatencyMetric::IpcLockWait, start);
+    guard
+}
+
 /// カーネル内部からIPC送信（ユーザー空間コピー不要）
 pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
     let len = data.len();
@@ -813,7 +847,7 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
     let sender = crate::task::current_thread_id()
         .and_then(|t| ensure_endpoint_for_thread(t.as_u64()))
         .unwrap_or(0);
-    MAILBOXES.lock().get_mut(idx).map_or(false, |mb| {
+    lock_mailboxes().get_mut(idx).map_or(false, |mb| {
         if mb
             .push_message(
                 sender,
@@ -858,7 +892,7 @@ pub fn send_pages_from_kernel(
     let sender = crate::task::current_thread_id()
         .and_then(|t| ensure_endpoint_for_thread(t.as_u64()))
         .unwrap_or(0);
-    let mut boxes = MAILBOXES.lock();
+    let mut boxes = lock_mailboxes();
     boxes.get_mut(idx).map_or(false, |mb| {
         if let Some(slot_idx) = mb.alloc_slot() {
             let msg = &mut mb.slots[slot_idx];
@@ -928,7 +962,7 @@ fn send_virtual_pages_from_kernel(
     let sender = crate::task::current_thread_id()
         .and_then(|t| ensure_endpoint_for_thread(t.as_u64()))
         .unwrap_or(0);
-    let mut boxes = MAILBOXES.lock();
+    let mut boxes = lock_mailboxes();
     boxes.get_mut(idx).map_or(false, |mb| {
         if let Some(slot_idx) = mb.alloc_slot() {
             let msg = &mut mb.slots[slot_idx];
@@ -982,7 +1016,7 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
     let sender = crate::task::current_thread_id()
         .map(|t| t.as_u64())
         .unwrap_or(0);
-    let mut boxes = MAILBOXES.lock();
+    let mut boxes = lock_mailboxes();
     boxes.get_mut(idx).map_or(false, |mb| {
         if let Some(slot_idx) = mb.alloc_slot() {
             let msg = &mut mb.slots[slot_idx];
@@ -1074,6 +1108,9 @@ fn send_to_thread_id_with_kind(
         return EINVAL;
     }
 
+    #[cfg(feature = "performance-instrumentation")]
+    let send_start = crate::performance::timestamp();
+
     // NOTE:
     // - 宛先スロットに加えて世代番号をメッセージへ埋め込む。
     // - これにより、送信先終了後に同一スロットへ別スレッドが再利用されても誤配送されない。
@@ -1081,12 +1118,14 @@ fn send_to_thread_id_with_kind(
 
     // データをユーザー空間からコピー
     let mut data = vec![0u8; MAX_MSG_SIZE];
+    crate::performance::increment(crate::performance::CounterMetric::IpcSendAllocations, 1);
     if len > 0 && buf_ptr != 0 {
         if let Err(err) = crate::syscall::copy_from_user(buf_ptr, &mut data[..len]) {
             return err;
         }
+        record_ipc_copy(len);
     }
-    let mut boxes = MAILBOXES.lock();
+    let mut boxes = lock_mailboxes();
     if boxes[idx]
         .push_message(
             sender_handle,
@@ -1112,6 +1151,16 @@ fn send_to_thread_id_with_kind(
     if waiter != 0 {
         crate::task::wake_ipc_waiter(crate::task::ThreadId::from_u64(waiter));
     }
+
+    #[cfg(feature = "performance-instrumentation")]
+    crate::performance::record_latency(
+        if len >= 4096 {
+            crate::performance::LatencyMetric::IpcFourKilobytes
+        } else {
+            crate::performance::LatencyMetric::IpcSmallOneWay
+        },
+        send_start,
+    );
 
     0
 }
@@ -1421,8 +1470,9 @@ fn recv_from_thread_nonblocking(
 
     let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
     let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
+    crate::performance::increment(crate::performance::CounterMetric::IpcReceiveAllocations, 1);
     let (from, copy_len, ext_pages, _) = {
-        let mut boxes = MAILBOXES.lock();
+        let mut boxes = lock_mailboxes();
         match boxes[idx].pop_valid_for_receiver_copy(
             receiver_thread_id,
             idx as u16,
@@ -1459,6 +1509,7 @@ fn recv_from_thread_nonblocking(
             }
             return err;
         }
+        record_ipc_copy(copy_len);
     }
     crate::debug!(
         "[IPC RECV] tid={} from={} len={}",
@@ -1487,10 +1538,11 @@ fn recv_blocking_for_thread(
     }
 
     let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
+    crate::performance::increment(crate::performance::CounterMetric::IpcReceiveAllocations, 1);
     loop {
         let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
         let recv = {
-            let mut boxes = MAILBOXES.lock();
+            let mut boxes = lock_mailboxes();
             match boxes[idx].pop_valid_for_receiver_copy(
                 receiver_thread_id,
                 idx as u16,
@@ -1532,6 +1584,7 @@ fn recv_blocking_for_thread(
                         }
                         return err;
                     }
+                    record_ipc_copy(copy_len);
                 }
                 crate::debug!(
                     "[IPC RECV] tid={} from={} len={} data={:02x?}",
@@ -1544,7 +1597,7 @@ fn recv_blocking_for_thread(
             }
             None => {
                 {
-                    let mut boxes = MAILBOXES.lock();
+                    let mut boxes = lock_mailboxes();
                     if let Some((from, copy_len, ext_pages, expects_reply)) = boxes[idx]
                         .pop_valid_for_receiver_copy(
                             receiver_thread_id,
@@ -1582,6 +1635,7 @@ fn recv_blocking_for_thread(
                                 }
                                 return err;
                             }
+                            record_ipc_copy(copy_len);
                         }
                         crate::debug!(
                             "[IPC RECV] tid={} from={} len={}",
@@ -1598,7 +1652,7 @@ fn recv_blocking_for_thread(
                     crate::task::yield_now();
                 } else {
                     {
-                        let mut boxes = MAILBOXES.lock();
+                        let mut boxes = lock_mailboxes();
                         if boxes[idx].waiter == caller_thread_id {
                             boxes[idx].waiter = 0;
                         }
@@ -1668,7 +1722,7 @@ pub fn recv_from_sender_for_kernel_nonblocking(
     }
 
     let n = {
-        let mut boxes = MAILBOXES.lock();
+        let mut boxes = lock_mailboxes();
         boxes[idx]
             .pop_from_sender_copy(
                 sender_thread_id,
@@ -1709,7 +1763,7 @@ pub fn recv_blocking_from_sender_for_kernel(
 
     loop {
         let n = {
-            let mut boxes = MAILBOXES.lock();
+            let mut boxes = lock_mailboxes();
             match boxes[idx].pop_from_sender_copy(
                 sender_thread_id,
                 receiver_u64,
@@ -1730,7 +1784,7 @@ pub fn recv_blocking_from_sender_for_kernel(
             Some(n) => return Ok(n),
             None => {
                 {
-                    let mut boxes = MAILBOXES.lock();
+                    let mut boxes = lock_mailboxes();
                     if let Some((_, n, _)) = boxes[idx].pop_from_sender_copy(
                         sender_thread_id,
                         receiver_u64,
@@ -1748,7 +1802,7 @@ pub fn recv_blocking_from_sender_for_kernel(
                 if crate::task::sleep_thread_unless_woken(receiver) {
                     crate::task::yield_now();
                 } else {
-                    let mut boxes = MAILBOXES.lock();
+                    let mut boxes = lock_mailboxes();
                     if boxes[idx].waiter == receiver_u64 {
                         boxes[idx].waiter = 0;
                     }
