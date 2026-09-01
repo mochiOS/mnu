@@ -10,7 +10,6 @@ use x86_64::{PhysAddr, VirtAddr};
 use crate::{BootInfo, SmpHandoff};
 
 const AP_BOOT_STACK_SIZE: usize = 0x2000;
-const MAX_SMP_STACKS: usize = crate::MAX_CPU_IDS;
 const X2APIC_SIVR_MSR: u32 = 0x80F;
 const X2APIC_EOI_MSR: u32 = 0x80B;
 const X2APIC_ICR_MSR: u32 = 0x830;
@@ -24,17 +23,6 @@ const APIC_TIMER_PERIODIC: u32 = 1 << 17;
 const APIC_TIMER_MASKED: u32 = 1 << 16;
 const APIC_TIMER_DIVIDE_BY_16: u32 = 0x3;
 const APIC_TIMER_CALIBRATION_TICKS: u64 = 10;
-#[repr(align(16))]
-struct ApBootStack {
-    _bytes: [u8; AP_BOOT_STACK_SIZE],
-}
-
-static mut AP_BOOT_STACKS: [ApBootStack; MAX_SMP_STACKS] = [const {
-    ApBootStack {
-        _bytes: [0; AP_BOOT_STACK_SIZE],
-    }
-}; MAX_SMP_STACKS];
-
 static BOOT_INFO_PTR: AtomicU64 = AtomicU64::new(0);
 static SMP_HANDOFF_ADDR: AtomicU64 = AtomicU64::new(0);
 static TRAMPOLINE_PHYS: AtomicU64 = AtomicU64::new(0);
@@ -59,6 +47,24 @@ struct TrampolineLayout {
 }
 
 static TRAMPOLINE_LAYOUT: Once<TrampolineLayout> = Once::new();
+
+fn allocate_ap_boot_stack() -> Option<u64> {
+    let page_count = AP_BOOT_STACK_SIZE.checked_add(0xfff)? / 0x1000;
+    let frame = crate::mem::frame::allocate_contiguous_frames(page_count).ok()?;
+    let stack_start = frame
+        .start_address()
+        .as_u64()
+        .checked_add(crate::mem::paging::physical_memory_offset()?)?;
+    // SAFETY: The frame allocator has reserved `page_count` contiguous frames
+    // for this AP. They remain reserved after startup because the BSP cannot
+    // prove that a late AP has stopped using its bootstrap stack.
+    unsafe {
+        (stack_start as *mut u8).write_bytes(0, AP_BOOT_STACK_SIZE);
+    }
+    stack_start
+        .checked_add(AP_BOOT_STACK_SIZE as u64)
+        .map(|top| top & !0xf)
+}
 
 global_asm!(
     r#"
@@ -743,15 +749,10 @@ pub fn start_secondary_cpus() {
             continue;
         }
 
-        let stack_slot = apic_id as usize;
-        if stack_slot >= MAX_SMP_STACKS {
-            crate::warn!("APIC ID {} exceeds AP stack table; skipping", apic_id);
+        let Some(stack_top) = allocate_ap_boot_stack() else {
+            crate::warn!("AP boot stack allocation failed for APIC ID {}", apic_id);
             continue;
-        }
-        let stack_top = unsafe {
-            let stack = &AP_BOOT_STACKS[stack_slot];
-            (stack as *const ApBootStack as u64) + AP_BOOT_STACK_SIZE as u64
-        } & !0xFu64;
+        };
 
         let before = handoff.ap_count.load(Ordering::Acquire);
         crate::info!(
