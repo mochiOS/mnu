@@ -10,6 +10,7 @@ use super::{EACCES, EAGAIN, EFAULT, EINVAL};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
+const MESSAGE_CACHE_CAP: usize = MAILBOX_CAP;
 const MAX_MSG_SIZE: usize = 4128; // FsResponse(4112) / DiskBulkResponse(2064) を収容
 const MAX_EXT_PAGES: usize = 262_144;
 const MAX_INLINE_EXT_PAGES: usize = 16;
@@ -606,7 +607,7 @@ impl Mailbox {
     fn quarantine(&mut self, reason: &'static str) {
         crate::audit::log(crate::audit::AuditEventKind::Quarantine, reason);
         for message in self.slots.iter_mut().filter_map(Option::take) {
-            wipe_message(message);
+            release_message(message);
         }
         *self = Self::new();
     }
@@ -631,7 +632,7 @@ impl Mailbox {
             self.quarantine("ipc mailbox slot missing during free");
             return false;
         };
-        wipe_message(message);
+        release_message(message);
         self.free[self.free_count] = idx as u8;
         self.free_count += 1;
         true
@@ -846,15 +847,75 @@ impl Mailbox {
     }
 }
 
-fn wipe_message(mut message: Box<Message>) {
+struct MessageCache {
+    slots: [Option<Box<Message>>; MESSAGE_CACHE_CAP],
+    count: usize,
+}
+
+impl MessageCache {
+    const fn new() -> Self {
+        Self {
+            slots: [const { None }; MESSAGE_CACHE_CAP],
+            count: 0,
+        }
+    }
+
+    fn take(&mut self) -> Option<Box<Message>> {
+        if self.count == 0 {
+            return None;
+        }
+        self.count -= 1;
+        match self.slots[self.count].take() {
+            Some(message) => Some(message),
+            None => {
+                self.quarantine("ipc message cache count points to an empty slot");
+                None
+            }
+        }
+    }
+
+    fn put(&mut self, message: Box<Message>) -> Result<(), Box<Message>> {
+        if self.count >= MESSAGE_CACHE_CAP {
+            return Err(message);
+        }
+        if self.slots[self.count].is_some() {
+            self.quarantine("ipc message cache points to an occupied slot");
+            return Err(message);
+        }
+        self.slots[self.count] = Some(message);
+        self.count += 1;
+        Ok(())
+    }
+
+    fn quarantine(&mut self, reason: &'static str) {
+        crate::audit::log(crate::audit::AuditEventKind::Quarantine, reason);
+        for message in self.slots.iter_mut().filter_map(Option::take) {
+            drop(wipe_message(message));
+        }
+        self.count = 0;
+    }
+}
+
+fn wipe_message(mut message: Box<Message>) -> Box<Message> {
     // The volatile replacement keeps message contents from surviving in a
     // reusable kernel heap allocation after the queue releases them.
     unsafe {
         core::ptr::write_volatile(message.as_mut(), Message::empty());
     }
+    message
+}
+
+fn release_message(message: Box<Message>) {
+    let message = wipe_message(message);
+    if let Err(message) = MESSAGE_CACHE.lock().put(message) {
+        drop(message);
+    }
 }
 
 fn allocate_message() -> Option<Box<Message>> {
+    if let Some(message) = MESSAGE_CACHE.lock().take() {
+        return Some(message);
+    }
     let layout = Layout::new::<Message>();
     // SAFETY: The returned pointer is checked before it is initialized and
     // converted into a Box with the same global allocator and layout.
@@ -870,6 +931,7 @@ fn allocate_message() -> Option<Box<Message>> {
     }
 }
 
+static MESSAGE_CACHE: SpinLock<MessageCache> = SpinLock::new(MessageCache::new());
 static MAILBOXES: SpinLock<[Mailbox; MAX_THREADS]> =
     SpinLock::new([const { Mailbox::new() }; MAX_THREADS]);
 
