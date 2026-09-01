@@ -1,9 +1,12 @@
 use core::arch::{asm, x86_64::__cpuid_count};
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 #[cfg(feature = "performance-instrumentation")]
 use core::sync::atomic::AtomicU64;
-pub use mnu_abi::performance::{BootMilestone, CounterMetric, GaugeMetric, LatencyMetric};
+pub use mnu_abi::performance::{
+    AllocationSubsystem, BootMilestone, CounterMetric, GaugeMetric, HeapAllocationSizeClass,
+    LatencyMetric,
+};
 #[cfg(feature = "performance-instrumentation")]
 use mnu_metrics::{
     AtomicGauge, AtomicHistogram, GaugeSnapshot as MetricGaugeSnapshot, HistogramSnapshot,
@@ -53,6 +56,115 @@ static GAUGES: [AtomicGauge; GaugeMetric::COUNT] =
 #[cfg(feature = "performance-instrumentation")]
 static BOOT_MILESTONES: [AtomicU64; BootMilestone::COUNT] =
     [const { AtomicU64::new(0) }; BootMilestone::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static HEAP_ALLOCATIONS_BY_SIZE: [AtomicU64; HeapAllocationSizeClass::COUNT] =
+    [const { AtomicU64::new(0) }; HeapAllocationSizeClass::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static HEAP_ALLOCATIONS_BY_CPU: [AtomicU64; mnu_abi::performance::PERFORMANCE_CPU_SLOTS] =
+    [const { AtomicU64::new(0) }; mnu_abi::performance::PERFORMANCE_CPU_SLOTS];
+#[cfg(feature = "performance-instrumentation")]
+static HEAP_ALLOCATIONS_BY_SUBSYSTEM: [AtomicU64; AllocationSubsystem::COUNT] =
+    [const { AtomicU64::new(0) }; AllocationSubsystem::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static HEAP_INTERNAL_FRAGMENTATION: AtomicGauge = AtomicGauge::new();
+
+#[cfg(feature = "performance-instrumentation")]
+const ALLOCATION_THREAD_SLOTS: usize = 64;
+#[cfg(feature = "performance-instrumentation")]
+const ALLOCATION_CONTEXT_SLOTS: usize =
+    ALLOCATION_THREAD_SLOTS + mnu_abi::performance::PERFORMANCE_CPU_SLOTS;
+#[cfg(feature = "performance-instrumentation")]
+static ALLOCATION_CONTEXTS: [AtomicU8; ALLOCATION_CONTEXT_SLOTS] =
+    [const { AtomicU8::new(AllocationSubsystem::Other as u8) }; ALLOCATION_CONTEXT_SLOTS];
+
+pub struct AllocationScope {
+    #[cfg(feature = "performance-instrumentation")]
+    context_index: usize,
+    #[cfg(feature = "performance-instrumentation")]
+    previous: u8,
+}
+
+impl AllocationScope {
+    #[inline]
+    pub fn enter(subsystem: AllocationSubsystem) -> Self {
+        #[cfg(feature = "performance-instrumentation")]
+        {
+            let context_index = allocation_context_index();
+            let previous =
+                ALLOCATION_CONTEXTS[context_index].swap(subsystem as u8, Ordering::Relaxed);
+            return Self {
+                context_index,
+                previous,
+            };
+        }
+
+        #[cfg(not(feature = "performance-instrumentation"))]
+        {
+            let _ = subsystem;
+            Self {}
+        }
+    }
+}
+
+impl Drop for AllocationScope {
+    #[inline]
+    fn drop(&mut self) {
+        #[cfg(feature = "performance-instrumentation")]
+        ALLOCATION_CONTEXTS[self.context_index].store(self.previous, Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "performance-instrumentation")]
+fn allocation_context_index() -> usize {
+    crate::percpu::current_thread_slot()
+        .filter(|slot| *slot < ALLOCATION_THREAD_SLOTS)
+        .unwrap_or_else(|| ALLOCATION_THREAD_SLOTS + crate::percpu::current_cpu_id())
+}
+
+#[cfg(feature = "performance-instrumentation")]
+fn current_allocation_subsystem() -> AllocationSubsystem {
+    match ALLOCATION_CONTEXTS[allocation_context_index()].load(Ordering::Relaxed) {
+        1 => AllocationSubsystem::Scheduler,
+        2 => AllocationSubsystem::Ipc,
+        3 => AllocationSubsystem::Vfs,
+        4 => AllocationSubsystem::PageFault,
+        5 => AllocationSubsystem::NetworkReceive,
+        6 => AllocationSubsystem::NetworkTransmit,
+        7 => AllocationSubsystem::BlockIo,
+        8 => AllocationSubsystem::ProcessCreation,
+        9 => AllocationSubsystem::ThreadCreation,
+        10 => AllocationSubsystem::Syscall,
+        _ => AllocationSubsystem::Other,
+    }
+}
+
+#[inline]
+pub fn record_heap_allocation(user_bytes: usize, reserved_bytes: usize) {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        let size_class = HeapAllocationSizeClass::for_size(user_bytes);
+        HEAP_ALLOCATIONS_BY_SIZE[size_class as usize].fetch_add(1, Ordering::Relaxed);
+
+        let cpu = crate::percpu::current_cpu_id();
+        HEAP_ALLOCATIONS_BY_CPU[cpu].fetch_add(1, Ordering::Relaxed);
+
+        let subsystem = current_allocation_subsystem();
+        HEAP_ALLOCATIONS_BY_SUBSYSTEM[subsystem as usize].fetch_add(1, Ordering::Relaxed);
+        HEAP_INTERNAL_FRAGMENTATION.add(reserved_bytes.saturating_sub(user_bytes) as u64);
+    }
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = (user_bytes, reserved_bytes);
+}
+
+#[inline]
+pub fn record_heap_deallocation(user_bytes: usize, reserved_bytes: usize) {
+    #[cfg(feature = "performance-instrumentation")]
+    HEAP_INTERNAL_FRAGMENTATION.subtract(reserved_bytes.saturating_sub(user_bytes) as u64);
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = (user_bytes, reserved_bytes);
+}
 
 pub fn initialize_clock() -> ClockInfo {
     let maximum_extended_leaf = cpuid(0x8000_0000, 0).eax;
@@ -231,6 +343,23 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
         latencies: core::array::from_fn(|index| distribution_snapshot(merged_latency(index))),
         boot_timestamps: core::array::from_fn(|index| {
             BOOT_MILESTONES[index].load(Ordering::Relaxed)
+        }),
+        heap_committed_bytes: crate::mem::allocator::heap_committed_bytes() as u64,
+        heap_internal_fragmentation: {
+            let snapshot = HEAP_INTERNAL_FRAGMENTATION.snapshot();
+            GaugeSnapshot {
+                current: snapshot.current,
+                peak: snapshot.peak,
+            }
+        },
+        heap_allocations_by_size: core::array::from_fn(|index| {
+            HEAP_ALLOCATIONS_BY_SIZE[index].load(Ordering::Relaxed)
+        }),
+        heap_allocations_by_cpu: core::array::from_fn(|index| {
+            HEAP_ALLOCATIONS_BY_CPU[index].load(Ordering::Relaxed)
+        }),
+        heap_allocations_by_subsystem: core::array::from_fn(|index| {
+            HEAP_ALLOCATIONS_BY_SUBSYSTEM[index].load(Ordering::Relaxed)
         }),
     }
 }

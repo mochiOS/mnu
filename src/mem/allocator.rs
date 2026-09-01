@@ -297,6 +297,7 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
                 performance::increment(CounterMetric::HeapAllocationBytes, layout.size() as u64);
                 performance::gauge_add(GaugeMetric::HeapLiveBytes, layout.size() as u64);
                 performance::gauge_add(GaugeMetric::HeapReservedBytes, raw_layout.size() as u64);
+                performance::record_heap_allocation(layout.size(), raw_layout.size());
                 return user_ptr;
             }
 
@@ -397,6 +398,7 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
         performance::increment(CounterMetric::HeapFreedBytes, u64::from(header.user_size));
         performance::gauge_subtract(GaugeMetric::HeapLiveBytes, u64::from(header.user_size));
         performance::gauge_add(GaugeMetric::HeapQuarantinedBytes, raw_layout.size() as u64);
+        performance::record_heap_deallocation(header.user_size as usize, raw_layout.size());
 
         if let Some(evicted) = evicted {
             performance::gauge_subtract(

@@ -1,4 +1,6 @@
-pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 1;
+pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 2;
+pub const PERFORMANCE_SNAPSHOT_V1_SIZE: usize = 1_200;
+pub const PERFORMANCE_CPU_SLOTS: usize = 64;
 
 pub const PERFORMANCE_FLAG_INSTRUMENTED: u64 = 1 << 0;
 pub const PERFORMANCE_FLAG_INVARIANT_TSC: u64 = 1 << 1;
@@ -93,6 +95,58 @@ impl BootMilestone {
     pub const COUNT: usize = Self::Idle as usize + 1;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum HeapAllocationSizeClass {
+    Bytes16,
+    Bytes64,
+    Bytes256,
+    Bytes1024,
+    Bytes4096,
+    Bytes16384,
+    Bytes65536,
+    Bytes262144,
+    Larger,
+}
+
+impl HeapAllocationSizeClass {
+    pub const COUNT: usize = Self::Larger as usize + 1;
+
+    pub const fn for_size(size: usize) -> Self {
+        match size {
+            0..=16 => Self::Bytes16,
+            17..=64 => Self::Bytes64,
+            65..=256 => Self::Bytes256,
+            257..=1_024 => Self::Bytes1024,
+            1_025..=4_096 => Self::Bytes4096,
+            4_097..=16_384 => Self::Bytes16384,
+            16_385..=65_536 => Self::Bytes65536,
+            65_537..=262_144 => Self::Bytes262144,
+            _ => Self::Larger,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum AllocationSubsystem {
+    Other,
+    Scheduler,
+    Ipc,
+    Vfs,
+    PageFault,
+    NetworkReceive,
+    NetworkTransmit,
+    BlockIo,
+    ProcessCreation,
+    ThreadCreation,
+    Syscall,
+}
+
+impl AllocationSubsystem {
+    pub const COUNT: usize = Self::Syscall as usize + 1;
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DistributionSnapshot {
@@ -112,7 +166,7 @@ pub struct GaugeSnapshot {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KernelPerformanceSnapshot {
     pub version: u32,
     pub size: u32,
@@ -128,6 +182,37 @@ pub struct KernelPerformanceSnapshot {
     pub gauges: [GaugeSnapshot; GaugeMetric::COUNT],
     pub latencies: [DistributionSnapshot; LatencyMetric::COUNT],
     pub boot_timestamps: [u64; BootMilestone::COUNT],
+    /// v2 extension. The v1 prefix above must remain byte-for-byte stable.
+    pub heap_committed_bytes: u64,
+    pub heap_internal_fragmentation: GaugeSnapshot,
+    pub heap_allocations_by_size: [u64; HeapAllocationSizeClass::COUNT],
+    pub heap_allocations_by_cpu: [u64; PERFORMANCE_CPU_SLOTS],
+    pub heap_allocations_by_subsystem: [u64; AllocationSubsystem::COUNT],
+}
+
+impl Default for KernelPerformanceSnapshot {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            size: 0,
+            flags: 0,
+            tsc_frequency_khz: 0,
+            clock_source: 0,
+            kernel_stack_high_water_bytes: 0,
+            usable_frames: 0,
+            free_frames: 0,
+            heap_capacity_bytes: 0,
+            counters: [0; CounterMetric::COUNT],
+            gauges: [GaugeSnapshot::default(); GaugeMetric::COUNT],
+            latencies: [DistributionSnapshot::default(); LatencyMetric::COUNT],
+            boot_timestamps: [0; BootMilestone::COUNT],
+            heap_committed_bytes: 0,
+            heap_internal_fragmentation: GaugeSnapshot::default(),
+            heap_allocations_by_size: [0; HeapAllocationSizeClass::COUNT],
+            heap_allocations_by_cpu: [0; PERFORMANCE_CPU_SLOTS],
+            heap_allocations_by_subsystem: [0; AllocationSubsystem::COUNT],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -138,7 +223,31 @@ mod tests {
     fn snapshot_layout_is_fixed() {
         assert_eq!(core::mem::size_of::<DistributionSnapshot>(), 48);
         assert_eq!(core::mem::size_of::<GaugeSnapshot>(), 16);
-        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 1_200);
+        assert_eq!(
+            core::mem::offset_of!(KernelPerformanceSnapshot, heap_committed_bytes),
+            PERFORMANCE_SNAPSHOT_V1_SIZE
+        );
+        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 1_896);
         assert_eq!(core::mem::align_of::<KernelPerformanceSnapshot>(), 8);
+    }
+
+    #[test]
+    fn allocation_size_classes_cover_boundaries() {
+        assert_eq!(
+            HeapAllocationSizeClass::for_size(16),
+            HeapAllocationSizeClass::Bytes16
+        );
+        assert_eq!(
+            HeapAllocationSizeClass::for_size(17),
+            HeapAllocationSizeClass::Bytes64
+        );
+        assert_eq!(
+            HeapAllocationSizeClass::for_size(262_144),
+            HeapAllocationSizeClass::Bytes262144
+        );
+        assert_eq!(
+            HeapAllocationSizeClass::for_size(262_145),
+            HeapAllocationSizeClass::Larger
+        );
     }
 }

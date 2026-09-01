@@ -182,6 +182,10 @@ pub fn is_scheduler_enabled() -> bool {
 /// # Returns
 /// スケジューリングが必要な場合はtrue
 pub fn scheduler_tick() -> bool {
+    #[cfg(feature = "performance-instrumentation")]
+    let _allocation_scope = crate::performance::AllocationScope::enter(
+        crate::performance::AllocationSubsystem::Scheduler,
+    );
     crate::task::reclaim_current_cpu_kernel_stack();
     if let Some(slot) = current_thread_slot() {
         if with_thread_at_slot(slot, |t| t.in_syscall()).unwrap_or(false) {
@@ -547,6 +551,10 @@ pub fn exit_current_task(exit_code: u64) -> ! {
 ///
 /// タイマー割り込みハンドラから呼び出される
 pub fn schedule_and_switch() {
+    #[cfg(feature = "performance-instrumentation")]
+    let _allocation_scope = crate::performance::AllocationScope::enter(
+        crate::performance::AllocationSubsystem::Scheduler,
+    );
     if !is_scheduler_enabled() {
         return;
     }

@@ -26,9 +26,8 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 const FIRMWARE_PRESENT_MAX: usize = mnu_abi::hypervisor::FIRMWARE_FRAMEBUFFER_MAX_TRANSFER;
-static FIRMWARE_PRESENT_BUFFER: crate::interrupt::spinlock::SpinLock<
-    [u8; FIRMWARE_PRESENT_MAX],
-> = crate::interrupt::spinlock::SpinLock::new([0; FIRMWARE_PRESENT_MAX]);
+static FIRMWARE_PRESENT_BUFFER: crate::interrupt::spinlock::SpinLock<[u8; FIRMWARE_PRESENT_MAX]> =
+    crate::interrupt::spinlock::SpinLock::new([0; FIRMWARE_PRESENT_MAX]);
 
 /// ユーザー空間ポインタの有効性を検証する
 ///
@@ -575,6 +574,9 @@ pub fn last_syscall_snapshot() -> (u64, [u64; 5]) {
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
     record_syscall(num, arg0, arg1, arg2, arg3, arg4);
     #[cfg(feature = "performance-instrumentation")]
+    let _allocation_scope =
+        crate::performance::AllocationScope::enter(allocation_subsystem_for_syscall(num));
+    #[cfg(feature = "performance-instrumentation")]
     let latency = vfs_latency_metric(num).map(|metric| (metric, crate::performance::timestamp()));
 
     let result = match num {
@@ -633,9 +635,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
             present_framebuffer(arg0, arg1, arg2, arg3)
         }
         x if x == SyscallNumber::StorageControl as u64 => storage::control(arg0, arg1),
-        x if x == SyscallNumber::PerformanceSnapshot as u64 => {
-            performance::snapshot(arg0, arg1)
-        }
+        x if x == SyscallNumber::PerformanceSnapshot as u64 => performance::snapshot(arg0, arg1),
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryProtect as u64 => pgroup::mprotect(arg0, arg1, arg2),
@@ -727,13 +727,78 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
 }
 
 #[cfg(feature = "performance-instrumentation")]
+fn allocation_subsystem_for_syscall(num: u64) -> crate::performance::AllocationSubsystem {
+    use crate::performance::AllocationSubsystem;
+
+    if is_ipc_syscall(num) {
+        AllocationSubsystem::Ipc
+    } else if is_vfs_syscall(num) {
+        AllocationSubsystem::Vfs
+    } else if is_process_creation_syscall(num) {
+        AllocationSubsystem::ProcessCreation
+    } else if num == SyscallNumber::ThreadCreate as u64 {
+        AllocationSubsystem::ThreadCreation
+    } else if num == SyscallNumber::BlockRead as u64
+        || num == SyscallNumber::BlockWrite as u64
+        || num == SyscallNumber::StorageControl as u64
+    {
+        AllocationSubsystem::BlockIo
+    } else {
+        AllocationSubsystem::Syscall
+    }
+}
+
+#[cfg(feature = "performance-instrumentation")]
+fn is_ipc_syscall(num: u64) -> bool {
+    num == SyscallNumber::IpcSend as u64
+        || num == SyscallNumber::IpcRecv as u64
+        || num == SyscallNumber::IpcRecvWait as u64
+        || num == SyscallNumber::IpcSendPages as u64
+        || num == SyscallNumber::IpcEndpointAlive as u64
+        || num == SyscallNumber::IpcEndpointOwner as u64
+        || num == SyscallNumber::IpcCreate as u64
+        || num == SyscallNumber::IpcCall as u64
+        || num == SyscallNumber::IpcReply as u64
+        || num == SyscallNumber::IpcWait as u64
+}
+
+#[cfg(feature = "performance-instrumentation")]
+fn is_vfs_syscall(num: u64) -> bool {
+    matches!(
+        num,
+        0..=8 | 19..=22 | 32..=33 | 72 | 74..=77 | 79 | 87 | 89..=92 | 137 | 217 | 257 | 262..=264 | 267 | 269 | 293 | 560..=573
+    )
+}
+
+#[cfg(feature = "performance-instrumentation")]
+fn is_process_creation_syscall(num: u64) -> bool {
+    num == SyscallNumber::Fork as u64
+        || num == SyscallNumber::Clone as u64
+        || num == SyscallNumber::Execve as u64
+        || num == SyscallNumber::Exec as u64
+        || num == SyscallNumber::ExecFromBuffer as u64
+        || num == SyscallNumber::ExecFromBufferNamed as u64
+        || num == SyscallNumber::ExecFromBufferNamedArgs as u64
+        || num == SyscallNumber::ExecFromBufferNamedArgsWithRequester as u64
+        || num == SyscallNumber::ExecFromFsStream as u64
+        || num == SyscallNumber::ExecWithCapabilities as u64
+        || num == SyscallNumber::ProcessSpawn as u64
+        || num == SyscallNumber::ExecManifest as u64
+        || num == SyscallNumber::ExecManifestWithCredentials as u64
+        || num == SyscallNumber::ExecManifestForRequester as u64
+}
+
+#[cfg(feature = "performance-instrumentation")]
 fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
     use crate::performance::LatencyMetric;
 
     match num {
         x if x == SyscallNumber::Open as u64
             || x == SyscallNumber::FileOpen as u64
-            || x == SyscallNumber::FileOpenAt as u64 => Some(LatencyMetric::VfsOpen),
+            || x == SyscallNumber::FileOpenAt as u64 =>
+        {
+            Some(LatencyMetric::VfsOpen)
+        }
         x if x == SyscallNumber::Read as u64 || x == SyscallNumber::FileRead as u64 => {
             Some(LatencyMetric::VfsRead)
         }
@@ -745,7 +810,10 @@ fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
         }
         x if x == SyscallNumber::FileStat as u64
             || x == SyscallNumber::FileStatAt as u64
-            || x == SyscallNumber::FileFstat as u64 => Some(LatencyMetric::VfsStat),
+            || x == SyscallNumber::FileFstat as u64 =>
+        {
+            Some(LatencyMetric::VfsStat)
+        }
         _ => None,
     }
 }
