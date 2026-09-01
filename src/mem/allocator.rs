@@ -40,24 +40,22 @@ unsafe impl Send for QuarantinedBlock {}
 struct HeapHeader {
     magic: u64,
     cookie: u64,
-    raw_ptr: u64,
-    raw_size: usize,
-    raw_align: usize,
-    user_size: usize,
-    user_align: usize,
     checksum: u64,
+    raw_offset: u32,
+    raw_size: u32,
+    user_size: u32,
+    user_align: u32,
 }
 
 impl HeapHeader {
     fn checksum(&self, cookie: u64) -> u64 {
         self.magic
-            ^ self.raw_ptr
-            ^ (self.raw_size as u64)
-            ^ (self.raw_align as u64)
-            ^ (self.user_size as u64)
-            ^ (self.user_align as u64)
             ^ cookie
             ^ HEAP_HEADER_MAGIC
+            ^ u64::from(self.raw_offset)
+            ^ u64::from(self.raw_size).rotate_left(11)
+            ^ u64::from(self.user_size).rotate_left(23)
+            ^ u64::from(self.user_align).rotate_left(37)
     }
 
     fn is_valid(&self) -> bool {
@@ -259,28 +257,40 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
             Ok(v) => v,
             Err(_) => return ptr::null_mut(),
         };
+        let Ok(raw_size) = u32::try_from(raw_layout.size()) else {
+            return ptr::null_mut();
+        };
+        let Ok(user_size) = u32::try_from(layout.size()) else {
+            return ptr::null_mut();
+        };
+        let Ok(user_align_u32) = u32::try_from(layout.align()) else {
+            return ptr::null_mut();
+        };
 
         loop {
             let raw_ptr = GlobalAlloc::alloc(&self.inner, raw_layout);
             if !raw_ptr.is_null() {
                 let cookie = self.cookie_seed();
                 let user_ptr = align_user_ptr(raw_ptr, header_size, user_align);
+                let Ok(raw_offset) = u32::try_from(user_ptr.offset_from(raw_ptr) as usize) else {
+                    GlobalAlloc::dealloc(&self.inner, raw_ptr, raw_layout);
+                    return ptr::null_mut();
+                };
                 let header_ptr = user_ptr.sub(header_size) as *mut HeapHeader;
                 let header = HeapHeader {
                     magic: HEAP_HEADER_MAGIC,
                     cookie,
-                    raw_ptr: raw_ptr as u64,
-                    raw_size: raw_layout.size(),
-                    raw_align: raw_layout.align(),
-                    user_size: layout.size(),
-                    user_align: layout.align(),
                     checksum: 0,
+                    raw_offset,
+                    raw_size,
+                    user_size,
+                    user_align: user_align_u32,
                 };
                 let mut header = header;
                 header.checksum = header.checksum(cookie);
                 ptr::write(header_ptr, header);
                 ptr::write_unaligned(
-                    user_ptr.add(layout.size()) as *mut u64,
+                    user_ptr.add(user_size as usize) as *mut u64,
                     cookie ^ HEAP_TAIL_MAGIC,
                 );
                 performance::increment(CounterMetric::HeapAllocations, 1);
@@ -330,7 +340,16 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
             );
             return;
         }
-        let tail_ptr = ptr.add(header.user_size) as *const u64;
+        if header.user_size as usize != layout.size()
+            || header.user_align as usize != layout.align()
+        {
+            crate::audit::log(
+                crate::audit::AuditEventKind::Memory,
+                "heap dealloc layout mismatch",
+            );
+            return;
+        }
+        let tail_ptr = ptr.add(header.user_size as usize) as *const u64;
         let expected_tail = header.cookie ^ HEAP_TAIL_MAGIC;
         let tail_ok = unsafe { tail_ptr.read_unaligned() == expected_tail };
         if !tail_ok {
@@ -340,8 +359,11 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
                 "heap tail canary mismatch",
             );
         }
-        let raw_ptr = header.raw_ptr as *mut u8;
-        let raw_layout = match Layout::from_size_align(header.raw_size, header.raw_align) {
+        let raw_ptr = ptr.sub(header.raw_offset as usize);
+        let raw_layout = match Layout::from_size_align(
+            header.raw_size as usize,
+            (header.user_align as usize).max(HEAP_HEADER_ALIGNMENT),
+        ) {
             Ok(v) => v,
             Err(_) => {
                 crate::warn!(
@@ -367,13 +389,13 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
                 return;
             }
 
-            ptr::write_bytes(ptr, 0xDD, header.user_size);
+            ptr::write_bytes(ptr, 0xDD, header.user_size as usize);
             quarantine.push(block)
         };
 
         performance::increment(CounterMetric::HeapFrees, 1);
-        performance::increment(CounterMetric::HeapFreedBytes, header.user_size as u64);
-        performance::gauge_subtract(GaugeMetric::HeapLiveBytes, header.user_size as u64);
+        performance::increment(CounterMetric::HeapFreedBytes, u64::from(header.user_size));
+        performance::gauge_subtract(GaugeMetric::HeapLiveBytes, u64::from(header.user_size));
         performance::gauge_add(GaugeMetric::HeapQuarantinedBytes, raw_layout.size() as u64);
 
         if let Some(evicted) = evicted {
