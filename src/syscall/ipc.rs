@@ -2,7 +2,6 @@ use crate::interrupt::spinlock::{SpinLock, SpinLockGuard};
 use alloc::alloc::{alloc, Layout};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -343,19 +342,18 @@ fn recv_blocking_reply_for_thread(
         return EINVAL;
     }
 
-    let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
-    crate::performance::increment(crate::performance::CounterMetric::IpcReceiveAllocations, 1);
     loop {
         let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
         let recv = {
             let mut boxes = lock_mailboxes();
-            match boxes[idx].pop_reply_copy(
+            match boxes[idx].pop_reply_to_user(
                 receiver_thread_id,
                 idx as u16,
                 receiver_generation,
-                &mut recv_buf[..max_copy],
+                buf_ptr,
+                max_copy,
             ) {
-                Some(v) => {
+                Ok(Some(v)) => {
                     if let Some((caller_idx, _)) =
                         crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                     {
@@ -365,32 +363,29 @@ fn recv_blocking_reply_for_thread(
                     }
                     Some(v)
                 }
-                None => {
+                Ok(None) => {
                     boxes[idx].waiter = caller_thread_id;
                     None
                 }
+                Err(error) => return error,
             }
         };
 
         match recv {
             Some((from, copy_len)) => {
-                if copy_len > 0 && buf_ptr != 0 {
-                    if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len]) {
-                        return err;
-                    }
-                    record_ipc_copy(copy_len);
-                }
                 return (from << 32) | (copy_len as u64);
             }
             None => {
                 {
                     let mut boxes = lock_mailboxes();
-                    if let Some((from, copy_len)) = boxes[idx].pop_reply_copy(
+                    let second_try = boxes[idx].pop_reply_to_user(
                         receiver_thread_id,
                         idx as u16,
                         receiver_generation,
-                        &mut recv_buf[..max_copy],
-                    ) {
+                        buf_ptr,
+                        max_copy,
+                    );
+                    if let Ok(Some((from, copy_len))) = second_try {
                         if boxes[idx].waiter == caller_thread_id {
                             boxes[idx].waiter = 0;
                         }
@@ -401,16 +396,13 @@ fn recv_blocking_reply_for_thread(
                                 boxes[caller_idx].reply_to = from;
                             }
                         }
-                        drop(boxes);
-                        if copy_len > 0 && buf_ptr != 0 {
-                            if let Err(err) =
-                                crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len])
-                            {
-                                return err;
-                            }
-                            record_ipc_copy(copy_len);
-                        }
                         return (from << 32) | (copy_len as u64);
+                    }
+                    if let Err(error) = second_try {
+                        if boxes[idx].waiter == caller_thread_id {
+                            boxes[idx].waiter = 0;
+                        }
+                        return error;
                     }
                 }
                 if crate::task::sleep_thread_unless_woken(crate::task::ThreadId::from_u64(
@@ -552,6 +544,14 @@ impl Message {
             ext_pages: ExternalPages::empty(),
         }
     }
+}
+
+struct UserReceive {
+    from: u64,
+    copy_len: usize,
+    ext_pages: ExternalPages,
+    expects_reply: bool,
+    external_header: [u8; 16],
 }
 
 #[derive(Debug)]
@@ -719,50 +719,60 @@ impl Mailbox {
         Ok(())
     }
 
-    fn pop_valid_for_receiver_copy(
+    fn pop_valid_for_receiver_to_user(
         &mut self,
         receiver: u64,
         receiver_slot: u16,
         receiver_generation: u64,
-        out: &mut [u8],
-    ) -> Option<(u64, usize, ExternalPages, bool)> {
-        while let Some(slot_idx) = self.dequeue_slot() {
-            let Some(msg) = self.slots[slot_idx].as_deref() else {
+        buf_ptr: u64,
+        max_copy: usize,
+    ) -> Result<Option<UserReceive>, u64> {
+        while self.count > 0 {
+            let slot_idx = self.queue[self.head] as usize;
+            let Some(msg) = self.slots.get(slot_idx).and_then(Option::as_deref) else {
                 self.quarantine("ipc mailbox queue points to an empty slot");
-                return None;
+                return Ok(None);
             };
-            if msg.to == receiver
-                && msg.to_slot == receiver_slot
-                && msg.to_generation == receiver_generation
+            if msg.to != receiver
+                || msg.to_slot != receiver_slot
+                || msg.to_generation != receiver_generation
             {
-                let copy_len = core::cmp::min(msg.len, out.len());
-                if !msg.ext_pages.is_empty() && msg.len == 0 {
-                    let from = msg.from;
-                    let ext_pages = msg.ext_pages;
-                    let expects_reply = msg.expects_reply;
-                    if !self.free_slot(slot_idx) {
-                        return None;
-                    }
-                    return Some((from, 0usize, ext_pages, expects_reply));
+                let _ = self.dequeue_slot();
+                if !self.free_slot(slot_idx) {
+                    return Ok(None);
                 }
-                if copy_len > 0 {
-                    out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
+                continue;
+            }
+
+            let copy_len = core::cmp::min(msg.len, max_copy);
+            let mut external_header = [0u8; 16];
+            if msg.ext_pages.is_empty() {
+                if copy_len > 0 && buf_ptr != 0 {
+                    crate::syscall::copy_to_user(buf_ptr, &msg.data[..copy_len])?;
                     record_ipc_copy(copy_len);
                 }
-                let from = msg.from;
-                let ext_pages = msg.ext_pages;
-                let expects_reply = msg.expects_reply;
-                if !self.free_slot(slot_idx) {
-                    return None;
+            } else {
+                if copy_len < external_header.len() {
+                    return Err(EFAULT);
                 }
-                return Some((from, copy_len, ext_pages, expects_reply));
+                external_header.copy_from_slice(&msg.data[..16]);
+                record_ipc_copy(16);
             }
-            // 古い宛先のメッセージは破棄
-            if !self.free_slot(slot_idx) {
-                return None;
+
+            let receive = UserReceive {
+                from: msg.from,
+                copy_len,
+                ext_pages: msg.ext_pages,
+                expects_reply: msg.expects_reply,
+                external_header,
+            };
+            let dequeued = self.dequeue_slot();
+            if dequeued != Some(slot_idx) || !self.free_slot(slot_idx) {
+                return Ok(None);
             }
+            return Ok(Some(receive));
         }
-        None
+        Ok(None)
     }
 
     /// 指定送信元からの有効メッセージを1件だけ取り出し、内容を out へコピーする
@@ -815,23 +825,26 @@ impl Mailbox {
         None
     }
 
-    fn pop_reply_copy(
+    fn pop_reply_to_user(
         &mut self,
         receiver: u64,
         receiver_slot: u16,
         receiver_generation: u64,
-        out: &mut [u8],
-    ) -> Option<(u64, usize)> {
+        buf_ptr: u64,
+        max_copy: usize,
+    ) -> Result<Option<(u64, usize)>, u64> {
         if self.count == 0 {
-            return None;
+            return Ok(None);
         }
 
         let original = self.count;
         for _ in 0..original {
-            let slot_idx = self.dequeue_slot()?;
-            let Some(msg) = self.slots[slot_idx].as_deref() else {
+            let Some(slot_idx) = self.dequeue_slot() else {
+                return Ok(None);
+            };
+            let Some(msg) = self.slots.get(slot_idx).and_then(Option::as_deref) else {
                 self.quarantine("ipc mailbox queue points to an empty slot");
-                return None;
+                return Ok(None);
             };
             if msg.to != receiver
                 || msg.to_slot != receiver_slot
@@ -840,24 +853,29 @@ impl Mailbox {
             {
                 if self.enqueue_slot(slot_idx).is_err() {
                     let _ = self.free_slot(slot_idx);
-                    return None;
+                    return Ok(None);
                 }
                 continue;
             }
 
-            let copy_len = core::cmp::min(msg.len, out.len());
-            if copy_len > 0 {
-                out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
+            let copy_len = core::cmp::min(msg.len, max_copy);
+            if copy_len > 0 && buf_ptr != 0 {
+                if let Err(error) = crate::syscall::copy_to_user(buf_ptr, &msg.data[..copy_len]) {
+                    if self.enqueue_slot(slot_idx).is_err() {
+                        let _ = self.free_slot(slot_idx);
+                    }
+                    return Err(error);
+                }
                 record_ipc_copy(copy_len);
             }
             let from = msg.from;
             if !self.free_slot(slot_idx) {
-                return None;
+                return Ok(None);
             }
-            return Some((from, copy_len));
+            return Ok(Some((from, copy_len)));
         }
 
-        None
+        Ok(None)
     }
 
     /// メッセージを積んだ後、待機中スレッドがいれば返して登録を消す
@@ -1593,6 +1611,35 @@ fn prepare_external_pages_for_user(
     Ok((16, Some(mapped_addr)))
 }
 
+fn finish_user_receive(
+    receiver_thread_id: u64,
+    buf_ptr: u64,
+    mut receive: UserReceive,
+) -> Result<(u64, usize, bool), u64> {
+    if receive.ext_pages.is_empty() {
+        return Ok((receive.from, receive.copy_len, receive.expects_reply));
+    }
+
+    let (copy_len, mapping) = prepare_external_pages_for_user(
+        receiver_thread_id,
+        &mut receive.external_header,
+        receive.copy_len,
+        receive.ext_pages,
+    )?;
+    if copy_len > 0 && buf_ptr != 0 {
+        if let Err(error) =
+            crate::syscall::copy_to_user(buf_ptr, &receive.external_header[..copy_len])
+        {
+            if let Some(mapping) = mapping.as_ref() {
+                mapping.rollback();
+            }
+            return Err(error);
+        }
+        record_ipc_copy(copy_len);
+    }
+    Ok((receive.from, copy_len, receive.expects_reply))
+}
+
 fn recv_from_thread_nonblocking(
     receiver_thread_id: u64,
     caller_thread_id: u64,
@@ -1610,48 +1657,33 @@ fn recv_from_thread_nonblocking(
     }
 
     let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
-    let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
-    crate::performance::increment(crate::performance::CounterMetric::IpcReceiveAllocations, 1);
-    let (from, copy_len, ext_pages, _) = {
+    let receive = {
         let mut boxes = lock_mailboxes();
-        match boxes[idx].pop_valid_for_receiver_copy(
+        match boxes[idx].pop_valid_for_receiver_to_user(
             receiver_thread_id,
             idx as u16,
             receiver_generation,
-            &mut recv_buf[..max_copy],
+            buf_ptr,
+            max_copy,
         ) {
-            Some(v) => {
+            Ok(Some(receive)) => {
                 if let Some((caller_idx, _)) =
                     crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                 {
-                    if caller_idx < MAX_THREADS && v.3 {
-                        boxes[caller_idx].reply_to = v.0;
+                    if caller_idx < MAX_THREADS && receive.expects_reply {
+                        boxes[caller_idx].reply_to = receive.from;
                     }
                 }
-                v
+                receive
             }
-            None => return EAGAIN,
+            Ok(None) => return EAGAIN,
+            Err(error) => return error,
         }
     };
-    let (copy_len, mapping) = match prepare_external_pages_for_user(
-        receiver_thread_id,
-        &mut recv_buf,
-        copy_len,
-        ext_pages,
-    ) {
-        Ok(v) => v,
-        Err(e) => return e,
+    let (from, copy_len, _) = match finish_user_receive(receiver_thread_id, buf_ptr, receive) {
+        Ok(result) => result,
+        Err(error) => return error,
     };
-
-    if copy_len > 0 && buf_ptr != 0 {
-        if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len]) {
-            if let Some(mapping) = mapping.as_ref() {
-                mapping.rollback();
-            }
-            return err;
-        }
-        record_ipc_copy(copy_len);
-    }
     crate::debug!(
         "[IPC RECV] tid={} from={} len={}",
         receiver_thread_id,
@@ -1678,106 +1710,77 @@ fn recv_blocking_for_thread(
         return EINVAL;
     }
 
-    let mut recv_buf = vec![0u8; MAX_MSG_SIZE];
-    crate::performance::increment(crate::performance::CounterMetric::IpcReceiveAllocations, 1);
     loop {
         let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
         let recv = {
             let mut boxes = lock_mailboxes();
-            match boxes[idx].pop_valid_for_receiver_copy(
+            match boxes[idx].pop_valid_for_receiver_to_user(
                 receiver_thread_id,
                 idx as u16,
                 receiver_generation,
-                &mut recv_buf[..max_copy],
+                buf_ptr,
+                max_copy,
             ) {
-                Some(v) => {
+                Ok(Some(receive)) => {
                     if let Some((caller_idx, _)) =
                         crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                     {
-                        if caller_idx < MAX_THREADS && v.3 {
-                            boxes[caller_idx].reply_to = v.0;
+                        if caller_idx < MAX_THREADS && receive.expects_reply {
+                            boxes[caller_idx].reply_to = receive.from;
                         }
                     }
-                    Some(v)
+                    Some(receive)
                 }
-                None => {
+                Ok(None) => {
                     boxes[idx].waiter = caller_thread_id;
                     None
                 }
+                Err(error) => return error,
             }
         };
 
         match recv {
-            Some((from, copy_len, ext_pages, _)) => {
-                let (copy_len, mapping) = match prepare_external_pages_for_user(
-                    receiver_thread_id,
-                    &mut recv_buf,
-                    copy_len,
-                    ext_pages,
-                ) {
-                    Ok(v) => v,
-                    Err(e) => return e,
-                };
-                if copy_len > 0 && buf_ptr != 0 {
-                    if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len]) {
-                        if let Some(mapping) = mapping.as_ref() {
-                            mapping.rollback();
-                        }
-                        return err;
-                    }
-                    record_ipc_copy(copy_len);
-                }
+            Some(receive) => {
+                let (from, copy_len, _) =
+                    match finish_user_receive(receiver_thread_id, buf_ptr, receive) {
+                        Ok(result) => result,
+                        Err(error) => return error,
+                    };
                 crate::debug!(
-                    "[IPC RECV] tid={} from={} len={} data={:02x?}",
+                    "[IPC RECV] tid={} from={} len={}",
                     receiver_thread_id,
                     from,
-                    copy_len,
-                    &recv_buf[..core::cmp::min(copy_len, 16)]
+                    copy_len
                 );
                 return (from << 32) | (copy_len as u64);
             }
             None => {
                 {
                     let mut boxes = lock_mailboxes();
-                    if let Some((from, copy_len, ext_pages, expects_reply)) = boxes[idx]
-                        .pop_valid_for_receiver_copy(
-                            receiver_thread_id,
-                            idx as u16,
-                            receiver_generation,
-                            &mut recv_buf[..max_copy],
-                        )
-                    {
+                    let second_try = boxes[idx].pop_valid_for_receiver_to_user(
+                        receiver_thread_id,
+                        idx as u16,
+                        receiver_generation,
+                        buf_ptr,
+                        max_copy,
+                    );
+                    if let Ok(Some(receive)) = second_try {
                         if boxes[idx].waiter == caller_thread_id {
                             boxes[idx].waiter = 0;
                         }
                         if let Some((caller_idx, _)) =
                             crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                         {
-                            if caller_idx < MAX_THREADS && expects_reply {
-                                boxes[caller_idx].reply_to = from;
+                            if caller_idx < MAX_THREADS && receive.expects_reply {
+                                boxes[caller_idx].reply_to = receive.from;
                             }
                         }
                         drop(boxes);
-                        let (copy_len, mapping) = match prepare_external_pages_for_user(
-                            receiver_thread_id,
-                            &mut recv_buf,
-                            copy_len,
-                            ext_pages,
-                        ) {
-                            Ok(v) => v,
-                            Err(e) => return e,
-                        };
-                        if copy_len > 0 && buf_ptr != 0 {
-                            if let Err(err) =
-                                crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len])
-                            {
-                                if let Some(mapping) = mapping.as_ref() {
-                                    mapping.rollback();
-                                }
-                                return err;
-                            }
-                            record_ipc_copy(copy_len);
-                        }
+                        let (from, copy_len, _) =
+                            match finish_user_receive(receiver_thread_id, buf_ptr, receive) {
+                                Ok(result) => result,
+                                Err(error) => return error,
+                            };
                         crate::debug!(
                             "[IPC RECV] tid={} from={} len={}",
                             receiver_thread_id,
@@ -1785,6 +1788,12 @@ fn recv_blocking_for_thread(
                             copy_len
                         );
                         return (from << 32) | (copy_len as u64);
+                    }
+                    if let Err(error) = second_try {
+                        if boxes[idx].waiter == caller_thread_id {
+                            boxes[idx].waiter = 0;
+                        }
+                        return error;
                     }
                 }
                 if crate::task::sleep_thread_unless_woken(crate::task::ThreadId::from_u64(
