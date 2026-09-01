@@ -4,8 +4,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 #[cfg(feature = "performance-instrumentation")]
 use core::sync::atomic::AtomicU64;
 pub use mnu_abi::performance::{
-    AllocationSubsystem, BootMilestone, CounterMetric, GaugeMetric, HeapAllocationSizeClass,
-    LatencyMetric,
+    AllocationSubsystem, BootMilestone, CounterMetric, FrameAllocationFailure, GaugeMetric,
+    HeapAllocationSizeClass, LatencyMetric,
 };
 #[cfg(feature = "performance-instrumentation")]
 use mnu_metrics::{
@@ -67,6 +67,25 @@ static HEAP_ALLOCATIONS_BY_SUBSYSTEM: [AtomicU64; AllocationSubsystem::COUNT] =
     [const { AtomicU64::new(0) }; AllocationSubsystem::COUNT];
 #[cfg(feature = "performance-instrumentation")]
 static HEAP_INTERNAL_FRAGMENTATION: AtomicGauge = AtomicGauge::new();
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ALLOCATOR_REQUESTS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ALLOCATOR_FREE_LIST_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ALLOCATOR_BUMP_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ALLOCATOR_CONTIGUOUS_REQUESTS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ALLOCATOR_REGIONS_EXAMINED: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ZERO_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ZERO_BYTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ZERO_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ALLOCATOR_FAILURES: [AtomicU64; FrameAllocationFailure::COUNT] =
+    [const { AtomicU64::new(0) }; FrameAllocationFailure::COUNT];
 
 #[cfg(feature = "performance-instrumentation")]
 const ALLOCATION_THREAD_SLOTS: usize = 64;
@@ -164,6 +183,69 @@ pub fn record_heap_deallocation(user_bytes: usize, reserved_bytes: usize) {
 
     #[cfg(not(feature = "performance-instrumentation"))]
     let _ = (user_bytes, reserved_bytes);
+}
+
+#[inline]
+pub fn record_frame_request(contiguous: bool) {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        FRAME_ALLOCATOR_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        if contiguous {
+            FRAME_ALLOCATOR_CONTIGUOUS_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = contiguous;
+}
+
+#[inline]
+pub fn record_frame_free_list_hit() {
+    #[cfg(feature = "performance-instrumentation")]
+    FRAME_ALLOCATOR_FREE_LIST_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_frame_bump_hit() {
+    #[cfg(feature = "performance-instrumentation")]
+    FRAME_ALLOCATOR_BUMP_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_frame_region_examined() {
+    #[cfg(feature = "performance-instrumentation")]
+    FRAME_ALLOCATOR_REGIONS_EXAMINED.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_frame_failure(reason: FrameAllocationFailure) {
+    #[cfg(feature = "performance-instrumentation")]
+    FRAME_ALLOCATOR_FAILURES[reason as usize].fetch_add(1, Ordering::Relaxed);
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = reason;
+}
+
+#[inline]
+pub fn frame_zero_start() -> u64 {
+    #[cfg(feature = "performance-instrumentation")]
+    return timestamp();
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    0
+}
+
+#[inline]
+pub fn record_frame_zero(start: u64, bytes: usize) {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        FRAME_ZERO_CALLS.fetch_add(1, Ordering::Relaxed);
+        FRAME_ZERO_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+        FRAME_ZERO_CYCLES.fetch_add(elapsed_cycles(start), Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = (start, bytes);
 }
 
 pub fn initialize_clock() -> ClockInfo {
@@ -301,9 +383,9 @@ pub fn boot_milestone(milestone: BootMilestone) -> Option<u64> {
 #[cfg(feature = "performance-instrumentation")]
 pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
     use mnu_abi::performance::{
-        GaugeSnapshot, KernelPerformanceSnapshot, PERFORMANCE_FLAG_INSTRUMENTED,
-        PERFORMANCE_FLAG_INVARIANT_TSC, PERFORMANCE_FLAG_RDTSCP, PERFORMANCE_FLAG_WEAK_SNAPSHOT,
-        PERFORMANCE_SNAPSHOT_VERSION,
+        FrameAllocatorSnapshot, GaugeSnapshot, KernelPerformanceSnapshot,
+        PERFORMANCE_FLAG_INSTRUMENTED, PERFORMANCE_FLAG_INVARIANT_TSC, PERFORMANCE_FLAG_RDTSCP,
+        PERFORMANCE_FLAG_WEAK_SNAPSHOT, PERFORMANCE_SNAPSHOT_VERSION,
     };
 
     let clock = clock_info();
@@ -361,6 +443,19 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
         heap_allocations_by_subsystem: core::array::from_fn(|index| {
             HEAP_ALLOCATIONS_BY_SUBSYSTEM[index].load(Ordering::Relaxed)
         }),
+        frame_allocator: FrameAllocatorSnapshot {
+            requests: FRAME_ALLOCATOR_REQUESTS.load(Ordering::Relaxed),
+            free_list_hits: FRAME_ALLOCATOR_FREE_LIST_HITS.load(Ordering::Relaxed),
+            bump_hits: FRAME_ALLOCATOR_BUMP_HITS.load(Ordering::Relaxed),
+            contiguous_requests: FRAME_ALLOCATOR_CONTIGUOUS_REQUESTS.load(Ordering::Relaxed),
+            memory_map_regions_examined: FRAME_ALLOCATOR_REGIONS_EXAMINED.load(Ordering::Relaxed),
+            zero_calls: FRAME_ZERO_CALLS.load(Ordering::Relaxed),
+            zero_bytes: FRAME_ZERO_BYTES.load(Ordering::Relaxed),
+            zero_cycles: FRAME_ZERO_CYCLES.load(Ordering::Relaxed),
+            failures: core::array::from_fn(|index| {
+                FRAME_ALLOCATOR_FAILURES[index].load(Ordering::Relaxed)
+            }),
+        },
     }
 }
 

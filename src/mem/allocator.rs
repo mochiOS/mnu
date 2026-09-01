@@ -461,6 +461,7 @@ fn zero_frame(frame: x86_64::structures::paging::PhysFrame<Size4KiB>) -> bool {
     let Some(offset) = crate::mem::paging::physical_memory_offset() else {
         return false;
     };
+    let started = performance::frame_zero_start();
     unsafe {
         ptr::write_bytes(
             (frame.start_address().as_u64() + offset) as *mut u8,
@@ -468,6 +469,7 @@ fn zero_frame(frame: x86_64::structures::paging::PhysFrame<Size4KiB>) -> bool {
             4096,
         );
     }
+    performance::record_frame_zero(started, 4096);
     true
 }
 

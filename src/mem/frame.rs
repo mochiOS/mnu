@@ -15,17 +15,19 @@ use x86_64::{
 use crate::performance::{self, CounterMetric, GaugeMetric};
 
 /// グローバルフレームアロケータ
-pub static FRAME_ALLOCATOR: Mutex<Option<BitmapFrameAllocator>> = Mutex::new(None);
+pub static FRAME_ALLOCATOR: Mutex<Option<MnuFrameAllocator>> = Mutex::new(None);
 
-/// ビットマップベースのフレームアロケータ
+/// 未使用領域のカーソルと、解放済みフレームのリストを使うアロケータ
 ///
 /// 解放済みフレームはフレーム自身の先頭8バイトにリンクリストのnextポインタを
 /// 埋め込むことで上限なしに再利用できる。
-pub struct BitmapFrameAllocator {
+pub struct MnuFrameAllocator {
     /// メモリマップ
     memory_map: &'static [MemoryRegion],
     /// バンプアロケータの次フレームインデックス
     next_frame: usize,
+    /// `next_frame` を含む、またはその次にあるメモリマップ領域
+    next_region: usize,
     /// 解放済みフレームのフリーリスト先頭（物理アドレス、0 = 空）
     free_list_head: u64,
     /// 解放済みフレームの短期退避領域
@@ -42,7 +44,7 @@ pub struct BitmapFrameAllocator {
 const FRAME_QUARANTINE_CAP: usize = 32;
 const FRAME_FREE_COOKIE_CONST: u64 = 0x8f1d_3b79_2c4a_6e15;
 
-impl BitmapFrameAllocator {
+impl MnuFrameAllocator {
     /// 新しいフレームアロケータを作成
     pub fn new(memory_map: &'static [MemoryRegion], phys_offset: u64) -> Self {
         let seed = crate::cpu::boot_entropy_u64()
@@ -52,6 +54,7 @@ impl BitmapFrameAllocator {
         Self {
             memory_map,
             next_frame: 0x100000 / 4096, // 1MB から開始（低位メモリ予約領域をスキップ）
+            next_region: 0,
             free_list_head: 0,
             quarantine: [0; FRAME_QUARANTINE_CAP],
             quarantine_head: 0,
@@ -208,12 +211,17 @@ impl BitmapFrameAllocator {
     }
 
     fn reserve_contiguous_region(&mut self, page_count: usize) -> Option<PhysFrame> {
+        performance::record_frame_request(true);
         if page_count == 0 {
+            performance::record_frame_failure(
+                performance::FrameAllocationFailure::InvalidContiguousRequest,
+            );
             return None;
         }
         let min_phys = (self.next_frame as u64).saturating_mul(4096);
         let bytes = (page_count as u64).saturating_mul(4096);
-        for region in self.memory_map.iter() {
+        for (index, region) in self.memory_map.iter().enumerate().skip(self.next_region) {
+            performance::record_frame_region_examined();
             if region.region_type != MemoryType::Usable || region.len < bytes {
                 continue;
             }
@@ -227,10 +235,15 @@ impl BitmapFrameAllocator {
             if end > region_end {
                 continue;
             }
+            self.next_region = index;
             self.next_frame = (end / 4096) as usize;
             self.record_allocation(page_count);
+            performance::record_frame_bump_hit();
             return Some(PhysFrame::containing_address(PhysAddr::new(phys_addr)));
         }
+        performance::record_frame_failure(
+            performance::FrameAllocationFailure::ContiguousUnavailable,
+        );
         None
     }
 
@@ -240,8 +253,9 @@ impl BitmapFrameAllocator {
     }
 }
 
-unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
+unsafe impl FrameAllocator<Size4KiB> for MnuFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        performance::record_frame_request(false);
         if self.free_list_head == 0 && self.quarantine_len != 0 {
             self.release_quarantine_oldest();
         }
@@ -266,6 +280,7 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
                         }
                         self.clear_frame_meta(phys);
                         self.record_allocation(1);
+                        performance::record_frame_free_list_hit();
                         return Some(PhysFrame::containing_address(PhysAddr::new(phys)));
                     }
                     Some(_) => {
@@ -283,7 +298,8 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
 
         // バンプアロケータから新規割り当て
         let min_phys = (self.next_frame as u64).saturating_mul(4096);
-        for region in self.memory_map.iter() {
+        for (index, region) in self.memory_map.iter().enumerate().skip(self.next_region) {
+            performance::record_frame_region_examined();
             if region.region_type != MemoryType::Usable || region.len < 4096 {
                 continue;
             }
@@ -296,20 +312,24 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
 
             let phys_addr = core::cmp::max(region_start, min_phys);
             if phys_addr >= region_end {
+                self.next_region = index.saturating_add(1);
                 continue;
             }
 
+            self.next_region = index;
             self.next_frame = (phys_addr / 4096 + 1) as usize;
             self.record_allocation(1);
+            performance::record_frame_bump_hit();
             return Some(PhysFrame::containing_address(PhysAddr::new(phys_addr)));
         }
+        performance::record_frame_failure(performance::FrameAllocationFailure::Exhausted);
         None
     }
 }
 
 /// フレームアロケータを初期化
 pub fn init(memory_map: &'static [MemoryRegion]) {
-    let allocator = BitmapFrameAllocator::new(memory_map, 0);
+    let allocator = MnuFrameAllocator::new(memory_map, 0);
     *FRAME_ALLOCATOR.lock() = Some(allocator);
 }
 
@@ -323,18 +343,28 @@ pub fn set_phys_offset(offset: u64) {
 
 /// フレームを割り当て
 pub fn allocate_frame() -> Result<PhysFrame> {
-    FRAME_ALLOCATOR
-        .lock()
-        .as_mut()
-        .and_then(|a| a.allocate_frame())
+    let mut guard = FRAME_ALLOCATOR.lock();
+    let Some(allocator) = guard.as_mut() else {
+        performance::record_frame_failure(
+            performance::FrameAllocationFailure::AllocatorUnavailable,
+        );
+        return Err(Kernel::Memory(Memory::OutOfMemory));
+    };
+    allocator
+        .allocate_frame()
         .ok_or(Kernel::Memory(Memory::OutOfMemory))
 }
 
 pub fn allocate_contiguous_frames(page_count: usize) -> Result<PhysFrame> {
-    FRAME_ALLOCATOR
-        .lock()
-        .as_mut()
-        .and_then(|a| a.reserve_contiguous_region(page_count))
+    let mut guard = FRAME_ALLOCATOR.lock();
+    let Some(allocator) = guard.as_mut() else {
+        performance::record_frame_failure(
+            performance::FrameAllocationFailure::AllocatorUnavailable,
+        );
+        return Err(Kernel::Memory(Memory::OutOfMemory));
+    };
+    allocator
+        .reserve_contiguous_region(page_count)
         .ok_or(Kernel::Memory(Memory::OutOfMemory))
 }
 

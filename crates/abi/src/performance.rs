@@ -1,5 +1,6 @@
-pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 2;
+pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 3;
 pub const PERFORMANCE_SNAPSHOT_V1_SIZE: usize = 1_200;
+pub const PERFORMANCE_SNAPSHOT_V2_SIZE: usize = 1_896;
 pub const PERFORMANCE_CPU_SLOTS: usize = 64;
 
 pub const PERFORMANCE_FLAG_INSTRUMENTED: u64 = 1 << 0;
@@ -147,6 +148,19 @@ impl AllocationSubsystem {
     pub const COUNT: usize = Self::Syscall as usize + 1;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum FrameAllocationFailure {
+    AllocatorUnavailable,
+    Exhausted,
+    InvalidContiguousRequest,
+    ContiguousUnavailable,
+}
+
+impl FrameAllocationFailure {
+    pub const COUNT: usize = Self::ContiguousUnavailable as usize + 1;
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DistributionSnapshot {
@@ -163,6 +177,20 @@ pub struct DistributionSnapshot {
 pub struct GaugeSnapshot {
     pub current: u64,
     pub peak: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameAllocatorSnapshot {
+    pub requests: u64,
+    pub free_list_hits: u64,
+    pub bump_hits: u64,
+    pub contiguous_requests: u64,
+    pub memory_map_regions_examined: u64,
+    pub zero_calls: u64,
+    pub zero_bytes: u64,
+    pub zero_cycles: u64,
+    pub failures: [u64; FrameAllocationFailure::COUNT],
 }
 
 #[repr(C)]
@@ -188,6 +216,8 @@ pub struct KernelPerformanceSnapshot {
     pub heap_allocations_by_size: [u64; HeapAllocationSizeClass::COUNT],
     pub heap_allocations_by_cpu: [u64; PERFORMANCE_CPU_SLOTS],
     pub heap_allocations_by_subsystem: [u64; AllocationSubsystem::COUNT],
+    /// v3 extension. The v2 prefix above must remain byte-for-byte stable.
+    pub frame_allocator: FrameAllocatorSnapshot,
 }
 
 impl Default for KernelPerformanceSnapshot {
@@ -211,6 +241,7 @@ impl Default for KernelPerformanceSnapshot {
             heap_allocations_by_size: [0; HeapAllocationSizeClass::COUNT],
             heap_allocations_by_cpu: [0; PERFORMANCE_CPU_SLOTS],
             heap_allocations_by_subsystem: [0; AllocationSubsystem::COUNT],
+            frame_allocator: FrameAllocatorSnapshot::default(),
         }
     }
 }
@@ -227,7 +258,11 @@ mod tests {
             core::mem::offset_of!(KernelPerformanceSnapshot, heap_committed_bytes),
             PERFORMANCE_SNAPSHOT_V1_SIZE
         );
-        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 1_896);
+        assert_eq!(
+            core::mem::offset_of!(KernelPerformanceSnapshot, frame_allocator),
+            PERFORMANCE_SNAPSHOT_V2_SIZE
+        );
+        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 1_992);
         assert_eq!(core::mem::align_of::<KernelPerformanceSnapshot>(), 8);
     }
 
