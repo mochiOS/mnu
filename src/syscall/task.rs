@@ -123,7 +123,10 @@ pub fn thread_create(entry: u64, stack: u64, arg0: u64) -> u64 {
         None => return ENOSYS,
     };
     let kstack_size = crate::config::kernel().exec.kernel_thread_stack_size;
-    let kstack = match crate::task::allocate_kernel_stack(kstack_size) {
+    let page_table = crate::task::with_process(pid, |process| process.page_table())
+        .flatten()
+        .unwrap_or(0);
+    let kstack = match crate::task::allocate_kernel_stack_in_table(kstack_size, page_table) {
         Some(a) => a,
         None => return ENOMEM,
     };
@@ -134,6 +137,9 @@ pub fn thread_create(entry: u64, stack: u64, arg0: u64) -> u64 {
     }
     match crate::task::add_thread(thread) {
         Some(tid) => tid.as_u64(),
-        None => ENOSYS,
+        None => {
+            crate::task::free_kernel_stack(kstack);
+            ENOSYS
+        }
     }
 }

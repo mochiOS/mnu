@@ -1510,9 +1510,11 @@ fn exec_with_data(
             return crate::syscall::types::EINVAL;
         }
         // allocate kernel stack for the new thread
-        // unmap_guard_page() がページテーブル操作を行うため、SmapSmepGuard スコープを保持
         let kstack_size = crate::config::kernel().exec.kernel_thread_stack_size;
-        let kstack = match crate::task::thread::allocate_kernel_stack(kstack_size) {
+        let kstack = match crate::task::thread::allocate_kernel_stack_in_table(
+            kstack_size,
+            new_pt_phys,
+        ) {
             Some(a) => a,
             None => {
                 crate::warn!("Failed to allocate kernel stack for thread");
@@ -1550,6 +1552,7 @@ fn exec_with_data(
         crate::debug!("exec: add_thread returned: {:?}", add_res);
         if add_res.is_none() {
             crate::warn!("Failed to add thread");
+            crate::task::free_kernel_stack(kstack);
             let _ = crate::task::remove_process(pid);
             if is_boot_service_manager {
                 let _ = release_service_manager_pid(pid.as_u64());
@@ -1890,6 +1893,15 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         Some(p) => p,
         None => return EINVAL,
     };
+    let kernel_stack = match crate::task::with_thread(current_tid, |thread| {
+        thread.kernel_stack_base()
+    }) {
+        Some(base) => base,
+        None => return EINVAL,
+    };
+    if !crate::task::remap_kernel_stack_user_table(kernel_stack, new_pt_phys) {
+        return crate::syscall::types::ENOMEM;
+    }
     crate::task::release_process_mmio_mappings(pid);
     crate::task::release_process_dma_buffers(pid);
     crate::task::with_thread_mut(current_tid, |t| t.set_fs_base(initial_fs_base));

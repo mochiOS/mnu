@@ -213,6 +213,26 @@ pub fn map_page(page: Page, frame: PhysFrame, flags: PageTableFlags) -> Result<(
     Ok(())
 }
 
+pub fn unmap_kernel_page(page: Page<Size4KiB>) -> Result<Option<PhysFrame<Size4KiB>>> {
+    use x86_64::structures::paging::mapper::TranslateError;
+
+    let mut page_table_lock = PAGE_TABLE.lock();
+    let page_table = page_table_lock
+        .as_mut()
+        .ok_or(Kernel::Memory(Memory::NotMapped))?;
+    match page_table.translate_page(page) {
+        Err(TranslateError::PageNotMapped) => Ok(None),
+        Err(_) => Err(Kernel::Memory(Memory::InvalidAddress)),
+        Ok(_) => {
+            let (frame, flush) = page_table
+                .unmap(page)
+                .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?;
+            flush.flush();
+            Ok(Some(frame))
+        }
+    }
+}
+
 /// 仮想アドレスを物理アドレスに変換
 ///
 /// ## Arguments
@@ -1945,6 +1965,9 @@ pub fn destroy_user_page_table(table_phys: u64) -> Result<()> {
     if table_phys == 0 || (table_phys & 0xfff) != 0 {
         return Err(Kernel::InvalidParam);
     }
+    if crate::task::kernel_stack_table_in_use(table_phys) {
+        return Err(Kernel::Memory(Memory::PermissionDenied));
+    }
     let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
     // Ensure SMAP/SMEP disabled while dereferencing HHDM pointers
     let _smap_guard = crate::cpu::SmapSmepGuard::new();
@@ -2317,4 +2340,84 @@ pub fn unmap_page_in_table(table_phys: u64, virt_addr: u64) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// 指定した4KiBページが期待する物理フレームを指す場合だけアンマップする。
+///
+/// スタック専用の上位アドレスで使い、空になった中間テーブルも回収する。
+/// 共有ページテーブル階層には使用しない。
+pub fn unmap_private_page_in_table(
+    table_phys: u64,
+    virt_addr: u64,
+    expected_phys: u64,
+) -> Result<bool> {
+    if (table_phys | virt_addr | expected_phys) & 0xfff != 0 {
+        return Err(Kernel::Memory(Memory::AlignmentError));
+    }
+
+    let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+    let _smap_guard = crate::cpu::SmapSmepGuard::new();
+    let table_at = |phys: u64| -> Result<&mut PageTable> {
+        let virt = phys
+            .checked_add(phys_off)
+            .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+        Ok(unsafe { &mut *(virt as *mut PageTable) })
+    };
+    let table_is_empty = |table: &PageTable| table.iter().all(|entry| entry.is_unused());
+
+    let l4 = table_at(table_phys)?;
+    let vaddr = VirtAddr::new(virt_addr);
+    let l4e = &mut l4[vaddr.p4_index()];
+    if l4e.is_unused() || !l4e.flags().contains(PageTableFlags::PRESENT) {
+        return Ok(false);
+    }
+    let l3_phys = l4e.addr().as_u64();
+    let l3 = table_at(l3_phys)?;
+    let l3e = &mut l3[vaddr.p3_index()];
+    if l3e.is_unused()
+        || !l3e.flags().contains(PageTableFlags::PRESENT)
+        || l3e.flags().contains(PageTableFlags::HUGE_PAGE)
+    {
+        return Ok(false);
+    }
+    let l2_phys = l3e.addr().as_u64();
+    let l2 = table_at(l2_phys)?;
+    let l2e = &mut l2[vaddr.p2_index()];
+    if l2e.is_unused()
+        || !l2e.flags().contains(PageTableFlags::PRESENT)
+        || l2e.flags().contains(PageTableFlags::HUGE_PAGE)
+    {
+        return Ok(false);
+    }
+    let l1_phys = l2e.addr().as_u64();
+    let l1 = table_at(l1_phys)?;
+    let l1e = &mut l1[vaddr.p1_index()];
+    if l1e.is_unused()
+        || !l1e.flags().contains(PageTableFlags::PRESENT)
+        || l1e.addr().as_u64() != expected_phys
+    {
+        return Ok(false);
+    }
+
+    l1e.set_unused();
+    let (current_cr3, _) = Cr3::read();
+    if current_cr3.start_address().as_u64() == table_phys {
+        unsafe {
+            core::arch::asm!("invlpg [{}]", in(reg) virt_addr, options(nostack, preserves_flags));
+        }
+    }
+
+    if table_is_empty(l1) {
+        l2e.set_unused();
+        deallocate_4k_frame_by_phys(l1_phys);
+        if table_is_empty(l2) {
+            l3e.set_unused();
+            deallocate_4k_frame_by_phys(l2_phys);
+            if table_is_empty(l3) {
+                l4e.set_unused();
+                deallocate_4k_frame_by_phys(l3_phys);
+            }
+        }
+    }
+    Ok(true)
 }

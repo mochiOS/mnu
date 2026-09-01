@@ -222,7 +222,7 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
         flags,
         tsc_frequency_khz: u64::from(clock.frequency_khz),
         clock_source: clock.source as u32,
-        reserved0: 0,
+        kernel_stack_high_water_bytes: crate::task::kernel_stack_high_water_bytes(),
         usable_frames,
         free_frames: usable_frames.saturating_sub(frames_in_use.saturating_add(frames_quarantined)),
         heap_capacity_bytes: crate::mem::allocator::HEAP_SIZE as u64,

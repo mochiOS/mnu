@@ -119,7 +119,8 @@ pub struct KernelPerformanceSnapshot {
     pub flags: u64,
     pub tsc_frequency_khz: u64,
     pub clock_source: u32,
-    pub reserved0: u32,
+    /// 計測buildで観測した、単一kernel stackの最大使用量。
+    pub kernel_stack_high_water_bytes: u32,
     pub usable_frames: u64,
     pub free_frames: u64,
     pub heap_capacity_bytes: u64,

@@ -261,22 +261,38 @@ pub struct Thread {
     cpu_burst_score: u8,
 }
 
-// Simple kernel stack pool for creating kernel stacks for threads
 const KSTACK_SLOT_BYTES: usize = 4096 * 16;
 const KSTACK_PAGE_BYTES: usize = 4096;
 const KSTACK_GUARD_BYTES: usize = KSTACK_PAGE_BYTES;
 const KSTACK_SLOT_STRIDE: usize = KSTACK_GUARD_BYTES + KSTACK_SLOT_BYTES;
 const KSTACK_SLOT_COUNT: usize = ThreadQueue::MAX_THREADS;
 const KSTACK_POOL_SIZE: usize = KSTACK_SLOT_STRIDE * KSTACK_SLOT_COUNT;
+const KSTACK_ARENA_BASE: u64 = 0xffff_9000_0000_0000;
+const KSTACK_SLOT_RESERVED: u8 = u8::MAX;
 
 const _: () = assert!(KSTACK_SLOT_COUNT <= u64::BITS as usize);
 
-#[repr(align(4096))]
-struct KernelStackPool([u8; KSTACK_POOL_SIZE]);
+#[derive(Clone, Copy)]
+struct KernelStackSlot {
+    user_page_table: u64,
+    requested_bytes: u32,
+    mapped_pages: u8,
+    sampled: bool,
+}
 
-static KSTACK_POOL: SpinLock<KernelStackPool> =
-    SpinLock::new(KernelStackPool([0; KSTACK_POOL_SIZE]));
-static KSTACK_USED_SLOTS: SpinLock<u64> = SpinLock::new(0);
+impl KernelStackSlot {
+    const EMPTY: Self = Self {
+        user_page_table: 0,
+        requested_bytes: 0,
+        mapped_pages: 0,
+        sampled: false,
+    };
+}
+
+static KSTACK_SLOTS: SpinLock<[KernelStackSlot; KSTACK_SLOT_COUNT]> =
+    SpinLock::new([KernelStackSlot::EMPTY; KSTACK_SLOT_COUNT]);
+#[cfg(feature = "performance-instrumentation")]
+static KSTACK_HIGH_WATER: AtomicU64 = AtomicU64::new(0);
 static RETIRED_KERNEL_STACKS: [AtomicU64; crate::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::percpu::MAX_CPUS];
 
@@ -285,12 +301,69 @@ pub fn retire_current_kernel_stack(base: u64) {
     if base == 0 {
         return;
     }
+    // このスレッドはユーザー空間へ戻らない。プロセスのページテーブルが
+    // zombie回収で先に破棄されても、退役待ちstackがそれを参照しないようにする。
+    if !detach_kernel_stack_user_table(base) {
+        if let Some(slot_index) = stack_slot_index(base) {
+            KSTACK_SLOTS.lock()[slot_index].mapped_pages = KSTACK_SLOT_RESERVED;
+        }
+        crate::audit::log(
+            crate::audit::AuditEventKind::Quarantine,
+            "kernel stack user mapping detach failed",
+        );
+        return;
+    }
     let retired = &RETIRED_KERNEL_STACKS[crate::percpu::current_cpu_id()];
     let previous = retired.swap(base, Ordering::AcqRel);
     if previous != 0 {
         free_kernel_stack(previous);
     }
 }
+
+pub fn kernel_stack_table_in_use(table: u64) -> bool {
+    table != 0
+        && KSTACK_SLOTS.lock().iter().any(|slot| {
+            slot.user_page_table == table && slot.mapped_pages != 0
+        })
+}
+
+pub fn kernel_stack_high_water_bytes() -> u32 {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        return KSTACK_HIGH_WATER.load(Ordering::Relaxed).min(u64::from(u32::MAX)) as u32;
+    }
+    #[cfg(not(feature = "performance-instrumentation"))]
+    0
+}
+
+#[cfg(feature = "performance-instrumentation")]
+fn sample_kernel_stack(slot_index: usize, base: u64) {
+    const UNUSED: u8 = 0xa5;
+    let requested_bytes = {
+        let mut slots = KSTACK_SLOTS.lock();
+        let slot = &mut slots[slot_index];
+        if slot.sampled || slot.requested_bytes == 0 {
+            return;
+        }
+        slot.sampled = true;
+        slot.requested_bytes as usize
+    };
+    let bytes = unsafe { core::slice::from_raw_parts(base as *const u8, requested_bytes) };
+    let untouched = bytes.iter().take_while(|byte| **byte == UNUSED).count();
+    let used = requested_bytes.saturating_sub(untouched) as u64;
+    let previous = KSTACK_HIGH_WATER.fetch_max(used, Ordering::Relaxed);
+    if used > previous {
+        crate::info!(
+            "kernel stack high-water: used={} allocated={}",
+            used,
+            requested_bytes
+        );
+    }
+}
+
+#[cfg(not(feature = "performance-instrumentation"))]
+#[inline]
+fn sample_kernel_stack(_slot_index: usize, _base: u64) {}
 
 /// 前回のcontext switchより前に退役したstackを回収します。
 pub fn reclaim_current_cpu_kernel_stack() {
@@ -301,173 +374,278 @@ pub fn reclaim_current_cpu_kernel_stack() {
     }
 }
 
-fn unmap_guard_page(guard_addr: u64) -> bool {
-    use x86_64::structures::paging::mapper::TranslateError;
-    use x86_64::structures::paging::{Mapper, Page, Size4KiB};
-
-    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(guard_addr));
-    let mut page_table_lock = crate::mem::paging::PAGE_TABLE.lock();
-    let page_table = match page_table_lock.as_mut() {
-        Some(pt) => pt,
-        None => {
-            crate::debug!(
-                "unmap_guard_page: PAGE_TABLE not initialized at {:#x}",
-                guard_addr
-            );
-            return false;
-        }
-    };
-
-    match page_table.translate_page(page) {
-        Ok(_) => {
-            crate::debug!(
-                "unmap_guard_page: page mapped at {:#x}, attempting unmap",
-                guard_addr
-            );
-        }
-        Err(TranslateError::PageNotMapped) => {
-            crate::debug!(
-                "unmap_guard_page: page not mapped at {:#x}, returning true",
-                guard_addr
-            );
-            return true;
-        }
-        Err(TranslateError::ParentEntryHugePage) => {
-            // Huge page region - can't unmap individual 4KB pages within huge pages
-            // This is expected for bootloader-mapped regions. Skip guard page unmapping.
-            crate::debug!(
-                "unmap_guard_page: page in huge page region at {:#x}, skipping unmap",
-                guard_addr
-            );
-            return true;
-        }
-        Err(e) => {
-            crate::debug!(
-                "unmap_guard_page: translate error at {:#x}: {:?}",
-                guard_addr,
-                e
-            );
-            return false;
-        }
-    }
-
-    match page_table.unmap(page) {
-        Ok((_frame, flush)) => {
-            flush.flush();
-            crate::debug!("unmap_guard_page: successfully unmapped {:#x}", guard_addr);
-            true
-        }
-        Err(e) => {
-            crate::debug!(
-                "unmap_guard_page: unmap error at {:#x}: {:?}",
-                guard_addr,
-                e
-            );
-            false
-        }
-    }
+fn stack_base_for_slot(slot_index: usize) -> u64 {
+    KSTACK_ARENA_BASE
+        + (slot_index * KSTACK_SLOT_STRIDE + KSTACK_GUARD_BYTES) as u64
 }
 
-/// カーネルスタックを内部プールから割り当てます。
-/// 全スレッドで固定長スロットを使い、異なるサイズ間での再利用を防ぐ。
-/// Returns base address (bottom) of stack.
+fn stack_slot_index(base: u64) -> Option<usize> {
+    let guard = base.checked_sub(KSTACK_GUARD_BYTES as u64)?;
+    let offset = guard.checked_sub(KSTACK_ARENA_BASE)? as usize;
+    if offset >= KSTACK_POOL_SIZE || offset % KSTACK_SLOT_STRIDE != 0 {
+        return None;
+    }
+    Some(offset / KSTACK_SLOT_STRIDE)
+}
+
+fn unmap_stack_from_table(table: u64, base: u64, page_count: usize) -> bool {
+    let mut success = true;
+    for page_index in 0..page_count {
+        let address = base + (page_index * KSTACK_PAGE_BYTES) as u64;
+        let Some(physical) = crate::mem::paging::translate_addr(VirtAddr::new(address)) else {
+            return false;
+        };
+        success &= crate::mem::paging::unmap_private_page_in_table(
+            table,
+            address,
+            physical.as_u64() & !0xfff,
+        )
+        .unwrap_or(false);
+    }
+    success
+}
+
+fn release_stack_pages(base: u64, page_count: usize, user_page_table: u64) -> bool {
+    use x86_64::structures::paging::{Page, Size4KiB};
+
+    if user_page_table != 0 && !unmap_stack_from_table(user_page_table, base, page_count) {
+        return false;
+    }
+    let mut success = true;
+    for page_index in 0..page_count {
+        let address = base + (page_index * KSTACK_PAGE_BYTES) as u64;
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(address));
+        match crate::mem::paging::unmap_kernel_page(page) {
+            Ok(Some(frame)) => {
+                if crate::mem::frame::deallocate_frame(frame).is_err() {
+                    success = false;
+                }
+            }
+            _ => success = false,
+        }
+    }
+    success
+}
+
+fn map_stack_page_in_user_table(table: u64, address: u64, physical: u64) -> bool {
+    table == 0
+        || (crate::mem::paging::translate_addr_in_table(table, VirtAddr::new(address)).is_none()
+            && crate::mem::paging::map_page_in_table(table, address, physical, true, false).is_ok())
+}
+
+fn detach_kernel_stack_user_table(base: u64) -> bool {
+    let slot_index = match stack_slot_index(base) {
+        Some(index) => index,
+        None => return true,
+    };
+    sample_kernel_stack(slot_index, base);
+    let (user_page_table, requested_bytes, page_count, sampled) = {
+        let mut slots = KSTACK_SLOTS.lock();
+        let slot = &mut slots[slot_index];
+        if slot.mapped_pages == 0 || slot.mapped_pages == KSTACK_SLOT_RESERVED {
+            return false;
+        }
+        if slot.user_page_table == 0 {
+            return true;
+        }
+        let state = (
+            slot.user_page_table,
+            slot.requested_bytes,
+            slot.mapped_pages as usize,
+            slot.sampled,
+        );
+        slot.mapped_pages = KSTACK_SLOT_RESERVED;
+        state
+    };
+    if !unmap_stack_from_table(user_page_table, base, page_count) {
+        KSTACK_SLOTS.lock()[slot_index] = KernelStackSlot {
+            user_page_table,
+            requested_bytes,
+            mapped_pages: page_count as u8,
+            sampled,
+        };
+        return false;
+    }
+    KSTACK_SLOTS.lock()[slot_index] = KernelStackSlot {
+        user_page_table: 0,
+        requested_bytes,
+        mapped_pages: page_count as u8,
+        sampled,
+    };
+    true
+}
+
 pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
+    allocate_kernel_stack_in_table(size, 0)
+}
+
+pub fn allocate_kernel_stack_in_table(size: usize, user_page_table: u64) -> Option<u64> {
+    use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
+
     reclaim_current_cpu_kernel_stack();
     if size == 0 || size > KSTACK_SLOT_BYTES {
         return None;
     }
+    let (slot_index, base) = {
+        let mut slots = KSTACK_SLOTS.lock();
+        let slot_index = slots
+            .iter()
+            .position(|slot| slot.mapped_pages == 0)?;
+        slots[slot_index] = KernelStackSlot {
+            user_page_table,
+            requested_bytes: size as u32,
+            mapped_pages: KSTACK_SLOT_RESERVED,
+            sampled: false,
+        };
+        (slot_index, stack_base_for_slot(slot_index))
+    };
 
-    let slot_index = {
-        let mut used = KSTACK_USED_SLOTS.lock();
-        let free = !*used;
-        if free == 0 {
+    let page_count = size.div_ceil(KSTACK_PAGE_BYTES);
+    let guard = base - KSTACK_GUARD_BYTES as u64;
+    let slot_is_unmapped = crate::mem::paging::translate_addr(VirtAddr::new(guard)).is_none()
+        && (0..page_count).all(|page_index| {
+            let address = base + (page_index * KSTACK_PAGE_BYTES) as u64;
+            crate::mem::paging::translate_addr(VirtAddr::new(address)).is_none()
+        });
+    if !slot_is_unmapped {
+        KSTACK_SLOTS.lock()[slot_index] = KernelStackSlot::EMPTY;
+        return None;
+    }
+    let phys_offset = match crate::mem::paging::physical_memory_offset() {
+        Some(offset) => offset,
+        None => {
+            KSTACK_SLOTS.lock()[slot_index] = KernelStackSlot::EMPTY;
             return None;
         }
-        let index = free.trailing_zeros() as usize;
-        *used |= 1u64 << index;
-        index
     };
-
-    let pool_base = {
-        let pool = KSTACK_POOL.lock();
-        pool.0.as_ptr() as u64
-    };
-    let Some(guard_addr) = pool_base.checked_add((slot_index * KSTACK_SLOT_STRIDE) as u64) else {
-        *KSTACK_USED_SLOTS.lock() &= !(1u64 << slot_index);
-        return None;
-    };
-    crate::debug!(
-        "allocate_kernel_stack: allocated from pool at {:#x}, calling unmap_guard_page",
-        guard_addr
-    );
-    if !unmap_guard_page(guard_addr) {
-        *KSTACK_USED_SLOTS.lock() &= !(1u64 << slot_index);
-        crate::debug!(
-            "allocate_kernel_stack: unmap_guard_page failed at {:#x}",
-            guard_addr
-        );
-        return None;
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+    let mut mapped_pages = 0usize;
+    while mapped_pages < page_count {
+        let frame = match crate::mem::frame::allocate_frame() {
+            Ok(frame) => frame,
+            Err(_) => break,
+        };
+        unsafe {
+            core::ptr::write_bytes(
+                (frame.start_address().as_u64() + phys_offset) as *mut u8,
+                if cfg!(feature = "performance-instrumentation") {
+                    0xa5
+                } else {
+                    0
+                },
+                KSTACK_PAGE_BYTES,
+            );
+        }
+        let address = base + (mapped_pages * KSTACK_PAGE_BYTES) as u64;
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(address));
+        if crate::mem::paging::map_page(page, frame, flags).is_err()
+            || !map_stack_page_in_user_table(
+                user_page_table,
+                address,
+                frame.start_address().as_u64(),
+            )
+        {
+            let _ = crate::mem::paging::unmap_kernel_page(page);
+            let _ = crate::mem::frame::deallocate_frame(frame);
+            break;
+        }
+        mapped_pages += 1;
     }
 
-    crate::debug!(
-        "allocate_kernel_stack: returning stack top {:#x}",
-        guard_addr + KSTACK_GUARD_BYTES as u64
-    );
-    guard_addr.checked_add(KSTACK_GUARD_BYTES as u64)
+    if mapped_pages != page_count {
+        let _ = release_stack_pages(base, mapped_pages, user_page_table);
+        KSTACK_SLOTS.lock()[slot_index] = KernelStackSlot::EMPTY;
+        return None;
+    }
+    KSTACK_SLOTS.lock()[slot_index].mapped_pages = page_count as u8;
+    Some(base)
 }
 
-/// カーネルスタックをフリーリストへ返却する。
-/// `base` は `allocate_kernel_stack` が返したアドレス（ガードページの直上）。
-pub fn free_kernel_stack(base: u64) {
-    if base == 0 {
-        return;
-    }
-    let guard_addr = match base.checked_sub(KSTACK_GUARD_BYTES as u64) {
-        Some(a) => a,
-        None => return,
+pub fn remap_kernel_stack_user_table(base: u64, new_page_table: u64) -> bool {
+    let slot_index = match stack_slot_index(base) {
+        Some(index) => index,
+        None => return false,
     };
-    // プール範囲内のアドレスのみ受け付ける
-    let pool_base = {
-        let pool = KSTACK_POOL.lock();
-        pool.0.as_ptr() as u64
+    let (old_page_table, requested_bytes, page_count, sampled) = {
+        let mut slots = KSTACK_SLOTS.lock();
+        let slot = &mut slots[slot_index];
+        if slot.mapped_pages == 0 || slot.mapped_pages == KSTACK_SLOT_RESERVED {
+            return false;
+        }
+        let state = (
+            slot.user_page_table,
+            slot.requested_bytes,
+            slot.mapped_pages as usize,
+            slot.sampled,
+        );
+        slot.mapped_pages = KSTACK_SLOT_RESERVED;
+        state
     };
-    if guard_addr < pool_base || guard_addr >= pool_base + KSTACK_POOL_SIZE as u64 {
-        crate::audit::log(
-            crate::audit::AuditEventKind::Fault,
-            "kernel stack free rejected",
-        );
-        return;
+
+    let mut mapped = 0usize;
+    while mapped < page_count {
+        let address = base + (mapped * KSTACK_PAGE_BYTES) as u64;
+        let Some(physical) = crate::mem::paging::translate_addr(VirtAddr::new(address)) else {
+            break;
+        };
+        if !map_stack_page_in_user_table(new_page_table, address, physical.as_u64()) {
+            break;
+        }
+        mapped += 1;
     }
-    let offset = (guard_addr - pool_base) as usize;
-    if offset % KSTACK_SLOT_STRIDE != 0 {
-        crate::audit::log(
-            crate::audit::AuditEventKind::Fault,
-            "unaligned kernel stack free rejected",
-        );
-        return;
+    if mapped != page_count {
+        let _ = unmap_stack_from_table(new_page_table, base, mapped);
+        KSTACK_SLOTS.lock()[slot_index] = KernelStackSlot {
+            user_page_table: old_page_table,
+            requested_bytes,
+            mapped_pages: page_count as u8,
+            sampled,
+        };
+        return false;
     }
-    let slot_index = offset / KSTACK_SLOT_STRIDE;
-    if slot_index >= KSTACK_SLOT_COUNT {
-        crate::audit::log(
-            crate::audit::AuditEventKind::Fault,
-            "kernel stack slot free rejected",
-        );
-        return;
-    }
-    let mut used = KSTACK_USED_SLOTS.lock();
-    let bit = 1u64 << slot_index;
-    if (*used & bit) == 0 {
-        crate::warn!(
-            "free_kernel_stack: double free detected at {:#x}",
-            guard_addr
-        );
+    if old_page_table != 0 && !unmap_stack_from_table(old_page_table, base, page_count) {
         crate::audit::log(
             crate::audit::AuditEventKind::Quarantine,
-            "kernel stack double free detected",
+            "old kernel stack mapping could not be fully detached during exec",
         );
-        return;
     }
-    *used &= !bit;
+    KSTACK_SLOTS.lock()[slot_index] = KernelStackSlot {
+        user_page_table: new_page_table,
+        requested_bytes,
+        mapped_pages: page_count as u8,
+        sampled,
+    };
+    true
+}
+
+pub fn free_kernel_stack(base: u64) {
+    let slot_index = match stack_slot_index(base) {
+        Some(index) => index,
+        None => return,
+    };
+    sample_kernel_stack(slot_index, base);
+    let (page_count, user_page_table) = {
+        let mut slots = KSTACK_SLOTS.lock();
+        let slot = &mut slots[slot_index];
+        if slot.mapped_pages == 0 || slot.mapped_pages == KSTACK_SLOT_RESERVED {
+            crate::audit::log(
+                crate::audit::AuditEventKind::Quarantine,
+                "kernel stack double free detected",
+            );
+            return;
+        }
+        let state = (slot.mapped_pages as usize, slot.user_page_table);
+        slot.mapped_pages = KSTACK_SLOT_RESERVED;
+        state
+    };
+    if release_stack_pages(base, page_count, user_page_table) {
+        KSTACK_SLOTS.lock()[slot_index] = KernelStackSlot::EMPTY;
+    } else {
+        crate::audit::log(
+            crate::audit::AuditEventKind::Quarantine,
+            "kernel stack page release failed",
+        );
+    }
 }
 
 impl Thread {
@@ -986,11 +1164,8 @@ impl Thread {
         use x86_64::structures::paging::Mapper;
         use x86_64::structures::paging::{Page, Size4KiB};
 
-        let (pool_start, pool_end) = {
-            let pool = KSTACK_POOL.lock();
-            let start = pool.0.as_ptr() as u64;
-            (start, start + KSTACK_POOL_SIZE as u64)
-        };
+        let pool_start = KSTACK_ARENA_BASE;
+        let pool_end = KSTACK_ARENA_BASE + KSTACK_POOL_SIZE as u64;
         let stack_end = match self.kernel_stack.checked_add(self.kernel_stack_size as u64) {
             Some(v) => v,
             None => return false,
@@ -1010,9 +1185,7 @@ impl Thread {
         match page_table.translate_page(guard_page) {
             Ok(_) => false,
             Err(TranslateError::PageNotMapped) => true,
-            // 現状の early kernel 領域は bootloader の huge page に載ることがある。
-            // その場合は 4KiB guard を作れていないので、破損として扱わない。
-            Err(TranslateError::ParentEntryHugePage) => true,
+            Err(TranslateError::ParentEntryHugePage) => false,
             Err(_) => false,
         }
     }

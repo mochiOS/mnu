@@ -579,7 +579,7 @@ pub fn fork() -> u64 {
     }
 
     let kstack_size = crate::config::kernel().exec.kernel_thread_stack_size;
-    let kstack = match crate::task::thread::allocate_kernel_stack(kstack_size) {
+    let kstack = match crate::task::thread::allocate_kernel_stack_in_table(kstack_size, child_pt) {
         Some(s) => s,
         None => {
             let _ = crate::task::remove_process(child_pid);
@@ -601,6 +601,7 @@ pub fn fork() -> u64 {
         kstack_size,
     );
     if crate::task::add_thread(child_thread).is_none() {
+        crate::task::free_kernel_stack(kstack);
         let _ = crate::task::remove_process(child_pid);
         let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOMEM;

@@ -34,10 +34,12 @@ pub use signal::{
     USER_SIGRETURN_STUB_OFFSET,
 };
 pub use thread::{
-    add_thread, allocate_kernel_stack, count_threads_by_state, current_thread_id,
-    current_thread_slot, for_each_thread, free_kernel_stack, peek_next_thread, remove_thread,
-    reclaim_current_cpu_kernel_stack, retire_current_kernel_stack, set_current_thread,
-    set_thread_state, set_thread_state_at_slot, thread_count, thread_id_exists, thread_slot_index,
+    add_thread, allocate_kernel_stack, allocate_kernel_stack_in_table, count_threads_by_state,
+    current_thread_id, current_thread_slot, for_each_thread, free_kernel_stack,
+    kernel_stack_high_water_bytes, kernel_stack_table_in_use, peek_next_thread,
+    reclaim_current_cpu_kernel_stack, remap_kernel_stack_user_table, remove_thread,
+    retire_current_kernel_stack, set_current_thread, set_thread_state,
+    set_thread_state_at_slot, thread_count, thread_id_exists, thread_slot_index,
     thread_slot_index_and_generation, thread_slot_index_and_generation_by_u64,
     thread_slot_index_by_u64, thread_to_process_id, with_thread, with_thread_at_slot,
     with_thread_at_slot_mut, with_thread_mut, Thread, ThreadQueue,
