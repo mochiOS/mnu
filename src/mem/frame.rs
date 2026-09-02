@@ -289,6 +289,7 @@ pub(crate) fn lock_allocator() -> MutexGuard<'static, Option<MnuFrameAllocator>>
 ///
 /// ユーザープロセスへ公開するページと、ページテーブルとして使うページは、
 /// 利用前に必ずここを通します。ゼロクリアの安全規則と計測経路を分散させません。
+#[inline(never)]
 pub(crate) fn zero_frame(frame: PhysFrame) -> Result<()> {
     let offset =
         crate::mem::paging::physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
