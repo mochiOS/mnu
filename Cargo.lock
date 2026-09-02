@@ -104,9 +104,9 @@ version = "0.1.0"
 dependencies = [
  "linked_list_allocator",
  "mnu-abi",
+ "mnu-csprng",
  "mnu-metrics",
- "mochios-csprng",
- "mochios-time-core",
+ "mnu-time-core",
  "sha2",
  "spin",
  "x86_64",
@@ -117,11 +117,7 @@ name = "mnu-abi"
 version = "0.1.0"
 
 [[package]]
-name = "mnu-metrics"
-version = "0.1.0"
-
-[[package]]
-name = "mochios-csprng"
+name = "mnu-csprng"
 version = "0.1.0"
 dependencies = [
  "rand_chacha",
@@ -130,7 +126,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "mochios-time-core"
+name = "mnu-metrics"
+version = "0.1.0"
+
+[[package]]
+name = "mnu-time-core"
 version = "0.1.0"
 
 [[package]]

@@ -868,7 +868,7 @@ extern "x86-interrupt" fn page_fault_handler(
         // カーネルモードでのページフォルト: システム全体を停止
         error!("FATAL: Page fault in kernel mode!");
         error!("{:#?}", stack_frame);
-        error!("Please report this to https://github.com/tas0dev/mochiOS/issues with the above log details. :(");
+        error!("Please report this to https://github.com/mochiOS/mnu/issues with the log above.");
         halt_cpu();
     }
 }

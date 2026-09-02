@@ -431,7 +431,7 @@ fn wait_for_port(expected: u32) -> Result<(), Error> {
         if hypervisor_guest::invoke(HypercallNumber::Yield, 0, 0, 0) != HYPERCALL_SUCCESS {
             return Err(Error::Hypercall);
         }
-        // Hypervisor Yield schedules another Domain, not another mochiOS
+        // Hypervisor Yield schedules another Domain, not another guest
         // thread. Explicitly yield here as well so a slow hardware response
         // cannot starve the service manager and desktop on a single vCPU.
         if crate::task::is_scheduler_enabled() {

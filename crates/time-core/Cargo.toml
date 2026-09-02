@@ -1,4 +1,4 @@
 [package]
-name = "mochios-time-core"
+name = "mnu-time-core"
 version = "0.1.0"
 edition = "2021"

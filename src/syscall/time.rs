@@ -40,9 +40,9 @@ pub enum RealtimeError {
 
 pub fn initialize_realtime() -> Result<(), RealtimeError> {
     let date = crate::cpu::rtc_utc().ok_or(RealtimeError::Unavailable)?;
-    let seconds = mochios_time_core::unix_seconds(date).map_err(|error| match error {
-        mochios_time_core::Error::InvalidDate => RealtimeError::InvalidDate,
-        mochios_time_core::Error::InvalidYear => RealtimeError::InvalidYear,
+    let seconds = mnu_time_core::unix_seconds(date).map_err(|error| match error {
+        mnu_time_core::Error::InvalidDate => RealtimeError::InvalidDate,
+        mnu_time_core::Error::InvalidYear => RealtimeError::InvalidYear,
     })?;
     REALTIME_BASE_SECONDS.store(seconds, Ordering::Release);
     REALTIME_BASE_TICKS.store(get_ticks(), Ordering::Release);

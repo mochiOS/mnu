@@ -40,14 +40,14 @@ bench = false
 required-features = ["domain-guest"]
 
 [[bin]]
-name = "mochios-domain"
-path = "src/mochios_domain.rs"
+name = "domain-probe"
+path = "src/domain_probe.rs"
 test = false
 bench = false
 required-features = ["domain-guest"]
 
 [[bin]]
-name = "mochios-system"
+name = "domain-kernel"
 path = "src/system_domain_entry.rs"
 test = false
 bench = false
@@ -83,8 +83,8 @@ required-features = ["domain-guest"]
 
 [target.'cfg(any(target_os = "none", target_os = "uefi"))'.dependencies]
 linked_list_allocator = "0.10.5"
-mochios-csprng = { path = "crates/csprng" }
-mochios-time-core = { path = "crates/time-core" }
+mnu-csprng = { path = "crates/csprng" }
+mnu-time-core = { path = "crates/time-core" }
 sha2 = { version = "0.10.8", default-features = false }
 spin = "0.9"
 x86_64 = "0.15"

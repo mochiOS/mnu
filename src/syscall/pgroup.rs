@@ -357,12 +357,12 @@ pub fn uname(buf_ptr: u64) -> u64 {
         return EINVAL;
     }
     let fields: [&[u8]; 6] = [
-        b"mochiOS",       // sysname
-        b"mochi",         // nodename
-        b"0.1.0",         // release
-        b"mochiOS 0.1.0", // version
-        b"x86_64",        // machine
-        b"",              // domainname
+        b"mnu",       // sysname
+        b"localhost", // nodename
+        b"0.1.0",     // release
+        b"mnu 0.1.0", // version
+        b"x86_64",    // machine
+        b"",          // domainname
     ];
     let mut buf = [0u8; UTSNAME_SIZE as usize];
     for (i, f) in fields.iter().enumerate() {

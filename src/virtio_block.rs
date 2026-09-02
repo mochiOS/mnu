@@ -52,7 +52,7 @@ const DATA_GPA: u64 = 0x14_4000;
 const STATUS_GPA: u64 = 0x14_5000;
 const DMA_END: u64 = STATUS_GPA + 4096;
 const TEST_SECTOR: u64 = 0;
-const TEST_MARKER: &[u8] = b"mochiOS virtio-blk DMA test\n";
+const TEST_MARKER: &[u8] = b"mnu virtio-blk DMA test\n";
 
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;

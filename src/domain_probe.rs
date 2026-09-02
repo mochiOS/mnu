@@ -50,7 +50,7 @@ use mnu_abi::shared_ring::{
     initialize, pop_response, push_request, SharedRingMessage, SharedRingPage,
 };
 
-static START_MESSAGE: &[u8] = b"mochiOS System Domain entered\n";
+static START_MESSAGE: &[u8] = b"System Domain probe entered\n";
 static MDRIVER_EVENT_MESSAGE: &[u8] = b"mDriver control Event Channel verified\n";
 static MDRIVER_PROTOCOL_MESSAGE: &[u8] = b"mDriver device control protocol ready\n";
 static MDRIVER_BLOCK_MESSAGE: &[u8] = b"mDriver block data path ready\n";

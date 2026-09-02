@@ -1,4 +1,4 @@
-//! mochiOSのResultとエラー型を定義
+//! mnuのResultとエラー型を定義
 //!
 //! すべてのカーネルエラーをResult型で表現し、panicを禁止
 

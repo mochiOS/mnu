@@ -586,7 +586,7 @@ fn bcd_to_bin(v: u8) -> u8 {
     (v & 0x0f) + ((v >> 4) * 10)
 }
 
-pub use mochios_time_core::UtcDateTime as RtcDateTime;
+pub use mnu_time_core::UtcDateTime as RtcDateTime;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct RawRtcDateTime {

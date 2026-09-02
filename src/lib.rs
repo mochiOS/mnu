@@ -10,7 +10,7 @@ compile_error!("cargo test is disabled for this crate; use the QEMU/kernel self-
 
 #[cfg(feature = "kcfi")]
 compile_error!(
-    "feature `kcfi` is intentionally gated off: the current mochiOS build does not have a \
+    "feature `kcfi` is intentionally gated off: the current build does not have a \
      verified Rust/LLVM KCFI pipeline for this freestanding x86_64 kernel. Leaving it \
      selectable without end-to-end verification would be unsound."
 );

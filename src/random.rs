@@ -1,6 +1,6 @@
 //! Kernel cryptographic random generator.
 
-use mochios_csprng::Csprng;
+use mnu_csprng::Csprng;
 use sha2::{Digest, Sha256};
 use spin::Mutex;
 
@@ -17,7 +17,7 @@ pub enum RandomError {
 
 pub fn initialize(firmware_seed: &[u8; 32], firmware_seed_valid: bool) -> Result<(), RandomError> {
     let mut hasher = Sha256::new();
-    hasher.update(b"mochiOS kernel CSPRNG seed v1");
+    hasher.update(b"mnu kernel CSPRNG seed v1");
 
     if firmware_seed_valid {
         hasher.update(b"UEFI RNG");
