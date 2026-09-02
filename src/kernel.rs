@@ -170,6 +170,15 @@ pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
         crate::error!("Boot ABI validation failed: {:?}", error);
         halt_forever();
     }
+    match crate::boot_memory::preparation_status() {
+        Some(crate::boot_memory::BootMemoryPreparation::Succeeded { reclaimed_bytes }) => {
+            crate::info!("Reclaimed {} bootloader bytes", reclaimed_bytes)
+        }
+        Some(crate::boot_memory::BootMemoryPreparation::Failed) => {
+            crate::warn!("Bootloader memory reclamation was skipped")
+        }
+        None => {}
+    }
     unsafe {
         crate::init::fs::set_image(boot_info.initfs_addr, boot_info.initfs_size as usize);
         crate::init::fs::set_rootfs(boot_info.rootfs_addr, boot_info.rootfs_size as usize);

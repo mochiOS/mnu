@@ -36,6 +36,9 @@ pub mod result;
 pub mod audit;
 
 #[cfg(not(test))]
+pub mod boot_memory;
+
+#[cfg(not(test))]
 /// 割込み管理
 pub mod interrupt;
 
@@ -107,7 +110,7 @@ pub use mnu_abi::boot::{
     BootInfo, BootInfoError, MemoryRegion, MemoryType, SmpHandoff, BOOT_ABI_MAGIC,
     BOOT_ABI_VERSION, BOOT_FEATURE_ENTROPY, BOOT_FEATURE_FRAMEBUFFER,
     BOOT_FEATURE_HYPERVISOR_DOMAIN, BOOT_FEATURE_INITFS, BOOT_FEATURE_ROOTFS_IMAGE,
-    BOOT_FEATURE_SMP, MAX_CPU_IDS,
+    BOOT_FEATURE_SMP, MAX_BOOT_MEMORY_REGIONS, MAX_CPU_IDS,
 };
 
 #[cfg(not(test))]

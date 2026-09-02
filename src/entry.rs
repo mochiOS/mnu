@@ -8,6 +8,11 @@
 
 use mnu::mem::allocator::HardenedKernelHeap;
 
+unsafe extern "C" {
+    static __kernel_start: u8;
+    static __kernel_end: u8;
+}
+
 /// カーネルのグローバルアロケータ
 /// mem::init 内の init_heap がこの HardenedKernelHeap を初期化する
 #[global_allocator]
@@ -20,10 +25,28 @@ static KERNEL_ALLOCATOR: HardenedKernelHeap = HardenedKernelHeap::empty();
 /// これにより `mnu` 側の init_heap が正しいアロケータを初期化できる。
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn kernel_entry(boot_info_ptr: *mut mnu::BootInfo) -> ! {
-    // kernel_heap_addr = &KERNEL_ALLOCATOR（init_heap がここを初期化する）
-    (*boot_info_ptr).kernel_heap_addr = &KERNEL_ALLOCATOR as *const HardenedKernelHeap as u64;
-    mnu::smp::set_boot_info_addr(boot_info_ptr as u64);
+    let stack_pointer: u64;
+    core::arch::asm!(
+        "mov {}, rsp",
+        out(reg) stack_pointer,
+        options(nomem, nostack, preserves_flags)
+    );
+    let kernel_heap_addr = &KERNEL_ALLOCATOR as *const HardenedKernelHeap as u64;
+    let boot_info = match mnu::boot_memory::prepare_boot_info(
+        boot_info_ptr,
+        core::ptr::addr_of!(__kernel_start) as u64,
+        core::ptr::addr_of!(__kernel_end) as u64,
+        stack_pointer,
+        kernel_heap_addr,
+    ) {
+        Ok(boot_info) => boot_info,
+        Err(_) => {
+            mnu::boot_memory::note_preparation_failure();
+            (*boot_info_ptr).kernel_heap_addr = kernel_heap_addr;
+            &*boot_info_ptr
+        }
+    };
+    mnu::smp::set_boot_info_addr(boot_info as *const mnu::BootInfo as u64);
 
-    let boot_info: &'static mnu::BootInfo = &*(boot_info_ptr as *const _);
     mnu::kernel_entry(boot_info)
 }

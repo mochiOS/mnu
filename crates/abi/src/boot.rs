@@ -4,6 +4,7 @@ use core::sync::atomic::AtomicU64;
 pub const BOOT_ABI_MAGIC: u64 = u64::from_le_bytes(*b"MNUBOOT\0");
 pub const BOOT_ABI_VERSION: u32 = 1;
 pub const MAX_CPU_IDS: usize = 64;
+pub const MAX_BOOT_MEMORY_REGIONS: usize = 256;
 
 pub const BOOT_FEATURE_FRAMEBUFFER: u64 = 1 << 0;
 pub const BOOT_FEATURE_INITFS: u64 = 1 << 1;

@@ -4,6 +4,7 @@ SECTIONS
 {
     /* Keep the kernel image in a conventional-memory window below the bootloader image. */
     . = 0x2000000;
+    __kernel_start = .;
 
     .text : {
         __text_start = .;
@@ -25,6 +26,7 @@ SECTIONS
         *(COMMON)
         _bss_end = .;
     }
+    __kernel_end = .;
 
     /DISCARD/ : {
         *(.eh_frame)
