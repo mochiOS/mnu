@@ -286,6 +286,26 @@ pub(crate) fn lock_allocator() -> MutexGuard<'static, Option<MnuFrameAllocator>>
     allocator
 }
 
+/// 割り当て済みフレームをHHDM経由でゼロクリアします。
+///
+/// ユーザープロセスへ公開するページと、ページテーブルとして使うページは、
+/// 利用前に必ずここを通します。ゼロクリアの安全規則と計測経路を分散させません。
+pub(crate) fn zero_frame(frame: PhysFrame) -> Result<()> {
+    let offset =
+        crate::mem::paging::physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+    let address = frame
+        .start_address()
+        .as_u64()
+        .checked_add(offset)
+        .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
+    let started = performance::frame_zero_start();
+    unsafe {
+        core::ptr::write_bytes(address as *mut u8, 0, 4096);
+    }
+    performance::record_frame_zero(started, 4096);
+    Ok(())
+}
+
 unsafe impl FrameAllocator<Size4KiB> for MnuFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         performance::record_frame_request(false);
@@ -437,7 +457,10 @@ pub fn get_memory_info() -> Option<(u64, usize)> {
 pub fn performance_snapshot() -> (u64, mnu_abi::performance::FrameFragmentationSnapshot) {
     let guard = lock_allocator();
     let Some(allocator) = guard.as_ref() else {
-        return (0, mnu_abi::performance::FrameFragmentationSnapshot::default());
+        return (
+            0,
+            mnu_abi::performance::FrameFragmentationSnapshot::default(),
+        );
     };
     (
         allocator.usable_frames() as u64,

@@ -149,12 +149,10 @@ fn ensure_syscall_shared_region_for_cpu(cpu_id: usize) {
     let state_phys = state_frame.start_address().as_u64();
     let stack_phys = stack_frame.start_address().as_u64();
 
-    let phys_off = crate::mem::paging::physical_memory_offset()
-        .unwrap_or_else(|| panic!("physical memory offset unavailable for syscall shared region"));
-    unsafe {
-        core::ptr::write_bytes((state_phys + phys_off) as *mut u8, 0, 4096);
-        core::ptr::write_bytes((stack_phys + phys_off) as *mut u8, 0, 4096);
-    }
+    crate::mem::frame::zero_frame(state_frame)
+        .unwrap_or_else(|_| panic!("failed to clear syscall shared state page"));
+    crate::mem::frame::zero_frame(stack_frame)
+        .unwrap_or_else(|_| panic!("failed to clear syscall shared stack page"));
 
     map_syscall_page(cpu_id, syscall_state_vaddr_for_cpu(cpu_id), state_phys);
     map_syscall_page(cpu_id, syscall_stack_vaddr_for_cpu(cpu_id), stack_phys);

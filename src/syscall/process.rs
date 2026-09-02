@@ -1193,17 +1193,6 @@ pub fn alloc_shared_pages(
         None => return ENOMEM,
     };
 
-    let phys_off = match crate::mem::paging::physical_memory_offset() {
-        Some(offset) => offset,
-        None => {
-            let _ = crate::task::with_process_mut(pid, |process| {
-                if process.heap_end() >= virt_start {
-                    process.set_heap_end(old_heap_end);
-                }
-            });
-            return ENOMEM;
-        }
-    };
     let mut phys_pages = Vec::new();
     if phys_pages.try_reserve_exact(page_count).is_err() {
         let _ = crate::task::with_process_mut(pid, |process| {
@@ -1235,10 +1224,17 @@ pub fn alloc_shared_pages(
         let phys = frame.start_address().as_u64();
         phys_pages[index] = phys;
         allocated += 1;
-        if let Some(ptr) = phys.checked_add(phys_off) {
-            unsafe {
-                core::ptr::write_bytes(ptr as *mut u8, 0, 4096);
-            }
+        if crate::mem::frame::zero_frame(frame).is_err() {
+            rollback_shared_pages(
+                pid,
+                pt_phys,
+                virt_start,
+                old_heap_end,
+                &phys_pages,
+                allocated,
+                mapped,
+            );
+            return ENOMEM;
         }
         let virt = virt_start + (index as u64) * 4096;
         if crate::mem::paging::map_page_in_table(pt_phys, virt, phys, true, true).is_err() {
@@ -1255,7 +1251,6 @@ pub fn alloc_shared_pages(
         }
         mapped += 1;
     }
-
 
     if phys_pages_ptr != 0 {
         let bytes = unsafe {

@@ -175,10 +175,7 @@ impl HardenedKernelHeap {
         if committed >= HEAP_SIZE {
             return false;
         }
-        let wanted = minimum_bytes
-            .max(HEAP_GROWTH_SIZE)
-            .saturating_add(4095)
-            & !4095;
+        let wanted = minimum_bytes.max(HEAP_GROWTH_SIZE).saturating_add(4095) & !4095;
         let grow_by = wanted.min(HEAP_SIZE - committed);
         let mut mapped = 0usize;
         let mut page_table = crate::mem::paging::PAGE_TABLE.lock();
@@ -193,7 +190,7 @@ impl HardenedKernelHeap {
             let Some(frame) = frames.allocate_frame() else {
                 break;
             };
-            if !zero_frame(frame) {
+            if crate::mem::frame::zero_frame(frame).is_err() {
                 if frames.deallocate_frame(frame) {
                     performance::increment(CounterMetric::FrameFrees, 1);
                     performance::gauge_subtract(GaugeMetric::FramesInUse, 1);
@@ -457,22 +454,6 @@ pub fn heap_committed_bytes() -> usize {
     unsafe { (*ptr).committed_bytes.load(Ordering::Acquire) }
 }
 
-fn zero_frame(frame: x86_64::structures::paging::PhysFrame<Size4KiB>) -> bool {
-    let Some(offset) = crate::mem::paging::physical_memory_offset() else {
-        return false;
-    };
-    let started = performance::frame_zero_start();
-    unsafe {
-        ptr::write_bytes(
-            (frame.start_address().as_u64() + offset) as *mut u8,
-            0,
-            4096,
-        );
-    }
-    performance::record_frame_zero(started, 4096);
-    true
-}
-
 /// ヒープを初期化
 ///
 /// ## Arguments
@@ -504,7 +485,7 @@ pub fn init_heap(
         let frame = frame_allocator
             .allocate_frame()
             .ok_or(MapToError::FrameAllocationFailed)?;
-        let _ = zero_frame(frame);
+        crate::mem::frame::zero_frame(frame).map_err(|_| MapToError::FrameAllocationFailed)?;
         // カーネルヒープは実行不可（W^X: NO_EXECUTE でコード実行を防ぐ）
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
         unsafe {

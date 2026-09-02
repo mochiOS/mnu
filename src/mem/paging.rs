@@ -1081,10 +1081,7 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
         let l3_phys = if l4e.is_unused() || !l4e.flags().contains(Flags::PRESENT) {
             let new_l3_frame = frame::allocate_frame()?;
             let new_l3_phys = new_l3_frame.start_address().as_u64();
-            let new_l3_virt = new_l3_phys
-                .checked_add(phys_off)
-                .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-            unsafe { core::ptr::write_bytes(new_l3_virt as *mut u8, 0, 4096) };
+            frame::zero_frame(new_l3_frame)?;
             let mut flags = Flags::PRESENT | Flags::WRITABLE;
             if user_accessible {
                 flags |= Flags::USER_ACCESSIBLE;
@@ -1103,10 +1100,7 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
         if l3e.is_unused() || !l3e.flags().contains(Flags::PRESENT) {
             let new_l2_frame = frame::allocate_frame()?;
             let new_l2_phys = new_l2_frame.start_address().as_u64();
-            let new_l2_virt = new_l2_phys
-                .checked_add(phys_off)
-                .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-            unsafe { core::ptr::write_bytes(new_l2_virt as *mut u8, 0, 4096) };
+            frame::zero_frame(new_l2_frame)?;
             let mut flags = Flags::PRESENT | Flags::WRITABLE;
             if user_accessible {
                 flags |= Flags::USER_ACCESSIBLE;
@@ -1124,10 +1118,7 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
         if l2e.is_unused() || !l2e.flags().contains(Flags::PRESENT) {
             let new_l1_frame = frame::allocate_frame()?;
             let new_l1_phys = new_l1_frame.start_address().as_u64();
-            let new_l1_virt = new_l1_phys
-                .checked_add(phys_off)
-                .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-            unsafe { core::ptr::write_bytes(new_l1_virt as *mut u8, 0, 4096) };
+            frame::zero_frame(new_l1_frame)?;
             let mut flags = Flags::PRESENT | Flags::WRITABLE;
             if user_accessible {
                 flags |= Flags::USER_ACCESSIBLE;
@@ -1137,10 +1128,7 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
             let old_flags = l2e.flags();
             let new_l1_frame = frame::allocate_frame()?;
             let new_l1_phys = new_l1_frame.start_address().as_u64();
-            let new_l1_virt = new_l1_phys
-                .checked_add(phys_off)
-                .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-            unsafe { core::ptr::write_bytes(new_l1_virt as *mut u8, 0, 4096) };
+            frame::zero_frame(new_l1_frame)?;
             let mut flags = old_flags;
             flags.remove(Flags::HUGE_PAGE);
             l2e.set_addr(PhysAddr::new(new_l1_phys), flags);
@@ -1281,12 +1269,7 @@ fn ensure_user_page_table_hierarchy(temp_kern_virt: u64, vaddr: u64, phys_off: u
                 .ok_or(Kernel::Memory(Memory::OutOfMemory))?
         };
         let l3_phys = l3_frame.start_address().as_u64();
-
-        // L3をカーネル仮想空間でゼロ初期化
-        let l3_virt = l3_phys + phys_off;
-        unsafe {
-            core::ptr::write_bytes(l3_virt as *mut PageTable, 0, 1);
-        }
+        frame::zero_frame(l3_frame)?;
 
         // ユーザーL4にL3を記録
         l4[l4_index].set_addr(
@@ -1317,12 +1300,7 @@ fn ensure_user_page_table_hierarchy(temp_kern_virt: u64, vaddr: u64, phys_off: u
                 .ok_or(Kernel::Memory(Memory::OutOfMemory))?
         };
         let l2_phys = l2_frame.start_address().as_u64();
-
-        // L2をカーネル仮想空間でゼロ初期化
-        let l2_virt = l2_phys + phys_off;
-        unsafe {
-            core::ptr::write_bytes(l2_virt as *mut PageTable, 0, 1);
-        }
+        frame::zero_frame(l2_frame)?;
 
         // ユーザーL3にL2を記録
         l3[l3_index].set_addr(
@@ -1353,11 +1331,7 @@ fn ensure_user_page_table_hierarchy(temp_kern_virt: u64, vaddr: u64, phys_off: u
                 .ok_or(Kernel::Memory(Memory::OutOfMemory))?
         };
         let l1_phys = l1_frame.start_address().as_u64();
-
-        let l1_virt = l1_phys + phys_off;
-        unsafe {
-            core::ptr::write_bytes(l1_virt as *mut PageTable, 0, 1);
-        }
+        frame::zero_frame(l1_frame)?;
 
         l2[l2_index].set_addr(
             PhysAddr::new(l1_phys),
@@ -1537,11 +1511,7 @@ pub fn map_and_copy_segment_to(
                 .ok_or(Kernel::Memory(Memory::OutOfMemory))?
         };
         let mut phys_frame_addr = frame.start_address().as_u64();
-
-        // フレームを先にゼロ初期化（BSS領域のため）
-        unsafe {
-            core::ptr::write_bytes((phys_frame_addr + phys_off) as *mut u8, 0, 4096);
-        }
+        frame::zero_frame(frame)?;
 
         // 直接ページテーブルにエントリを作成（テンポラリマッピング経由で）
 
@@ -2151,12 +2121,7 @@ pub fn map_page_in_table(
     let l3_phys = if l4e.is_unused() || !l4e.flags().contains(PageTableFlags::PRESENT) {
         let new_l3_frame = frame::allocate_frame()?;
         let new_l3 = new_l3_frame.start_address().as_u64();
-        let new_l3_vaddr = new_l3
-            .checked_add(phys_off)
-            .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-        unsafe {
-            core::ptr::write_bytes(new_l3_vaddr as *mut u8, 0, 4096);
-        }
+        frame::zero_frame(new_l3_frame)?;
         let mut flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
         if user_accessible {
             flags |= PageTableFlags::USER_ACCESSIBLE;
@@ -2188,12 +2153,7 @@ pub fn map_page_in_table(
     let l2_phys = if l3e.is_unused() || !l3e.flags().contains(PageTableFlags::PRESENT) {
         let new_l2_frame = frame::allocate_frame()?;
         let new_l2 = new_l2_frame.start_address().as_u64();
-        let new_l2_vaddr = new_l2
-            .checked_add(phys_off)
-            .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-        unsafe {
-            core::ptr::write_bytes(new_l2_vaddr as *mut u8, 0, 4096);
-        }
+        frame::zero_frame(new_l2_frame)?;
         let mut flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
         if user_accessible {
             flags |= PageTableFlags::USER_ACCESSIBLE;
@@ -2225,12 +2185,7 @@ pub fn map_page_in_table(
     let l1_phys = if l2e.is_unused() || !l2e.flags().contains(PageTableFlags::PRESENT) {
         let new_l1_frame = frame::allocate_frame()?;
         let new_l1 = new_l1_frame.start_address().as_u64();
-        let new_l1_vaddr = new_l1
-            .checked_add(phys_off)
-            .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-        unsafe {
-            core::ptr::write_bytes(new_l1_vaddr as *mut u8, 0, 4096);
-        }
+        frame::zero_frame(new_l1_frame)?;
         let mut flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
         if user_accessible {
             flags |= PageTableFlags::USER_ACCESSIBLE;
