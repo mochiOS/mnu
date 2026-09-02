@@ -876,10 +876,7 @@ pub fn create_user_page_table() -> Result<u64> {
         } else {
             let l2_addr = user_l3[0].addr();
             let l2_flags = user_l3[0].flags() | PageTableFlags::USER_ACCESSIBLE;
-            user_l3[0].set_addr(
-                l2_addr,
-                l2_flags,
-            );
+            user_l3[0].set_addr(l2_addr, l2_flags);
         }
         let user_l2_phys = user_l3[0].addr().as_u64();
         let user_l2 = unsafe { &mut *((user_l2_phys + phys_off) as *mut PageTable) };

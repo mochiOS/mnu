@@ -50,6 +50,13 @@ impl Drop for UserPageTableGuard {
     }
 }
 
+fn mapping_error_errno(error: crate::Kernel) -> u64 {
+    match error {
+        crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => crate::syscall::types::ENOMEM,
+        _ => crate::syscall::types::EINVAL,
+    }
+}
+
 #[inline]
 fn aslr_mix64(mut x: u64) -> u64 {
     x ^= x >> 30;
@@ -852,7 +859,7 @@ pub(crate) fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u6
                 tls_base,
                 e
             );
-            Err(crate::syscall::types::EINVAL)
+            Err(mapping_error_errno(e))
         }
     }
 }
@@ -1015,7 +1022,7 @@ fn exec_with_data(
                     process_name,
                     e
                 );
-                return crate::syscall::types::EINVAL;
+                return mapping_error_errno(e);
             }
         };
         let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
@@ -1333,7 +1340,7 @@ fn exec_with_data(
             false,
         ) {
             crate::warn!("Failed to allocate user stack lower: {:?}", e);
-            return crate::syscall::types::EINVAL;
+            return mapping_error_errno(e);
         }
         // Map the top page with args (writable, non-executable stack)
         let top_page_vaddr = stack_end_vaddr - 4096;
@@ -1347,7 +1354,7 @@ fn exec_with_data(
             false,
         ) {
             crate::warn!("Failed to allocate user stack top: {:?}", e);
-            return crate::syscall::types::EINVAL;
+            return mapping_error_errno(e);
         }
 
         crate::debug!("User stack allocated successfully");
@@ -1706,7 +1713,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     // 新しいページテーブルを作成
     let new_pt_phys = match crate::mem::paging::create_user_page_table() {
         Ok(p) => p,
-        Err(_) => return EINVAL,
+        Err(error) => return mapping_error_errno(error),
     };
     let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
 
@@ -1774,7 +1781,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
                         }
                     };
                     let seg_src = &data[src_off..src_end];
-                    if crate::mem::paging::map_and_copy_segment_to(
+                    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
                         new_pt_phys,
                         ph.p_vaddr,
                         ph.p_filesz,
@@ -1782,10 +1789,8 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
                         seg_src,
                         (ph.p_flags & 0x2) != 0,
                         (ph.p_flags & 0x1) != 0,
-                    )
-                    .is_err()
-                    {
-                        return EINVAL;
+                    ) {
+                        return mapping_error_errno(error);
                     }
                 }
             }
@@ -1832,7 +1837,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         Err(errno) => return errno,
     };
 
-    if crate::mem::paging::map_and_copy_segment_to(
+    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
         new_pt_phys,
         stack_base_vaddr,
         0,
@@ -1840,13 +1845,11 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         &[],
         true,
         false,
-    )
-    .is_err()
-    {
-        return EINVAL;
+    ) {
+        return mapping_error_errno(error);
     }
     let top_page_vaddr = stack_end_vaddr - 4096;
-    if crate::mem::paging::map_and_copy_segment_to(
+    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
         new_pt_phys,
         top_page_vaddr,
         4096,
@@ -1854,10 +1857,8 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         &page_data,
         true,
         false,
-    )
-    .is_err()
-    {
-        return EINVAL;
+    ) {
+        return mapping_error_errno(error);
     }
 
     // 初期ヒープをASLR付きで確保
@@ -1866,7 +1867,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         aslr_offset_pages(aslr_seed ^ 0x4a11_6b5c, exec_cfg.mmap_heap_aslr_max_pages) * 4096,
     );
     let heap_map_size: u64 = 4096 * 2;
-    if crate::mem::paging::map_and_copy_segment_to(
+    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
         new_pt_phys,
         heap_base,
         0,
@@ -1874,10 +1875,8 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         &[],
         true,
         false,
-    )
-    .is_err()
-    {
-        return EINVAL;
+    ) {
+        return mapping_error_errno(error);
     }
     let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
         Ok(base) => base,
