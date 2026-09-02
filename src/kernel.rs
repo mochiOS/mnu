@@ -1,6 +1,3 @@
-use crate::capability::path::{
-    register_service_paths, PathRights, PATH_CREATE, PATH_LIST, PATH_READ, PATH_WRITE,
-};
 use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
 use crate::util::log::LogLevel;
@@ -108,22 +105,22 @@ fn kernel_main() -> ! {
         },
     ));
 
-    // 最小のサービス管理プロセスを起動する。
-    info!("Starting service manager");
-    let boot_launch = crate::policy::service_manager_launch();
-    let manager_pid = crate::syscall::exec::exec_kernel_with_name_caps_and_authorities(
+    // 起動後の構成はカーネルではなく init が決める。
+    info!("Starting init");
+    let boot_launch = crate::policy::init_launch();
+    let init_pid = crate::syscall::exec::exec_kernel_with_name_caps_and_authorities(
         boot_launch.exec_path,
         boot_launch.process_name,
         caps.clone(),
         kernel_authorities,
         crate::task::PrivilegeLevel::Service,
     );
-    crate::info!("service manager pid = {:#x}", manager_pid);
-    if manager_pid != 0
-        && task::with_process(task::ProcessId::from_u64(manager_pid), |_| ()).is_some()
+    crate::info!("init pid = {:#x}", init_pid);
+    if init_pid != 0
+        && task::with_process(task::ProcessId::from_u64(init_pid), |_| ()).is_some()
     {
-        crate::policy::register_service_manager_pid(manager_pid);
-        if let Some(pid) = task::with_process(task::ProcessId::from_u64(manager_pid), |proc| {
+        crate::policy::register_init_pid(init_pid);
+        if let Some(capabilities) = task::with_process(task::ProcessId::from_u64(init_pid), |proc| {
             let spawn = proc
                 .capabilities()
                 .contains(crate::capability::Capability::ProcessSpawn);
@@ -133,24 +130,13 @@ fn kernel_main() -> ! {
             (spawn, inspect)
         }) {
             crate::info!(
-                "service manager caps: process.spawn={} process.inspect={}",
-                pid.0,
-                pid.1
+                "init caps: process.spawn={} process.inspect={}",
+                capabilities.0,
+                capabilities.1
             );
         }
-        let service_paths = [
-            (
-                "/tmp/core.service.fs-test",
-                PathRights::new(PATH_READ | PATH_WRITE | PATH_CREATE),
-            ),
-            ("/tmp/testdata", PathRights::new(PATH_READ | PATH_LIST)),
-        ];
-        let _ = register_service_paths(manager_pid, &service_paths);
     } else {
-        crate::warn!(
-            "Failed to register service manager (ret={:#x})",
-            manager_pid
-        );
+        crate::warn!("Failed to start init (ret={:#x})", init_pid);
     }
 
     // カーネルはアイドル状態に入る

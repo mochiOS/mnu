@@ -127,11 +127,11 @@ pub fn service_delegate_register(kind_raw: u64, pid_raw: u64) -> u64 {
         Some(pid) => pid,
         None => return EACCES,
     };
-    let manager_pid = crate::policy::service_manager_pid();
-    let is_manager = manager_pid != 0 && caller_pid.as_u64() == manager_pid;
+    let init_pid = crate::policy::init_pid();
+    let is_init = init_pid != 0 && caller_pid.as_u64() == init_pid;
     let can_register =
         crate::syscall::security::caller_has_any_capability(&[Capability::ServiceRegister]);
-    if !is_manager && !can_register {
+    if !is_init && !can_register {
         return EACCES;
     }
 

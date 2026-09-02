@@ -9,9 +9,9 @@ use crate::task::{PrivilegeLevel, ProcessId};
 
 pub mod signature;
 
-/// `.service` 実行を許可するサービスマネージャープロセスID
+/// ブート時にカーネルが起動した init プロセスID
 /// 0 は未登録。
-static SERVICE_MANAGER_PID: AtomicU64 = AtomicU64::new(0);
+static INIT_PID: AtomicU64 = AtomicU64::new(0);
 static SERVICE_SPAWN_DELEGATE_PID: AtomicU64 = AtomicU64::new(0);
 static DRIVER_SPAWN_DELEGATE_PID: AtomicU64 = AtomicU64::new(0);
 
@@ -70,14 +70,12 @@ pub struct LaunchPolicy {
 pub struct BootLaunch {
     pub process_name: &'static str,
     pub exec_path: &'static str,
-    pub manifest_role: ManifestRole,
 }
 
-pub fn service_manager_launch() -> BootLaunch {
+pub fn init_launch() -> BootLaunch {
     BootLaunch {
-        process_name: "core.service",
-        exec_path: "core.service",
-        manifest_role: ManifestRole::CoreService,
+        process_name: "init",
+        exec_path: "/init",
     }
 }
 
@@ -93,26 +91,22 @@ fn role_priority(role: ManifestRole) -> u8 {
     }
 }
 
-/// サービスマネージャーPIDを登録する（IDベース認可）
-pub fn register_service_manager_pid(pid: u64) {
-    SERVICE_MANAGER_PID.store(pid, Ordering::SeqCst);
+pub fn register_init_pid(pid: u64) {
+    INIT_PID.store(pid, Ordering::SeqCst);
 }
 
-/// サービスマネージャーPIDを取得する
-pub fn service_manager_pid() -> u64 {
-    SERVICE_MANAGER_PID.load(Ordering::SeqCst)
+pub fn init_pid() -> u64 {
+    INIT_PID.load(Ordering::SeqCst)
 }
 
-/// 既存の登録がない場合のみサービスマネージャーPIDを確保する
-pub fn claim_service_manager_pid(pid: u64) -> bool {
-    SERVICE_MANAGER_PID
+pub fn claim_init_pid(pid: u64) -> bool {
+    INIT_PID
         .compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
 }
 
-/// 登録済みのサービスマネージャーPIDを解除する
-pub fn release_service_manager_pid(pid: u64) -> bool {
-    SERVICE_MANAGER_PID
+pub fn release_init_pid(pid: u64) -> bool {
+    INIT_PID
         .compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
 }
@@ -160,10 +154,10 @@ pub fn caller_can_launch_service() -> bool {
         return true;
     };
 
-    let manager_pid_raw = service_manager_pid();
-    if manager_pid_raw != 0 && caller_pid.as_u64() == manager_pid_raw {
-        let manager_pid = ProcessId::from_u64(manager_pid_raw);
-        return crate::task::with_process(manager_pid, |p| {
+    let init_pid_raw = init_pid();
+    if init_pid_raw != 0 && caller_pid.as_u64() == init_pid_raw {
+        let init_pid = ProcessId::from_u64(init_pid_raw);
+        return crate::task::with_process(init_pid, |p| {
             let state = p.state();
             let alive = state != crate::task::ProcessState::Zombie
                 && state != crate::task::ProcessState::Terminated;
@@ -199,8 +193,8 @@ pub fn caller_can_launch_driver() -> bool {
         return true;
     };
 
-    let manager_pid_raw = service_manager_pid();
-    if manager_pid_raw != 0 && caller_pid.as_u64() == manager_pid_raw {
+    let init_pid_raw = init_pid();
+    if init_pid_raw != 0 && caller_pid.as_u64() == init_pid_raw {
         return true;
     }
 

@@ -2,7 +2,7 @@ use crate::capability::{
     parse_kernel_authority_spec, Capability, CapabilitySet, KernelAuthoritySet,
 };
 use crate::policy::{
-    caller_can_grant_capabilities_on_exec, claim_service_manager_pid, release_service_manager_pid,
+    caller_can_grant_capabilities_on_exec, claim_init_pid, release_init_pid,
     resolve_exec_foreground, resolve_exec_priority, resolve_exec_privilege, ManifestRole,
 };
 use alloc::string::String;
@@ -1447,10 +1447,10 @@ fn exec_with_data(
                 .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
         });
         let privilege = resolve_exec_privilege(requested_privilege);
-        let boot_service_manager = crate::policy::service_manager_launch();
-        let is_boot_service_manager = privilege == crate::task::PrivilegeLevel::Service
-            && exec_path == boot_service_manager.exec_path
-            && process_name == boot_service_manager.process_name;
+        let boot_init = crate::policy::init_launch();
+        let is_boot_init = privilege == crate::task::PrivilegeLevel::Service
+            && exec_path == boot_init.exec_path
+            && process_name == boot_init.process_name;
         let priority = resolve_exec_priority(ManifestRole::Unknown, parent_pid);
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
         if let Some(app_id) = app_id {
@@ -1506,13 +1506,13 @@ fn exec_with_data(
             Err(errno) => return errno,
         };
         let pid = proc.id();
-        if is_boot_service_manager && !claim_service_manager_pid(pid.as_u64()) {
-            crate::warn!("service manager is already running, rejecting duplicate launch");
+        if is_boot_init && !claim_init_pid(pid.as_u64()) {
+            crate::warn!("init is already running, rejecting duplicate launch");
             return crate::syscall::types::EINVAL;
         }
         if crate::task::add_process(proc).is_none() {
-            if is_boot_service_manager {
-                let _ = release_service_manager_pid(pid.as_u64());
+            if is_boot_init {
+                let _ = release_init_pid(pid.as_u64());
             }
             return crate::syscall::types::EINVAL;
         }
@@ -1526,8 +1526,8 @@ fn exec_with_data(
             None => {
                 crate::warn!("Failed to allocate kernel stack for thread");
                 let _ = crate::task::remove_process(pid);
-                if is_boot_service_manager {
-                    let _ = release_service_manager_pid(pid.as_u64());
+                if is_boot_init {
+                    let _ = release_init_pid(pid.as_u64());
                 }
                 let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
                 return crate::syscall::types::ENOMEM;
@@ -1561,8 +1561,8 @@ fn exec_with_data(
             crate::warn!("Failed to add thread");
             crate::task::free_kernel_stack(kstack);
             let _ = crate::task::remove_process(pid);
-            if is_boot_service_manager {
-                let _ = release_service_manager_pid(pid.as_u64());
+            if is_boot_init {
+                let _ = release_init_pid(pid.as_u64());
             }
             let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
             return crate::syscall::types::EINVAL;
