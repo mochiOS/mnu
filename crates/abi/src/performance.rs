@@ -1,6 +1,7 @@
-pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 3;
+pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 4;
 pub const PERFORMANCE_SNAPSHOT_V1_SIZE: usize = 1_200;
 pub const PERFORMANCE_SNAPSHOT_V2_SIZE: usize = 1_896;
+pub const PERFORMANCE_SNAPSHOT_V3_SIZE: usize = 1_992;
 pub const PERFORMANCE_CPU_SLOTS: usize = 64;
 
 pub const PERFORMANCE_FLAG_INSTRUMENTED: u64 = 1 << 0;
@@ -194,6 +195,14 @@ pub struct FrameAllocatorSnapshot {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameFragmentationSnapshot {
+    pub bump_free_pages: u64,
+    pub recycled_pages: u64,
+    pub largest_contiguous_pages: u64,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KernelPerformanceSnapshot {
     pub version: u32,
@@ -218,6 +227,9 @@ pub struct KernelPerformanceSnapshot {
     pub heap_allocations_by_subsystem: [u64; AllocationSubsystem::COUNT],
     /// v3 extension. The v2 prefix above must remain byte-for-byte stable.
     pub frame_allocator: FrameAllocatorSnapshot,
+    /// v4 extension. The v3 prefix above must remain byte-for-byte stable.
+    pub frame_allocator_lock_wait: DistributionSnapshot,
+    pub frame_fragmentation: FrameFragmentationSnapshot,
 }
 
 impl Default for KernelPerformanceSnapshot {
@@ -242,6 +254,8 @@ impl Default for KernelPerformanceSnapshot {
             heap_allocations_by_cpu: [0; PERFORMANCE_CPU_SLOTS],
             heap_allocations_by_subsystem: [0; AllocationSubsystem::COUNT],
             frame_allocator: FrameAllocatorSnapshot::default(),
+            frame_allocator_lock_wait: DistributionSnapshot::default(),
+            frame_fragmentation: FrameFragmentationSnapshot::default(),
         }
     }
 }
@@ -262,7 +276,11 @@ mod tests {
             core::mem::offset_of!(KernelPerformanceSnapshot, frame_allocator),
             PERFORMANCE_SNAPSHOT_V2_SIZE
         );
-        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 1_992);
+        assert_eq!(
+            core::mem::offset_of!(KernelPerformanceSnapshot, frame_allocator_lock_wait),
+            PERFORMANCE_SNAPSHOT_V3_SIZE
+        );
+        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 2_064);
         assert_eq!(core::mem::align_of::<KernelPerformanceSnapshot>(), 8);
     }
 

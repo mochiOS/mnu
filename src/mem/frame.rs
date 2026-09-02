@@ -6,7 +6,7 @@ use crate::{
     result::{Kernel, Memory, Result},
     MemoryRegion, MemoryType,
 };
-use spin::Mutex;
+use spin::{Mutex, MutexGuard};
 use x86_64::{
     structures::paging::{FrameAllocator, PhysFrame, Size4KiB},
     PhysAddr,
@@ -15,13 +15,13 @@ use x86_64::{
 use crate::performance::{self, CounterMetric, GaugeMetric};
 
 /// グローバルフレームアロケータ
-pub static FRAME_ALLOCATOR: Mutex<Option<MnuFrameAllocator>> = Mutex::new(None);
+static FRAME_ALLOCATOR: Mutex<Option<MnuFrameAllocator>> = Mutex::new(None);
 
 /// 未使用領域のカーソルと、解放済みフレームのリストを使うアロケータ
 ///
 /// 解放済みフレームはフレーム自身の先頭8バイトにリンクリストのnextポインタを
 /// 埋め込むことで上限なしに再利用できる。
-pub struct MnuFrameAllocator {
+pub(crate) struct MnuFrameAllocator {
     /// メモリマップ
     memory_map: &'static [MemoryRegion],
     /// バンプアロケータの次フレームインデックス
@@ -110,6 +110,7 @@ impl MnuFrameAllocator {
         let cookie = self.free_cookie(phys_addr);
         self.write_frame_meta(phys_addr, self.free_list_head, cookie);
         self.free_list_head = phys_addr;
+        performance::add_frame_recycled();
         true
     }
 
@@ -251,6 +252,38 @@ impl MnuFrameAllocator {
         performance::increment(CounterMetric::FrameAllocations, page_count as u64);
         performance::gauge_add(GaugeMetric::FramesInUse, page_count as u64);
     }
+
+    #[cfg(feature = "performance-instrumentation")]
+    fn fragmentation_snapshot(&self) -> mnu_abi::performance::FrameFragmentationSnapshot {
+        let min_phys = (self.next_frame as u64).saturating_mul(4096);
+        let mut bump_free_pages = 0u64;
+        let mut largest_contiguous_pages = 0u64;
+
+        for region in self.memory_map.iter().skip(self.next_region) {
+            if region.region_type != MemoryType::Usable {
+                continue;
+            }
+            let start = Self::align_up(region.start, 4096).max(min_phys);
+            let end = region.start.saturating_add(region.len) & !0xfff;
+            let pages = end.saturating_sub(start) / 4096;
+            bump_free_pages = bump_free_pages.saturating_add(pages);
+            largest_contiguous_pages = largest_contiguous_pages.max(pages);
+        }
+
+        mnu_abi::performance::FrameFragmentationSnapshot {
+            bump_free_pages,
+            recycled_pages: performance::frame_recycled_pages()
+                .saturating_add(self.quarantine_len as u64),
+            largest_contiguous_pages,
+        }
+    }
+}
+
+pub(crate) fn lock_allocator() -> MutexGuard<'static, Option<MnuFrameAllocator>> {
+    let started = performance::frame_allocator_lock_start();
+    let allocator = FRAME_ALLOCATOR.lock();
+    performance::record_frame_allocator_lock_wait(started);
+    allocator
 }
 
 unsafe impl FrameAllocator<Size4KiB> for MnuFrameAllocator {
@@ -270,13 +303,20 @@ unsafe impl FrameAllocator<Size4KiB> for MnuFrameAllocator {
                     "frame free list corruption",
                 );
                 self.free_list_head = 0;
+                performance::clear_frame_recycled();
             } else {
                 match self.read_frame_meta(phys) {
                     Some((next, cookie)) if cookie == self.free_cookie(phys) => {
                         if next != 0 && next & 0xfff == 0 && self.is_usable_frame_addr(next) {
                             self.free_list_head = next;
+                            performance::remove_frame_recycled();
                         } else {
                             self.free_list_head = 0;
+                            if next == 0 {
+                                performance::remove_frame_recycled();
+                            } else {
+                                performance::clear_frame_recycled();
+                            }
                         }
                         self.clear_frame_meta(phys);
                         self.record_allocation(1);
@@ -290,8 +330,12 @@ unsafe impl FrameAllocator<Size4KiB> for MnuFrameAllocator {
                             "frame cookie mismatch",
                         );
                         self.free_list_head = 0;
+                        performance::clear_frame_recycled();
                     }
-                    None => self.free_list_head = 0,
+                    None => {
+                        self.free_list_head = 0;
+                        performance::clear_frame_recycled();
+                    }
                 }
             }
         }
@@ -330,12 +374,12 @@ unsafe impl FrameAllocator<Size4KiB> for MnuFrameAllocator {
 /// フレームアロケータを初期化
 pub fn init(memory_map: &'static [MemoryRegion]) {
     let allocator = MnuFrameAllocator::new(memory_map, 0);
-    *FRAME_ALLOCATOR.lock() = Some(allocator);
+    *lock_allocator() = Some(allocator);
 }
 
 /// ページングが初期化された後に HHDM オフセットをセット
 pub fn set_phys_offset(offset: u64) {
-    if let Some(alloc) = FRAME_ALLOCATOR.lock().as_mut() {
+    if let Some(alloc) = lock_allocator().as_mut() {
         alloc.phys_offset = offset;
         alloc.phys_mapping_ready = true;
     }
@@ -343,7 +387,7 @@ pub fn set_phys_offset(offset: u64) {
 
 /// フレームを割り当て
 pub fn allocate_frame() -> Result<PhysFrame> {
-    let mut guard = FRAME_ALLOCATOR.lock();
+    let mut guard = lock_allocator();
     let Some(allocator) = guard.as_mut() else {
         performance::record_frame_failure(
             performance::FrameAllocationFailure::AllocatorUnavailable,
@@ -356,7 +400,7 @@ pub fn allocate_frame() -> Result<PhysFrame> {
 }
 
 pub fn allocate_contiguous_frames(page_count: usize) -> Result<PhysFrame> {
-    let mut guard = FRAME_ALLOCATOR.lock();
+    let mut guard = lock_allocator();
     let Some(allocator) = guard.as_mut() else {
         performance::record_frame_failure(
             performance::FrameAllocationFailure::AllocatorUnavailable,
@@ -370,7 +414,7 @@ pub fn allocate_contiguous_frames(page_count: usize) -> Result<PhysFrame> {
 
 /// フレームを解放
 pub fn deallocate_frame(frame: PhysFrame) -> Result<()> {
-    let mut guard = FRAME_ALLOCATOR.lock();
+    let mut guard = lock_allocator();
     let allocator = guard.as_mut().ok_or(Kernel::Memory(Memory::OutOfMemory))?;
     if allocator.deallocate_frame(frame) {
         performance::increment(CounterMetric::FrameFrees, 1);
@@ -384,15 +428,26 @@ pub fn deallocate_frame(frame: PhysFrame) -> Result<()> {
 
 /// 使用可能なメモリ情報を取得
 pub fn get_memory_info() -> Option<(u64, usize)> {
-    FRAME_ALLOCATOR
-        .lock()
+    lock_allocator()
         .as_ref()
         .map(|a| (a.usable_memory(), a.usable_frames()))
 }
 
+#[cfg(feature = "performance-instrumentation")]
+pub fn performance_snapshot() -> (u64, mnu_abi::performance::FrameFragmentationSnapshot) {
+    let guard = lock_allocator();
+    let Some(allocator) = guard.as_ref() else {
+        return (0, mnu_abi::performance::FrameFragmentationSnapshot::default());
+    };
+    (
+        allocator.usable_frames() as u64,
+        allocator.fragmentation_snapshot(),
+    )
+}
+
 /// 指定した物理アドレスがアロケータ管理対象の Usable フレームか判定
 pub fn is_usable_physical_address(phys_addr: u64) -> bool {
-    let guard = FRAME_ALLOCATOR.lock();
+    let guard = lock_allocator();
     let Some(alloc) = guard.as_ref() else {
         return false;
     };
@@ -432,7 +487,7 @@ pub fn is_allowed_mmio_range(start_phys: u64, size: u64) -> bool {
         None => return false,
     };
 
-    let guard = FRAME_ALLOCATOR.lock();
+    let guard = lock_allocator();
     let Some(alloc) = guard.as_ref() else {
         return false;
     };

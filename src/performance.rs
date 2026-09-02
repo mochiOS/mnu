@@ -86,6 +86,10 @@ static FRAME_ZERO_CYCLES: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "performance-instrumentation")]
 static FRAME_ALLOCATOR_FAILURES: [AtomicU64; FrameAllocationFailure::COUNT] =
     [const { AtomicU64::new(0) }; FrameAllocationFailure::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ALLOCATOR_LOCK_WAIT: AtomicHistogram = AtomicHistogram::new();
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_RECYCLED_PAGES: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "performance-instrumentation")]
 const ALLOCATION_THREAD_SLOTS: usize = 64;
@@ -248,6 +252,53 @@ pub fn record_frame_zero(start: u64, bytes: usize) {
     let _ = (start, bytes);
 }
 
+#[inline]
+pub fn frame_allocator_lock_start() -> u64 {
+    #[cfg(feature = "performance-instrumentation")]
+    return timestamp();
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    0
+}
+
+#[inline]
+pub fn record_frame_allocator_lock_wait(start: u64) {
+    #[cfg(feature = "performance-instrumentation")]
+    FRAME_ALLOCATOR_LOCK_WAIT.record(elapsed_cycles(start));
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = start;
+}
+
+#[inline]
+pub fn add_frame_recycled() {
+    #[cfg(feature = "performance-instrumentation")]
+    FRAME_RECYCLED_PAGES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn remove_frame_recycled() {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        let _ = FRAME_RECYCLED_PAGES.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |pages| Some(pages.saturating_sub(1)),
+        );
+    }
+}
+
+#[inline]
+pub fn clear_frame_recycled() {
+    #[cfg(feature = "performance-instrumentation")]
+    FRAME_RECYCLED_PAGES.store(0, Ordering::Relaxed);
+}
+
+#[cfg(feature = "performance-instrumentation")]
+pub fn frame_recycled_pages() -> u64 {
+    FRAME_RECYCLED_PAGES.load(Ordering::Relaxed)
+}
+
 pub fn initialize_clock() -> ClockInfo {
     let maximum_extended_leaf = cpuid(0x8000_0000, 0).eax;
     let rdtscp = maximum_extended_leaf >= 0x8000_0001 && cpuid(0x8000_0001, 0).edx & (1 << 27) != 0;
@@ -406,9 +457,7 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
     });
     let frames_in_use = gauges[GaugeMetric::FramesInUse as usize].current;
     let frames_quarantined = gauges[GaugeMetric::FramesQuarantined as usize].current;
-    let usable_frames = crate::mem::frame::get_memory_info()
-        .map(|(_, frames)| frames as u64)
-        .unwrap_or(0);
+    let (usable_frames, frame_fragmentation) = crate::mem::frame::performance_snapshot();
 
     KernelPerformanceSnapshot {
         version: PERFORMANCE_SNAPSHOT_VERSION,
@@ -456,6 +505,8 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
                 FRAME_ALLOCATOR_FAILURES[index].load(Ordering::Relaxed)
             }),
         },
+        frame_allocator_lock_wait: distribution_snapshot(FRAME_ALLOCATOR_LOCK_WAIT.snapshot()),
+        frame_fragmentation,
     }
 }
 

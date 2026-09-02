@@ -120,7 +120,7 @@ pub fn init_page_table() -> Result<()> {
 
     // 新しい L4 テーブルをメモリに割り当てる
     let new_l4_frame = {
-        let mut allocator_guard = frame::FRAME_ALLOCATOR.lock();
+        let mut allocator_guard = frame::lock_allocator();
         if let Some(alloc) = allocator_guard.as_mut() {
             alloc.allocate_frame()
         } else {
@@ -192,7 +192,7 @@ pub fn map_page(page: Page, frame: PhysFrame, flags: PageTableFlags) -> Result<(
         .as_mut()
         .ok_or(Kernel::Memory(Memory::NotMapped))?;
 
-    let mut allocator_lock = frame::FRAME_ALLOCATOR.lock();
+    let mut allocator_lock = frame::lock_allocator();
     let allocator = allocator_lock
         .as_mut()
         .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
@@ -700,7 +700,7 @@ pub fn map_and_copy_segment(
                 // 同じ物理フレームに新しいフラグで再マップ
                 let phys_frame = PhysFrame::containing_address(PhysAddr::new(phys_frame_addr));
                 {
-                    let mut alloc_lock = frame::FRAME_ALLOCATOR.lock();
+                    let mut alloc_lock = frame::lock_allocator();
                     let alloc_ref = alloc_lock
                         .as_mut()
                         .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
@@ -1273,7 +1273,7 @@ fn ensure_user_page_table_hierarchy(temp_kern_virt: u64, vaddr: u64, phys_off: u
     if l4[l4_index].is_unused() {
         crate::debug!("Creating new L3 table for L4[{}]", l4_index);
         let l3_frame = {
-            let mut alloc = frame::FRAME_ALLOCATOR.lock();
+            let mut alloc = frame::lock_allocator();
             alloc
                 .as_mut()
                 .ok_or(Kernel::Memory(Memory::OutOfMemory))?
@@ -1309,7 +1309,7 @@ fn ensure_user_page_table_hierarchy(temp_kern_virt: u64, vaddr: u64, phys_off: u
     if l3[l3_index].is_unused() {
         crate::debug!("Creating new L2 table for L3[{}]", l3_index);
         let l2_frame = {
-            let mut alloc = frame::FRAME_ALLOCATOR.lock();
+            let mut alloc = frame::lock_allocator();
             alloc
                 .as_mut()
                 .ok_or(Kernel::Memory(Memory::OutOfMemory))?
@@ -1345,7 +1345,7 @@ fn ensure_user_page_table_hierarchy(temp_kern_virt: u64, vaddr: u64, phys_off: u
     let l2_flags = l2[l2_index].flags();
     if l2[l2_index].is_unused() || l2_flags.contains(Flags::HUGE_PAGE) {
         let l1_frame = {
-            let mut alloc = frame::FRAME_ALLOCATOR.lock();
+            let mut alloc = frame::lock_allocator();
             alloc
                 .as_mut()
                 .ok_or(Kernel::Memory(Memory::OutOfMemory))?
@@ -1466,7 +1466,7 @@ pub fn map_and_copy_segment_to(
 
     // カーネルのページテーブルにユーザーL4テーブルをテンポラリマップ
     unsafe {
-        let mut frame_alloc = frame::FRAME_ALLOCATOR.lock();
+        let mut frame_alloc = frame::lock_allocator();
         if let Some(alloc_ref) = frame_alloc.as_mut() {
             match kernel_pt.map_to(
                 temp_page,
@@ -1529,7 +1529,7 @@ pub fn map_and_copy_segment_to(
         ensure_user_page_table_hierarchy(temp_kern_virt, page_addr, phys_off)?;
 
         let frame = {
-            let mut alloc = frame::FRAME_ALLOCATOR.lock();
+            let mut alloc = frame::lock_allocator();
             alloc
                 .as_mut()
                 .ok_or(Kernel::Memory(Memory::OutOfMemory))?
@@ -2042,7 +2042,7 @@ pub fn map_physical_range_to_user(
         let frame = PhysFrame::containing_address(PhysAddr::new(phys_start + i * 4096));
 
         let map_result = unsafe {
-            let mut alloc_lock = frame::FRAME_ALLOCATOR.lock();
+            let mut alloc_lock = frame::lock_allocator();
             let alloc_ref = alloc_lock
                 .as_mut()
                 .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
@@ -2055,7 +2055,7 @@ pub fn map_physical_range_to_user(
                 if let Ok((_, flush)) = pt.unmap(page) {
                     flush.ignore();
                 }
-                let mut alloc_lock2 = frame::FRAME_ALLOCATOR.lock();
+                let mut alloc_lock2 = frame::lock_allocator();
                 let alloc_ref2 = alloc_lock2
                     .as_mut()
                     .ok_or(Kernel::Memory(Memory::OutOfMemory))?;

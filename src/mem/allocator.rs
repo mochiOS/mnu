@@ -185,7 +185,7 @@ impl HardenedKernelHeap {
         let Some(mapper) = page_table.as_mut() else {
             return false;
         };
-        let mut frame_allocator = crate::mem::frame::FRAME_ALLOCATOR.lock();
+        let mut frame_allocator = crate::mem::frame::lock_allocator();
         let Some(frames) = frame_allocator.as_mut() else {
             return false;
         };

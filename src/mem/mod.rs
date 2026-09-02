@@ -76,7 +76,7 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
             return Err(crate::Kernel::Memory(crate::result::Memory::NotMapped));
         }
     };
-    let mut frame_alloc_lock = frame::FRAME_ALLOCATOR.lock();
+    let mut frame_alloc_lock = frame::lock_allocator();
     let frame_alloc = match frame_alloc_lock.as_mut() {
         Some(fa) => fa,
         None => {
