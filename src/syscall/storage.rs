@@ -23,7 +23,7 @@ pub fn control(request_ptr: u64, response_ptr: u64) -> u64 {
     {
         return EINVAL;
     }
-    let response = match crate::mdriver::storage_control(
+    let response = match crate::platform::device_control(
         request.operation,
         request.device_id,
         request.arguments,

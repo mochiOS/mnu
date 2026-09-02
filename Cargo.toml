@@ -47,13 +47,6 @@ bench = false
 required-features = ["domain-guest"]
 
 [[bin]]
-name = "domain-kernel"
-path = "src/system_domain_entry.rs"
-test = false
-bench = false
-required-features = ["system-domain"]
-
-[[bin]]
 name = "hardware-bootstrap"
 path = "src/hardware_bootstrap.rs"
 test = false
@@ -97,7 +90,6 @@ mnu-metrics = { path = "crates/metrics" }
 default = ["kernel-bin"]
 kernel-bin = []
 domain-guest = []
-system-domain = ["kernel-bin"]
 performance-instrumentation = []
 frame-allocation-failure-injection = ["performance-instrumentation"]
 kcfi = []

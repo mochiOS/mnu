@@ -52,9 +52,6 @@ pub mod kernel;
 /// メモリ管理、GDT、TSSを含む
 pub mod mem;
 #[cfg(not(test))]
-pub mod mdriver;
-
-#[cfg(not(test))]
 /// ELF周り
 pub mod elf;
 
@@ -99,6 +96,8 @@ pub mod hypervisor_guest;
 pub mod percpu;
 #[cfg(not(test))]
 pub mod performance;
+#[cfg(not(test))]
+pub mod platform;
 #[cfg(not(test))]
 /// Kernel cryptographic random generator.
 pub mod random;

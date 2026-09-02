@@ -278,7 +278,7 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
             format: 1 | mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_MEDIATED,
         }
     } else if let Some(info) = crate::hypervisor_guest::is_active()
-        .then(crate::mdriver::display_info)
+        .then(crate::platform::display_info)
         .transpose()
         .ok()
         .flatten()
@@ -360,7 +360,7 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
     if copy_from_user(pixels_ptr, &mut pixels).is_err() {
         return EFAULT;
     }
-    match crate::mdriver::present_display(x, y, width, height, &pixels) {
+    match crate::platform::present_display(x, y, width, height, &pixels) {
         Ok(()) => SUCCESS,
         Err(_) => EIO,
     }
