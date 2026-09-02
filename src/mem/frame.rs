@@ -249,8 +249,7 @@ impl MnuFrameAllocator {
     }
 
     fn record_allocation(&self, page_count: usize) {
-        performance::increment(CounterMetric::FrameAllocations, page_count as u64);
-        performance::gauge_add(GaugeMetric::FramesInUse, page_count as u64);
+        performance::record_frame_allocation(page_count);
     }
 
     #[cfg(feature = "performance-instrumentation")]

@@ -90,6 +90,18 @@ static FRAME_ALLOCATOR_FAILURES: [AtomicU64; FrameAllocationFailure::COUNT] =
 static FRAME_ALLOCATOR_LOCK_WAIT: AtomicHistogram = AtomicHistogram::new();
 #[cfg(feature = "performance-instrumentation")]
 static FRAME_RECYCLED_PAGES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ALLOCATED_PAGES_BY_CPU: [AtomicU64; mnu_abi::performance::PERFORMANCE_CPU_SLOTS] =
+    [const { AtomicU64::new(0) }; mnu_abi::performance::PERFORMANCE_CPU_SLOTS];
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ALLOCATED_PAGES_BY_SUBSYSTEM: [AtomicU64; AllocationSubsystem::COUNT] =
+    [const { AtomicU64::new(0) }; AllocationSubsystem::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ZERO_CALLS_BY_SUBSYSTEM: [AtomicU64; AllocationSubsystem::COUNT] =
+    [const { AtomicU64::new(0) }; AllocationSubsystem::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static FRAME_ZERO_CYCLES_BY_SUBSYSTEM: [AtomicU64; AllocationSubsystem::COUNT] =
+    [const { AtomicU64::new(0) }; AllocationSubsystem::COUNT];
 
 #[cfg(feature = "performance-instrumentation")]
 const ALLOCATION_THREAD_SLOTS: usize = 64;
@@ -231,6 +243,21 @@ pub fn record_frame_failure(reason: FrameAllocationFailure) {
 }
 
 #[inline]
+pub fn record_frame_allocation(page_count: usize) {
+    let pages = page_count as u64;
+    increment(CounterMetric::FrameAllocations, pages);
+    gauge_add(GaugeMetric::FramesInUse, pages);
+
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        FRAME_ALLOCATED_PAGES_BY_CPU[crate::percpu::current_cpu_id()]
+            .fetch_add(pages, Ordering::Relaxed);
+        FRAME_ALLOCATED_PAGES_BY_SUBSYSTEM[current_allocation_subsystem() as usize]
+            .fetch_add(pages, Ordering::Relaxed);
+    }
+}
+
+#[inline]
 pub fn frame_zero_start() -> u64 {
     #[cfg(feature = "performance-instrumentation")]
     return timestamp();
@@ -245,7 +272,11 @@ pub fn record_frame_zero(start: u64, bytes: usize) {
     {
         FRAME_ZERO_CALLS.fetch_add(1, Ordering::Relaxed);
         FRAME_ZERO_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-        FRAME_ZERO_CYCLES.fetch_add(elapsed_cycles(start), Ordering::Relaxed);
+        let cycles = elapsed_cycles(start);
+        FRAME_ZERO_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        let subsystem = current_allocation_subsystem() as usize;
+        FRAME_ZERO_CALLS_BY_SUBSYSTEM[subsystem].fetch_add(1, Ordering::Relaxed);
+        FRAME_ZERO_CYCLES_BY_SUBSYSTEM[subsystem].fetch_add(cycles, Ordering::Relaxed);
     }
 
     #[cfg(not(feature = "performance-instrumentation"))]
@@ -280,11 +311,9 @@ pub fn add_frame_recycled() {
 pub fn remove_frame_recycled() {
     #[cfg(feature = "performance-instrumentation")]
     {
-        let _ = FRAME_RECYCLED_PAGES.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |pages| Some(pages.saturating_sub(1)),
-        );
+        let _ = FRAME_RECYCLED_PAGES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pages| {
+            Some(pages.saturating_sub(1))
+        });
     }
 }
 
@@ -434,7 +463,7 @@ pub fn boot_milestone(milestone: BootMilestone) -> Option<u64> {
 #[cfg(feature = "performance-instrumentation")]
 pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
     use mnu_abi::performance::{
-        FrameAllocatorSnapshot, GaugeSnapshot, KernelPerformanceSnapshot,
+        FrameActivitySnapshot, FrameAllocatorSnapshot, GaugeSnapshot, KernelPerformanceSnapshot,
         PERFORMANCE_FLAG_INSTRUMENTED, PERFORMANCE_FLAG_INVARIANT_TSC, PERFORMANCE_FLAG_RDTSCP,
         PERFORMANCE_FLAG_WEAK_SNAPSHOT, PERFORMANCE_SNAPSHOT_VERSION,
     };
@@ -507,6 +536,20 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
         },
         frame_allocator_lock_wait: distribution_snapshot(FRAME_ALLOCATOR_LOCK_WAIT.snapshot()),
         frame_fragmentation,
+        frame_activity: FrameActivitySnapshot {
+            allocated_pages_by_cpu: core::array::from_fn(|index| {
+                FRAME_ALLOCATED_PAGES_BY_CPU[index].load(Ordering::Relaxed)
+            }),
+            allocated_pages_by_subsystem: core::array::from_fn(|index| {
+                FRAME_ALLOCATED_PAGES_BY_SUBSYSTEM[index].load(Ordering::Relaxed)
+            }),
+            zero_calls_by_subsystem: core::array::from_fn(|index| {
+                FRAME_ZERO_CALLS_BY_SUBSYSTEM[index].load(Ordering::Relaxed)
+            }),
+            zero_cycles_by_subsystem: core::array::from_fn(|index| {
+                FRAME_ZERO_CYCLES_BY_SUBSYSTEM[index].load(Ordering::Relaxed)
+            }),
+        },
     }
 }
 
