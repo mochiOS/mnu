@@ -134,22 +134,9 @@ fn ensure_syscall_shared_region_for_cpu(cpu_id: usize) {
         return;
     }
 
-    let state_frame = crate::mem::frame::allocate_zeroed_frame().unwrap_or_else(|_| {
-        panic!(
-            "failed to allocate syscall shared state page for cpu {}",
-            cpu_id
-        )
+    let [state_frame, stack_frame] = allocate_syscall_frames().unwrap_or_else(|_| {
+        panic!("failed to allocate syscall shared pages for cpu {}", cpu_id)
     });
-    let stack_frame = match crate::mem::frame::allocate_zeroed_frame() {
-        Ok(frame) => frame,
-        Err(_) => {
-            let _ = crate::mem::frame::deallocate_frame(state_frame);
-            panic!(
-                "failed to allocate syscall shared stack page for cpu {}",
-                cpu_id
-            );
-        }
-    };
     let state_phys = state_frame.start_address().as_u64();
     let stack_phys = stack_frame.start_address().as_u64();
 
@@ -163,6 +150,35 @@ fn ensure_syscall_shared_region_for_cpu(cpu_id: usize) {
     syscall_state
         .syscall_trampoline_rsp
         .store(syscall_stack_vaddr_for_cpu(cpu_id) + 4096, Ordering::SeqCst);
+}
+
+fn allocate_syscall_frames() -> crate::result::Result<[PhysFrame; 2]> {
+    let state_frame = crate::mem::frame::allocate_zeroed_frame()?;
+    match crate::mem::frame::allocate_zeroed_frame() {
+        Ok(stack_frame) => Ok([state_frame, stack_frame]),
+        Err(error) => {
+            crate::mem::frame::deallocate_frame(state_frame)?;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(feature = "frame-allocation-failure-injection")]
+pub(crate) fn verify_syscall_frame_allocation_rollback() -> crate::result::Result<()> {
+    use crate::performance::GaugeMetric;
+
+    let frames_before = crate::performance::gauge_snapshot(GaugeMetric::FramesInUse).current;
+    crate::mem::frame::inject_allocation_failure_after(1);
+    let result = allocate_syscall_frames();
+    let failure_was_injected = crate::mem::frame::injected_allocation_failure_was_consumed();
+    crate::mem::frame::disable_allocation_failure_injection();
+    let frames_after = crate::performance::gauge_snapshot(GaugeMetric::FramesInUse).current;
+
+    if result.is_ok() || !failure_was_injected || frames_before != frames_after {
+        return Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress));
+    }
+    crate::info!("frame allocation failure injection: rollback OK");
+    Ok(())
 }
 
 pub fn map_syscall_shared_region_in_table(table_phys: u64) -> crate::result::Result<()> {

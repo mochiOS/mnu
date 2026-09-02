@@ -70,6 +70,9 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     mem::init(boot_info)?;
     crate::performance::mark_boot(crate::performance::BootMilestone::EarlyMemoryReady);
 
+    #[cfg(feature = "frame-allocation-failure-injection")]
+    crate::percpu::verify_syscall_frame_allocation_rollback()?;
+
     fs::init();
     crate::performance::mark_boot(crate::performance::BootMilestone::FilesystemMounted);
     crate::config::init();

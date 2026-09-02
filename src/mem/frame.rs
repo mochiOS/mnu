@@ -14,6 +14,9 @@ use x86_64::{
 
 use crate::performance::{self, CounterMetric, GaugeMetric};
 
+#[cfg(feature = "frame-allocation-failure-injection")]
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 /// グローバルフレームアロケータ
 static FRAME_ALLOCATOR: Mutex<Option<MnuFrameAllocator>> = Mutex::new(None);
 
@@ -43,6 +46,51 @@ pub(crate) struct MnuFrameAllocator {
 
 const FRAME_QUARANTINE_CAP: usize = 32;
 const FRAME_FREE_COOKIE_CONST: u64 = 0x8f1d_3b79_2c4a_6e15;
+
+#[cfg(feature = "frame-allocation-failure-injection")]
+const FAILURE_INJECTION_DISABLED: usize = usize::MAX;
+#[cfg(feature = "frame-allocation-failure-injection")]
+static ALLOCATION_FAILURE_COUNTDOWN: AtomicUsize =
+    AtomicUsize::new(FAILURE_INJECTION_DISABLED);
+
+#[cfg(feature = "frame-allocation-failure-injection")]
+fn take_injected_allocation_failure() -> bool {
+    let mut remaining = ALLOCATION_FAILURE_COUNTDOWN.load(Ordering::Acquire);
+    loop {
+        if remaining == FAILURE_INJECTION_DISABLED {
+            return false;
+        }
+        let next = if remaining == 0 {
+            FAILURE_INJECTION_DISABLED
+        } else {
+            remaining - 1
+        };
+        match ALLOCATION_FAILURE_COUNTDOWN.compare_exchange_weak(
+            remaining,
+            next,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return remaining == 0,
+            Err(current) => remaining = current,
+        }
+    }
+}
+
+#[cfg(feature = "frame-allocation-failure-injection")]
+pub(crate) fn inject_allocation_failure_after(allowed_calls: usize) {
+    ALLOCATION_FAILURE_COUNTDOWN.store(allowed_calls, Ordering::Release);
+}
+
+#[cfg(feature = "frame-allocation-failure-injection")]
+pub(crate) fn disable_allocation_failure_injection() {
+    ALLOCATION_FAILURE_COUNTDOWN.store(FAILURE_INJECTION_DISABLED, Ordering::Release);
+}
+
+#[cfg(feature = "frame-allocation-failure-injection")]
+pub(crate) fn injected_allocation_failure_was_consumed() -> bool {
+    ALLOCATION_FAILURE_COUNTDOWN.load(Ordering::Acquire) == FAILURE_INJECTION_DISABLED
+}
 
 impl MnuFrameAllocator {
     /// 新しいフレームアロケータを作成
@@ -407,6 +455,11 @@ pub fn set_phys_offset(offset: u64) {
 
 /// フレームを割り当て
 pub fn allocate_frame() -> Result<PhysFrame> {
+    #[cfg(feature = "frame-allocation-failure-injection")]
+    if take_injected_allocation_failure() {
+        return Err(Kernel::Memory(Memory::OutOfMemory));
+    }
+
     let mut guard = lock_allocator();
     let Some(allocator) = guard.as_mut() else {
         performance::record_frame_failure(
@@ -429,6 +482,11 @@ pub fn allocate_zeroed_frame() -> Result<PhysFrame> {
 }
 
 pub fn allocate_contiguous_frames(page_count: usize) -> Result<PhysFrame> {
+    #[cfg(feature = "frame-allocation-failure-injection")]
+    if take_injected_allocation_failure() {
+        return Err(Kernel::Memory(Memory::OutOfMemory));
+    }
+
     let mut guard = lock_allocator();
     let Some(allocator) = guard.as_mut() else {
         performance::record_frame_failure(
