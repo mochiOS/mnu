@@ -9,21 +9,15 @@ use super::thread::{
     with_thread_mut, THREAD_QUEUE,
 };
 
-/// スケジューラ
-///
-/// スレッドのスケジューリングを管理
-pub struct Scheduler {
-    /// スケジューラが有効かどうか
+/// スレッドのスケジューリング状態
+struct Scheduler {
     enabled: bool,
-    /// タイムスライス（タイマー割り込み回数）
     time_slice: [u64; crate::percpu::MAX_CPUS],
-    /// 現在のタイムスライスカウンタ
     current_slice: [u64; crate::percpu::MAX_CPUS],
 }
 
 impl Scheduler {
-    /// 新しいスケジューラを作成
-    pub fn new() -> Self {
+    fn new() -> Self {
         let default_time_slice = crate::config::kernel().scheduler.default_time_slice_ticks();
         Self {
             enabled: false,
@@ -32,30 +26,19 @@ impl Scheduler {
         }
     }
 
-    /// スケジューラを有効化
-    pub fn enable(&mut self) {
+    fn enable(&mut self) {
         self.enabled = true;
     }
 
-    /// スケジューラを無効化
-    pub fn disable(&mut self) {
-        self.enabled = false;
-    }
-
-    /// スケジューラが有効かどうか
-    pub fn is_enabled(&self) -> bool {
+    fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    /// タイムスライスを設定
-    pub fn set_time_slice(&mut self, slice: u64) {
-        self.time_slice[crate::percpu::current_cpu_id()] = slice;
+    fn set_time_slice(&mut self, slice: u64) {
+        self.time_slice[crate::percpu::current_cpu_id()] = slice.max(1);
     }
 
-    /// タイマー割り込み時に呼ばれる
-    ///
-    /// タイムスライスをカウントし、期限が来たらスケジューリングを実行
-    pub fn tick(&mut self) -> bool {
+    fn tick(&mut self) -> bool {
         if !self.enabled {
             return false;
         }
@@ -64,14 +47,13 @@ impl Scheduler {
         self.current_slice[cpu] += 1;
         if self.current_slice[cpu] >= self.time_slice[cpu] {
             self.current_slice[cpu] = 0;
-            true // スケジューリングが必要
+            true
         } else {
             false
         }
     }
 
-    /// タイムスライスをリセット
-    pub fn reset_slice(&mut self) {
+    fn reset_slice(&mut self) {
         self.current_slice[crate::percpu::current_cpu_id()] = 0;
     }
 }
@@ -138,13 +120,6 @@ fn time_slice_ticks_for_thread(
     class_time_slice_ticks(class, is_foreground, interactive_score, process_priority)
 }
 
-impl Default for Scheduler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// グローバルスケジューラ
 static SCHEDULER: Once<SpinLock<Scheduler>> = Once::new();
 
 fn scheduler() -> &'static SpinLock<Scheduler> {
@@ -153,23 +128,7 @@ fn scheduler() -> &'static SpinLock<Scheduler> {
 
 /// スケジューラを初期化
 pub fn init_scheduler() {
-    let mut scheduler = scheduler().lock();
-    scheduler.enable();
-}
-
-/// スケジューラを有効化
-pub fn enable_scheduler() {
     scheduler().lock().enable();
-}
-
-/// タイムスライスを設定
-pub fn set_time_slice(slice: u64) {
-    scheduler().lock().set_time_slice(slice);
-}
-
-/// スケジューラを無効化
-pub fn disable_scheduler() {
-    scheduler().lock().disable();
 }
 
 /// スケジューラが有効かどうか
@@ -207,16 +166,6 @@ pub fn scheduler_tick() -> bool {
     should_schedule
 }
 
-/// 次に実行すべきスレッドを選択
-///
-/// ラウンドロビンスケジューリング：Ready状態のスレッドを順に選択
-///
-/// # Returns
-/// 次に実行すべきスレッドID。実行可能なスレッドがない場合はNone
-pub fn schedule() -> Option<ThreadId> {
-    schedule_with_slot().map(|(next_id, _)| next_id)
-}
-
 /// 次に実行すべきスレッドIDとスロットを取得
 #[inline]
 fn schedule_with_slot() -> Option<(ThreadId, usize)> {
@@ -244,15 +193,6 @@ fn select_next_thread() -> Option<(ThreadId, usize)> {
             .is_some_and(|thread| thread.state() == ThreadState::Running)
         {
             queue.set_state_at_slot(slot, ThreadState::Ready);
-        }
-    } else if let Some(current_id) = current {
-        if let Some(slot) = queue.slot_index(current_id) {
-            if queue
-                .get_slot(slot)
-                .is_some_and(|thread| thread.state() == ThreadState::Running)
-            {
-                queue.set_state_at_slot(slot, ThreadState::Ready);
-            }
         }
     }
 
@@ -312,7 +252,7 @@ fn select_next_thread() -> Option<(ThreadId, usize)> {
         );
     }
     let mut scheduler = scheduler().lock();
-    scheduler.set_time_slice(next_time_slice.max(1));
+    scheduler.set_time_slice(next_time_slice);
     scheduler.reset_slice();
 
     Some((next_id, next_slot))
@@ -640,7 +580,7 @@ pub fn start_scheduling() -> ! {
                         interactive_score,
                         cpu_burst_score,
                     );
-                    scheduler().lock().set_time_slice(first_slice.max(1));
+                    scheduler().lock().set_time_slice(first_slice);
                 }
                 let first_slot = {
                     let queue = THREAD_QUEUE.lock();

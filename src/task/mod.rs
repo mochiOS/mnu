@@ -23,10 +23,9 @@ pub use process::{
     MmioMapping, Process, ProcessTable, ResourceLimits,
 };
 pub use scheduler::{
-    block_current_thread, disable_scheduler, enable_scheduler, exit_current_task, init_scheduler,
-    is_scheduler_enabled, schedule, schedule_and_switch, scheduler_tick, set_time_slice,
-    sleep_thread, sleep_thread_unless_woken, start_scheduling, terminate_thread, wake_ipc_waiter,
-    wake_thread, yield_now, Scheduler,
+    block_current_thread, exit_current_task, init_scheduler, is_scheduler_enabled,
+    schedule_and_switch, scheduler_tick, sleep_thread, sleep_thread_unless_woken, start_scheduling,
+    terminate_thread, wake_ipc_waiter, wake_thread, yield_now,
 };
 pub use signal::{
     default_action, sigreturn_stub_addr, DefaultAction, SigAction, SignalState, SA_RESTORER,
