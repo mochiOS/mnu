@@ -358,7 +358,7 @@ pub fn brk(addr: u64) -> u64 {
         None => return ENOSYS,
     };
 
-    let result = crate::task::with_process_mut(pid, |process| {
+    let result = crate::task::with_process_mut(pid, move |process| {
         crate::debug!(
             "brk(pid={:?}, process='{}'): req={:#x}, heap_start={:#x}, heap_end={:#x}",
             pid,
@@ -989,8 +989,8 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
                 return Err(ENOMEM);
             }
         } else {
-            let (path, data) = match file_backing.as_ref() {
-                Some((path, data)) => (path.clone(), data.clone()),
+            let (path, data) = match file_backing {
+                Some(backing) => backing,
                 None => return Err(EINVAL),
             };
             let region = crate::task::MmapRegion::file_backed(
