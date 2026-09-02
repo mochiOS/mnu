@@ -9,7 +9,6 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const EM_X86_64: u16 = 0x3E;
@@ -1004,7 +1003,7 @@ fn exec_with_data(
 
         // MED-27修正: エントリポイントが0の場合はELFが無効として拒否する
         // 以前はentry=0のままプロセスを作成し、仮想アドレス0にジャンプしていた
-        let mut entry = match crate::elf::entry_point(data) {
+        let entry = match crate::elf::entry_point(data) {
             Some(e) if e != 0 => e,
             _ => {
                 crate::warn!("exec: ELF entry point is 0 or missing, rejecting");
@@ -1141,138 +1140,6 @@ fn exec_with_data(
             phdr_vaddr = load_base.saturating_add(eh.e_phoff);
         }
 
-        // The newlib crt0 initializes stdio with the required _impure_ptr argument.
-        // Calling __sinit directly here violates its ABI and duplicates that initialization.
-        let needs_sinit = false;
-        let mut sinit_addr: Option<u64> = None;
-        if needs_sinit {
-            if let Some(eh_sym) = crate::elf::parse_elf_header(data) {
-                let shoff = eh_sym.e_shoff as usize;
-                let shentsz = eh_sym.e_shentsize as usize;
-                let shnum = eh_sym.e_shnum as usize;
-                if shoff > 0 && shentsz > 0 && shnum > 0 && data.len() >= shoff + shentsz * shnum {
-                    let mut symtab_offset: usize = 0;
-                    let mut symtab_size: usize = 0;
-                    let mut symtab_entsize: usize = 0;
-                    let mut strtab_offset: usize = 0;
-                    let mut strtab_size: usize = 0;
-                    for si in 0..shnum {
-                        let sh_off = shoff + si * shentsz;
-                        if sh_off + shentsz > data.len() {
-                            break;
-                        }
-                        let sh_type = match data[sh_off + 4..sh_off + 8].try_into() {
-                            Ok(b) => u32::from_le_bytes(b),
-                            Err(_) => {
-                                crate::warn!("ELF section header truncated");
-                                return crate::syscall::types::EINVAL;
-                            }
-                        };
-                        let sh_offset = match data[sh_off + 24..sh_off + 32].try_into() {
-                            Ok(b) => u64::from_le_bytes(b) as usize,
-                            Err(_) => {
-                                crate::warn!("ELF section header truncated");
-                                return crate::syscall::types::EINVAL;
-                            }
-                        };
-                        let sh_size = match data[sh_off + 32..sh_off + 40].try_into() {
-                            Ok(b) => u64::from_le_bytes(b) as usize,
-                            Err(_) => {
-                                crate::warn!("ELF section header truncated");
-                                return crate::syscall::types::EINVAL;
-                            }
-                        };
-                        let sh_link = match data[sh_off + 40..sh_off + 44].try_into() {
-                            Ok(b) => u32::from_le_bytes(b),
-                            Err(_) => {
-                                crate::warn!("ELF section header truncated");
-                                return crate::syscall::types::EINVAL;
-                            }
-                        };
-                        let sh_entsize = match data[sh_off + 56..sh_off + 64].try_into() {
-                            Ok(b) => u64::from_le_bytes(b) as usize,
-                            Err(_) => {
-                                crate::warn!("ELF section header truncated");
-                                return crate::syscall::types::EINVAL;
-                            }
-                        };
-
-                        // SHT_SYMTAB == 2
-                        if sh_type == 2 {
-                            symtab_offset = sh_offset;
-                            symtab_size = sh_size;
-                            symtab_entsize = sh_entsize;
-                            // linked string table
-                            let link_idx = sh_link as usize;
-                            if link_idx < shnum {
-                                let link_sh_off = shoff + link_idx * shentsz;
-                                strtab_offset =
-                                    match data[link_sh_off + 24..link_sh_off + 32].try_into() {
-                                        Ok(b) => u64::from_le_bytes(b) as usize,
-                                        Err(_) => {
-                                            crate::warn!("ELF section header truncated");
-                                            return crate::syscall::types::EINVAL;
-                                        }
-                                    };
-                                strtab_size =
-                                    match data[link_sh_off + 32..link_sh_off + 40].try_into() {
-                                        Ok(b) => u64::from_le_bytes(b) as usize,
-                                        Err(_) => {
-                                            crate::warn!("ELF section header truncated");
-                                            return crate::syscall::types::EINVAL;
-                                        }
-                                    };
-                            }
-                            break;
-                        }
-                    }
-                    if symtab_offset > 0 && strtab_offset > 0 && symtab_entsize > 0 {
-                        let nsyms = symtab_size / symtab_entsize;
-                        for i_sym in 0..nsyms {
-                            let sym_off = symtab_offset + i_sym * symtab_entsize;
-                            if sym_off + symtab_entsize > data.len() {
-                                break;
-                            }
-                            let st_name = match data[sym_off..sym_off + 4].try_into() {
-                                Ok(b) => u32::from_le_bytes(b) as usize,
-                                Err(_) => {
-                                    crate::warn!("ELF symbol entry truncated");
-                                    break;
-                                }
-                            };
-                            let st_value = match data[sym_off + 8..sym_off + 16].try_into() {
-                                Ok(b) => u64::from_le_bytes(b),
-                                Err(_) => {
-                                    crate::warn!("ELF symbol entry truncated");
-                                    break;
-                                }
-                            };
-
-                            if st_name < strtab_size {
-                                let name_off = strtab_offset + st_name;
-                                if name_off < data.len() {
-                                    let mut end = name_off;
-                                    while end < data.len() && data[end] != 0 {
-                                        end += 1;
-                                    }
-                                    if end <= data.len() {
-                                        if let Ok(name_str) =
-                                            core::str::from_utf8(&data[name_off..end])
-                                        {
-                                            if name_str == "__sinit" {
-                                                sinit_addr = Some(st_value);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } // needs_sinit
-
         let base_name = exec_path.rsplit('/').next().unwrap_or(process_name);
         let argv0 = base_name.strip_suffix(".elf").unwrap_or(base_name);
         let mut all_args: Vec<&str> = Vec::new();
@@ -1387,56 +1254,6 @@ fn exec_with_data(
                 process_name
             );
             heap_pre_mapped = true;
-        }
-
-        // __sinitがあれば、スタブを作成して先に呼び出す
-        if let Some(sinit) = sinit_addr {
-            let stub_addr = match stack_end_vaddr.checked_add(4096) {
-                Some(v) => v,
-                None => return crate::syscall::types::EINVAL,
-            };
-            crate::info!(
-                "Found __sinit at {:#x}, mapping init stub at {:#x}",
-                sinit,
-                stub_addr
-            );
-            let mut stub_page = vec![0u8; 4096];
-            let mut cur = 0usize;
-            if cur + 24 > stub_page.len() {
-                crate::warn!("__sinit stub size overflow: {}", cur + 24);
-                return crate::syscall::types::EINVAL;
-            }
-            // movabs rax, <sinit>
-            stub_page[cur..cur + 2].copy_from_slice(&[0x48, 0xB8]);
-            cur += 2;
-            stub_page[cur..cur + 8].copy_from_slice(&sinit.to_le_bytes());
-            cur += 8;
-            // call rax
-            stub_page[cur..cur + 2].copy_from_slice(&[0xFF, 0xD0]);
-            cur += 2;
-            // movabs rax, <entry>
-            stub_page[cur..cur + 2].copy_from_slice(&[0x48, 0xB8]);
-            cur += 2;
-            stub_page[cur..cur + 8].copy_from_slice(&entry.to_le_bytes());
-            cur += 8;
-            // jmp rax
-            stub_page[cur..cur + 2].copy_from_slice(&[0xFF, 0xE0]);
-            cur += 2;
-
-            if let Err(e) = crate::mem::paging::map_and_copy_segment_to(
-                new_pt_phys,
-                stub_addr,
-                cur as u64,
-                4096,
-                &stub_page[0..cur],
-                false,
-                true,
-            ) {
-                crate::warn!("Failed to map __sinit stub at {:#x}: {:?}", stub_addr, e);
-            } else {
-                // jump to stub first
-                entry = stub_addr;
-            }
         }
 
         // プロセスを作成してページテーブルをセット
