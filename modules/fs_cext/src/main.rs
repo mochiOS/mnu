@@ -269,8 +269,8 @@ pub extern "C" fn _start() -> *const McxFsOps {
 }
 
 #[used]
-#[link_section = ".data.mochi.init"]
-static KEEP_MOCHI_MODULE_INIT: extern "C" fn() -> *const McxFsOps = _start;
+#[link_section = ".data.mnu.init"]
+static KEEP_MNU_MODULE_INIT: extern "C" fn() -> *const McxFsOps = _start;
 
 #[unsafe(no_mangle)]
 #[inline(never)]
