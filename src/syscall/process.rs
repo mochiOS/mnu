@@ -36,6 +36,7 @@ const MAX_FUTEX_WAITERS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const NO_TIMEOUT_WAKE_TICK: u64 = u64::MAX;
 static FUTEX_WAIT_QUEUE: SpinLock<[Option<FutexWaitEntry>; MAX_FUTEX_WAITERS]> =
     SpinLock::new([None; MAX_FUTEX_WAITERS]);
+static NEXT_FUTEX_DEADLINE: super::time::DeadlineHint = super::time::DeadlineHint::new();
 
 #[inline]
 fn aslr_mix64(mut x: u64) -> u64 {
@@ -138,6 +139,9 @@ fn register_futex_waiter(tid: ThreadId, uaddr: u64, wake_tick: u64) -> bool {
                 uaddr,
                 wake_tick,
             });
+            if wake_tick != NO_TIMEOUT_WAKE_TICK {
+                NEXT_FUTEX_DEADLINE.note(wake_tick);
+            }
             return true;
         }
     }
@@ -172,11 +176,38 @@ pub fn clear_futex_waiter(tid: ThreadId) {
 pub fn wake_due_futex_waiters(now_tick: u64) {
     #[cfg(feature = "performance-instrumentation")]
     let started = crate::performance::timestamp();
+    if !NEXT_FUTEX_DEADLINE.is_due(now_tick) {
+        #[cfg(feature = "performance-instrumentation")]
+        crate::performance::record_timer_queue_check(
+            crate::performance::TimerQueueKind::FutexTimeout,
+            started,
+            false,
+            0,
+        );
+        return;
+    }
+
+    let wake_count = wake_due_futex_waiters_slow(now_tick);
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = wake_count;
+    #[cfg(feature = "performance-instrumentation")]
+    crate::performance::record_timer_queue_check(
+        crate::performance::TimerQueueKind::FutexTimeout,
+        started,
+        true,
+        wake_count,
+    );
+}
+
+#[cold]
+#[inline(never)]
+fn wake_due_futex_waiters_slow(now_tick: u64) -> usize {
     let mut wake_list = [None; MAX_FUTEX_WAITERS];
     let mut wake_count = 0usize;
 
     {
         let mut queue = FUTEX_WAIT_QUEUE.lock();
+        let mut next_deadline = NO_TIMEOUT_WAKE_TICK;
         for slot in queue.iter_mut() {
             if let Some(entry) = *slot {
                 if entry.wake_tick != NO_TIMEOUT_WAKE_TICK && now_tick >= entry.wake_tick {
@@ -190,22 +221,19 @@ pub fn wake_due_futex_waiters(now_tick: u64) {
                             "futex wake list overflow; dropping excess wake event",
                         );
                     }
+                } else if entry.wake_tick != NO_TIMEOUT_WAKE_TICK {
+                    next_deadline = next_deadline.min(entry.wake_tick);
                 }
             }
         }
+        NEXT_FUTEX_DEADLINE.replace_after_scan(next_deadline);
     }
 
     for tid in wake_list.iter().take(wake_count).flatten() {
         crate::task::with_thread_mut(*tid, |thread| thread.set_futex_timed_out(true));
         crate::task::wake_thread(*tid);
     }
-    #[cfg(feature = "performance-instrumentation")]
-    crate::performance::record_timer_queue_check(
-        crate::performance::TimerQueueKind::FutexTimeout,
-        started,
-        true,
-        wake_count,
-    );
+    wake_count
 }
 
 /// Exitシステムコール

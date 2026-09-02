@@ -8,6 +8,28 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 static REALTIME_VALID: AtomicBool = AtomicBool::new(false);
 static REALTIME_BASE_SECONDS: AtomicU64 = AtomicU64::new(0);
 static REALTIME_BASE_TICKS: AtomicU64 = AtomicU64::new(0);
+const NO_DEADLINE: u64 = u64::MAX;
+
+pub(super) struct DeadlineHint(AtomicU64);
+
+impl DeadlineHint {
+    pub const fn new() -> Self {
+        Self(AtomicU64::new(NO_DEADLINE))
+    }
+
+    pub fn note(&self, deadline: u64) {
+        self.0.fetch_min(deadline, Ordering::Release);
+    }
+
+    pub fn is_due(&self, now: u64) -> bool {
+        now >= self.0.load(Ordering::Acquire)
+    }
+
+    /// Replaces the hint after scanning the queue while its lock is held.
+    pub fn replace_after_scan(&self, deadline: u64) {
+        self.0.store(deadline, Ordering::Release);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RealtimeError {
@@ -55,20 +77,26 @@ struct SleepEntry {
 const MAX_SLEEPERS: usize = crate::task::ThreadQueue::MAX_THREADS;
 static SLEEP_QUEUE: SpinLock<[Option<SleepEntry>; MAX_SLEEPERS]> =
     SpinLock::new([None; MAX_SLEEPERS]);
+static NEXT_SLEEP_DEADLINE: DeadlineHint = DeadlineHint::new();
+
+fn store_sleep_entry(slot: &mut Option<SleepEntry>, entry: SleepEntry) {
+    *slot = Some(entry);
+    NEXT_SLEEP_DEADLINE.note(entry.wake_tick);
+}
 
 fn register_sleep_entry(tid: ThreadId, wake_tick: u64) -> bool {
     let mut queue = SLEEP_QUEUE.lock();
 
     for slot in queue.iter_mut() {
         if slot.is_some_and(|entry| entry.tid == tid) {
-            *slot = Some(SleepEntry { tid, wake_tick });
+            store_sleep_entry(slot, SleepEntry { tid, wake_tick });
             return true;
         }
     }
 
     for slot in queue.iter_mut() {
         if slot.is_none() {
-            *slot = Some(SleepEntry { tid, wake_tick });
+            store_sleep_entry(slot, SleepEntry { tid, wake_tick });
             return true;
         }
     }
@@ -79,11 +107,38 @@ fn register_sleep_entry(tid: ThreadId, wake_tick: u64) -> bool {
 pub fn wake_due_sleepers(now_tick: u64) {
     #[cfg(feature = "performance-instrumentation")]
     let started = crate::performance::timestamp();
+    if !NEXT_SLEEP_DEADLINE.is_due(now_tick) {
+        #[cfg(feature = "performance-instrumentation")]
+        crate::performance::record_timer_queue_check(
+            crate::performance::TimerQueueKind::Sleep,
+            started,
+            false,
+            0,
+        );
+        return;
+    }
+
+    let wake_count = wake_due_sleepers_slow(now_tick);
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = wake_count;
+    #[cfg(feature = "performance-instrumentation")]
+    crate::performance::record_timer_queue_check(
+        crate::performance::TimerQueueKind::Sleep,
+        started,
+        true,
+        wake_count,
+    );
+}
+
+#[cold]
+#[inline(never)]
+fn wake_due_sleepers_slow(now_tick: u64) -> usize {
     let mut wake_list = [None; MAX_SLEEPERS];
     let mut wake_count = 0usize;
 
     {
         let mut queue = SLEEP_QUEUE.lock();
+        let mut next_deadline = NO_DEADLINE;
         for slot in queue.iter_mut() {
             if let Some(entry) = *slot {
                 if now_tick >= entry.wake_tick {
@@ -92,21 +147,18 @@ pub fn wake_due_sleepers(now_tick: u64) {
                         wake_count += 1;
                     }
                     *slot = None;
+                } else {
+                    next_deadline = next_deadline.min(entry.wake_tick);
                 }
             }
         }
+        NEXT_SLEEP_DEADLINE.replace_after_scan(next_deadline);
     }
 
     for tid in wake_list.iter().take(wake_count).flatten() {
         crate::task::wake_thread(*tid);
     }
-    #[cfg(feature = "performance-instrumentation")]
-    crate::performance::record_timer_queue_check(
-        crate::performance::TimerQueueKind::Sleep,
-        started,
-        true,
-        wake_count,
-    );
+    wake_count
 }
 
 /// GetTicksシステムコール
