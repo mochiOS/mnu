@@ -63,11 +63,153 @@ pub enum MemoryType {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryRegion {
     pub start: u64,
     pub len: u64,
     pub region_type: MemoryType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalRange {
+    pub start: u64,
+    pub len: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryMapTransformError {
+    InvalidMemoryRegion,
+    InvalidReservedRange,
+    OutputTooSmall,
+}
+
+fn append_memory_region(
+    output: &mut [MemoryRegion],
+    output_len: &mut usize,
+    region: MemoryRegion,
+) -> Result<(), MemoryMapTransformError> {
+    if region.len == 0 {
+        return Ok(());
+    }
+    if *output_len != 0 {
+        let previous = &mut output[*output_len - 1];
+        let previous_end = previous
+            .start
+            .checked_add(previous.len)
+            .ok_or(MemoryMapTransformError::InvalidMemoryRegion)?;
+        if previous_end == region.start && previous.region_type == region.region_type {
+            previous.len = previous
+                .len
+                .checked_add(region.len)
+                .ok_or(MemoryMapTransformError::InvalidMemoryRegion)?;
+            return Ok(());
+        }
+    }
+    let slot = output
+        .get_mut(*output_len)
+        .ok_or(MemoryMapTransformError::OutputTooSmall)?;
+    *slot = region;
+    *output_len += 1;
+    Ok(())
+}
+
+fn next_reserved_range(
+    cursor: u64,
+    region_end: u64,
+    reserved: &[PhysicalRange],
+) -> Option<(u64, u64)> {
+    let mut next: Option<(u64, u64)> = None;
+    for range in reserved {
+        let overlap_start = range.start.max(cursor);
+        let overlap_end = (range.start + range.len).min(region_end);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+        match next {
+            Some((best_start, _)) if best_start < overlap_start => {}
+            Some((best_start, best_end)) if best_start == overlap_start => {
+                next = Some((best_start, best_end.max(overlap_end)));
+            }
+            _ => next = Some((overlap_start, overlap_end)),
+        }
+    }
+    next
+}
+
+/// `BootloaderReclaimable`のうち、`reserved`と重ならないpageを`Usable`へ変換します。
+///
+/// 入力は変更せず、隣接する同種regionをまとめて`output`へ書き出します。
+/// kernel imageやinitfs、起動中のstackなど、引き続き参照する範囲は呼び出し側が
+/// page単位で`reserved`へ渡す必要があります。
+pub fn build_reclaimed_memory_map(
+    input: &[MemoryRegion],
+    reserved: &[PhysicalRange],
+    output: &mut [MemoryRegion],
+) -> Result<usize, MemoryMapTransformError> {
+    for range in reserved {
+        if range.len == 0
+            || range.start & 0xfff != 0
+            || range.len & 0xfff != 0
+            || range.start.checked_add(range.len).is_none()
+        {
+            return Err(MemoryMapTransformError::InvalidReservedRange);
+        }
+    }
+
+    let mut output_len = 0usize;
+    for region in input {
+        let region_end = region
+            .start
+            .checked_add(region.len)
+            .ok_or(MemoryMapTransformError::InvalidMemoryRegion)?;
+        if region.region_type != MemoryType::BootloaderReclaimable {
+            append_memory_region(output, &mut output_len, *region)?;
+            continue;
+        }
+        if region.start & 0xfff != 0 || region.len & 0xfff != 0 {
+            return Err(MemoryMapTransformError::InvalidMemoryRegion);
+        }
+
+        let mut cursor = region.start;
+        while cursor < region_end {
+            let Some((reserved_start, reserved_end)) =
+                next_reserved_range(cursor, region_end, reserved)
+            else {
+                append_memory_region(
+                    output,
+                    &mut output_len,
+                    MemoryRegion {
+                        start: cursor,
+                        len: region_end - cursor,
+                        region_type: MemoryType::Usable,
+                    },
+                )?;
+                break;
+            };
+            if cursor < reserved_start {
+                append_memory_region(
+                    output,
+                    &mut output_len,
+                    MemoryRegion {
+                        start: cursor,
+                        len: reserved_start - cursor,
+                        region_type: MemoryType::Usable,
+                    },
+                )?;
+            }
+            append_memory_region(
+                output,
+                &mut output_len,
+                MemoryRegion {
+                    start: reserved_start,
+                    len: reserved_end - reserved_start,
+                    region_type: MemoryType::Reserved,
+                },
+            )?;
+            cursor = reserved_end;
+        }
+    }
+    Ok(output_len)
 }
 
 #[repr(C)]
@@ -176,6 +318,20 @@ impl Default for BootInfo {
 mod tests {
     use super::*;
 
+    const EMPTY_REGION: MemoryRegion = MemoryRegion {
+        start: 0,
+        len: 0,
+        region_type: MemoryType::Reserved,
+    };
+
+    const fn region(start: u64, len: u64, region_type: MemoryType) -> MemoryRegion {
+        MemoryRegion {
+            start,
+            len,
+            region_type,
+        }
+    }
+
     #[test]
     fn empty_boot_info_is_valid() {
         assert_eq!(BootInfo::empty().validate(), Ok(()));
@@ -193,5 +349,69 @@ mod tests {
         let mut info = BootInfo::empty();
         info.struct_size -= 1;
         assert_eq!(info.validate(), Err(BootInfoError::InvalidStructSize));
+    }
+
+    #[test]
+    fn reclaims_unreserved_bootloader_pages() {
+        let input = [region(0x1000, 0x4000, MemoryType::BootloaderReclaimable)];
+        let mut output = [EMPTY_REGION; 1];
+
+        let len = build_reclaimed_memory_map(&input, &[], &mut output).unwrap();
+
+        assert_eq!(len, 1);
+        assert_eq!(output[0], region(0x1000, 0x4000, MemoryType::Usable));
+    }
+
+    #[test]
+    fn preserves_a_reserved_region_starting_at_zero() {
+        let input = [
+            region(0, 0x1000, MemoryType::Reserved),
+            region(0x1000, 0x1000, MemoryType::BootloaderReclaimable),
+        ];
+        let mut output = [EMPTY_REGION; 2];
+
+        let len = build_reclaimed_memory_map(&input, &[], &mut output).unwrap();
+
+        assert_eq!(len, 2);
+        assert_eq!(output[0], region(0, 0x1000, MemoryType::Reserved));
+        assert_eq!(output[1], region(0x1000, 0x1000, MemoryType::Usable));
+    }
+
+    #[test]
+    fn keeps_reserved_pages_out_of_reclaimed_memory() {
+        let input = [region(0x1000, 0x8000, MemoryType::BootloaderReclaimable)];
+        let reserved = [
+            PhysicalRange {
+                start: 0x3000,
+                len: 0x2000,
+            },
+            PhysicalRange {
+                start: 0x4000,
+                len: 0x3000,
+            },
+        ];
+        let mut output = [EMPTY_REGION; 3];
+
+        let len = build_reclaimed_memory_map(&input, &reserved, &mut output).unwrap();
+
+        assert_eq!(len, 3);
+        assert_eq!(output[0], region(0x1000, 0x2000, MemoryType::Usable));
+        assert_eq!(output[1], region(0x3000, 0x4000, MemoryType::Reserved));
+        assert_eq!(output[2], region(0x7000, 0x2000, MemoryType::Usable));
+    }
+
+    #[test]
+    fn reports_insufficient_output_capacity() {
+        let input = [region(0x1000, 0x3000, MemoryType::BootloaderReclaimable)];
+        let reserved = [PhysicalRange {
+            start: 0x2000,
+            len: 0x1000,
+        }];
+        let mut output = [EMPTY_REGION; 2];
+
+        assert_eq!(
+            build_reclaimed_memory_map(&input, &reserved, &mut output),
+            Err(MemoryMapTransformError::OutputTooSmall)
+        );
     }
 }
