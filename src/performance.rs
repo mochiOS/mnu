@@ -102,6 +102,18 @@ static FRAME_ZERO_CALLS_BY_SUBSYSTEM: [AtomicU64; AllocationSubsystem::COUNT] =
 #[cfg(feature = "performance-instrumentation")]
 static FRAME_ZERO_CYCLES_BY_SUBSYSTEM: [AtomicU64; AllocationSubsystem::COUNT] =
     [const { AtomicU64::new(0) }; AllocationSubsystem::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static TIMER_QUEUE_HOUSEKEEPING: [AtomicHistogram; TimerQueueKind::COUNT] =
+    [const { AtomicHistogram::new() }; TimerQueueKind::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static TIMER_QUEUE_FULL_SCANS: [AtomicU64; TimerQueueKind::COUNT] =
+    [const { AtomicU64::new(0) }; TimerQueueKind::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static TIMER_QUEUE_SKIPPED_CHECKS: [AtomicU64; TimerQueueKind::COUNT] =
+    [const { AtomicU64::new(0) }; TimerQueueKind::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static TIMER_QUEUE_WAKEUPS: [AtomicU64; TimerQueueKind::COUNT] =
+    [const { AtomicU64::new(0) }; TimerQueueKind::COUNT];
 
 #[cfg(feature = "performance-instrumentation")]
 const ALLOCATION_THREAD_SLOTS: usize = 64;
@@ -111,6 +123,18 @@ const ALLOCATION_CONTEXT_SLOTS: usize =
 #[cfg(feature = "performance-instrumentation")]
 static ALLOCATION_CONTEXTS: [AtomicU8; ALLOCATION_CONTEXT_SLOTS] =
     [const { AtomicU8::new(AllocationSubsystem::Other as u8) }; ALLOCATION_CONTEXT_SLOTS];
+
+#[cfg(feature = "performance-instrumentation")]
+#[derive(Clone, Copy)]
+pub(crate) enum TimerQueueKind {
+    Sleep,
+    FutexTimeout,
+}
+
+#[cfg(feature = "performance-instrumentation")]
+impl TimerQueueKind {
+    const COUNT: usize = Self::FutexTimeout as usize + 1;
+}
 
 pub struct AllocationScope {
     #[cfg(feature = "performance-instrumentation")]
@@ -390,6 +414,24 @@ pub fn record_latency(metric: LatencyMetric, start: u64) {
     let _ = (metric, start);
 }
 
+#[inline]
+#[cfg(feature = "performance-instrumentation")]
+pub(crate) fn record_timer_queue_check(
+    queue: TimerQueueKind,
+    start: u64,
+    full_scan: bool,
+    wakeups: usize,
+) {
+    let index = queue as usize;
+    TIMER_QUEUE_HOUSEKEEPING[index].record(elapsed_cycles(start));
+    if full_scan {
+        TIMER_QUEUE_FULL_SCANS[index].fetch_add(1, Ordering::Relaxed);
+    } else {
+        TIMER_QUEUE_SKIPPED_CHECKS[index].fetch_add(1, Ordering::Relaxed);
+    }
+    TIMER_QUEUE_WAKEUPS[index].fetch_add(wakeups as u64, Ordering::Relaxed);
+}
+
 #[cfg(feature = "performance-instrumentation")]
 pub fn latency_snapshot(metric: LatencyMetric) -> HistogramSnapshot {
     merged_latency(metric as usize)
@@ -464,8 +506,8 @@ pub fn boot_milestone(milestone: BootMilestone) -> Option<u64> {
 pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
     use mnu_abi::performance::{
         FrameActivitySnapshot, FrameAllocatorSnapshot, GaugeSnapshot, KernelPerformanceSnapshot,
-        PERFORMANCE_FLAG_INSTRUMENTED, PERFORMANCE_FLAG_INVARIANT_TSC, PERFORMANCE_FLAG_RDTSCP,
-        PERFORMANCE_FLAG_WEAK_SNAPSHOT, PERFORMANCE_SNAPSHOT_VERSION,
+        TimerActivitySnapshot, PERFORMANCE_FLAG_INSTRUMENTED, PERFORMANCE_FLAG_INVARIANT_TSC,
+        PERFORMANCE_FLAG_RDTSCP, PERFORMANCE_FLAG_WEAK_SNAPSHOT, PERFORMANCE_SNAPSHOT_VERSION,
     };
 
     let clock = clock_info();
@@ -550,6 +592,21 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
                 FRAME_ZERO_CYCLES_BY_SUBSYSTEM[index].load(Ordering::Relaxed)
             }),
         },
+        timer_activity: TimerActivitySnapshot {
+            sleep_queue: timer_queue_snapshot(TimerQueueKind::Sleep),
+            futex_timeout_queue: timer_queue_snapshot(TimerQueueKind::FutexTimeout),
+        },
+    }
+}
+
+#[cfg(feature = "performance-instrumentation")]
+fn timer_queue_snapshot(queue: TimerQueueKind) -> mnu_abi::performance::TimerQueueSnapshot {
+    let index = queue as usize;
+    mnu_abi::performance::TimerQueueSnapshot {
+        housekeeping: distribution_snapshot(TIMER_QUEUE_HOUSEKEEPING[index].snapshot()),
+        full_scans: TIMER_QUEUE_FULL_SCANS[index].load(Ordering::Relaxed),
+        skipped_checks: TIMER_QUEUE_SKIPPED_CHECKS[index].load(Ordering::Relaxed),
+        wakeups: TIMER_QUEUE_WAKEUPS[index].load(Ordering::Relaxed),
     }
 }
 

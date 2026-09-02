@@ -1,8 +1,9 @@
-pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 5;
+pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 6;
 pub const PERFORMANCE_SNAPSHOT_V1_SIZE: usize = 1_200;
 pub const PERFORMANCE_SNAPSHOT_V2_SIZE: usize = 1_896;
 pub const PERFORMANCE_SNAPSHOT_V3_SIZE: usize = 1_992;
 pub const PERFORMANCE_SNAPSHOT_V4_SIZE: usize = 2_064;
+pub const PERFORMANCE_SNAPSHOT_V5_SIZE: usize = 2_840;
 pub const PERFORMANCE_CPU_SLOTS: usize = 64;
 
 pub const PERFORMANCE_FLAG_INSTRUMENTED: u64 = 1 << 0;
@@ -224,6 +225,22 @@ impl Default for FrameActivitySnapshot {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimerQueueSnapshot {
+    pub housekeeping: DistributionSnapshot,
+    pub full_scans: u64,
+    pub skipped_checks: u64,
+    pub wakeups: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimerActivitySnapshot {
+    pub sleep_queue: TimerQueueSnapshot,
+    pub futex_timeout_queue: TimerQueueSnapshot,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KernelPerformanceSnapshot {
     pub version: u32,
@@ -253,6 +270,8 @@ pub struct KernelPerformanceSnapshot {
     pub frame_fragmentation: FrameFragmentationSnapshot,
     /// v5 extension. The v4 prefix above must remain byte-for-byte stable.
     pub frame_activity: FrameActivitySnapshot,
+    /// v6 extension. The v5 prefix above must remain byte-for-byte stable.
+    pub timer_activity: TimerActivitySnapshot,
 }
 
 impl Default for KernelPerformanceSnapshot {
@@ -280,6 +299,7 @@ impl Default for KernelPerformanceSnapshot {
             frame_allocator_lock_wait: DistributionSnapshot::default(),
             frame_fragmentation: FrameFragmentationSnapshot::default(),
             frame_activity: FrameActivitySnapshot::default(),
+            timer_activity: TimerActivitySnapshot::default(),
         }
     }
 }
@@ -308,7 +328,11 @@ mod tests {
             core::mem::offset_of!(KernelPerformanceSnapshot, frame_activity),
             PERFORMANCE_SNAPSHOT_V4_SIZE
         );
-        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 2_840);
+        assert_eq!(
+            core::mem::offset_of!(KernelPerformanceSnapshot, timer_activity),
+            PERFORMANCE_SNAPSHOT_V5_SIZE
+        );
+        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 2_984);
         assert_eq!(core::mem::align_of::<KernelPerformanceSnapshot>(), 8);
     }
 

@@ -77,6 +77,8 @@ fn register_sleep_entry(tid: ThreadId, wake_tick: u64) -> bool {
 }
 
 pub fn wake_due_sleepers(now_tick: u64) {
+    #[cfg(feature = "performance-instrumentation")]
+    let started = crate::performance::timestamp();
     let mut wake_list = [None; MAX_SLEEPERS];
     let mut wake_count = 0usize;
 
@@ -98,6 +100,13 @@ pub fn wake_due_sleepers(now_tick: u64) {
     for tid in wake_list.iter().take(wake_count).flatten() {
         crate::task::wake_thread(*tid);
     }
+    #[cfg(feature = "performance-instrumentation")]
+    crate::performance::record_timer_queue_check(
+        crate::performance::TimerQueueKind::Sleep,
+        started,
+        true,
+        wake_count,
+    );
 }
 
 /// GetTicksシステムコール

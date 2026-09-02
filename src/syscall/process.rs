@@ -170,6 +170,8 @@ pub fn clear_futex_waiter(tid: ThreadId) {
 
 /// FUTEX_WAIT のタイムアウトに達したスレッドを起床させる（タイマー割り込みから呼ばれる）
 pub fn wake_due_futex_waiters(now_tick: u64) {
+    #[cfg(feature = "performance-instrumentation")]
+    let started = crate::performance::timestamp();
     let mut wake_list = [None; MAX_FUTEX_WAITERS];
     let mut wake_count = 0usize;
 
@@ -197,6 +199,13 @@ pub fn wake_due_futex_waiters(now_tick: u64) {
         crate::task::with_thread_mut(*tid, |thread| thread.set_futex_timed_out(true));
         crate::task::wake_thread(*tid);
     }
+    #[cfg(feature = "performance-instrumentation")]
+    crate::performance::record_timer_queue_check(
+        crate::performance::TimerQueueKind::FutexTimeout,
+        started,
+        true,
+        wake_count,
+    );
 }
 
 /// Exitシステムコール
