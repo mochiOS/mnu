@@ -13,8 +13,8 @@ use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const EM_X86_64: u16 = 0x3E;
-const EXEC_MANIFEST_ENV_PREFIX: &str = "__MOCHI_EXEC_ENV=";
-const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MOCHI_EXEC_APP_ID=";
+const EXEC_MANIFEST_ENV_PREFIX: &str = "__MNU_EXEC_ENV=";
+const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MNU_EXEC_APP_ID=";
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct InitialUserStack {
