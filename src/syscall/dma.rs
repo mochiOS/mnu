@@ -25,6 +25,15 @@ fn page_align_up(addr: u64) -> Option<u64> {
     addr.checked_add(4095).map(|v| v & !4095)
 }
 
+fn release_dma_frames(phys_start: u64, page_count: usize) {
+    for page_index in 0..page_count {
+        let frame = PhysFrame::containing_address(PhysAddr::new(
+            phys_start + (page_index as u64) * 4096,
+        ));
+        let _ = crate::mem::frame::deallocate_frame(frame);
+    }
+}
+
 #[inline]
 fn aslr_mix64(mut x: u64) -> u64 {
     x ^= x >> 30;
@@ -83,31 +92,36 @@ pub fn alloc(length: u64, out_ptr: u64) -> u64 {
         Err(_) => return ENOMEM,
     };
     let phys_start = first_frame.start_address().as_u64();
+    let Some(phys_offset) = crate::mem::paging::physical_memory_offset() else {
+        release_dma_frames(phys_start, page_count);
+        return ENOMEM;
+    };
+    let Some(clear_address) = phys_start.checked_add(phys_offset) else {
+        release_dma_frames(phys_start, page_count);
+        return ENOMEM;
+    };
+    let zero_started = crate::performance::frame_zero_start();
+    unsafe {
+        core::ptr::write_bytes(clear_address as *mut u8, 0, size as usize);
+    }
+    crate::performance::record_frame_zero(zero_started, size as usize);
     let handle = NEXT_DMA_HANDLE.fetch_add(1, Ordering::Relaxed);
 
     let (virt_start, old_dma_end) = match allocate_dma_virtual_range(pid, size) {
         Ok(v) => v,
         Err(errno) => {
-            for idx in 0..page_count {
-                let frame =
-                    PhysFrame::containing_address(PhysAddr::new(phys_start + (idx as u64) * 4096));
-                let _ = crate::mem::frame::deallocate_frame(frame);
-            }
+            release_dma_frames(phys_start, page_count);
             return errno;
         }
     };
 
     let buffer = DmaBuffer::new(handle, virt_start, size, phys_start, page_count);
     let reserved =
-        crate::task::with_process_mut(pid, |process| process.add_dma_buffer(buffer.clone()))
+        crate::task::with_process_mut(pid, |process| process.add_dma_buffer(buffer))
             .unwrap_or(false);
     if !reserved {
         let _ = crate::task::with_process_mut(pid, |process| process.set_dma_end(old_dma_end));
-        for idx in 0..page_count {
-            let frame =
-                PhysFrame::containing_address(PhysAddr::new(phys_start + (idx as u64) * 4096));
-            let _ = crate::mem::frame::deallocate_frame(frame);
-        }
+        release_dma_frames(phys_start, page_count);
         return EINVAL;
     }
 
@@ -128,12 +142,7 @@ pub fn alloc(length: u64, out_ptr: u64) -> u64 {
                 let _ = process.remove_dma_buffer(handle);
                 process.set_dma_end(old_dma_end);
             });
-            for free_idx in 0..page_count {
-                let frame = PhysFrame::containing_address(PhysAddr::new(
-                    phys_start + (free_idx as u64) * 4096,
-                ));
-                let _ = crate::mem::frame::deallocate_frame(frame);
-            }
+            release_dma_frames(phys_start, page_count);
             return ENOMEM;
         }
         mapped_pages += 1;
@@ -181,10 +190,6 @@ pub fn free(handle: u64) -> u64 {
         buffer.virt_start(),
         buffer.len(),
     );
-    for idx in 0..buffer.page_count() {
-        let frame =
-            PhysFrame::containing_address(PhysAddr::new(buffer.phys_start() + (idx as u64) * 4096));
-        let _ = crate::mem::frame::deallocate_frame(frame);
-    }
+    release_dma_frames(buffer.phys_start(), buffer.page_count());
     SUCCESS
 }
