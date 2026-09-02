@@ -134,25 +134,24 @@ fn ensure_syscall_shared_region_for_cpu(cpu_id: usize) {
         return;
     }
 
-    let state_frame = crate::mem::frame::allocate_frame().unwrap_or_else(|_| {
+    let state_frame = crate::mem::frame::allocate_zeroed_frame().unwrap_or_else(|_| {
         panic!(
             "failed to allocate syscall shared state page for cpu {}",
             cpu_id
         )
     });
-    let stack_frame = crate::mem::frame::allocate_frame().unwrap_or_else(|_| {
-        panic!(
-            "failed to allocate syscall shared stack page for cpu {}",
-            cpu_id
-        )
-    });
+    let stack_frame = match crate::mem::frame::allocate_zeroed_frame() {
+        Ok(frame) => frame,
+        Err(_) => {
+            let _ = crate::mem::frame::deallocate_frame(state_frame);
+            panic!(
+                "failed to allocate syscall shared stack page for cpu {}",
+                cpu_id
+            );
+        }
+    };
     let state_phys = state_frame.start_address().as_u64();
     let stack_phys = stack_frame.start_address().as_u64();
-
-    crate::mem::frame::zero_frame(state_frame)
-        .unwrap_or_else(|_| panic!("failed to clear syscall shared state page"));
-    crate::mem::frame::zero_frame(stack_frame)
-        .unwrap_or_else(|_| panic!("failed to clear syscall shared stack page"));
 
     map_syscall_page(cpu_id, syscall_state_vaddr_for_cpu(cpu_id), state_phys);
     map_syscall_page(cpu_id, syscall_stack_vaddr_for_cpu(cpu_id), stack_phys);
