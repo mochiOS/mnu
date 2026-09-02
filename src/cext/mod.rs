@@ -533,11 +533,12 @@ fn load_bundle_directories() -> bool {
             );
             continue;
         }
-        let Some(addr) = load_elf_symbol(&meta.elf, "mochi_module_init") else {
+        let Some(mut module) = load_elf_symbol(&meta.elf, "mochi_module_init") else {
             crate::warn!("cext: mochi_module_init not found in {}", entry_path);
             continue;
         };
-        if (reg.register)(addr, meta.module_version) {
+        if (reg.register)(module.address, meta.module_version) {
+            module.keep_mapped();
             crate::info!(
                 "cext: loaded bundle {} v{} id={} provides={:?} requires={:?}",
                 meta.name,
@@ -646,6 +647,35 @@ struct LoadedElf {
     min_vaddr: u64,
     max_vaddr: u64,
     segments: Vec<LoadedSegment>,
+    release_on_drop: bool,
+}
+
+struct LoadedSymbol {
+    address: u64,
+    image: LoadedElf,
+}
+
+impl LoadedSymbol {
+    fn keep_mapped(&mut self) {
+        self.image.keep_mapped();
+    }
+}
+
+impl LoadedElf {
+    fn keep_mapped(&mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for LoadedElf {
+    fn drop(&mut self) {
+        if !self.release_on_drop {
+            return;
+        }
+        for segment in &self.segments {
+            let _ = crate::mem::paging::release_kernel_range(segment.vaddr, segment.memsz);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -679,14 +709,18 @@ fn alloc_module_base(span: u64) -> Option<u64> {
     }
 }
 
-fn load_elf_symbol(elf: &[u8], symbol_name: &str) -> Option<u64> {
+fn load_elf_symbol(elf: &[u8], symbol_name: &str) -> Option<LoadedSymbol> {
     let eh = crate::elf::parse_elf_header(elf)?;
     let loaded = load_elf_image(elf, &eh)?;
     let reloc_ok = apply_relocations(elf, &eh, loaded.base, loaded.min_vaddr, loaded.max_vaddr);
     let restore_ok = finalize_loaded_elf(&loaded);
     reloc_ok?;
     restore_ok?;
-    find_symbol_runtime_addr(elf, &eh, symbol_name, loaded.base, loaded.min_vaddr)
+    let address = find_symbol_runtime_addr(elf, &eh, symbol_name, loaded.base, loaded.min_vaddr)?;
+    Some(LoadedSymbol {
+        address,
+        image: loaded,
+    })
 }
 
 const PT_LOAD: u32 = 1;
@@ -723,7 +757,6 @@ fn load_elf_image(elf: &[u8], eh: &crate::elf::Elf64Ehdr) -> Option<LoadedElf> {
         return None;
     }
     let is_dyn = eh.e_type == ET_DYN;
-    let mut segments = Vec::new();
     let base = if is_dyn {
         alloc_module_base(max_vaddr.checked_sub(min_vaddr)?)?
     } else {
@@ -734,6 +767,14 @@ fn load_elf_image(elf: &[u8], eh: &crate::elf::Elf64Ehdr) -> Option<LoadedElf> {
     } else {
         0
     };
+    let mut loaded = LoadedElf {
+        base,
+        min_vaddr,
+        max_vaddr,
+        segments: Vec::new(),
+        release_on_drop: true,
+    };
+    loaded.segments.try_reserve_exact(phnum).ok()?;
 
     for i in 0..phnum {
         let off = phoff.checked_add(i.checked_mul(phentsize)?)?;
@@ -775,7 +816,7 @@ fn load_elf_image(elf: &[u8], eh: &crate::elf::Elf64Ehdr) -> Option<LoadedElf> {
             false,
         )
         .ok()?;
-        segments.push(LoadedSegment {
+        loaded.segments.push(LoadedSegment {
             vaddr: seg_vaddr,
             memsz: ph.p_memsz,
             writable,
@@ -783,12 +824,7 @@ fn load_elf_image(elf: &[u8], eh: &crate::elf::Elf64Ehdr) -> Option<LoadedElf> {
         });
     }
 
-    Some(LoadedElf {
-        base,
-        min_vaddr,
-        max_vaddr,
-        segments,
-    })
+    Some(loaded)
 }
 
 fn finalize_loaded_elf(loaded: &LoadedElf) -> Option<()> {
@@ -1003,12 +1039,13 @@ pub fn load_modules() {
             continue;
         }
 
-        let Some(addr) = load_elf_symbol(&meta.elf, "mochi_module_init") else {
+        let Some(mut module) = load_elf_symbol(&meta.elf, "mochi_module_init") else {
             crate::warn!("cext: mochi_module_init not found in {}.cext", meta.name);
             continue;
         };
 
-        if (reg.register)(addr, meta.module_version) {
+        if (reg.register)(module.address, meta.module_version) {
+            module.keep_mapped();
             crate::info!("cext: loaded {}.cext v{}", meta.name, meta.module_version);
         } else {
             crate::warn!("cext: {} init returned null ops", meta.name);

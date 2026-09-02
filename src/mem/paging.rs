@@ -233,6 +233,36 @@ pub fn unmap_kernel_page(page: Page<Size4KiB>) -> Result<Option<PhysFrame<Size4K
     }
 }
 
+pub(crate) fn release_kernel_range(addr: u64, len: u64) -> Result<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    let start = addr & !0xfff;
+    let end = addr
+        .checked_add(len)
+        .and_then(|end| end.checked_add(0xfff))
+        .map(|end| end & !0xfff)
+        .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
+    let mut first_error = None;
+    let mut page_addr = start;
+    while page_addr < end {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
+        match unmap_kernel_page(page) {
+            Ok(Some(frame)) => {
+                if let Err(error) = frame::deallocate_frame(frame) {
+                    first_error.get_or_insert(error);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+        page_addr += 4096;
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 /// 仮想アドレスを物理アドレスに変換
 ///
 /// ## Arguments
@@ -580,6 +610,9 @@ pub fn map_and_copy_segment(
     use crate::mem::frame;
     use crate::result::{Kernel, Memory};
 
+    if writable && executable {
+        return Err(Kernel::Memory(Memory::PermissionDenied));
+    }
     physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
     if memsz == 0 {
         return if filesz == 0 {
@@ -603,31 +636,38 @@ pub fn map_and_copy_segment(
         .map(|v| v & !0xfffu64)
         .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
 
+    let temporary_flags =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+    let mut mapped_end = start;
     let mut page_addr = start;
     while page_addr < end {
         let page = Page::containing_address(VirtAddr::new(page_addr));
         if translate_addr(VirtAddr::new(page_addr)).is_some() {
+            let _ = release_kernel_range(start, mapped_end - start);
             return Err(Kernel::Memory(Memory::AlreadyMapped));
         }
 
-        // Not mapped, allocate new frame.
-        let frame = frame::allocate_zeroed_frame()?;
-
-        // Setup flags: PRESENT + WRITABLE
-        // NOTE: カーネル (cext) 用のマッピングなので USER_ACCESSIBLE は付与しない。
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        let frame = match frame::allocate_zeroed_frame() {
+            Ok(frame) => frame,
+            Err(error) => {
+                let _ = release_kernel_range(start, mapped_end - start);
+                return Err(error);
+            }
+        };
 
         crate::debug!(
             "about to map page {:#x} -> frame {:#x}, flags={:?}, writable={}",
             page_addr,
             frame.start_address().as_u64(),
-            flags,
+            temporary_flags,
             writable
         );
-        if let Err(error) = map_page(page, frame, flags) {
+        if let Err(error) = map_page(page, frame, temporary_flags) {
             let _ = frame::deallocate_frame(frame);
+            let _ = release_kernel_range(start, mapped_end - start);
             return Err(error);
         }
+        mapped_end = page_addr + 4096;
         let phys_frame_addr = frame.start_address().as_u64();
         crate::debug!(
             "mapped page {:#x} -> phys {:#x}",
@@ -655,68 +695,13 @@ pub fn map_and_copy_segment(
                 core::ptr::copy_nonoverlapping(src.as_ptr().add(src_off), dst_virt, len);
             }
         }
-        if page_start < mem_end {
-            let zero_start = core::cmp::max(page_start, file_end);
-            let zero_end = core::cmp::min(page_end, mem_end);
-            if zero_start < zero_end {
-                let offset_into_page = zero_start - page_start;
-                let dst_virt_addr = page_start + offset_into_page;
-                let dst_virt = dst_virt_addr as *mut u8;
-                let len = (zero_end - zero_start) as usize;
-                crate::debug!(
-                    "zeroing {} bytes at virt {:#x} (phys {:#x})",
-                    len,
-                    dst_virt_addr,
-                    phys_frame_addr + offset_into_page
-                );
-                unsafe { core::ptr::write_bytes(dst_virt, 0, len) };
-            }
-        }
-        // セグメントのコピーと初期化が完了したら、最終的なフラグを設定
-        if let Some(ref mut pt) = PAGE_TABLE.lock().as_mut() {
-            // cext のセグメントはカーネル専用なので USER_ACCESSIBLE は付与しない。
-            let mut new_flags = PageTableFlags::PRESENT;
-
-            if writable {
-                new_flags |= PageTableFlags::WRITABLE;
-            }
-
-            // NX (No-Execute) bit: set it for non-executable pages
-            if !executable {
-                new_flags |= PageTableFlags::NO_EXECUTE;
-            }
-
-            crate::debug!(
-                "Updating page {:#x} flags: writable={}, executable={}, flags={:?}",
-                page_addr,
-                writable,
-                executable,
-                new_flags
-            );
-
-            unsafe {
-                // まず既存のマッピングを解除
-                if let Ok((_, flush)) = pt.unmap(page) {
-                    flush.flush();
-                }
-
-                // 同じ物理フレームに新しいフラグで再マップ
-                let phys_frame = PhysFrame::containing_address(PhysAddr::new(phys_frame_addr));
-                {
-                    let mut alloc_lock = frame::lock_allocator();
-                    let alloc_ref = alloc_lock
-                        .as_mut()
-                        .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
-                    match pt.map_to(page, phys_frame, new_flags, alloc_ref) {
-                        Ok(flush) => flush.flush(),
-                        Err(e) => crate::warn!("Failed to remap page {:#x}: {:?}", page_addr, e),
-                    }
-                }
-            }
-        }
         page_addr += 4096;
     }
 
+    if let Err(error) = protect_current_range(start, end - start, true, writable, executable) {
+        let _ = release_kernel_range(start, mapped_end - start);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -1721,6 +1706,8 @@ pub fn protect_range_in_table(
 
     let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
     let mut pt = unsafe { OffsetPageTable::new(l4, VirtAddr::new(phys_off)) };
+    let (current_cr3, _) = Cr3::read();
+    let current_table = current_cr3.start_address().as_u64();
 
     let mut page_addr = start;
     while page_addr < end {
@@ -1751,7 +1738,11 @@ pub fn protect_range_in_table(
             pt.update_flags(page, new_flags)
                 .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?
         };
-        flush.ignore();
+        if current_table == table_phys {
+            flush.flush();
+        } else {
+            flush.ignore();
+        }
 
         page_addr += 4096;
     }
