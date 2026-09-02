@@ -210,38 +210,38 @@ extern "C" fn kernel_alloc_dma(size: usize, align: usize, out_region: *mut McxDm
         Some(v) => v,
         None => return -5,
     };
-    let mut frames = Vec::with_capacity(pages);
-    for _ in 0..pages {
-        let Ok(frame) = crate::mem::frame::allocate_frame() else {
-            for frame in frames {
-                let _ = crate::mem::frame::deallocate_frame(frame);
-            }
-            return -12;
-        };
-        frames.push(frame);
-    }
-    for pair in frames.windows(2) {
-        if pair[1].start_address().as_u64() != pair[0].start_address().as_u64() + 4096 {
-            for frame in frames {
-                let _ = crate::mem::frame::deallocate_frame(frame);
-            }
+    let Ok(first_frame) = crate::mem::frame::allocate_contiguous_frames(pages) else {
+        return -12;
+    };
+    let phys = first_frame.start_address().as_u64();
+
+    let release = || {
+        for page in 0..pages {
+            let frame = x86_64::structures::paging::PhysFrame::containing_address(
+                x86_64::PhysAddr::new(phys + (page as u64) * 4096),
+            );
+            let _ = crate::mem::frame::deallocate_frame(frame);
+        }
+    };
+    for page in 0..pages {
+        let frame = x86_64::structures::paging::PhysFrame::containing_address(
+            x86_64::PhysAddr::new(phys + (page as u64) * 4096),
+        );
+        if crate::mem::frame::zero_frame(frame).is_err() {
+            release();
             return -5;
         }
     }
-    let phys = frames[0].start_address().as_u64();
-    if phys & ((align as u64) - 1) != 0 {
-        for frame in frames {
-            let _ = crate::mem::frame::deallocate_frame(frame);
-        }
+    let Some(virt) = phys.checked_add(phys_off) else {
+        release();
         return -5;
-    }
+    };
     unsafe {
         *out_region = McxDmaRegion {
-            virt: (phys + phys_off) as *mut u8,
+            virt: virt as *mut u8,
             phys,
             len: pages * 4096,
         };
-        core::ptr::write_bytes((*out_region).virt, 0, (*out_region).len);
     }
     0
 }
