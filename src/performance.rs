@@ -1,5 +1,5 @@
 use core::arch::{asm, x86_64::__cpuid_count};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 #[cfg(feature = "performance-instrumentation")]
 use core::sync::atomic::AtomicU64;
@@ -114,6 +114,28 @@ static TIMER_QUEUE_SKIPPED_CHECKS: [AtomicU64; TimerQueueKind::COUNT] =
 #[cfg(feature = "performance-instrumentation")]
 static TIMER_QUEUE_WAKEUPS: [AtomicU64; TimerQueueKind::COUNT] =
     [const { AtomicU64::new(0) }; TimerQueueKind::COUNT];
+#[cfg(feature = "performance-instrumentation")]
+static VFS_METADATA_QUERIES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static VFS_READ_RANGE_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static VFS_WRITE_RANGE_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static VFS_READ_REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static VFS_READ_TRANSFERRED_BYTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static VFS_WRITE_REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static VFS_WRITE_TRANSFERRED_BYTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static VFS_TEMPORARY_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static VFS_TEMPORARY_BUFFER_BYTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static VFS_PATH_CLONE_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static VFS_PATH_CLONE_BYTES: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "performance-instrumentation")]
 const ALLOCATION_THREAD_SLOTS: usize = 64;
@@ -415,6 +437,72 @@ pub fn record_latency(metric: LatencyMetric, start: u64) {
 }
 
 #[inline]
+pub fn record_vfs_metadata_query() {
+    #[cfg(feature = "performance-instrumentation")]
+    VFS_METADATA_QUERIES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_vfs_read_range() {
+    #[cfg(feature = "performance-instrumentation")]
+    VFS_READ_RANGE_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_vfs_write_range() {
+    #[cfg(feature = "performance-instrumentation")]
+    VFS_WRITE_RANGE_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_vfs_read(requested_bytes: u64, transferred_bytes: u64) {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        VFS_READ_REQUESTED_BYTES.fetch_add(requested_bytes, Ordering::Relaxed);
+        VFS_READ_TRANSFERRED_BYTES.fetch_add(transferred_bytes, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = (requested_bytes, transferred_bytes);
+}
+
+#[inline]
+pub fn record_vfs_write(requested_bytes: u64, transferred_bytes: u64) {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        VFS_WRITE_REQUESTED_BYTES.fetch_add(requested_bytes, Ordering::Relaxed);
+        VFS_WRITE_TRANSFERRED_BYTES.fetch_add(transferred_bytes, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = (requested_bytes, transferred_bytes);
+}
+
+#[inline]
+pub fn record_vfs_temporary_buffer(bytes: usize) {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        VFS_TEMPORARY_BUFFER_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        VFS_TEMPORARY_BUFFER_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = bytes;
+}
+
+#[inline]
+pub fn record_vfs_path_clone(bytes: usize) {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        VFS_PATH_CLONE_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        VFS_PATH_CLONE_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = bytes;
+}
+
+#[inline]
 #[cfg(feature = "performance-instrumentation")]
 pub(crate) fn record_timer_queue_check(
     queue: TimerQueueKind,
@@ -506,8 +594,9 @@ pub fn boot_milestone(milestone: BootMilestone) -> Option<u64> {
 pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
     use mnu_abi::performance::{
         FrameActivitySnapshot, FrameAllocatorSnapshot, GaugeSnapshot, KernelPerformanceSnapshot,
-        TimerActivitySnapshot, PERFORMANCE_FLAG_INSTRUMENTED, PERFORMANCE_FLAG_INVARIANT_TSC,
-        PERFORMANCE_FLAG_RDTSCP, PERFORMANCE_FLAG_WEAK_SNAPSHOT, PERFORMANCE_SNAPSHOT_VERSION,
+        PERFORMANCE_FLAG_INSTRUMENTED, PERFORMANCE_FLAG_INVARIANT_TSC, PERFORMANCE_FLAG_RDTSCP,
+        PERFORMANCE_FLAG_WEAK_SNAPSHOT, PERFORMANCE_SNAPSHOT_VERSION, TimerActivitySnapshot,
+        VfsActivitySnapshot,
     };
 
     let clock = clock_info();
@@ -595,6 +684,19 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
         timer_activity: TimerActivitySnapshot {
             sleep_queue: timer_queue_snapshot(TimerQueueKind::Sleep),
             futex_timeout_queue: timer_queue_snapshot(TimerQueueKind::FutexTimeout),
+        },
+        vfs_activity: VfsActivitySnapshot {
+            metadata_queries: VFS_METADATA_QUERIES.load(Ordering::Relaxed),
+            read_range_calls: VFS_READ_RANGE_CALLS.load(Ordering::Relaxed),
+            write_range_calls: VFS_WRITE_RANGE_CALLS.load(Ordering::Relaxed),
+            read_requested_bytes: VFS_READ_REQUESTED_BYTES.load(Ordering::Relaxed),
+            read_transferred_bytes: VFS_READ_TRANSFERRED_BYTES.load(Ordering::Relaxed),
+            write_requested_bytes: VFS_WRITE_REQUESTED_BYTES.load(Ordering::Relaxed),
+            write_transferred_bytes: VFS_WRITE_TRANSFERRED_BYTES.load(Ordering::Relaxed),
+            temporary_buffer_allocations: VFS_TEMPORARY_BUFFER_ALLOCATIONS.load(Ordering::Relaxed),
+            temporary_buffer_bytes: VFS_TEMPORARY_BUFFER_BYTES.load(Ordering::Relaxed),
+            path_clone_allocations: VFS_PATH_CLONE_ALLOCATIONS.load(Ordering::Relaxed),
+            path_clone_bytes: VFS_PATH_CLONE_BYTES.load(Ordering::Relaxed),
         },
     }
 }

@@ -4,13 +4,13 @@ use super::types::{
     EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS,
     ENOTDIR, EOVERFLOW, EPIPE, EROFS, ESRCH, SUCCESS,
 };
-use crate::capability::path::{
-    self, PathOwner, PathType, UserPath, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ,
-    PATH_WRITE,
-};
 use crate::capability::Capability;
+use crate::capability::path::{
+    self, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner,
+    PathType, UserPath,
+};
 use crate::task::fd_table::{
-    FdTable, FileHandle, FileHandleCap, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
+    FD_BASE, FdTable, FileHandle, FileHandleCap, O_CLOEXEC, PROCESS_MAX_FDS,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -22,6 +22,12 @@ const WRITE_IO_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_PIPES: usize = 64;
 const PIPE_BUFFER_CAP: usize = 64 * 1024;
 const UNIX_EXECUTE: u32 = 1 << 31;
+
+fn transferred_io_bytes(result: u64) -> u64 {
+    (result <= MAX_IO_BYTES as u64)
+        .then_some(result)
+        .unwrap_or(0)
+}
 
 struct PipeState {
     data: Vec<u8>,
@@ -623,6 +629,7 @@ fn mode_for_stat(mode: u16) -> u32 {
 
 #[inline]
 pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64, u32, u32)> {
+    crate::performance::record_vfs_metadata_query();
     crate::cext::fs::file_metadata(path)
         .or_else(|| crate::init::fs::file_metadata(path).map(|(mode, size)| (mode, size, 0, 0)))
 }
@@ -634,6 +641,7 @@ pub(crate) fn readdir_rootfs_first(path: &str) -> Option<Vec<String>> {
 
 #[inline]
 fn read_file_range_rootfs_first(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
+    crate::performance::record_vfs_read_range();
     crate::cext::fs::read_range(path, offset, buf)
         .or_else(|| crate::init::fs::read_range_rootfs(path, offset, buf))
         .or_else(|| crate::init::fs::read_range(path, offset, buf))
@@ -722,7 +730,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
         return EISDIR;
     }
 
-    let existed_before = metadata.is_some() || crate::cext::fs::file_metadata(path).is_some();
+    let existed_before = metadata.is_some();
     let required_rights = open_path_required_rights(flags, is_dir, existed_before);
     if let Err(errno) = ensure_fs_path_access(path, required_rights) {
         return errno;
@@ -744,7 +752,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
             is_dir = metadata
                 .map(|(mode, _, _, _)| mode_is_directory(mode))
                 .unwrap_or_else(|| crate::cext::fs::is_directory(path));
-            exists = metadata.is_some() || crate::cext::fs::file_metadata(path).is_some();
+            exists = metadata.is_some();
             if !exists {
                 return ENOENT;
             }
@@ -757,10 +765,6 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
         if rc != 0 {
             return errno_from_cext(rc);
         }
-    }
-
-    if !is_dir && metadata_rootfs_first(path).is_none() {
-        return ENOENT;
     }
 
     let cloexec = (flags & O_CLOEXEC) != 0;
@@ -1169,6 +1173,12 @@ pub fn getcwd(buf_ptr: u64, size: u64) -> u64 {
 
 /// Read: 開かれたファイルからデータを読み込む
 pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
+    let result = read_impl(fd, buf_ptr, len);
+    crate::performance::record_vfs_read(len, transferred_io_bytes(result));
+    result
+}
+
+fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if buf_ptr == 0 {
         return EFAULT;
     }
@@ -1206,7 +1216,8 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         Err(_) => MAX_IO_BYTES,
     };
     let mut written = 0usize;
-    let mut tmp = alloc::vec![0u8; READ_IO_CHUNK_BYTES];
+    let mut tmp = alloc::vec![0u8; core::cmp::min(READ_IO_CHUNK_BYTES, to_copy)];
+    crate::performance::record_vfs_temporary_buffer(tmp.len());
 
     while written < to_copy {
         let chunk_len = core::cmp::min(READ_IO_CHUNK_BYTES, to_copy - written);
@@ -1221,6 +1232,7 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
                 None => return EBADF,
             };
             if let Some(path) = path.as_deref() {
+                crate::performance::record_vfs_path_clone(path.len());
                 let read =
                     match read_file_range_rootfs_first(path, pos as u64, &mut tmp[..chunk_len]) {
                         Some(read) => read,
@@ -1293,6 +1305,7 @@ fn read_pipe(pipe_id: usize, open_flags: u64, buf_ptr: u64, len: u64) -> u64 {
             crate::task::yield_now();
             continue;
         };
+        crate::performance::record_vfs_temporary_buffer(chunk.len());
         if crate::syscall::copy_to_user(buf_ptr, &chunk).is_err() {
             return EFAULT;
         }
@@ -1307,6 +1320,12 @@ fn read_pipe(pipe_id: usize, open_flags: u64, buf_ptr: u64, len: u64) -> u64 {
 
 /// Write: 開かれたファイルへデータを書き込む
 pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
+    let result = write_impl(fd, buf_ptr, len);
+    crate::performance::record_vfs_write(len, transferred_io_bytes(result));
+    result
+}
+
+fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if buf_ptr == 0 {
         return EFAULT;
     }
@@ -1353,6 +1372,9 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         Some(Some(info)) => info,
         _ => return EBADF,
     };
+    if let Some(path) = fs_path.as_deref() {
+        crate::performance::record_vfs_path_clone(path.len());
+    }
     if (open_flags & O_APPEND) != 0 {
         let Some(path) = fs_path.as_deref() else {
             return EINVAL;
@@ -1365,7 +1387,8 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         };
     }
     let mut written = 0usize;
-    let mut tmp = alloc::vec![0u8; WRITE_IO_CHUNK_BYTES];
+    let mut tmp = alloc::vec![0u8; core::cmp::min(WRITE_IO_CHUNK_BYTES, len_usize)];
+    crate::performance::record_vfs_temporary_buffer(tmp.len());
 
     while written < len_usize {
         let chunk_len = core::cmp::min(WRITE_IO_CHUNK_BYTES, len_usize - written);
@@ -1376,6 +1399,7 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         }
 
         if let Some(path) = fs_path.as_deref() {
+            crate::performance::record_vfs_write_range();
             let write_offset = match start_pos.checked_add(written) {
                 Some(value) => value as u64,
                 None => return if written == 0 { EFBIG } else { written as u64 },
@@ -1443,6 +1467,7 @@ fn write_pipe(pipe_id: usize, buf_ptr: u64, len: u64) -> u64 {
         return EAGAIN;
     }
     let mut tmp = alloc::vec![0u8; len_usize];
+    crate::performance::record_vfs_temporary_buffer(tmp.len());
     if let Err(errno) = crate::syscall::copy_from_user(buf_ptr, &mut tmp) {
         return errno;
     }
@@ -2388,10 +2413,10 @@ pub fn file_sync(fd: u64) -> u64 {
 #[cfg(test)]
 mod unix_mode_tests {
     use super::{
-        access_mode_rights, capability_requirement_satisfied, open_path_required_rights,
-        path_is_in_identity_storage, path_is_in_shared_configuration,
-        sticky_directory_allows_delete, unix_mode_allows, O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE,
-        PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, UNIX_EXECUTE,
+        O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE,
+        UNIX_EXECUTE, access_mode_rights, capability_requirement_satisfied,
+        open_path_required_rights, path_is_in_identity_storage, path_is_in_shared_configuration,
+        sticky_directory_allows_delete, unix_mode_allows,
     };
     use crate::capability::Capability;
 

@@ -1,9 +1,10 @@
-pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 6;
+pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 7;
 pub const PERFORMANCE_SNAPSHOT_V1_SIZE: usize = 1_200;
 pub const PERFORMANCE_SNAPSHOT_V2_SIZE: usize = 1_896;
 pub const PERFORMANCE_SNAPSHOT_V3_SIZE: usize = 1_992;
 pub const PERFORMANCE_SNAPSHOT_V4_SIZE: usize = 2_064;
 pub const PERFORMANCE_SNAPSHOT_V5_SIZE: usize = 2_840;
+pub const PERFORMANCE_SNAPSHOT_V6_SIZE: usize = 2_984;
 pub const PERFORMANCE_CPU_SLOTS: usize = 64;
 
 pub const PERFORMANCE_FLAG_INSTRUMENTED: u64 = 1 << 0;
@@ -241,6 +242,58 @@ pub struct TimerActivitySnapshot {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VfsActivitySnapshot {
+    pub metadata_queries: u64,
+    pub read_range_calls: u64,
+    pub write_range_calls: u64,
+    pub read_requested_bytes: u64,
+    pub read_transferred_bytes: u64,
+    pub write_requested_bytes: u64,
+    pub write_transferred_bytes: u64,
+    pub temporary_buffer_allocations: u64,
+    pub temporary_buffer_bytes: u64,
+    pub path_clone_allocations: u64,
+    pub path_clone_bytes: u64,
+}
+
+impl VfsActivitySnapshot {
+    pub fn saturating_sub(self, earlier: Self) -> Self {
+        Self {
+            metadata_queries: self
+                .metadata_queries
+                .saturating_sub(earlier.metadata_queries),
+            read_range_calls: self.read_range_calls.saturating_sub(earlier.read_range_calls),
+            write_range_calls: self
+                .write_range_calls
+                .saturating_sub(earlier.write_range_calls),
+            read_requested_bytes: self
+                .read_requested_bytes
+                .saturating_sub(earlier.read_requested_bytes),
+            read_transferred_bytes: self
+                .read_transferred_bytes
+                .saturating_sub(earlier.read_transferred_bytes),
+            write_requested_bytes: self
+                .write_requested_bytes
+                .saturating_sub(earlier.write_requested_bytes),
+            write_transferred_bytes: self
+                .write_transferred_bytes
+                .saturating_sub(earlier.write_transferred_bytes),
+            temporary_buffer_allocations: self
+                .temporary_buffer_allocations
+                .saturating_sub(earlier.temporary_buffer_allocations),
+            temporary_buffer_bytes: self
+                .temporary_buffer_bytes
+                .saturating_sub(earlier.temporary_buffer_bytes),
+            path_clone_allocations: self
+                .path_clone_allocations
+                .saturating_sub(earlier.path_clone_allocations),
+            path_clone_bytes: self.path_clone_bytes.saturating_sub(earlier.path_clone_bytes),
+        }
+    }
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KernelPerformanceSnapshot {
     pub version: u32,
@@ -272,6 +325,8 @@ pub struct KernelPerformanceSnapshot {
     pub frame_activity: FrameActivitySnapshot,
     /// v6 extension. The v5 prefix above must remain byte-for-byte stable.
     pub timer_activity: TimerActivitySnapshot,
+    /// v7 extension. The v6 prefix above must remain byte-for-byte stable.
+    pub vfs_activity: VfsActivitySnapshot,
 }
 
 impl Default for KernelPerformanceSnapshot {
@@ -300,6 +355,7 @@ impl Default for KernelPerformanceSnapshot {
             frame_fragmentation: FrameFragmentationSnapshot::default(),
             frame_activity: FrameActivitySnapshot::default(),
             timer_activity: TimerActivitySnapshot::default(),
+            vfs_activity: VfsActivitySnapshot::default(),
         }
     }
 }
@@ -332,7 +388,11 @@ mod tests {
             core::mem::offset_of!(KernelPerformanceSnapshot, timer_activity),
             PERFORMANCE_SNAPSHOT_V5_SIZE
         );
-        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 2_984);
+        assert_eq!(
+            core::mem::offset_of!(KernelPerformanceSnapshot, vfs_activity),
+            PERFORMANCE_SNAPSHOT_V6_SIZE
+        );
+        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 3_072);
         assert_eq!(core::mem::align_of::<KernelPerformanceSnapshot>(), 8);
     }
 
@@ -354,5 +414,23 @@ mod tests {
             HeapAllocationSizeClass::for_size(262_145),
             HeapAllocationSizeClass::Larger
         );
+    }
+
+    #[test]
+    fn vfs_activity_delta_does_not_underflow() {
+        let earlier = VfsActivitySnapshot {
+            metadata_queries: 7,
+            temporary_buffer_bytes: 4_096,
+            ..VfsActivitySnapshot::default()
+        };
+        let current = VfsActivitySnapshot {
+            metadata_queries: 10,
+            temporary_buffer_bytes: 2_048,
+            ..VfsActivitySnapshot::default()
+        };
+
+        let delta = current.saturating_sub(earlier);
+        assert_eq!(delta.metadata_queries, 3);
+        assert_eq!(delta.temporary_buffer_bytes, 0);
     }
 }
