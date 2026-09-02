@@ -178,11 +178,11 @@ fn ensure_fs_path_access_for_process(
     needed_rights: u32,
     pid_raw: u64,
 ) -> Result<(), u64> {
-    let application_storage = application_storage_path_allows(path, pid_raw);
-    let settings_storage = settings_storage_path_allows(path, needed_rights, pid_raw);
+    let identity_storage = identity_storage_path_allows(path, pid_raw);
+    let shared_configuration = shared_configuration_path_allows(path, needed_rights, pid_raw);
     ensure_fs_capability_access_for_process(path, needed_rights, pid_raw)?;
     ensure_unix_traversal_for_process(path, pid_raw)?;
-    if application_storage || settings_storage {
+    if identity_storage || shared_configuration {
         return Ok(());
     }
     if (needed_rights & (PATH_CREATE | PATH_DELETE)) != 0 {
@@ -210,10 +210,10 @@ fn ensure_fs_capability_access_for_process(
     needed_rights: u32,
     pid_raw: u64,
 ) -> Result<(), u64> {
-    if application_storage_path_allows(path, pid_raw) {
+    if identity_storage_path_allows(path, pid_raw) {
         return Ok(());
     }
-    if settings_storage_path_allows(path, needed_rights, pid_raw) {
+    if shared_configuration_path_allows(path, needed_rights, pid_raw) {
         return Ok(());
     }
     if let Some(entry) = path::lookup_path(path) {
@@ -230,33 +230,44 @@ fn ensure_fs_capability_access_for_process(
     Ok(())
 }
 
-fn application_storage_path_allows(path: &str, pid_raw: u64) -> bool {
+fn identity_storage_path_allows(path: &str, pid_raw: u64) -> bool {
     if !path.starts_with('/') {
         return false;
     }
-    let normalized = normalize_path(path);
-    let Some(app_id) =
-        crate::task::with_process(crate::task::ids::ProcessId::from_u64(pid_raw), |process| {
-            process.app_id().map(ToString::to_string)
-        })
-        .flatten()
-    else {
+    let Some(storage_root) = crate::config::kernel().policy_paths.identity_storage_root() else {
         return false;
     };
-    path_is_in_application_storage(&normalized, &app_id)
+    let normalized = normalize_path(path);
+    crate::task::with_process(crate::task::ids::ProcessId::from_u64(pid_raw), |process| {
+        process.security_identity().is_some_and(|identity| {
+            path_is_in_identity_storage(&normalized, storage_root, identity)
+        })
+    })
+    .unwrap_or(false)
 }
 
-fn path_is_in_application_storage(normalized: &str, app_id: &str) -> bool {
-    let root = alloc::format!("/libraries/applications/{app_id}");
-    normalized == root
-        || normalized
-            .strip_prefix(&root)
+fn path_is_in_identity_storage(normalized: &str, storage_root: &str, identity: &str) -> bool {
+    if identity.is_empty() || identity.as_bytes().contains(&b'/') {
+        return false;
+    }
+    let Some(relative) = path_relative_to(normalized, storage_root) else {
+        return false;
+    };
+    relative == identity
+        || relative
+            .strip_prefix(identity)
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-fn settings_storage_path_allows(path: &str, needed_rights: u32, pid_raw: u64) -> bool {
+fn shared_configuration_path_allows(path: &str, needed_rights: u32, pid_raw: u64) -> bool {
+    let Some(storage_root) = crate::config::kernel()
+        .policy_paths
+        .shared_configuration_root()
+    else {
+        return false;
+    };
     let normalized = normalize_path(path);
-    if !path_is_in_settings_storage(&normalized) {
+    if !path_is_in_shared_configuration(&normalized, storage_root) {
         return false;
     }
     let writes = (needed_rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) != 0;
@@ -265,11 +276,15 @@ fn settings_storage_path_allows(path: &str, needed_rights: u32, pid_raw: u64) ->
         && (!reads || process_has_cap(pid_raw, Capability::SettingsRead))
 }
 
-fn path_is_in_settings_storage(normalized: &str) -> bool {
-    normalized == "/var/config"
-        || normalized
-            .strip_prefix("/var/config")
-            .is_some_and(|suffix| suffix.starts_with('/'))
+fn path_is_in_shared_configuration(normalized: &str, storage_root: &str) -> bool {
+    normalized == storage_root || path_relative_to(normalized, storage_root).is_some()
+}
+
+fn path_relative_to<'a>(normalized: &'a str, root: &str) -> Option<&'a str> {
+    if root == "/" {
+        return normalized.strip_prefix('/');
+    }
+    normalized.strip_prefix(root)?.strip_prefix('/')
 }
 
 fn current_effective_ids() -> Option<(u32, u32)> {
@@ -2374,8 +2389,9 @@ pub fn file_sync(fd: u64) -> u64 {
 mod unix_mode_tests {
     use super::{
         access_mode_rights, capability_requirement_satisfied, open_path_required_rights,
-        path_is_in_settings_storage, sticky_directory_allows_delete, unix_mode_allows, O_CREAT,
-        O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, UNIX_EXECUTE,
+        path_is_in_identity_storage, path_is_in_shared_configuration,
+        sticky_directory_allows_delete, unix_mode_allows, O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE,
+        PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, UNIX_EXECUTE,
     };
     use crate::capability::Capability;
 
@@ -2454,33 +2470,52 @@ mod unix_mode_tests {
     }
 
     #[test]
-    fn application_storage_is_scoped_to_exact_bundle_id() {
-        assert!(path_is_in_application_storage(
-            "/libraries/applications/org.example.shell",
-            "org.example.shell"
+    fn identity_storage_is_scoped_to_exact_security_identity() {
+        assert!(path_is_in_identity_storage(
+            "/policy/identity-data/process.example.shell",
+            "/policy/identity-data",
+            "process.example.shell"
         ));
-        assert!(path_is_in_application_storage(
-            "/libraries/applications/org.example.shell/preferences.conf",
-            "org.example.shell"
+        assert!(path_is_in_identity_storage(
+            "/policy/identity-data/process.example.shell/preferences.conf",
+            "/policy/identity-data",
+            "process.example.shell"
         ));
-        assert!(!path_is_in_application_storage(
-            "/libraries/applications/org.example.files/settings",
-            "org.example.shell"
+        assert!(!path_is_in_identity_storage(
+            "/policy/identity-data/process.example.files/settings",
+            "/policy/identity-data",
+            "process.example.shell"
         ));
-        assert!(!path_is_in_application_storage(
-            "/libraries/applications/org.example.shell-extra/settings",
-            "org.example.shell"
+        assert!(!path_is_in_identity_storage(
+            "/policy/identity-data/process.example.shell-extra/settings",
+            "/policy/identity-data",
+            "process.example.shell"
+        ));
+        assert!(!path_is_in_identity_storage(
+            "/policy/identity-data/process.example.shell/settings",
+            "/somewhere/else",
+            "process.example.shell"
         ));
     }
 
     #[test]
-    fn settings_storage_is_scoped_to_var_config() {
-        assert!(path_is_in_settings_storage("/var/config"));
-        assert!(path_is_in_settings_storage(
-            "/var/config/appearance/settings.conf"
+    fn shared_configuration_is_scoped_to_configured_root() {
+        assert!(path_is_in_shared_configuration(
+            "/policy/configuration",
+            "/policy/configuration"
         ));
-        assert!(!path_is_in_settings_storage("/var/configuration"));
-        assert!(!path_is_in_settings_storage("/system/config"));
+        assert!(path_is_in_shared_configuration(
+            "/policy/configuration/appearance.conf",
+            "/policy/configuration"
+        ));
+        assert!(!path_is_in_shared_configuration(
+            "/policy/configuration-other",
+            "/policy/configuration"
+        ));
+        assert!(!path_is_in_shared_configuration(
+            "/system/configuration",
+            "/policy/configuration"
+        ));
     }
 
     #[test]

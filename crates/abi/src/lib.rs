@@ -3,6 +3,9 @@
 /// ブートローダーからmnuへ渡す起動情報のABIです。
 pub mod boot;
 
+/// プロセス作成時に渡すメタデータのABIです。
+pub mod exec;
+
 /// ハイパーバイザーのDomainとして起動するときに使うABIです。
 pub mod hypervisor;
 

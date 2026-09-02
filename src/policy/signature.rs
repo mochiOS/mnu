@@ -4,8 +4,6 @@ use core::str;
 
 use spin::Mutex;
 
-const EXECUTION_ALLOWLIST_PATH: &str = "/libraries/system/execution.allowlist";
-
 #[derive(Clone)]
 struct SignatureRecord {
     path: String,
@@ -74,14 +72,18 @@ fn parse_db(bytes: &[u8]) -> Option<SignatureDatabase> {
 }
 
 fn load_db_from_rootfs() -> bool {
-    let Some(bytes) = crate::init::fs::read_rootfs(EXECUTION_ALLOWLIST_PATH)
-        .or_else(|| crate::cext::fs::read_all(EXECUTION_ALLOWLIST_PATH))
+    let Some(allowlist_path) = crate::config::kernel().policy_paths.execution_allowlist() else {
+        crate::warn!("execution allowlist path is not configured");
+        return false;
+    };
+    let Some(bytes) = crate::init::fs::read_rootfs(allowlist_path)
+        .or_else(|| crate::cext::fs::read_all(allowlist_path))
     else {
-        crate::warn!("execution allowlist: missing {}", EXECUTION_ALLOWLIST_PATH);
+        crate::warn!("execution allowlist: missing {}", allowlist_path);
         return false;
     };
     let Some(db) = parse_db(&bytes) else {
-        crate::warn!("execution allowlist: invalid {}", EXECUTION_ALLOWLIST_PATH);
+        crate::warn!("execution allowlist: invalid {}", allowlist_path);
         return false;
     };
     *SIGNATURE_DB.lock() = Some(db);

@@ -95,7 +95,6 @@ fn kernel_main() -> ! {
         }
         caps.insert(*cap);
     }
-    caps.insert(crate::capability::Capability::UsbAccess);
     let mut kernel_authorities = crate::capability::KernelAuthoritySet::empty();
     kernel_authorities.insert(crate::capability::KernelAuthority::new(
         crate::capability::KernelCapability::PhysMap,

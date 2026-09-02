@@ -502,7 +502,7 @@ pub fn fork() -> u64 {
         stack_top,
         parent_cwd,
         parent_exe_path,
-        parent_app_id,
+        parent_security_identity,
         parent_limits,
         parent_pgid,
         parent_sid,
@@ -523,7 +523,7 @@ pub fn fork() -> u64 {
             p.stack_top(),
             p.cwd().to_string(),
             p.exe_path().to_string(),
-            p.app_id().map(ToString::to_string),
+            p.security_identity().map(ToString::to_string),
             p.resource_limits(),
             p.pgid(),
             p.sid(),
@@ -591,8 +591,8 @@ pub fn fork() -> u64 {
     child_proc.set_stack_top(stack_top);
     child_proc.set_cwd(&parent_cwd);
     child_proc.set_exe_path(&parent_exe_path);
-    if let Some(app_id) = parent_app_id {
-        child_proc.set_app_id(app_id);
+    if let Some(identity) = parent_security_identity {
+        child_proc.set_security_identity(identity);
     }
     child_proc.set_resource_limits(parent_limits);
     child_proc.set_pgid(parent_pgid);
@@ -862,8 +862,7 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
     if length == 0 {
         return EINVAL;
     }
-    // Signature verification accepts MPKG files up to 256 MiB. Keep one
-    // allocation large enough for that payload while retaining a hard limit.
+    // Retain a hard upper bound for large signed executable payloads.
     const MAX_MMAP_BACKING_BYTES: u64 = 256 * 1024 * 1024;
 
     // MAP_ANONYMOUS (0x20) は従来通りサポートする。

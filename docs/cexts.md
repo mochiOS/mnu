@@ -98,7 +98,7 @@ cext.tomlは、Cextを安全にロードするためのbuild-time manifest入力
 
 ```toml
 [cext]
-id = "org.mochios.fs"
+id = "org.example.fs"
 name = "fs"
 version = "0.1.0"
 entry = "builtin"
@@ -127,7 +127,7 @@ filesystems = [
 
 [depends]
 cexts = [
-  "org.mochios.storage"
+  "org.example.storage"
 ]
 
 services = []

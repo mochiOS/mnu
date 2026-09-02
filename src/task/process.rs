@@ -379,8 +379,8 @@ impl ProcessCredentials {
 pub struct Process {
     /// プロセスID
     id: ProcessId,
-    /// アプリID（アプリの場合のみ設定）
-    app_id: Option<String>,
+    /// ユーザー空間が割り当てた不透明なセキュリティID
+    security_identity: Option<String>,
     /// サービスID（サービスの場合のみ設定）
     service_id: Option<String>,
     /// プロセス名 (固定長バッファ)
@@ -474,7 +474,7 @@ impl Process {
 
         Self {
             id: ProcessId::new(),
-            app_id: None,
+            security_identity: None,
             service_id: None,
             name: name_buf,
             name_len: len,
@@ -519,14 +519,14 @@ impl Process {
         self.id
     }
 
-    /// アプリIDを取得
-    pub fn app_id(&self) -> Option<&str> {
-        self.app_id.as_deref()
+    /// セキュリティIDを取得
+    pub fn security_identity(&self) -> Option<&str> {
+        self.security_identity.as_deref()
     }
 
-    /// アプリIDを設定する（信頼済みmanifest起動経路専用）
-    pub(crate) fn set_app_id<S: Into<String>>(&mut self, app_id: S) {
-        self.app_id = Some(app_id.into());
+    /// セキュリティIDを設定する（信頼済み起動経路専用）
+    pub(crate) fn set_security_identity<S: Into<String>>(&mut self, identity: S) {
+        self.security_identity = Some(identity.into());
     }
 
     /// サービスIDを取得
@@ -1030,7 +1030,7 @@ impl core::fmt::Debug for Process {
         let mut debug_struct = f.debug_struct("Process");
         debug_struct
             .field("id", &self.id)
-            .field("app_id", &self.app_id)
+            .field("security_identity", &self.security_identity)
             .field("service_id", &self.service_id)
             .field("name", &self.name())
             .field("state", &self.state)
@@ -1144,7 +1144,7 @@ impl ProcessTable {
         // 1. 完全一致
         // 2. stored_name without ".elf" == name
         // 3. stored_name == name + ".elf"
-        // 4. drivers.list に定義された alias == name
+        // 4. 起動ポリシーに定義された alias == name
         // 5. stored_name contains name as substring (fallback)
 
         // 1) 完全一致
@@ -1180,8 +1180,8 @@ impl ProcessTable {
             return Some(p);
         }
 
-        // 4) drivers.list alias lookup (path -> alias)
-        if let Some(alias) = driver_alias_for_path(name) {
+        // 4) executable path alias lookup (path -> alias)
+        if let Some(alias) = process_alias_for_executable(name) {
             if let Some(p) = self
                 .processes
                 .iter()
@@ -1261,8 +1261,9 @@ impl ProcessTable {
     }
 }
 
-pub(crate) fn driver_alias_for_path(path: &str) -> Option<String> {
-    let data = crate::cext::fs::read_all("/config/drivers.list")?;
+pub(crate) fn process_alias_for_executable(path: &str) -> Option<String> {
+    let aliases_path = crate::config::kernel().policy_paths.process_aliases()?;
+    let data = crate::cext::fs::read_all(aliases_path)?;
     let text = core::str::from_utf8(&data).ok()?;
     for line in text.lines() {
         let line = line.trim();

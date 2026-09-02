@@ -53,10 +53,41 @@ pub struct IpcConfig {
     pub max_external_pages: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct FsConfig {
     pub service_retry_count: usize,
     pub service_retry_ms: u64,
+}
+
+#[derive(Clone, Default)]
+pub struct PolicyPaths {
+    identity_storage_root: String,
+    shared_configuration_root: String,
+    execution_allowlist: String,
+    audit_log: String,
+    process_aliases: String,
+}
+
+impl PolicyPaths {
+    pub fn identity_storage_root(&self) -> Option<&str> {
+        configured_path(&self.identity_storage_root)
+    }
+
+    pub fn shared_configuration_root(&self) -> Option<&str> {
+        configured_path(&self.shared_configuration_root)
+    }
+
+    pub fn execution_allowlist(&self) -> Option<&str> {
+        configured_path(&self.execution_allowlist)
+    }
+
+    pub fn audit_log(&self) -> Option<&str> {
+        configured_path(&self.audit_log)
+    }
+
+    pub fn process_aliases(&self) -> Option<&str> {
+        configured_path(&self.process_aliases)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -96,7 +127,7 @@ pub struct CextConfig {
     pub max_read_bytes: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct KernelConfig {
     pub scheduler: SchedulerConfig,
     pub ipc: IpcConfig,
@@ -106,6 +137,7 @@ pub struct KernelConfig {
     pub capability: CapabilityConfig,
     pub exec: ExecConfig,
     pub cext: CextConfig,
+    pub policy_paths: PolicyPaths,
 }
 
 impl Default for KernelConfig {
@@ -155,6 +187,7 @@ impl Default for KernelConfig {
                 module_load_guard: 0x20_0000,
                 max_read_bytes: 64 * 1024 * 1024,
             },
+            policy_paths: PolicyPaths::default(),
         }
     }
 }
@@ -211,6 +244,31 @@ fn parse_usize(value: &str) -> Option<usize> {
 
 fn parse_u8(value: &str) -> Option<u8> {
     parse_u64(value).and_then(|v| u8::try_from(v).ok())
+}
+
+fn configured_path(path: &String) -> Option<&str> {
+    (!path.is_empty()).then_some(path.as_str())
+}
+
+fn set_policy_path(destination: &mut String, value: &str) {
+    const MAX_POLICY_PATH_BYTES: usize = 1024;
+
+    let canonical = value.starts_with('/')
+        && value.len() <= MAX_POLICY_PATH_BYTES
+        && !value.as_bytes().contains(&0)
+        && value
+            .split('/')
+            .all(|segment| segment != "." && segment != "..");
+    if !canonical {
+        crate::warn!("ignoring invalid kernel policy path");
+        return;
+    }
+
+    destination.clear();
+    destination.push_str(value.trim_end_matches('/'));
+    if destination.is_empty() {
+        destination.push('/');
+    }
 }
 
 fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
@@ -289,6 +347,21 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
             if let Some(v) = parse_u64(value) {
                 config.fs.service_retry_ms = v;
             }
+        }
+        "policy.identity_storage_root" => {
+            set_policy_path(&mut config.policy_paths.identity_storage_root, value);
+        }
+        "policy.shared_configuration_root" => {
+            set_policy_path(&mut config.policy_paths.shared_configuration_root, value);
+        }
+        "policy.execution_allowlist" => {
+            set_policy_path(&mut config.policy_paths.execution_allowlist, value);
+        }
+        "policy.audit_log" => {
+            set_policy_path(&mut config.policy_paths.audit_log, value);
+        }
+        "policy.process_aliases" => {
+            set_policy_path(&mut config.policy_paths.process_aliases, value);
         }
         "block.max_sectors_per_call" => {
             if let Some(v) = parse_u64(value) {
@@ -376,5 +449,42 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KernelConfig, apply_key_value};
+
+    #[test]
+    fn optional_policy_paths_are_empty_by_default() {
+        let config = KernelConfig::default();
+
+        assert_eq!(config.policy_paths.identity_storage_root(), None);
+        assert_eq!(config.policy_paths.shared_configuration_root(), None);
+        assert_eq!(config.policy_paths.execution_allowlist(), None);
+        assert_eq!(config.policy_paths.audit_log(), None);
+        assert_eq!(config.policy_paths.process_aliases(), None);
+    }
+
+    #[test]
+    fn policy_paths_accept_only_canonical_absolute_paths() {
+        let mut config = KernelConfig::default();
+
+        apply_key_value(
+            &mut config,
+            "policy.execution_allowlist",
+            "/policy/allowlist/",
+        );
+        assert_eq!(
+            config.policy_paths.execution_allowlist(),
+            Some("/policy/allowlist")
+        );
+
+        apply_key_value(&mut config, "policy.execution_allowlist", "../untrusted");
+        assert_eq!(
+            config.policy_paths.execution_allowlist(),
+            Some("/policy/allowlist")
+        );
     }
 }

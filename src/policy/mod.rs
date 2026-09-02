@@ -2,7 +2,6 @@
 //!
 //! manifest のパースは userland 側で行い、kernel は検証と最終的な強制だけを持つ。
 
-use alloc::string::String;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::task::{PrivilegeLevel, ProcessId};
@@ -33,38 +32,6 @@ pub enum ManifestRole {
     Unknown,
 }
 
-/// インストール元
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallSource {
-    Initfs,
-    Rootfs,
-    BuiltIn,
-    PackageStore,
-    RemovableMedia,
-    Network,
-    Debug,
-    Unknown,
-}
-
-/// userland が manifest を解釈して kernel に渡す起動情報
-#[derive(Debug, Clone)]
-pub struct LaunchSpec {
-    pub package_id: String,
-    pub publisher_id: String,
-    pub signature_trusted: bool,
-    pub manifest_role: ManifestRole,
-    pub file_digest: [u8; 32],
-    pub install_source: InstallSource,
-}
-
-/// launch policy の最終結果
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LaunchPolicy {
-    pub privilege: PrivilegeLevel,
-    pub priority: u8,
-    pub foreground: bool,
-}
-
 /// 起動に必要な最小メタデータ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootLaunch {
@@ -76,18 +43,6 @@ pub fn init_launch() -> BootLaunch {
     BootLaunch {
         process_name: "init",
         exec_path: "/init",
-    }
-}
-
-#[inline]
-fn role_priority(role: ManifestRole) -> u8 {
-    match role {
-        ManifestRole::Application => 0,
-        ManifestRole::Tool => 2,
-        ManifestRole::Service => 64,
-        ManifestRole::CoreService => 24,
-        ManifestRole::Driver => 160,
-        ManifestRole::Unknown => 8,
     }
 }
 
@@ -221,36 +176,6 @@ pub fn caller_can_grant_capabilities_on_exec() -> bool {
     caller_pid().is_none() || caller_is_service_or_core()
 }
 
-/// manifest role を privilege に落とす
-#[inline]
-pub fn resolve_launch_privilege(
-    _role: ManifestRole,
-    _install_source: InstallSource,
-) -> PrivilegeLevel {
-    PrivilegeLevel::User
-}
-
-/// manifest role を priority に落とす
-#[inline]
-pub fn resolve_launch_priority(
-    role: ManifestRole,
-    _install_source: InstallSource,
-    _parent_pid: Option<ProcessId>,
-) -> u8 {
-    role_priority(role)
-}
-
-/// manifest role を foreground 判定に落とす
-#[inline]
-pub fn resolve_launch_foreground(
-    role: ManifestRole,
-    privilege: PrivilegeLevel,
-    _parent_pid: Option<ProcessId>,
-) -> bool {
-    privilege == PrivilegeLevel::User
-        && matches!(role, ManifestRole::Application | ManifestRole::Tool)
-}
-
 /// 呼び出し元が Service/Core か
 pub fn caller_is_service_or_core_process() -> bool {
     caller_is_service_or_core()
@@ -263,21 +188,4 @@ pub fn caller_is_service_or_core_process() -> bool {
 #[inline]
 pub fn resolve_exec_privilege(requested_privilege: Option<PrivilegeLevel>) -> PrivilegeLevel {
     requested_privilege.unwrap_or(PrivilegeLevel::User)
-}
-
-/// 現行の exec policy を priority に落とす
-#[inline]
-pub fn resolve_exec_priority(role: ManifestRole, _parent_pid: Option<ProcessId>) -> u8 {
-    role_priority(role)
-}
-
-/// 現行の exec policy を foreground 判定に落とす
-#[inline]
-pub fn resolve_exec_foreground(
-    role: ManifestRole,
-    privilege: PrivilegeLevel,
-    _parent_pid: Option<ProcessId>,
-) -> bool {
-    privilege == PrivilegeLevel::User
-        && matches!(role, ManifestRole::Application | ManifestRole::Tool)
 }

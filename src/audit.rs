@@ -282,6 +282,9 @@ pub fn flush_to_disk() {
     if !crate::cext::fs::is_loaded() {
         return;
     }
+    let Some(log_path) = crate::config::kernel().policy_paths.audit_log() else {
+        return;
+    };
 
     let mut snapshot = Vec::new();
     {
@@ -292,5 +295,5 @@ pub fn flush_to_disk() {
     if snapshot.len() < AUDIT_FILE_CAPACITY {
         snapshot.resize(AUDIT_FILE_CAPACITY, 0);
     }
-    let _ = crate::cext::fs::write_all("/system/logs/audit.log", 0, &snapshot);
+    let _ = crate::cext::fs::write_all(log_path, 0, &snapshot);
 }

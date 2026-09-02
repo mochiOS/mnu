@@ -2,7 +2,9 @@
     <h1>The mnu kernel</h1>
 </div>
 
-The mnu kernel is a [mochiOS](https://github.com/mochiOS/mochiOS) kernel.
+The mnu kernel is an independent, capability-oriented kernel. Operating systems may build their
+own user space and policy on top of its public ABI; mnu does not contain product-specific desktop,
+application, package, or service policy.
 
 ## Building
 To build the mnu kernel, you will need to have the following dependencies installed:

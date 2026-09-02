@@ -3,7 +3,7 @@ use crate::capability::{
 };
 use crate::policy::{
     caller_can_grant_capabilities_on_exec, claim_init_pid, release_init_pid,
-    resolve_exec_foreground, resolve_exec_priority, resolve_exec_privilege, ManifestRole,
+    resolve_exec_privilege, ManifestRole,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -13,8 +13,7 @@ use core::convert::TryInto;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const EM_X86_64: u16 = 0x3E;
-const EXEC_MANIFEST_ENV_PREFIX: &str = "__MNU_EXEC_ENV=";
-const EXEC_MANIFEST_APP_ID_PREFIX: &str = "__MNU_EXEC_APP_ID=";
+use mnu_abi::exec::{ENVIRONMENT_PREFIX, SECURITY_IDENTITY_PREFIX};
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct InitialUserStack {
@@ -539,19 +538,18 @@ fn exec_manifest_common(
     };
     let mut extra_args: Vec<&str> = Vec::new();
     let mut envp: Vec<&str> = Vec::new();
-    let mut app_id: Option<&str> = None;
+    let mut security_identity: Option<&str> = None;
     for item in &extra_args_owned {
-        if let Some(env) = item.strip_prefix(EXEC_MANIFEST_ENV_PREFIX) {
+        if let Some(env) = item.strip_prefix(ENVIRONMENT_PREFIX) {
             if env.is_empty() || !env.contains('=') {
                 return EINVAL;
             }
             envp.push(env);
-        } else if let Some(value) = item.strip_prefix(EXEC_MANIFEST_APP_ID_PREFIX) {
-            if role != ManifestRole::Application || app_id.is_some() || !valid_application_id(value)
-            {
+        } else if let Some(value) = item.strip_prefix(SECURITY_IDENTITY_PREFIX) {
+            if security_identity.is_some() || !valid_security_identity(value) {
                 return EINVAL;
             }
-            app_id = Some(value);
+            security_identity = Some(value);
         } else {
             extra_args.push(item.as_str());
         }
@@ -605,12 +603,12 @@ fn exec_manifest_common(
         requested_privilege,
         Some(role),
         parent_override,
-        app_id,
+        security_identity,
         true,
     )
 }
 
-fn valid_application_id(value: &str) -> bool {
+fn valid_security_identity(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
@@ -691,13 +689,13 @@ fn exec_internal(
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     manifest_role: Option<ManifestRole>,
     parent_override: Option<crate::task::ProcessId>,
-    app_id: Option<&str>,
+    security_identity: Option<&str>,
     enforce_path_access: bool,
 ) -> u64 {
     let mut process_name = name_override
         .map(|s| s.to_string())
         .unwrap_or_else(|| derive_process_name(path));
-    if let Some(alias) = crate::task::process::driver_alias_for_path(path) {
+    if let Some(alias) = crate::task::process::process_alias_for_executable(path) {
         process_name = alias;
     }
     let role = manifest_role.unwrap_or(ManifestRole::Unknown);
@@ -737,7 +735,7 @@ fn exec_internal(
             initial_kernel_authorities,
             requested_credentials,
             requested_privilege,
-            app_id,
+            security_identity,
         )
     } else {
         crate::warn!("exec: file not found: {}", path);
@@ -991,7 +989,7 @@ fn exec_with_data(
     initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_credentials: Option<crate::task::ProcessCredentials>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
-    app_id: Option<&str>,
+    security_identity: Option<&str>,
 ) -> u64 {
     crate::debug!("exec: name={}", process_name);
     let aslr_seed = next_aslr_seed(process_name);
@@ -1451,10 +1449,11 @@ fn exec_with_data(
         let is_boot_init = privilege == crate::task::PrivilegeLevel::Service
             && exec_path == boot_init.exec_path
             && process_name == boot_init.process_name;
-        let priority = resolve_exec_priority(ManifestRole::Unknown, parent_pid);
+        const DEFAULT_PROCESS_PRIORITY: u8 = 8;
+        let priority = DEFAULT_PROCESS_PRIORITY;
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
-        if let Some(app_id) = app_id {
-            proc.set_app_id(app_id);
+        if let Some(identity) = security_identity {
+            proc.set_security_identity(identity);
         }
         if let Some(credentials) =
             parent_pid.and_then(|pid| crate::task::with_process(pid, |parent| parent.credentials()))
@@ -1464,8 +1463,7 @@ fn exec_with_data(
         if let Some(credentials) = requested_credentials {
             proc.set_credentials_for_exec(credentials);
         }
-        let foreground = resolve_exec_foreground(ManifestRole::Unknown, privilege, parent_pid);
-        proc.set_foreground(foreground);
+        proc.set_foreground(false);
         if let Some(caps) = initial_caps {
             // capability はプロセス開始前にセットする必要がある。
             // スケジューラが有効だと `add_thread()` の直後に動き出すため、
