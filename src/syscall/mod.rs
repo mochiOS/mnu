@@ -269,7 +269,7 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
         UserFramebufferInfo {
             // The firmware address is a guest-visible token, not a stable
             // userspace MMIO mapping after GPU quarantine and resume.  Pixels
-            // are submitted to mBoot in bounded batches instead.
+            // are submitted to the hypervisor in bounded batches instead.
             addr: 0,
             size: info.size as u64,
             width: info.width as u32,

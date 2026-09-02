@@ -533,8 +533,8 @@ fn load_bundle_directories() -> bool {
             );
             continue;
         }
-        let Some(mut module) = load_elf_symbol(&meta.elf, "mochi_module_init") else {
-            crate::warn!("cext: mochi_module_init not found in {}", entry_path);
+        let Some(mut module) = load_elf_symbol(&meta.elf, "mnu_module_init") else {
+            crate::warn!("cext: mnu_module_init not found in {}", entry_path);
             continue;
         };
         if (reg.register)(module.address, meta.module_version) {
@@ -1039,8 +1039,8 @@ pub fn load_modules() {
             continue;
         }
 
-        let Some(mut module) = load_elf_symbol(&meta.elf, "mochi_module_init") else {
-            crate::warn!("cext: mochi_module_init not found in {}.cext", meta.name);
+        let Some(mut module) = load_elf_symbol(&meta.elf, "mnu_module_init") else {
+            crate::warn!("cext: mnu_module_init not found in {}.cext", meta.name);
             continue;
         };
 

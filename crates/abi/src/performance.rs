@@ -12,7 +12,7 @@ pub const PERFORMANCE_FLAG_RDTSCP: u64 = 1 << 2;
 pub const PERFORMANCE_FLAG_WEAK_SNAPSHOT: u64 = 1 << 3;
 
 pub const CLOCK_SOURCE_UNAVAILABLE: u32 = 0;
-pub const CLOCK_SOURCE_MBOOT: u32 = 1;
+pub const CLOCK_SOURCE_HYPERVISOR: u32 = 1;
 pub const CLOCK_SOURCE_CPUID_CRYSTAL: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,8 +90,8 @@ pub enum BootMilestone {
     FilesystemMounted,
     SystemServicesStarted,
     CompositorStarted,
-    BinderStarted,
-    BinderFirstFrame,
+    UserInterfaceStarted,
+    UserInterfaceFirstFrame,
     Idle,
 }
 

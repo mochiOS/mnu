@@ -2456,20 +2456,20 @@ mod unix_mode_tests {
     #[test]
     fn application_storage_is_scoped_to_exact_bundle_id() {
         assert!(path_is_in_application_storage(
-            "/libraries/applications/org.mochios.binder",
-            "org.mochios.binder"
+            "/libraries/applications/org.example.shell",
+            "org.example.shell"
         ));
         assert!(path_is_in_application_storage(
-            "/libraries/applications/org.mochios.binder/dock.conf",
-            "org.mochios.binder"
+            "/libraries/applications/org.example.shell/preferences.conf",
+            "org.example.shell"
         ));
         assert!(!path_is_in_application_storage(
-            "/libraries/applications/org.mochios.files/settings",
-            "org.mochios.binder"
+            "/libraries/applications/org.example.files/settings",
+            "org.example.shell"
         ));
         assert!(!path_is_in_application_storage(
-            "/libraries/applications/org.mochios.binder-extra/settings",
-            "org.mochios.binder"
+            "/libraries/applications/org.example.shell-extra/settings",
+            "org.example.shell"
         ));
     }
 

@@ -1,6 +1,6 @@
 //! 起動時に実行する初期化処理をまとめたモジュール
 
-use crate::{BootInfo, MemoryRegion, Result, debug, interrupt, mem, task, util};
+use crate::{debug, interrupt, mem, task, util, BootInfo, MemoryRegion, Result};
 
 pub mod fs;
 
@@ -78,10 +78,8 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     crate::config::init();
     crate::capability::path::init_from_kernel_config();
     if crate::hypervisor_guest::is_active() {
-        // mDriver may need to wait for Linux driver probing and physical I/O.
-        // Keep that work out of the single-threaded boot path: the scheduler
-        // and the desktop must be able to start even when hardware is slow or
-        // unavailable.
+        // A platform backend can become ready after the kernel. Keep optional
+        // device discovery out of the single-threaded boot path.
         crate::cext::init_runtime_config();
     } else {
         crate::cext::init_runtime_config();
@@ -111,9 +109,9 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     crate::performance::mark_boot(crate::performance::BootMilestone::SchedulerStarted);
     if crate::hypervisor_guest::is_active() {
         if crate::smp::enable_hypervisor_scheduler_timer() {
-            crate::info!("mBoot virtual scheduler timer initialized");
+            crate::info!("Hypervisor virtual scheduler timer initialized");
         } else {
-            crate::warn!("mBoot virtual scheduler timer unavailable");
+            crate::warn!("Hypervisor virtual scheduler timer unavailable");
         }
     } else {
         interrupt::init_pit();

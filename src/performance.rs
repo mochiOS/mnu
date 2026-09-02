@@ -16,14 +16,14 @@ use mnu_metrics::{
 #[repr(u8)]
 pub enum ClockSource {
     Unavailable,
-    MbootVirtual,
+    HypervisorVirtual,
     CpuidCrystal,
 }
 
 impl ClockSource {
     fn from_raw(value: u8) -> Self {
         match value {
-            1 => Self::MbootVirtual,
+            1 => Self::HypervisorVirtual,
             2 => Self::CpuidCrystal,
             _ => Self::Unavailable,
         }
@@ -636,7 +636,7 @@ fn distribution_snapshot(
 fn tsc_frequency() -> (u32, ClockSource) {
     let hypervisor_frequency = crate::hypervisor_guest::tsc_frequency_khz();
     if hypervisor_frequency != 0 {
-        return (hypervisor_frequency, ClockSource::MbootVirtual);
+        return (hypervisor_frequency, ClockSource::HypervisorVirtual);
     }
 
     let maximum_basic_leaf = cpuid(0, 0).eax;

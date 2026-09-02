@@ -1,7 +1,7 @@
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write, write_volatile};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-pub const SHARED_RING_MAGIC: u64 = u64::from_le_bytes(*b"MOCHIRNG");
+pub const SHARED_RING_MAGIC: u64 = u64::from_le_bytes(*b"MNURING\0");
 pub const SHARED_RING_VERSION: u32 = 1;
 pub const SHARED_RING_SLOT_COUNT: usize = 31;
 pub const SHARED_RING_PAYLOAD_SIZE: usize = 48;

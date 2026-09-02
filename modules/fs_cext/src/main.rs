@@ -274,7 +274,7 @@ static KEEP_MOCHI_MODULE_INIT: extern "C" fn() -> *const McxFsOps = _start;
 
 #[unsafe(no_mangle)]
 #[inline(never)]
-pub extern "C" fn mochi_module_init() -> *const McxFsOps {
+pub extern "C" fn mnu_module_init() -> *const McxFsOps {
     _start()
 }
 

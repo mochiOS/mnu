@@ -118,22 +118,22 @@ fn take_released_ap_boot_stack(stack_top: u64) -> bool {
 global_asm!(
     r#"
     .section .data.ap_trampoline, "aw"
-    .global __mochi_ap_trampoline_start
-    .global __mochi_ap_trampoline_end
-    .global __mochi_ap_trampoline_gdtr_load
-    .global __mochi_ap_trampoline_pm32_jump
-    .global __mochi_ap_trampoline_pm32_entry
-    .global __mochi_ap_trampoline_kernel_cr3_load
-    .global __mochi_ap_trampoline_lm64_jump
-    .global __mochi_ap_trampoline_lm64_entry
-    .global __mochi_ap_trampoline_kernel_cr3
-    .global __mochi_ap_trampoline_boot_info_ptr
-    .global __mochi_ap_trampoline_kernel_secondary_entry
-    .global __mochi_ap_trampoline_stack_top
-    .global __mochi_ap_trampoline_gdt
-    .global __mochi_ap_trampoline_gdtr
+    .global __mnu_ap_trampoline_start
+    .global __mnu_ap_trampoline_end
+    .global __mnu_ap_trampoline_gdtr_load
+    .global __mnu_ap_trampoline_pm32_jump
+    .global __mnu_ap_trampoline_pm32_entry
+    .global __mnu_ap_trampoline_kernel_cr3_load
+    .global __mnu_ap_trampoline_lm64_jump
+    .global __mnu_ap_trampoline_lm64_entry
+    .global __mnu_ap_trampoline_kernel_cr3
+    .global __mnu_ap_trampoline_boot_info_ptr
+    .global __mnu_ap_trampoline_kernel_secondary_entry
+    .global __mnu_ap_trampoline_stack_top
+    .global __mnu_ap_trampoline_gdt
+    .global __mnu_ap_trampoline_gdtr
 
-__mochi_ap_trampoline_start:
+__mnu_ap_trampoline_start:
     .code16
     cli
     mov ax, cs
@@ -141,18 +141,18 @@ __mochi_ap_trampoline_start:
     mov es, ax
     mov ss, ax
     mov sp, 0xfff0
-__mochi_ap_trampoline_gdtr_load:
+__mnu_ap_trampoline_gdtr_load:
     mov bx, 0x1234
     lgdt [bx]
     mov eax, cr0
     or eax, 1
     mov cr0, eax
-__mochi_ap_trampoline_pm32_jump:
+__mnu_ap_trampoline_pm32_jump:
     ljmp 0x08, 0x1234
 
     .code32
-__mochi_ap_trampoline_pm32_entry:
-__mochi_ap_trampoline_kernel_cr3_load:
+__mnu_ap_trampoline_pm32_entry:
+__mnu_ap_trampoline_kernel_cr3_load:
     mov ebx, 0x12345678
     mov ax, 0x10
     mov ds, ax
@@ -171,16 +171,16 @@ __mochi_ap_trampoline_kernel_cr3_load:
     mov eax, cr0
     or eax, 1 << 31
     mov cr0, eax
-__mochi_ap_trampoline_lm64_jump:
+__mnu_ap_trampoline_lm64_jump:
     ljmp 0x18, 0x12345678
 
     .code64
-__mochi_ap_trampoline_lm64_entry:
+__mnu_ap_trampoline_lm64_entry:
     mov ax, 0x10
     mov ds, ax
     mov es, ax
     mov ss, ax
-    lea rbx, [rip + __mochi_ap_trampoline_stack_top]
+    lea rbx, [rip + __mnu_ap_trampoline_stack_top]
     mov rsp, qword ptr [rbx]
     sub rsp, 8
     mov rdi, qword ptr [rbx - 16]
@@ -189,52 +189,52 @@ __mochi_ap_trampoline_lm64_entry:
     jmp rax
 
     .align 8
-__mochi_ap_trampoline_kernel_cr3:
+__mnu_ap_trampoline_kernel_cr3:
     .quad 0
-__mochi_ap_trampoline_boot_info_ptr:
+__mnu_ap_trampoline_boot_info_ptr:
     .quad 0
-__mochi_ap_trampoline_kernel_secondary_entry:
+__mnu_ap_trampoline_kernel_secondary_entry:
     .quad 0
-__mochi_ap_trampoline_stack_top:
+__mnu_ap_trampoline_stack_top:
     .quad 0
-__mochi_ap_trampoline_gdt:
+__mnu_ap_trampoline_gdt:
     .quad 0x0000000000000000
     .quad 0x00CF9A000000FFFF
     .quad 0x00CF92000000FFFF
     .quad 0x00AF9A000000FFFF
-__mochi_ap_trampoline_gdtr:
+__mnu_ap_trampoline_gdtr:
     .word 0
     .long 0
-__mochi_ap_trampoline_gdt_end:
-__mochi_ap_trampoline_end:
+__mnu_ap_trampoline_gdt_end:
+__mnu_ap_trampoline_end:
 "#
 );
 
 extern "C" {
-    static __mochi_ap_trampoline_start: u8;
-    static __mochi_ap_trampoline_end: u8;
-    static __mochi_ap_trampoline_gdtr_load: u8;
-    static __mochi_ap_trampoline_pm32_jump: u8;
-    static __mochi_ap_trampoline_pm32_entry: u8;
-    static __mochi_ap_trampoline_kernel_cr3_load: u8;
-    static __mochi_ap_trampoline_lm64_jump: u8;
-    static __mochi_ap_trampoline_lm64_entry: u8;
-    static mut __mochi_ap_trampoline_kernel_cr3: u64;
-    static mut __mochi_ap_trampoline_boot_info_ptr: u64;
-    static mut __mochi_ap_trampoline_kernel_secondary_entry: u64;
-    static mut __mochi_ap_trampoline_stack_top: u64;
-    static mut __mochi_ap_trampoline_gdt: u8;
-    static mut __mochi_ap_trampoline_gdtr: u8;
+    static __mnu_ap_trampoline_start: u8;
+    static __mnu_ap_trampoline_end: u8;
+    static __mnu_ap_trampoline_gdtr_load: u8;
+    static __mnu_ap_trampoline_pm32_jump: u8;
+    static __mnu_ap_trampoline_pm32_entry: u8;
+    static __mnu_ap_trampoline_kernel_cr3_load: u8;
+    static __mnu_ap_trampoline_lm64_jump: u8;
+    static __mnu_ap_trampoline_lm64_entry: u8;
+    static mut __mnu_ap_trampoline_kernel_cr3: u64;
+    static mut __mnu_ap_trampoline_boot_info_ptr: u64;
+    static mut __mnu_ap_trampoline_kernel_secondary_entry: u64;
+    static mut __mnu_ap_trampoline_stack_top: u64;
+    static mut __mnu_ap_trampoline_gdt: u8;
+    static mut __mnu_ap_trampoline_gdtr: u8;
 }
 
 #[inline]
 unsafe fn trampoline_start_ptr() -> *const u8 {
-    core::ptr::addr_of!(__mochi_ap_trampoline_start)
+    core::ptr::addr_of!(__mnu_ap_trampoline_start)
 }
 
 #[inline]
 unsafe fn trampoline_end_ptr() -> *const u8 {
-    core::ptr::addr_of!(__mochi_ap_trampoline_end)
+    core::ptr::addr_of!(__mnu_ap_trampoline_end)
 }
 
 fn trampoline_layout() -> &'static TrampolineLayout {
@@ -244,24 +244,24 @@ fn trampoline_layout() -> &'static TrampolineLayout {
         let size = end.saturating_sub(start);
         TrampolineLayout {
             size,
-            gdtr_load_off: core::ptr::addr_of!(__mochi_ap_trampoline_gdtr_load) as usize - start,
-            pm32_jump_off: core::ptr::addr_of!(__mochi_ap_trampoline_pm32_jump) as usize - start,
-            pm32_entry_off: core::ptr::addr_of!(__mochi_ap_trampoline_pm32_entry) as usize - start,
-            kernel_cr3_load_off: core::ptr::addr_of!(__mochi_ap_trampoline_kernel_cr3_load)
+            gdtr_load_off: core::ptr::addr_of!(__mnu_ap_trampoline_gdtr_load) as usize - start,
+            pm32_jump_off: core::ptr::addr_of!(__mnu_ap_trampoline_pm32_jump) as usize - start,
+            pm32_entry_off: core::ptr::addr_of!(__mnu_ap_trampoline_pm32_entry) as usize - start,
+            kernel_cr3_load_off: core::ptr::addr_of!(__mnu_ap_trampoline_kernel_cr3_load)
                 as usize
                 - start,
-            lm64_jump_off: core::ptr::addr_of!(__mochi_ap_trampoline_lm64_jump) as usize - start,
-            lm64_entry_off: core::ptr::addr_of!(__mochi_ap_trampoline_lm64_entry) as usize - start,
-            kernel_cr3_off: core::ptr::addr_of!(__mochi_ap_trampoline_kernel_cr3) as usize - start,
-            boot_info_ptr_off: core::ptr::addr_of!(__mochi_ap_trampoline_boot_info_ptr) as usize
+            lm64_jump_off: core::ptr::addr_of!(__mnu_ap_trampoline_lm64_jump) as usize - start,
+            lm64_entry_off: core::ptr::addr_of!(__mnu_ap_trampoline_lm64_entry) as usize - start,
+            kernel_cr3_off: core::ptr::addr_of!(__mnu_ap_trampoline_kernel_cr3) as usize - start,
+            boot_info_ptr_off: core::ptr::addr_of!(__mnu_ap_trampoline_boot_info_ptr) as usize
                 - start,
             kernel_secondary_entry_off: core::ptr::addr_of!(
-                __mochi_ap_trampoline_kernel_secondary_entry
+                __mnu_ap_trampoline_kernel_secondary_entry
             ) as usize
                 - start,
-            stack_top_off: core::ptr::addr_of!(__mochi_ap_trampoline_stack_top) as usize - start,
-            gdt_off: core::ptr::addr_of!(__mochi_ap_trampoline_gdt) as usize - start,
-            gdtr_off: core::ptr::addr_of!(__mochi_ap_trampoline_gdtr) as usize - start,
+            stack_top_off: core::ptr::addr_of!(__mnu_ap_trampoline_stack_top) as usize - start,
+            gdt_off: core::ptr::addr_of!(__mnu_ap_trampoline_gdt) as usize - start,
+            gdtr_off: core::ptr::addr_of!(__mnu_ap_trampoline_gdtr) as usize - start,
         }
     })
 }
@@ -483,10 +483,10 @@ pub fn enable_local_scheduler_timer() -> bool {
         && local_apic_write(X2APIC_TIMER_INITIAL_COUNT_MSR, 0x380, count)
 }
 
-/// Starts the mBoot-provided virtual x2APIC timer for the boot vCPU.
+/// Starts the hypervisor-provided virtual x2APIC timer for the boot vCPU.
 ///
 /// Unlike physical APIC calibration, the virtual timer advances directly from
-/// the stable TSC frequency published by mBoot's CPUID interface.
+/// the stable TSC frequency published by the hypervisor's CPUID interface.
 pub fn enable_hypervisor_scheduler_timer() -> bool {
     if !crate::hypervisor_guest::is_active() {
         return false;

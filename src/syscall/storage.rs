@@ -1,6 +1,4 @@
-use mnu_abi::{
-    STORAGE_CONTROL_LIST_DEVICE, SUCCESS, StorageControlRequest, StorageControlResponse,
-};
+use mnu_abi::{StorageControlRequest, StorageControlResponse, SUCCESS};
 
 use crate::capability::Capability;
 
@@ -18,9 +16,7 @@ pub fn control(request_ptr: u64, response_ptr: u64) -> u64 {
         return EFAULT;
     }
     let request = decode_request(&request_bytes);
-    if request.reserved0 != 0
-        || (request.operation != STORAGE_CONTROL_LIST_DEVICE && request.device_id == 0)
-    {
+    if request.reserved0 != 0 {
         return EINVAL;
     }
     let response = match crate::platform::device_control(

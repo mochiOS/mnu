@@ -69,7 +69,7 @@ pub fn init() {
 
     unsafe {
         if crate::hypervisor_guest::is_active() {
-            // mBoot virtualizes EFER and the syscall/TLS MSRs. It continues to
+            // The hypervisor virtualizes EFER and the syscall/TLS MSRs. It continues to
             // own speculation-control MSRs and the physical APIC.
             enable_nxe();
             enable_write_protect();
@@ -78,7 +78,7 @@ pub fn init() {
             enable_umip();
             enable_smep_smap();
             report_optional_control_flow_features();
-            crate::info!("Virtual CPU features initialized under mBoot");
+            crate::info!("Virtual CPU features initialized under the hypervisor");
             return;
         }
         enable_nxe();

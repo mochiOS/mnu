@@ -25,7 +25,7 @@ pub static PHYS_OFFSET: Mutex<Option<u64>> = Mutex::new(None);
 /// カーネルの元のL4ページテーブルの物理アドレス（init時に設定）
 pub static KERNEL_L4_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// `KERNEL_L4_PHYS` has been initialized. Physical address zero is valid for an
-/// mBoot guest, so the address itself cannot double as an initialization sentinel.
+/// a virtualized guest, so the address itself cannot double as an initialization sentinel.
 static KERNEL_L4_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// x86-64 canonical ユーザー空間上限
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;

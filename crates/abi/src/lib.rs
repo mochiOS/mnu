@@ -1,16 +1,10 @@
 #![no_std]
 
-/// mBootからmnuへ渡す起動情報のABIです。
+/// ブートローダーからmnuへ渡す起動情報のABIです。
 pub mod boot;
 
-/// mBootのDomainとして起動するときに使うABIです。
+/// ハイパーバイザーのDomainとして起動するときに使うABIです。
 pub mod hypervisor;
-
-/// mochiOSとmDriverの間で使うデバイス制御プロトコルです。
-pub mod mdriver_control;
-
-/// mochiOSとmDriverの間で使う非同期ブロックI/Oプロトコルです。
-pub mod mdriver_block;
 
 /// mnuの性能計測結果をユーザー空間へ渡す固定ABIです。
 pub mod performance;
@@ -18,7 +12,7 @@ pub mod performance;
 /// Grantで共有するrequest/response ringの固定ABIです。
 pub mod shared_ring;
 
-/// システムコール番号 (Linux x86_64 互換 + mochiOS 拡張)
+/// システムコール番号（Linux x86_64互換とmnu固有の番号）
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyscallNumber {
@@ -204,7 +198,7 @@ pub enum SyscallNumber {
     CheckGravityExist = 999,
 }
 
-/// `StorageControl` が受け取る、mDriverストレージ操作の固定長要求です。
+/// `StorageControl` が受け取る、プラットフォーム固有ストレージ操作の固定長要求です。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StorageControlRequest {
@@ -214,7 +208,7 @@ pub struct StorageControlRequest {
     pub arguments: [u64; 4],
 }
 
-/// `StorageControl` が返す固定長応答です。`status` はmDriverプロトコルの状態値です。
+/// `StorageControl` が返す固定長応答です。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StorageControlResponse {
@@ -225,6 +219,17 @@ pub struct StorageControlResponse {
 
 /// `arguments[0]` 番目のストレージ候補を返します。
 pub const STORAGE_CONTROL_LIST_DEVICE: u16 = 0;
+pub const STORAGE_CONTROL_INSPECT: u16 = 1;
+pub const STORAGE_CONTROL_CREATE_PARTITION: u16 = 2;
+pub const STORAGE_CONTROL_DELETE_PARTITION: u16 = 3;
+pub const STORAGE_CONTROL_INSTALL_PARTITION: u16 = 4;
+
+pub const STORAGE_STATUS_OK: u32 = 0;
+pub const STORAGE_STATUS_END: u32 = 6;
+
+pub const STORAGE_QUERY_DISK: u64 = 0;
+pub const STORAGE_QUERY_PARTITION_GUIDS: u64 = 1;
+pub const STORAGE_QUERY_PARTITION_RANGE: u64 = 2;
 
 /// `ExecManifestWithCredentials` に渡す固定長の資格情報指定。
 #[repr(C)]

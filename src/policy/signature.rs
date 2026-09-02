@@ -47,7 +47,7 @@ fn parse_db(bytes: &[u8]) -> Option<SignatureDatabase> {
     let text = str::from_utf8(bytes).ok()?;
     let mut lines = text.lines();
     let header = lines.next()?.trim();
-    if header != "mochios-execution-allowlist v1" {
+    if header != "mnu-execution-allowlist v1" {
         return None;
     }
 

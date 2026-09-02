@@ -44,7 +44,7 @@ pub fn grant_window() -> Option<(u64, u64)> {
     (start != 0 && size != 0).then_some((start, size))
 }
 
-/// Returns the virtual TSC frequency advertised by mBoot, in kHz.
+/// Returns the virtual TSC frequency advertised by the hypervisor, in kHz.
 pub fn tsc_frequency_khz() -> u32 {
     if !is_active() {
         return 0;

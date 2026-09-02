@@ -56,22 +56,6 @@ pub const PCI_DEVICE_INTERRUPT_COUNT: usize = 2;
 
 pub const EVENT_CHANNEL_VECTOR: u8 = 0x40;
 pub const DOMAIN_MANAGEMENT_VECTOR: u8 = 0x41;
-pub const MDRIVER_CONTROL_PORT: u32 = 1;
-pub const MDRIVER_CONTROL_IRQ_PORT: u32 = 2;
-pub const MDRIVER_CONTROL_RING_PORT: u32 = 3;
-pub const MDRIVER_BLOCK_RING_PORT: u32 = 4;
-pub const MDRIVER_BLOCK_DATA_PAGE: u64 = 1;
-pub const MDRIVER_BLOCK_RING_PAGE: u64 = 2;
-pub const MDRIVER_BLOCK_BUFFER_FIRST_PAGE: u64 = 3;
-pub const MDRIVER_INSTALL_METADATA_PAGE: u64 = 8;
-pub const MDRIVER_BLOCK_BUFFER_COUNT: usize = 4;
-pub const MDRIVER_DOMAIN_ID: u32 = 2;
-pub const MDRIVER_CONTROL_RING_GENERATION: u64 = 1;
-pub const MDRIVER_BLOCK_RING_GENERATION: u64 = 1;
-pub const MDRIVER_CONTROL_REQUEST_KIND: u16 = 1;
-pub const MDRIVER_CONTROL_RESPONSE_KIND: u16 = 2;
-pub const MDRIVER_BLOCK_REQUEST_KIND: u16 = 3;
-pub const MDRIVER_BLOCK_RESPONSE_KIND: u16 = 4;
 
 pub const DOMAIN_CRASH_STATUS_CRASHED: u32 = 1;
 pub const DOMAIN_CRASH_STATUS_RESTARTED: u32 = 2;
@@ -135,7 +119,7 @@ pub enum DomainBootInfoError {
     InvalidMemorySize,
 }
 
-/// mBootがmnuの最初のvCPUへ渡す固定長の起動情報です。
+/// ハイパーバイザーがmnuの最初のvCPUへ渡す固定長の起動情報です。
 ///
 /// x86_64では、この構造体のゲスト物理アドレスをRDIへ入れて
 /// `domain_entry`を呼び出します。アドレスは8バイト境界にそろえます。
@@ -150,7 +134,7 @@ pub struct DomainBootInfo {
     pub hypervisor_backend: u32,
     pub domain_role: u32,
     pub memory_size: u64,
-    /// mBootがDomain RAMへ配置した、署名検証済みの起動モジュールです。
+    /// ハイパーバイザーがDomain RAMへ配置した、検証済みの起動モジュールです。
     /// モジュールを使わないDomainでは、両方とも0です。
     pub boot_module_start: u64,
     pub boot_module_size: u64,

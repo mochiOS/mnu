@@ -249,7 +249,7 @@ pub fn exit(exit_code: u64) -> ! {
     crate::sprintln!("Process exiting with code: {}", exit_code);
 
     // ProcessExit/_exit は同一プロセスの全スレッドを終了させる。
-    // ここで現在スレッドだけを止めると、ViewKit などがワーカー
+    // ここで現在スレッドだけを止めると、GUIツールキットなどがワーカー
     // スレッドを持つ場合にプロセスが Zombie にならず waitpid が永久待機する。
     exit_current_process(exit_code as i32)
 }

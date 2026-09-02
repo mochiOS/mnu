@@ -32,41 +32,6 @@ test = false
 bench = false
 required-features = ["kernel-bin"]
 
-[[bin]]
-name = "domain-bootstrap"
-path = "src/domain_entry.rs"
-test = false
-bench = false
-required-features = ["domain-guest"]
-
-[[bin]]
-name = "hardware-bootstrap"
-path = "src/hardware_bootstrap.rs"
-test = false
-bench = false
-required-features = ["domain-guest"]
-
-[[bin]]
-name = "event-bootstrap"
-path = "src/event_bootstrap.rs"
-test = false
-bench = false
-required-features = ["domain-guest"]
-
-[[bin]]
-name = "grant-bootstrap"
-path = "src/grant_bootstrap.rs"
-test = false
-bench = false
-required-features = ["domain-guest"]
-
-[[bin]]
-name = "ring-bootstrap"
-path = "src/ring_bootstrap.rs"
-test = false
-bench = false
-required-features = ["domain-guest"]
-
 [target.'cfg(any(target_os = "none", target_os = "uefi"))'.dependencies]
 linked_list_allocator = "0.10.5"
 mnu-csprng = { path = "crates/csprng" }
@@ -82,7 +47,6 @@ mnu-metrics = { path = "crates/metrics" }
 [features]
 default = ["kernel-bin"]
 kernel-bin = []
-domain-guest = []
 performance-instrumentation = []
 frame-allocation-failure-injection = ["performance-instrumentation"]
 kcfi = []
