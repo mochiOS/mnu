@@ -418,6 +418,15 @@ pub fn allocate_frame() -> Result<PhysFrame> {
         .ok_or(Kernel::Memory(Memory::OutOfMemory))
 }
 
+pub fn allocate_zeroed_frame() -> Result<PhysFrame> {
+    let frame = allocate_frame()?;
+    if let Err(error) = zero_frame(frame) {
+        let _ = deallocate_frame(frame);
+        return Err(error);
+    }
+    Ok(frame)
+}
+
 pub fn allocate_contiguous_frames(page_count: usize) -> Result<PhysFrame> {
     let mut guard = lock_allocator();
     let Some(allocator) = guard.as_mut() else {
