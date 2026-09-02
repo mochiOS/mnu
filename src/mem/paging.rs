@@ -719,12 +719,20 @@ pub fn map_and_copy_segment(
 
 pub use arch64::PhysAddr;
 
+fn allocate_zeroed_page_table() -> Result<PhysFrame<Size4KiB>> {
+    let table_frame = frame::allocate_frame()?;
+    if let Err(error) = frame::zero_frame(table_frame) {
+        let _ = frame::deallocate_frame(table_frame);
+        return Err(error);
+    }
+    Ok(table_frame)
+}
+
 fn clone_kernel_l1_table_without_user_entries(src_l1_phys: u64, phys_off: u64) -> Result<u64> {
     let src_l1 = unsafe { &*((src_l1_phys + phys_off) as *const PageTable) };
-    let new_l1_frame = frame::allocate_frame()?;
+    let new_l1_frame = allocate_zeroed_page_table()?;
     let new_l1_phys = new_l1_frame.start_address().as_u64();
     let new_l1 = unsafe { &mut *((new_l1_phys + phys_off) as *mut PageTable) };
-    new_l1.zero();
 
     for i in 0..512 {
         let entry = src_l1[i].clone();
@@ -743,10 +751,9 @@ fn clone_kernel_l1_table_without_user_entries(src_l1_phys: u64, phys_off: u64) -
 
 fn clone_kernel_l2_table_without_user_entries(src_l2_phys: u64, phys_off: u64) -> Result<u64> {
     let src_l2 = unsafe { &*((src_l2_phys + phys_off) as *const PageTable) };
-    let new_l2_frame = frame::allocate_frame()?;
+    let new_l2_frame = allocate_zeroed_page_table()?;
     let new_l2_phys = new_l2_frame.start_address().as_u64();
     let new_l2 = unsafe { &mut *((new_l2_phys + phys_off) as *mut PageTable) };
-    new_l2.zero();
 
     for i in 0..512 {
         let entry = src_l2[i].clone();
@@ -763,11 +770,40 @@ fn clone_kernel_l2_table_without_user_entries(src_l2_phys: u64, phys_off: u64) -
         }
 
         let new_l1_phys =
-            clone_kernel_l1_table_without_user_entries(entry.addr().as_u64(), phys_off)?;
-        new_l2[i].set_addr(PhysAddr::new(new_l1_phys), flags);
+            match clone_kernel_l1_table_without_user_entries(entry.addr().as_u64(), phys_off) {
+                Ok(phys) => phys,
+                Err(error) => {
+                    for cloned_entry in new_l2.iter() {
+                        let cloned_flags = cloned_entry.flags();
+                        if !cloned_entry.is_unused()
+                            && cloned_flags.contains(PageTableFlags::PRESENT)
+                            && cloned_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+                            && !cloned_flags.contains(PageTableFlags::HUGE_PAGE)
+                        {
+                            deallocate_4k_frame_by_phys(cloned_entry.addr().as_u64());
+                        }
+                    }
+                    deallocate_4k_frame_by_phys(new_l2_phys);
+                    return Err(error);
+                }
+            };
+        new_l2[i].set_addr(
+            PhysAddr::new(new_l1_phys),
+            flags | PageTableFlags::USER_ACCESSIBLE,
+        );
     }
 
     Ok(new_l2_phys)
+}
+
+struct IncompleteUserPageTable(Option<u64>);
+
+impl Drop for IncompleteUserPageTable {
+    fn drop(&mut self) {
+        if let Some(table_phys) = self.0.take() {
+            let _ = destroy_user_page_table(table_phys);
+        }
+    }
 }
 
 /// ユーザープロセス用の新しいL4ページテーブルを作成する
@@ -794,10 +830,10 @@ pub fn create_user_page_table() -> Result<u64> {
     let kernel_l4 = unsafe { &*((kernel_l4_phys + phys_off) as *const PageTable) };
 
     // 新しいL4フレームを確保してゼロ初期化
-    let new_l4_frame = frame::allocate_frame()?;
+    let new_l4_frame = allocate_zeroed_page_table()?;
     let new_l4_phys = new_l4_frame.start_address().as_u64();
     let new_l4 = unsafe { &mut *((new_l4_phys + phys_off) as *mut PageTable) };
-    new_l4.zero();
+    let mut incomplete_table = IncompleteUserPageTable(Some(new_l4_phys));
 
     // KPTI強化: L4[0]（低位512GiB）のみ最小限コピーする。
     // これにより上位L4エントリを通じた広域カーネルマッピングをユーザーテーブルから除外する。
@@ -806,20 +842,24 @@ pub fn create_user_page_table() -> Result<u64> {
         let kernel_l3_phys = kernel_l4[0].addr().as_u64();
         let kernel_l3 = unsafe { &*((kernel_l3_phys + phys_off) as *const PageTable) };
 
-        let new_l3_frame = frame::allocate_frame()?;
+        let new_l3_frame = allocate_zeroed_page_table()?;
         let new_l3_phys = new_l3_frame.start_address().as_u64();
         let new_l3 = unsafe { &mut *((new_l3_phys + phys_off) as *mut PageTable) };
-        new_l3.zero();
+        new_l4[0].set_addr(
+            PhysAddr::new(new_l3_phys),
+            kernel_l4[0].flags() | PageTableFlags::USER_ACCESSIBLE,
+        );
 
         // L3[0]: 最初の1GB（カーネルコード・スタックとユーザーコードが混在）
         if !kernel_l3[0].is_unused() {
             let kernel_l2_phys = kernel_l3[0].addr().as_u64();
             let new_l2_phys = clone_kernel_l2_table_without_user_entries(kernel_l2_phys, phys_off)?;
 
-            new_l3[0].set_addr(PhysAddr::new(new_l2_phys), kernel_l3[0].flags());
+            new_l3[0].set_addr(
+                PhysAddr::new(new_l2_phys),
+                kernel_l3[0].flags() | PageTableFlags::USER_ACCESSIBLE,
+            );
         }
-
-        new_l4[0].set_addr(PhysAddr::new(new_l3_phys), kernel_l4[0].flags());
     }
 
     // 0x800000 アドレス（ユーザーコード領域）用に新しい L3/L2/L1 テーブルを事前に割り当てる
@@ -827,42 +867,41 @@ pub fn create_user_page_table() -> Result<u64> {
     if user_l3_phys != 0 {
         let user_l3 = unsafe { &mut *((user_l3_phys + phys_off) as *mut PageTable) };
 
-        let new_l2_frame = frame::allocate_frame()?;
-        let new_l2_phys = new_l2_frame.start_address().as_u64();
-        let new_l2 = unsafe { &mut *((new_l2_phys + phys_off) as *mut PageTable) };
-        new_l2.zero();
-
-        // ブートローダーのL2テーブルからカーネル領域エントリをコピー
-        if !user_l3[0].is_unused() {
-            let old_l2_phys = user_l3[0].addr().as_u64();
-            let old_l2 = unsafe { &*((old_l2_phys + phys_off) as *const PageTable) };
-
-            for i in 0..512 {
-                let entry = old_l2[i].clone();
-                let flags = entry.flags();
-                // カーネル領域（USER_ACCESSIBLEでない）のみコピー
-                if !entry.is_unused() && !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
-                    new_l2[i] = entry;
-                }
-            }
+        if user_l3[0].is_unused() {
+            let new_l2_frame = allocate_zeroed_page_table()?;
+            user_l3[0].set_addr(
+                new_l2_frame.start_address(),
+                PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::USER_ACCESSIBLE,
+            );
+        } else {
+            let l2_addr = user_l3[0].addr();
+            let l2_flags = user_l3[0].flags() | PageTableFlags::USER_ACCESSIBLE;
+            user_l3[0].set_addr(
+                l2_addr,
+                l2_flags,
+            );
         }
+        let user_l2_phys = user_l3[0].addr().as_u64();
+        let user_l2 = unsafe { &mut *((user_l2_phys + phys_off) as *mut PageTable) };
 
         // L2[4] エントリ（0x800000-0x9FFFFF）に新しいL1テーブルをセット
         // NOTE: L2 エントリは 2MiB 単位なので、0x800000 >> 21 == 4
-        let new_l1_frame = frame::allocate_frame()?;
+        let new_l1_frame = allocate_zeroed_page_table()?;
         let new_l1_phys = new_l1_frame.start_address().as_u64();
-        let new_l1 = unsafe { &mut *((new_l1_phys + phys_off) as *mut PageTable) };
-        new_l1.zero();
-
-        new_l2[4].set_addr(
+        let old_entry = user_l2[4].clone();
+        let old_flags = old_entry.flags();
+        if !old_entry.is_unused()
+            && old_flags.contains(PageTableFlags::PRESENT)
+            && old_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+            && !old_flags.contains(PageTableFlags::HUGE_PAGE)
+        {
+            deallocate_4k_frame_by_phys(old_entry.addr().as_u64());
+        }
+        user_l2[4].set_addr(
             PhysAddr::new(new_l1_phys),
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-        );
-
-        // L3[0] を新しいL2テーブルに切り替え
-        user_l3[0].set_addr(
-            PhysAddr::new(new_l2_phys),
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
         );
     }
 
@@ -881,6 +920,7 @@ pub fn create_user_page_table() -> Result<u64> {
         return Err(error);
     }
 
+    incomplete_table.0 = None;
     Ok(new_l4_phys)
 }
 
@@ -919,10 +959,9 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
             let mut base_flags = l2e.flags();
             base_flags.remove(Flags::HUGE_PAGE | Flags::USER_ACCESSIBLE);
 
-            let new_l1_frame = frame::allocate_frame()?;
+            let new_l1_frame = allocate_zeroed_page_table()?;
             let new_l1_phys = new_l1_frame.start_address().as_u64();
             let new_l1 = unsafe { &mut *((new_l1_phys + phys_off) as *mut PageTable) };
-            new_l1.zero();
             for i in 0..512 {
                 new_l1[i].set_addr(PhysAddr::new(huge_phys + (i as u64 * 4096)), base_flags);
             }
