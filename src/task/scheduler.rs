@@ -218,7 +218,20 @@ pub fn schedule() -> Option<ThreadId> {
 }
 
 /// 次に実行すべきスレッドIDとスロットを取得
+#[inline]
 fn schedule_with_slot() -> Option<(ThreadId, usize)> {
+    #[cfg(feature = "performance-instrumentation")]
+    let started = crate::performance::timestamp();
+    let selected = select_next_thread();
+    #[cfg(feature = "performance-instrumentation")]
+    crate::performance::record_latency(
+        crate::performance::LatencyMetric::SchedulerRunQueue,
+        started,
+    );
+    selected
+}
+
+fn select_next_thread() -> Option<(ThreadId, usize)> {
     let mut queue = THREAD_QUEUE.lock();
 
     let current = current_thread_id();
@@ -247,8 +260,14 @@ fn schedule_with_slot() -> Option<(ThreadId, usize)> {
     let next_slot =
         queue.next_ready_slot_for_cpu_after(current_slot, crate::percpu::current_cpu_id())?;
     let cpu = crate::percpu::current_cpu_id();
+    #[cfg(feature = "performance-instrumentation")]
+    let mut wakeup_started = None;
     let (next_id, next_pid, interactive_score, cpu_burst_score) =
         queue.get_slot_mut(next_slot).map(|thread| {
+            #[cfg(feature = "performance-instrumentation")]
+            {
+                wakeup_started = thread.take_wakeup_started_cycles();
+            }
             if thread.cpu_affinity().is_none() {
                 thread.set_cpu_affinity(Some(cpu));
                 if cpu != 0 {
@@ -285,6 +304,13 @@ fn schedule_with_slot() -> Option<(ThreadId, usize)> {
     );
 
     drop(queue);
+    #[cfg(feature = "performance-instrumentation")]
+    if let Some(started) = wakeup_started {
+        crate::performance::record_latency(
+            crate::performance::LatencyMetric::SchedulerWakeup,
+            started,
+        );
+    }
     let mut scheduler = scheduler().lock();
     scheduler.set_time_slice(next_time_slice.max(1));
     scheduler.reset_slice();

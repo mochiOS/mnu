@@ -259,6 +259,9 @@ pub struct Thread {
     interactive_score: u8,
     /// 直近の量子使い切りの傾向
     cpu_burst_score: u8,
+    #[cfg(feature = "performance-instrumentation")]
+    /// SleepingまたはBlockedからReadyになった時刻
+    wakeup_started_cycles: u64,
 }
 
 const KSTACK_SLOT_BYTES: usize = 4096 * 16;
@@ -732,6 +735,8 @@ impl Thread {
             fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
+            #[cfg(feature = "performance-instrumentation")]
+            wakeup_started_cycles: 0,
         }
     }
 
@@ -858,6 +863,8 @@ impl Thread {
             fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
+            #[cfg(feature = "performance-instrumentation")]
+            wakeup_started_cycles: 0,
         }
     }
 
@@ -1001,6 +1008,8 @@ impl Thread {
             fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
+            #[cfg(feature = "performance-instrumentation")]
+            wakeup_started_cycles: 0,
         }
     }
 
@@ -1096,6 +1105,17 @@ impl Thread {
     pub fn note_interactive_wakeup(&mut self) {
         self.interactive_score = self.interactive_score.saturating_add(2).min(8);
         self.cpu_burst_score = self.cpu_burst_score.saturating_sub(1);
+        #[cfg(feature = "performance-instrumentation")]
+        {
+            self.wakeup_started_cycles = crate::performance::timestamp().max(1);
+        }
+    }
+
+    #[cfg(feature = "performance-instrumentation")]
+    pub fn take_wakeup_started_cycles(&mut self) -> Option<u64> {
+        let started = self.wakeup_started_cycles;
+        self.wakeup_started_cycles = 0;
+        (started != 0).then_some(started)
     }
 
     pub fn note_voluntary_yield(&mut self) {
