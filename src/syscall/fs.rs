@@ -184,10 +184,9 @@ fn ensure_fs_path_access_for_process(
     pid_raw: u64,
 ) -> Result<(), u64> {
     let identity_storage = identity_storage_path_allows(path, pid_raw);
-    let shared_configuration = shared_configuration_path_allows(path, needed_rights, pid_raw);
     ensure_fs_capability_access_for_process(path, needed_rights, pid_raw)?;
     ensure_unix_traversal_for_process(path, pid_raw)?;
-    if identity_storage || shared_configuration {
+    if identity_storage {
         return Ok(());
     }
     if (needed_rights & (PATH_CREATE | PATH_DELETE)) != 0 {
@@ -216,9 +215,6 @@ fn ensure_fs_capability_access_for_process(
     pid_raw: u64,
 ) -> Result<(), u64> {
     if identity_storage_path_allows(path, pid_raw) {
-        return Ok(());
-    }
-    if shared_configuration_path_allows(path, needed_rights, pid_raw) {
         return Ok(());
     }
     if let Some(entry) = path::lookup_path(path) {
@@ -272,27 +268,6 @@ fn path_is_in_identity_storage(normalized: &str, storage_root: &str, identity: &
         || relative
             .strip_prefix(identity)
             .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-fn shared_configuration_path_allows(path: &str, needed_rights: u32, pid_raw: u64) -> bool {
-    let Some(storage_root) = crate::config::kernel()
-        .policy_paths
-        .shared_configuration_root()
-    else {
-        return false;
-    };
-    let normalized = normalize_path(path);
-    if !path_is_in_shared_configuration(&normalized, storage_root) {
-        return false;
-    }
-    let writes = (needed_rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) != 0;
-    let reads = (needed_rights & (PATH_READ | PATH_LIST | PATH_EXEC)) != 0;
-    (!writes || process_has_cap(pid_raw, Capability::SettingsWrite))
-        && (!reads || process_has_cap(pid_raw, Capability::SettingsRead))
-}
-
-fn path_is_in_shared_configuration(normalized: &str, storage_root: &str) -> bool {
-    normalized == storage_root || path_relative_to(normalized, storage_root).is_some()
 }
 
 fn path_relative_to<'a>(normalized: &'a str, root: &str) -> Option<&'a str> {
@@ -2335,8 +2310,8 @@ mod unix_mode_tests {
     use super::{
         O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE,
         UNIX_EXECUTE, access_mode_rights, capability_requirement_satisfied,
-        open_path_required_rights, path_is_in_identity_storage, path_is_in_shared_configuration,
-        sticky_directory_allows_delete, unix_mode_allows,
+        open_path_required_rights, path_is_in_identity_storage, sticky_directory_allows_delete,
+        unix_mode_allows,
     };
     use crate::capability::Capability;
 
@@ -2440,26 +2415,6 @@ mod unix_mode_tests {
             "/policy/identity-data/process.example.shell/settings",
             "/somewhere/else",
             "process.example.shell"
-        ));
-    }
-
-    #[test]
-    fn shared_configuration_is_scoped_to_configured_root() {
-        assert!(path_is_in_shared_configuration(
-            "/policy/configuration",
-            "/policy/configuration"
-        ));
-        assert!(path_is_in_shared_configuration(
-            "/policy/configuration/appearance.conf",
-            "/policy/configuration"
-        ));
-        assert!(!path_is_in_shared_configuration(
-            "/policy/configuration-other",
-            "/policy/configuration"
-        ));
-        assert!(!path_is_in_shared_configuration(
-            "/system/configuration",
-            "/policy/configuration"
         ));
     }
 

@@ -197,8 +197,6 @@ pub enum Capability {
     DeviceInput,
     DeviceStorage,
     DeviceNet,
-    SettingsRead,
-    SettingsWrite,
     CapabilitiesManage,
     Unsandboxed,
     DeveloperProfile,
@@ -236,8 +234,6 @@ impl Capability {
             DeviceInput => "device.input",
             DeviceStorage => "device.storage",
             DeviceNet => "device.net",
-            SettingsRead => "settings.read",
-            SettingsWrite => "settings.write",
             CapabilitiesManage => "capabilities.manage",
             Unsandboxed => "unsandboxed",
             DeveloperProfile => "developer.profile",
@@ -267,7 +263,6 @@ impl Capability {
                 | Capability::FsWriteRemovable
                 | Capability::DisplayRead
                 | Capability::SystemTimeRead
-                | Capability::SettingsRead
                 | Capability::Dynamic(_)
         )
     }
@@ -300,8 +295,6 @@ impl Capability {
             DeviceInput,
             DeviceStorage,
             DeviceNet,
-            SettingsRead,
-            SettingsWrite,
             CapabilitiesManage,
             Unsandboxed,
             DeveloperProfile,

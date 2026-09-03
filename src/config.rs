@@ -62,7 +62,6 @@ pub struct FsConfig {
 #[derive(Clone, Default)]
 pub struct PolicyPaths {
     identity_storage_root: String,
-    shared_configuration_root: String,
     execution_allowlist: String,
     audit_log: String,
     process_aliases: String,
@@ -71,10 +70,6 @@ pub struct PolicyPaths {
 impl PolicyPaths {
     pub fn identity_storage_root(&self) -> Option<&str> {
         configured_path(&self.identity_storage_root)
-    }
-
-    pub fn shared_configuration_root(&self) -> Option<&str> {
-        configured_path(&self.shared_configuration_root)
     }
 
     pub fn execution_allowlist(&self) -> Option<&str> {
@@ -351,9 +346,6 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
         "policy.identity_storage_root" => {
             set_policy_path(&mut config.policy_paths.identity_storage_root, value);
         }
-        "policy.shared_configuration_root" => {
-            set_policy_path(&mut config.policy_paths.shared_configuration_root, value);
-        }
         "policy.execution_allowlist" => {
             set_policy_path(&mut config.policy_paths.execution_allowlist, value);
         }
@@ -461,7 +453,6 @@ mod tests {
         let config = KernelConfig::default();
 
         assert_eq!(config.policy_paths.identity_storage_root(), None);
-        assert_eq!(config.policy_paths.shared_configuration_root(), None);
         assert_eq!(config.policy_paths.execution_allowlist(), None);
         assert_eq!(config.policy_paths.audit_log(), None);
         assert_eq!(config.policy_paths.process_aliases(), None);
