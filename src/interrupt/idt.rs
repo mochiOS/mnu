@@ -764,7 +764,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 /// - `error_code`: ページフォルトのエラーコード（エラーコードのビットフィールドには、ページが存在しないか、書き込みアクセスか、ユーザーモードかなどの情報が含まれる）
 extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
+    mut stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
     #[cfg(feature = "performance-instrumentation")]
@@ -778,6 +778,7 @@ extern "x86-interrupt" fn page_fault_handler(
     let faulting_addr = Cr2::read().unwrap_or(VirtAddr::new(0));
     let is_user_mode = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
     let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(is_user_mode);
+    normalize_user_iret_frame(&mut stack_frame);
     let user_page_table = is_user_mode
         .then(|| {
             crate::task::current_thread_id()
