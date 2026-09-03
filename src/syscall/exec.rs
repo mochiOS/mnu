@@ -11,7 +11,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-const EM_X86_64: u16 = 0x3E;
+mod image;
+
+use image::{map_elf_image, ElfImageLayout};
+
 use mnu_abi::exec::{ENVIRONMENT_PREFIX, SECURITY_IDENTITY_PREFIX};
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1074,16 +1077,6 @@ fn exec_with_data(
         // page tables. Hold the guard for the whole scope so it's restored on drop.
         let _smap_guard = crate::cpu::SmapSmepGuard::new();
 
-        // MED-27修正: エントリポイントが0の場合はELFが無効として拒否する
-        // 以前はentry=0のままプロセスを作成し、仮想アドレス0にジャンプしていた
-        let entry = match measurement.parse(|| crate::elf::entry_point(data)) {
-            Some(e) if e != 0 => e,
-            _ => {
-                crate::warn!("exec: ELF entry point is 0 or missing, rejecting");
-                return crate::syscall::types::EINVAL;
-            }
-        };
-        crate::debug!("ELF entry: {:#x}", entry);
         let new_pt_phys = match crate::mem::paging::create_user_page_table() {
             Ok(phys) => phys,
             Err(e) => {
@@ -1101,120 +1094,19 @@ fn exec_with_data(
         // Note: SMAP/SMEP are already disabled globally during kernel initialization
         // and are kept disabled for all exec operations. See src/core/mem/mod.rs:66
 
-        // ELFアーキテクチャ検証 (MED-07)
-        let mut phdr_vaddr: u64 = 0;
-        let mut phentsize: u64 = 0;
-        let mut phnum: u64 = 0;
-        if let Some(eh) = measurement.parse(|| crate::elf::parse_elf_header(data)) {
-            if eh.e_machine != EM_X86_64 {
-                crate::warn!("ELF e_machine {:#x} is not x86-64, rejecting", eh.e_machine);
-                return crate::syscall::types::EINVAL;
+        let ElfImageLayout {
+            entry,
+            phdr_vaddr,
+            phentsize,
+            phnum,
+            deferred_zero_regions,
+        } = match map_elf_image(data, new_pt_phys, measurement) {
+            Ok(layout) => layout,
+            Err(errno) => {
+                crate::warn!("exec: invalid or unmappable ELF image '{}': {}", exec_path, errno);
+                return errno;
             }
-            phentsize = eh.e_phentsize as u64;
-            phnum = eh.e_phnum as u64;
-            let phoff = eh.e_phoff as usize;
-            let phentsz = eh.e_phentsize as usize;
-            // phentszが0の場合は無限ループを防ぐため拒否 (MED-08)
-            if phentsz == 0 {
-                crate::warn!("ELF phentsize is 0, rejecting");
-                return crate::syscall::types::EINVAL;
-            }
-            let phnum: usize = eh.e_phnum as usize;
-            let mut load_base: u64 = 0;
-            let mut load_base_set = false;
-            for i in 0usize..phnum {
-                // オーバーフロー安全な乗算と加算 (MED-08)
-                let off_hdr = match i.checked_mul(phentsz).and_then(|x| phoff.checked_add(x)) {
-                    Some(o) if o < data.len() => o,
-                    _ => {
-                        crate::warn!("ELF program header offset overflow or out of bounds");
-                        return crate::syscall::types::EINVAL;
-                    }
-                };
-                if let Some(ph) = measurement.parse(|| crate::elf::parse_phdr(data, off_hdr)) {
-                    if ph.p_type == crate::elf::PT_LOAD {
-                        let vaddr = ph.p_vaddr;
-                        let memsz = ph.p_memsz;
-                        let filesz = ph.p_filesz;
-                        let src_off = ph.p_offset as usize;
-                        let flags = ph.p_flags;
-                        let writable = (flags & 0x2) != 0;
-                        let executable = (flags & 0x1) != 0;
-
-                        // ELFセグメントのvaddrがユーザー空間内であることを検証 (CRIT-05)
-                        const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
-                        if vaddr >= USER_SPACE_END {
-                            crate::warn!("ELF segment vaddr {:#x} is in kernel space", vaddr);
-                            return crate::syscall::types::EINVAL;
-                        }
-                        if memsz > 0 {
-                            match vaddr.checked_add(memsz) {
-                                Some(e) if e <= USER_SPACE_END => {}
-                                _ => {
-                                    crate::warn!("ELF segment vaddr+memsz overflows user space");
-                                    return crate::syscall::types::EINVAL;
-                                }
-                            }
-                        }
-
-                        // ELFセグメントの境界チェック (CRIT-04)
-                        let src_end = match src_off.checked_add(filesz as usize) {
-                            Some(e) if e <= data.len() => e,
-                            _ => {
-                                crate::warn!(
-                                    "ELF segment src offset+filesz out of bounds: seg={} src_off={} filesz={} data.len()={}",
-                                    i,
-                                    src_off,
-                                    filesz,
-                                    data.len()
-                                );
-                                return crate::syscall::types::EINVAL;
-                            }
-                        };
-
-                        crate::debug!(
-                            "Mapping seg {} -> {:#x} (filesz={}, memsz={})",
-                            i,
-                            vaddr,
-                            filesz,
-                            memsz
-                        );
-                        let seg_src = &data[src_off..src_end];
-
-                        if !load_base_set {
-                            load_base = ph.p_vaddr.saturating_sub(ph.p_offset);
-                            load_base_set = true;
-                        }
-
-                        let mapped = measurement.load(|| {
-                            crate::mem::paging::map_and_copy_segment_to(
-                                new_pt_phys,
-                                vaddr,
-                                filesz,
-                                memsz,
-                                seg_src,
-                                writable,
-                                executable,
-                            )
-                        });
-                        if let Err(e) = mapped {
-                            crate::warn!("Failed to map segment at {:#x}: {:?}", vaddr, e);
-                            crate::warn!(
-                                "  new_pt_phys={:#x}, filesz={}, memsz={}, writable={}, executable={}",
-                                new_pt_phys,
-                                filesz,
-                                memsz,
-                                writable,
-                                executable
-                            );
-                            return crate::syscall::types::EINVAL;
-                        }
-                    }
-                }
-            }
-
-            phdr_vaddr = load_base.saturating_add(eh.e_phoff);
-        }
+        };
 
         let base_name = exec_path.rsplit('/').next().unwrap_or(process_name);
         let argv0 = base_name.strip_suffix(".elf").unwrap_or(base_name);
@@ -1367,6 +1259,7 @@ fn exec_with_data(
             proc.set_kernel_authorities_for_exec(authorities);
         }
         proc.set_page_table(new_pt_phys);
+        proc.set_mmap_regions(deferred_zero_regions);
         proc.set_stack_bottom(stack_base_vaddr);
         proc.set_stack_top(stack_end_vaddr + 4096);
         proc.set_exe_path(exec_path);
@@ -1594,13 +1487,6 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     );
     let data: &[u8] = &data_vec;
 
-    // ELF エントリポイントとセグメントを解析
-    let entry = match measurement.parse(|| crate::elf::entry_point(data)) {
-        Some(e) if e != 0 => e,
-        None => return EINVAL,
-        _ => return EINVAL,
-    };
-
     // 新しいページテーブルを作成
     let new_pt_phys = match crate::mem::paging::create_user_page_table() {
         Ok(p) => p,
@@ -1608,89 +1494,16 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     };
     let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
 
-    // PT_LOAD セグメントをマップ / ELF メタデータを収集
-    const USER_SPACE_END_EXECVE: u64 = 0x0000_7FFF_FFFF_FFFF;
-    let mut phdr_vaddr: u64 = 0;
-    let mut phentsize: u64 = 0;
-    let mut phnum: u64 = 0;
-    if let Some(eh) = measurement.parse(|| crate::elf::parse_elf_header(data)) {
-        // ELFアーキテクチャ検証 (MED-07)
-        if eh.e_machine != EM_X86_64 {
-            crate::warn!("execve: ELF e_machine {:#x} is not x86-64", eh.e_machine);
-            return EINVAL;
-        }
-        phentsize = eh.e_phentsize as u64;
-        phnum = eh.e_phnum as u64;
-        let phoff = eh.e_phoff as usize;
-        let phentsz = eh.e_phentsize as usize;
-        // phentszが0の場合は無限ループを防ぐ (MED-08)
-        if phentsz == 0 {
-            return EINVAL;
-        }
-        let n = eh.e_phnum as usize;
-        let mut load_base: u64 = 0;
-        let mut load_base_set = false;
-        for i in 0..n {
-            // オーバーフロー安全な乗算と加算 (MED-08)
-            let off_hdr = match i.checked_mul(phentsz).and_then(|x| phoff.checked_add(x)) {
-                Some(o) if o < data.len() => o,
-                _ => return EINVAL,
-            };
-            if let Some(ph) = measurement.parse(|| crate::elf::parse_phdr(data, off_hdr)) {
-                if ph.p_type == crate::elf::PT_LOAD {
-                    // ELFセグメントのvaddrがユーザー空間内であることを検証 (CRIT-05)
-                    if ph.p_vaddr >= USER_SPACE_END_EXECVE {
-                        crate::warn!(
-                            "execve: ELF segment vaddr {:#x} is in kernel space",
-                            ph.p_vaddr
-                        );
-                        return EINVAL;
-                    }
-                    if ph.p_memsz > 0 {
-                        match ph.p_vaddr.checked_add(ph.p_memsz) {
-                            Some(e) if e <= USER_SPACE_END_EXECVE => {}
-                            _ => {
-                                crate::warn!(
-                                    "execve: ELF segment vaddr+memsz overflows user space"
-                                );
-                                return EINVAL;
-                            }
-                        }
-                    }
-                    // 最初の PT_LOAD から load_base を計算 (AT_PHDR 算出用)
-                    if !load_base_set {
-                        load_base = ph.p_vaddr.saturating_sub(ph.p_offset);
-                        load_base_set = true;
-                    }
-                    // ELFセグメントの境界チェック (CRIT-04)
-                    let src_off = ph.p_offset as usize;
-                    let src_end = match src_off.checked_add(ph.p_filesz as usize) {
-                        Some(e) if e <= data.len() => e,
-                        _ => {
-                            crate::warn!("execve: ELF segment src offset+filesz out of bounds");
-                            return EINVAL;
-                        }
-                    };
-                    let seg_src = &data[src_off..src_end];
-                    let mapped = measurement.load(|| {
-                        crate::mem::paging::map_and_copy_segment_to(
-                            new_pt_phys,
-                            ph.p_vaddr,
-                            ph.p_filesz,
-                            ph.p_memsz,
-                            seg_src,
-                            (ph.p_flags & 0x2) != 0,
-                            (ph.p_flags & 0x1) != 0,
-                        )
-                    });
-                    if let Err(error) = mapped {
-                        return mapping_error_errno(error);
-                    }
-                }
-            }
-        }
-        phdr_vaddr = load_base + eh.e_phoff;
-    }
+    let ElfImageLayout {
+        entry,
+        phdr_vaddr,
+        phentsize,
+        phnum,
+        deferred_zero_regions,
+    } = match map_elf_image(data, new_pt_phys, &mut measurement) {
+        Ok(layout) => layout,
+        Err(errno) => return errno,
+    };
 
     // ユーザースタックをセットアップ (Linux x86_64 ABI: argc, argv[], NULL, envp[], NULL, auxv[])
     // argv / envp をユーザー空間から読み込む
@@ -1810,6 +1623,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         p.set_heap_start(heap_base);
         p.set_heap_end(heap_base + heap_map_size);
         p.set_ipc_mapping_end(0);
+        p.set_mmap_regions(deferred_zero_regions);
         p.set_stack_bottom(stack_base_vaddr);
         p.set_stack_top(stack_end_vaddr + 4096);
         p.set_exe_path(&path_owned);

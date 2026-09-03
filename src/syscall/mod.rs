@@ -36,36 +36,52 @@ static FIRMWARE_PRESENT_BUFFER: crate::interrupt::spinlock::SpinLock<[u8; FIRMWA
 ///
 /// x86-64 canonical ユーザー空間上限: 0x0000_7FFF_FFFF_FFFF
 pub fn validate_user_ptr(ptr: u64, len: u64) -> bool {
-    if ptr == 0 {
+    if !is_canonical_user_range(ptr, len) {
         return false;
     }
-    // x86-64 ユーザー空間の上限アドレス (canonical hole 下側)
-    const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
-    if ptr > USER_SPACE_END {
-        return false;
-    }
-    let end_inclusive = if len == 0 {
-        ptr
-    } else {
-        match ptr.checked_add(len - 1) {
-            Some(e) => e,
-            None => return false, // 整数オーバーフロー
-        }
-    };
-    if end_inclusive > USER_SPACE_END {
-        return false;
+    if len == 0 {
+        return true;
     }
 
-    let user_pt = match crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-        .and_then(|pid| crate::task::with_process(pid, |p| p.page_table()))
-        .flatten()
+    let pid = match crate::task::current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
     {
-        Some(pt) => pt,
+        Some(pid) => pid,
         None => return false,
     };
-
-    crate::mem::paging::is_user_range_mapped_in_table(user_pt, ptr, len)
+    crate::task::with_process(pid, |process| {
+        let Some(table_phys) = process.page_table() else {
+            return false;
+        };
+        if crate::mem::paging::is_user_range_mapped_in_table(table_phys, ptr, len) {
+            return true;
+        }
+        let end = ptr + len;
+        let mut address = ptr;
+        while address < end {
+            let next_page = (address | 0xfff).saturating_add(1).min(end);
+            let chunk_len = next_page - address;
+            let resident = crate::mem::paging::is_user_range_mapped_in_table(
+                table_phys,
+                address,
+                chunk_len,
+            );
+            if !resident {
+                let valid_region = process.find_mmap_region(address).is_some_and(|region| {
+                    region.is_readable()
+                        && region
+                            .end()
+                            .is_some_and(|region_end| next_page <= region_end)
+                });
+                if !valid_region {
+                    return false;
+                }
+            }
+            address = next_page;
+        }
+        true
+    })
+    .unwrap_or(false)
 }
 
 fn current_user_page_table() -> Option<u64> {
@@ -417,7 +433,11 @@ pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
     if src_ptr == 0 {
         return Err(EFAULT);
     }
-    crate::mem::paging::copy_from_user_in_table(user_pt, src_ptr, dst).map_err(|err| {
+    let mut result = crate::mem::paging::copy_from_user_in_table(user_pt, src_ptr, dst);
+    if result.is_err() && fault_in_user_range(user_pt, src_ptr, dst.len() as u64, false) {
+        result = crate::mem::paging::copy_from_user_in_table(user_pt, src_ptr, dst);
+    }
+    result.map_err(|err| {
         let (syscall_num, syscall_args) = last_syscall_snapshot();
         let pid = crate::syscall::security::current_process_id()
             .map(|pid| pid.as_u64())
@@ -448,6 +468,31 @@ pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
     })
 }
 
+#[inline(never)]
+fn fault_in_user_range(table_phys: u64, address: u64, len: u64, write: bool) -> bool {
+    if !is_canonical_user_range(address, len) {
+        return false;
+    }
+
+    let end = address + len - 1;
+    let mut page = address & !0xfff;
+    let end_page = end & !0xfff;
+    loop {
+        let resident = if write {
+            crate::mem::paging::is_user_range_writable_in_table(table_phys, page, 1)
+        } else {
+            crate::mem::paging::is_user_range_mapped_in_table(table_phys, page, 1)
+        };
+        if !resident && !process::handle_user_mmap_fault(page, write, false) {
+            return false;
+        }
+        if page == end_page {
+            return true;
+        }
+        page += 4096;
+    }
+}
+
 /// バイト列をユーザー空間へコピーする（コピー元はカーネル空間）。
 pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
     if src.is_empty() {
@@ -460,7 +505,11 @@ pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
     if dst_ptr == 0 {
         return Err(EFAULT);
     }
-    crate::mem::paging::copy_to_user_in_table(user_pt, dst_ptr, src).map_err(|err| {
+    let mut result = crate::mem::paging::copy_to_user_in_table(user_pt, dst_ptr, src);
+    if result.is_err() && fault_in_user_range(user_pt, dst_ptr, src.len() as u64, true) {
+        result = crate::mem::paging::copy_to_user_in_table(user_pt, dst_ptr, src);
+    }
+    result.map_err(|err| {
         let (syscall_num, syscall_args) = last_syscall_snapshot();
         let pid = crate::syscall::security::current_process_id()
             .map(|pid| pid.as_u64())

@@ -260,6 +260,14 @@ impl MmapRegion {
         (self.prot & 0x2) != 0
     }
 
+    pub fn is_readable(&self) -> bool {
+        (self.prot & 0x1) != 0
+    }
+
+    pub fn is_executable(&self) -> bool {
+        (self.prot & 0x4) != 0
+    }
+
     pub fn is_shared(&self) -> bool {
         (self.flags & 0x1) != 0
     }

@@ -810,11 +810,10 @@ extern "x86-interrupt" fn page_fault_handler(
 
     if is_user_mode
         && !copy_on_write_failed
-        && (!error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION)
-            || error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE))
         && crate::syscall::process::handle_user_mmap_fault(
             faulting_addr.as_u64(),
             error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE),
+            error_code.contains(x86_64::structures::idt::PageFaultErrorCode::INSTRUCTION_FETCH),
         )
     {
         leave_to_user(entered_from_user);

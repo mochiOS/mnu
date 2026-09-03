@@ -746,8 +746,8 @@ pub fn wait(_pid: u64, status_ptr: u64, options: u64) -> u64 {
     }
 }
 
-/// page fault を契機に file-backed mmap を 1 ページだけ解決する。
-pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool) -> bool {
+/// page fault を契機に mmap を 1 ページだけ解決する。
+pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool, is_execute: bool) -> bool {
     let tid = match current_thread_id() {
         Some(t) => t,
         None => return false,
@@ -787,12 +787,16 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool) -> bool {
             crate::debug!("[MMAP_FAULT] write fault on read-only mapping");
             return Err(EPERM);
         }
+        if is_execute && !region.is_executable() {
+            crate::debug!("[MMAP_FAULT] instruction fault on non-executable mapping");
+            return Err(EPERM);
+        }
         let page_off = match page_addr.checked_sub(region.start()) {
             Some(v) => v as usize,
             None => return Err(EINVAL),
         };
 
-        if crate::mem::paging::virt_to_phys_in_table(pt_phys, page_addr).is_some() {
+        if crate::mem::paging::is_user_range_mapped_in_table(pt_phys, page_addr, 1) {
             if !is_write {
                 crate::debug!("[MMAP_FAULT] page already mapped {:#x}", page_addr);
                 return Err(EINVAL);
@@ -824,7 +828,7 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool) -> bool {
             4096,
             src,
             is_write && region.is_writable(),
-            false,
+            region.is_executable(),
         )
         .is_err()
         {

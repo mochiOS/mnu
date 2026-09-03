@@ -690,8 +690,13 @@ pub fn copy_to_user_in_table(table_phys: u64, dst_ptr: u64, src: &[u8]) -> Resul
     Ok(())
 }
 
-/// 指定したページテーブルでユーザー範囲がすべて有効にマップされているか確認する
-pub fn is_user_range_mapped_in_table(table_phys: u64, addr: u64, len: u64) -> bool {
+#[inline(never)]
+fn is_user_range_accessible_in_table(
+    table_phys: u64,
+    addr: u64,
+    len: u64,
+    require_writable: bool,
+) -> bool {
     if addr > USER_SPACE_END {
         return false;
     }
@@ -707,7 +712,12 @@ pub fn is_user_range_mapped_in_table(table_phys: u64, addr: u64, len: u64) -> bo
     let mut page_addr = addr & !0xfffu64;
     let end_page = end_inclusive & !0xfffu64;
     loop {
-        if !page_is_user_mapped_in_table(table_phys, page_addr) {
+        let accessible = user_page_flags_in_table(table_phys, page_addr).is_some_and(|flags| {
+            flags.contains(PageTableFlags::PRESENT)
+                && flags.contains(PageTableFlags::USER_ACCESSIBLE)
+                && (!require_writable || flags.contains(PageTableFlags::WRITABLE))
+        });
+        if !accessible {
             return false;
         }
         if page_addr == end_page {
@@ -718,6 +728,15 @@ pub fn is_user_range_mapped_in_table(table_phys: u64, addr: u64, len: u64) -> bo
             None => return false,
         };
     }
+}
+
+/// 指定したページテーブルでユーザー範囲がすべて有効にマップされているか確認する
+pub fn is_user_range_mapped_in_table(table_phys: u64, addr: u64, len: u64) -> bool {
+    is_user_range_accessible_in_table(table_phys, addr, len, false)
+}
+
+pub fn is_user_range_writable_in_table(table_phys: u64, addr: u64, len: u64) -> bool {
+    is_user_range_accessible_in_table(table_phys, addr, len, true)
 }
 
 /// 指定した仮想アドレス範囲にセグメントをマップしてコピーする
