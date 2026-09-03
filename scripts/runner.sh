@@ -64,6 +64,7 @@ stage_cext_bundles() {
 need_cmd cargo
 need_cmd cp
 need_cmd find
+need_cmd grep
 need_cmd perl
 need_cmd openssl
 need_cmd qemu-system-x86_64
@@ -75,8 +76,6 @@ need_cmd readelf
 need_cmd strings
 need_cmd stat
 need_cmd tee
-need_cmd sed
-need_cmd wc
 
 need_file "${OVMF_CODE}"
 need_file "${OVMF_VARS_TEMPLATE}"
@@ -252,30 +251,22 @@ trap cleanup EXIT
 
 PASS_FOUND=0
 KPTI_ENTRY_CHECK_FOUND=0
-NEXT_LINE=1
 
 for _ in $(seq 1 600); do
-    while IFS= read -r line; do
-        if [[ "$line" == *"USERLAND SELF-TEST PASS"* ]]; then
-            PASS_FOUND=1
-        fi
-
-        if [[ "$line" == *"SYSCALL entry pre-Rust CR3 check passed"* ]]; then
-            KPTI_ENTRY_CHECK_FOUND=1
-        fi
-
-        if [[ "$line" == *"USERLAND SELF-TEST FAIL"* ]]; then
-            echo "fatal: userland self-test reported FAIL" >&2
-            exit 1
-        fi
-
-        if [[ "$line" == *"PAGE FAULT"* || "$line" == *"Faulting user context:"* ]]; then
-            echo "fatal: userland fault observed during validation" >&2
-            exit 1
-        fi
-    done < <(sed -n "${NEXT_LINE},\$p" "${SERIAL_LOG}")
-
-    NEXT_LINE="$(($(wc -l < "${SERIAL_LOG}") + 1))"
+    if grep -Fq "USERLAND SELF-TEST FAIL" "${SERIAL_LOG}"; then
+        echo "fatal: userland self-test reported FAIL" >&2
+        exit 1
+    fi
+    if grep -Eq "PAGE FAULT|Faulting user context:" "${SERIAL_LOG}"; then
+        echo "fatal: userland fault observed during validation" >&2
+        exit 1
+    fi
+    if grep -Fq "USERLAND SELF-TEST PASS" "${SERIAL_LOG}"; then
+        PASS_FOUND=1
+    fi
+    if grep -Fq "SYSCALL entry pre-Rust CR3 check passed" "${SERIAL_LOG}"; then
+        KPTI_ENTRY_CHECK_FOUND=1
+    fi
 
     if [[ "${PASS_FOUND}" -eq 1 && "${KPTI_ENTRY_CHECK_FOUND}" -eq 1 ]]; then
         break
