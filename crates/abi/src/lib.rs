@@ -198,6 +198,7 @@ pub enum SyscallNumber {
     PresentFramebuffer = 610,
     StorageControl = 611,
     PerformanceSnapshot = 612,
+    FramebufferTransferLimit = 613,
     CheckGravityExist = 999,
 }
 

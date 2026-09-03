@@ -28,6 +28,9 @@ use alloc::vec::Vec;
 const FIRMWARE_PRESENT_MAX: usize = mnu_abi::hypervisor::FIRMWARE_FRAMEBUFFER_MAX_TRANSFER;
 static FIRMWARE_PRESENT_BUFFER: crate::interrupt::spinlock::SpinLock<[u8; FIRMWARE_PRESENT_MAX]> =
     crate::interrupt::spinlock::SpinLock::new([0; FIRMWARE_PRESENT_MAX]);
+const PLATFORM_PRESENT_MAX: usize = 1024 * 1024;
+static PLATFORM_PRESENT_BUFFER: crate::interrupt::spinlock::SpinLock<Vec<u8>> =
+    crate::interrupt::spinlock::SpinLock::new(Vec::new());
 
 /// ユーザー空間ポインタの有効性を検証する
 ///
@@ -324,16 +327,43 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
             EIO
         };
     }
-    if expected > 4096 {
+    let transfer_limit = match crate::platform::display_transfer_limit() {
+        Ok(limit) if limit != 0 && limit <= PLATFORM_PRESENT_MAX => limit,
+        _ => return EIO,
+    };
+    if expected > transfer_limit {
         return EINVAL;
     }
-    let mut pixels = alloc::vec![0u8; expected];
-    if copy_from_user(pixels_ptr, &mut pixels).is_err() {
+    let mut pixels = PLATFORM_PRESENT_BUFFER.lock();
+    if expected > pixels.len() {
+        let additional = expected - pixels.len();
+        if pixels.try_reserve_exact(additional).is_err() {
+            return crate::syscall::types::ENOMEM;
+        }
+        pixels.resize(expected, 0);
+    }
+    if copy_from_user(pixels_ptr, &mut pixels[..expected]).is_err() {
         return EFAULT;
     }
-    match crate::platform::present_display(x, y, width, height, &pixels) {
+    match crate::platform::present_display(x, y, width, height, &pixels[..expected]) {
         Ok(()) => SUCCESS,
         Err(_) => EIO,
+    }
+}
+
+pub fn framebuffer_transfer_limit() -> u64 {
+    use crate::capability::Capability;
+    use crate::syscall::types::{EACCES, EIO};
+
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
+        return EACCES;
+    }
+    if crate::hypervisor_guest::is_active() && crate::util::vga::get_info().is_some() {
+        return FIRMWARE_PRESENT_MAX as u64;
+    }
+    match crate::platform::display_transfer_limit() {
+        Ok(limit) if limit != 0 && limit <= PLATFORM_PRESENT_MAX => limit as u64,
+        _ => EIO,
     }
 }
 
@@ -636,6 +666,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::PresentFramebuffer as u64 => {
             present_framebuffer(arg0, arg1, arg2, arg3)
         }
+        x if x == SyscallNumber::FramebufferTransferLimit as u64 => framebuffer_transfer_limit(),
         x if x == SyscallNumber::StorageControl as u64 => storage::control(arg0, arg1),
         x if x == SyscallNumber::PerformanceSnapshot as u64 => performance::snapshot(arg0, arg1),
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),

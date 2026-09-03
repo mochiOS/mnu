@@ -32,6 +32,7 @@ pub struct DeviceControlResponse {
 
 pub struct PlatformOps {
     pub display_info: fn() -> Result<DisplayInfo, PlatformError>,
+    pub display_transfer_limit: fn() -> Result<usize, PlatformError>,
     pub present_display:
         fn(x: u32, y: u32, width: u32, height: u32, pixels: &[u8]) -> Result<(), PlatformError>,
     pub device_control: fn(
@@ -52,13 +53,19 @@ pub fn install(ops: &'static PlatformOps) -> Result<(), PlatformError> {
     Ok(())
 }
 
-fn with_ops<T>(f: impl FnOnce(&PlatformOps) -> Result<T, PlatformError>) -> Result<T, PlatformError> {
+fn with_ops<T>(
+    f: impl FnOnce(&PlatformOps) -> Result<T, PlatformError>,
+) -> Result<T, PlatformError> {
     let ops = *PLATFORM_OPS.lock();
     f(ops.ok_or(PlatformError::Unsupported)?)
 }
 
 pub fn display_info() -> Result<DisplayInfo, PlatformError> {
     with_ops(|ops| (ops.display_info)())
+}
+
+pub fn display_transfer_limit() -> Result<usize, PlatformError> {
+    with_ops(|ops| (ops.display_transfer_limit)())
 }
 
 pub fn present_display(
