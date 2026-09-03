@@ -559,7 +559,9 @@ fn verify_allocated_shared_page_fork() -> bool {
 }
 
 fn verify_exec_measurements() -> bool {
-    use mnu_abi::performance::{CounterMetric, KernelPerformanceSnapshot, LatencyMetric};
+    use mnu_abi::performance::{
+        AllocationSubsystem, CounterMetric, KernelPerformanceSnapshot, LatencyMetric,
+    };
 
     let mut snapshot = KernelPerformanceSnapshot::default();
     let result = user::performance_snapshot(&mut snapshot);
@@ -586,6 +588,19 @@ fn verify_exec_measurements() -> bool {
     write_decimal(1, snapshot.process_activity.copy_on_write_faults);
     write_literal(1, b" cow_copies=");
     write_decimal(1, snapshot.process_activity.copy_on_write_pages_copied);
+    write_literal(1, b"\n");
+
+    write_literal(1, b"process.exec: bytes_read=");
+    write_decimal(
+        1,
+        snapshot.counters[CounterMetric::ExecutableBytesRead as usize],
+    );
+    write_literal(1, b" pages_allocated=");
+    write_decimal(
+        1,
+        snapshot.frame_activity.allocated_pages_by_subsystem
+            [AllocationSubsystem::ProcessCreation as usize],
+    );
     write_literal(1, b"\n");
 
     let fork_pages = snapshot
