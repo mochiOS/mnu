@@ -24,6 +24,7 @@ const CAP_IPC_SERVER: &[u8] = b"ipc.server";
 const CAP_INVALID: &[u8] = b"no.such.capability";
 const MAP_ANONYMOUS_PRIVATE: u64 = 0x22;
 const MEMORY_SYNC_TEST_PATH: &[u8] = b"/tmp/init.msync-test";
+const SPAWN_MMAP_TEST_PATH: &str = "/tmp/init.spawn-mmap-test";
 const PASS_LINE: &[u8] = b"USERLAND SELF-TEST PASS\n";
 const FAIL_LINE: &[u8] = b"USERLAND SELF-TEST FAIL\n";
 const STAGE_MEMORY: &[u8] = b"stage: memory\n";
@@ -356,19 +357,52 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
 }
 
 fn run_process_spawn_test() -> bool {
-    const CHILD_EXIT_CODE: u64 = 37;
+    const EXPECTED_BYTE: u8 = 0xa5;
 
+    let create_fd = user::file_open(SPAWN_MMAP_TEST_PATH, 0o2 | 0o100 | 0o1000);
+    if create_fd == 0 || is_error(create_fd) || user::file_write(create_fd, &[EXPECTED_BYTE]) != 1 {
+        if create_fd != 0 && !is_error(create_fd) {
+            let _ = user::file_close(create_fd);
+        }
+        return false;
+    }
+    let _ = user::file_close(create_fd);
+
+    let fd = user::file_open(SPAWN_MMAP_TEST_PATH, 0);
+    if fd == 0 || is_error(fd) {
+        return false;
+    }
+    let mut persisted = [0u8; 1];
+    if user::file_read(fd, &mut persisted) != 1 || persisted[0] != EXPECTED_BYTE {
+        let _ = user::file_close(fd);
+        return false;
+    }
+    let mapping = user::memory_map(0, PAGE_SIZE, 1, 0x2, fd);
+    if mapping == 0 || is_error(mapping) {
+        let _ = user::file_close(fd);
+        return false;
+    }
+    if unsafe { core::ptr::read_volatile(mapping as *const u8) } != EXPECTED_BYTE {
+        let _ = user::memory_unmap(mapping, PAGE_SIZE);
+        let _ = user::file_close(fd);
+        return false;
+    }
     let child = user::process_spawn(0, 0);
     if is_error(child) {
+        let _ = user::memory_unmap(mapping, PAGE_SIZE);
+        let _ = user::file_close(fd);
         return false;
     }
     if child == 0 {
-        user::process_exit(CHILD_EXIT_CODE);
+        let mapped_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
+        user::process_exit(u64::from(mapped_byte));
     }
 
     let mut status = 0i32;
     let waited = user::process_wait(child, (&mut status as *mut i32) as u64, 0);
-    waited == child && status == (CHILD_EXIT_CODE as i32) << 8
+    let _ = user::memory_unmap(mapping, PAGE_SIZE);
+    let _ = user::file_close(fd);
+    waited == child && status == i32::from(EXPECTED_BYTE) << 8
 }
 
 fn verify_exec_measurements() -> bool {

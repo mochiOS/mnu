@@ -2,6 +2,7 @@ use crate::interrupt::spinlock::SpinLock;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::capability::{CapabilitySet, KernelAuthority, KernelAuthoritySet, KernelCapability};
@@ -48,7 +49,7 @@ pub enum MmapBacking {
     },
     File {
         path: String,
-        data: alloc::vec::Vec<u8>,
+        data: Arc<alloc::vec::Vec<u8>>,
         writable: bool,
         shared: bool,
     },
@@ -166,7 +167,7 @@ impl MmapRegion {
             flags,
             backing: MmapBacking::File {
                 path,
-                data,
+                data: Arc::new(data),
                 writable,
                 shared,
             },
@@ -282,7 +283,7 @@ impl MmapBacking {
     pub fn file_data_mut(&mut self) -> &mut alloc::vec::Vec<u8> {
         match self {
             MmapBacking::Anonymous { data, .. } => data,
-            MmapBacking::File { data, .. } => data,
+            MmapBacking::File { data, .. } => Arc::make_mut(data),
         }
     }
 

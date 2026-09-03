@@ -6,13 +6,19 @@ use core::arch::asm;
 const IA32_FS_BASE: u32 = 0xC000_0100;
 
 #[repr(C)]
-struct ForkCalleeSaved {
+struct ForkRegisters {
     rbx: u64,
     rbp: u64,
     r12: u64,
     r13: u64,
     r14: u64,
     r15: u64,
+    rdi: u64,
+    rsi: u64,
+    rdx: u64,
+    r8: u64,
+    r9: u64,
+    r10: u64,
 }
 
 /// ユーザーモードでコードを実行する
@@ -144,18 +150,10 @@ fn read_gdtr() -> (u64, u16) {
 /// iretq フレームを構築し、RAX=0 (fork の子側戻り値) でユーザーに復帰する
 ///
 /// # Safety
-/// `entry`/`stack`/`user_rflags`/`fs_base` は子プロセスの有効な復帰コンテキストである必要がある。
+/// `context` と `fs_base` は子プロセスの有効な復帰コンテキストである必要がある。
 pub unsafe fn jump_to_usermode_fork_child(
-    entry: u64,
-    stack: u64,
-    user_rflags: u64,
+    context: crate::task::thread::SyscallUserContext,
     fs_base: u64,
-    user_rbx: u64,
-    user_rbp: u64,
-    user_r12: u64,
-    user_r13: u64,
-    user_r14: u64,
-    user_r15: u64,
 ) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3;
     let user_ss = gdt::user_data_selector() as u64 | 3;
@@ -165,13 +163,19 @@ pub unsafe fn jump_to_usermode_fork_child(
         .unwrap_or(0);
     let fs_lo = fs_base as u32;
     let fs_hi = (fs_base >> 32) as u32;
-    let callee_saved = ForkCalleeSaved {
-        rbx: user_rbx,
-        rbp: user_rbp,
-        r12: user_r12,
-        r13: user_r13,
-        r14: user_r14,
-        r15: user_r15,
+    let registers = ForkRegisters {
+        rbx: context.rbx,
+        rbp: context.rbp,
+        r12: context.r12,
+        r13: context.r13,
+        r14: context.r14,
+        r15: context.r15,
+        rdi: context.rdi,
+        rsi: context.rsi,
+        rdx: context.rdx,
+        r8: context.r8,
+        r9: context.r9,
+        r10: context.r10,
     };
     if user_cr3 != 0 {
         crate::mem::paging::switch_page_table(user_cr3);
@@ -186,31 +190,50 @@ pub unsafe fn jump_to_usermode_fork_child(
         "mov ax, r8w",
         "mov ds, ax",
         "mov es, ax",
-        // SysV callee-saved registers を親の syscall 呼び出し時点へ戻す。
-        "mov rbx, [rsi + 0x00]",
-        "mov rbp, [rsi + 0x08]",
-        "mov r12, [rsi + 0x10]",
-        "mov r13, [rsi + 0x18]",
-        "mov r14, [rsi + 0x20]",
-        "mov r15, [rsi + 0x28]",
         // iretq フレームを構築: SS, RSP, RFLAGS, CS, RIP
         "push r8",
         "push r9",
         "push r10",
         "push r11",
         "push rdi",
+        // syscallが保持するレジスタを親の入口時点へ戻す。RAXだけは子の戻り値0にする。
+        "mov rax, rsi",
+        "mov rbx, [rax + {rbx_offset}]",
+        "mov rbp, [rax + {rbp_offset}]",
+        "mov r12, [rax + {r12_offset}]",
+        "mov r13, [rax + {r13_offset}]",
+        "mov r14, [rax + {r14_offset}]",
+        "mov r15, [rax + {r15_offset}]",
+        "mov rdi, [rax + {rdi_offset}]",
+        "mov rdx, [rax + {rdx_offset}]",
+        "mov r8,  [rax + {r8_offset}]",
+        "mov r9,  [rax + {r9_offset}]",
+        "mov r10, [rax + {r10_offset}]",
+        "mov rsi, [rax + {rsi_offset}]",
         // fork 子プロセスは rax=0 を返す
         "xor eax, eax",
         "iretq",
         in("r8") user_ss,
-        in("r9") stack,
-        in("r10") (user_rflags | 0x200),
+        in("r9") context.rsp,
+        in("r10") (context.rflags | 0x200),
         in("r11") user_cs,
-        in("rdi") entry,
-        in("rsi") (&callee_saved as *const ForkCalleeSaved),
+        in("rdi") context.rip,
+        in("rsi") (&registers as *const ForkRegisters),
         in("ecx") IA32_FS_BASE,
         in("eax") fs_lo,
         in("edx") fs_hi,
+        rbx_offset = const core::mem::offset_of!(ForkRegisters, rbx),
+        rbp_offset = const core::mem::offset_of!(ForkRegisters, rbp),
+        r12_offset = const core::mem::offset_of!(ForkRegisters, r12),
+        r13_offset = const core::mem::offset_of!(ForkRegisters, r13),
+        r14_offset = const core::mem::offset_of!(ForkRegisters, r14),
+        r15_offset = const core::mem::offset_of!(ForkRegisters, r15),
+        rdi_offset = const core::mem::offset_of!(ForkRegisters, rdi),
+        rsi_offset = const core::mem::offset_of!(ForkRegisters, rsi),
+        rdx_offset = const core::mem::offset_of!(ForkRegisters, rdx),
+        r8_offset = const core::mem::offset_of!(ForkRegisters, r8),
+        r9_offset = const core::mem::offset_of!(ForkRegisters, r9),
+        r10_offset = const core::mem::offset_of!(ForkRegisters, r10),
         options(noreturn)
     )
 }

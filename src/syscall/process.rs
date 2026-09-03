@@ -554,22 +554,10 @@ pub fn fork() -> u64 {
         );
     }
 
-    let (user_context, parent_fs, user_rbx, user_rbp, user_r12, user_r13, user_r14, user_r15) =
-        crate::task::with_thread(parent_tid, |t| {
-            let user_context = t.syscall_user_context();
-            let (rbx, rbp, r12, r13, r14, r15) = t.fork_user_callee_saved();
-            (user_context, t.fs_base(), rbx, rbp, r12, r13, r14, r15)
-        })
-        .unwrap_or((
-            crate::task::thread::SyscallUserContext::empty(),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ));
+    let (user_context, parent_fs) = crate::task::with_thread(parent_tid, |thread| {
+        (thread.syscall_user_context(), thread.fs_base())
+    })
+    .unwrap_or((crate::task::thread::SyscallUserContext::empty(), 0));
     if user_context.rip == 0 || user_context.rsp == 0 {
         let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOSYS;
@@ -626,12 +614,6 @@ pub fn fork() -> u64 {
         child_pid,
         user_context,
         parent_fs,
-        user_rbx,
-        user_rbp,
-        user_r12,
-        user_r13,
-        user_r14,
-        user_r15,
         kstack,
         kstack_size,
     );
@@ -909,8 +891,8 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
             Some(Some(path)) => path,
             _ => return EINVAL,
         };
-        let data = match crate::init::fs::read_rootfs(&path)
-            .or_else(|| crate::cext::fs::read_all(&path))
+        let data = match crate::cext::fs::read_all(&path)
+            .or_else(|| crate::init::fs::read_rootfs(&path))
         {
             Some(data) => data,
             None => return ENOMEM,
@@ -937,6 +919,11 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
             return Err(EINVAL);
         }
 
+        let pt_phys = match process.page_table() {
+            Some(p) => p,
+            None => return Err(ENOMEM),
+        };
+
         let map_start = if addr != 0 {
             match page_align_up(addr) {
                 Some(v) => v,
@@ -946,27 +933,23 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
                 }
             }
         } else {
-            // heap_endを mmap_base として使う（簡易実装）
-            // 実際は別のアドレス空間管理が必要
-            let base = process.heap_end();
-            match page_align_up(base) {
+            let mut candidate = match page_align_up(process.heap_end()) {
                 Some(v) => v,
-                None => {
-                    crate::debug!("process::mmap invalid heap align");
-                    return Err(EINVAL);
-                }
+                None => return Err(EINVAL),
+            };
+            while crate::mem::paging::is_user_range_mapped_in_table(pt_phys, candidate, size) {
+                candidate = match candidate.checked_add(4096) {
+                    Some(v) if is_user_range(v, size) => v,
+                    _ => return Err(ENOMEM),
+                };
             }
+            candidate
         };
 
         if !is_user_range(map_start, size) {
             crate::debug!("process::mmap out of range");
             return Err(EINVAL);
         }
-
-        let pt_phys = match process.page_table() {
-            Some(p) => p,
-            None => return Err(ENOMEM),
-        };
 
         if anonymous {
             let region =

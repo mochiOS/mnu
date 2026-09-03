@@ -10,6 +10,12 @@ pub struct SyscallUserContext {
     pub rip: u64,
     pub rsp: u64,
     pub rflags: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
     pub rbp: u64,
     pub rbx: u64,
     pub r12: u64,
@@ -24,6 +30,12 @@ impl SyscallUserContext {
             rip: 0,
             rsp: 0,
             rflags: 0,
+            rdi: 0,
+            rsi: 0,
+            rdx: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
             rbp: 0,
             rbx: 0,
             r12: 0,
@@ -232,15 +244,6 @@ pub struct Thread {
     user_stack: u64,
     /// ユーザーモード初期引数（thread_create 用）
     user_arg0: u64,
-    /// fork時に子プロセスへ渡すユーザー RFLAGS
-    fork_user_rflags: u64,
-    /// fork時に子プロセスへ渡す callee-saved registers
-    fork_user_rbx: u64,
-    fork_user_rbp: u64,
-    fork_user_r12: u64,
-    fork_user_r13: u64,
-    fork_user_r14: u64,
-    fork_user_r15: u64,
     /// TLS用 FS ベースレジスタ (arch_prctl ARCH_SET_FS で設定)
     fs_base: u64,
     /// 現在システムコールコンテキスト中かどうか
@@ -719,13 +722,6 @@ impl Thread {
             user_entry: 0,
             user_stack: 0,
             user_arg0: 0,
-            fork_user_rflags: 0,
-            fork_user_rbx: 0,
-            fork_user_rbp: 0,
-            fork_user_r12: 0,
-            fork_user_r13: 0,
-            fork_user_r14: 0,
-            fork_user_r15: 0,
             fs_base: 0,
             in_syscall: false,
             syscall_user_cr3: 0,
@@ -847,13 +843,6 @@ impl Thread {
             user_entry,
             user_stack,
             user_arg0,
-            fork_user_rflags: 0,
-            fork_user_rbx: 0,
-            fork_user_rbp: 0,
-            fork_user_r12: 0,
-            fork_user_r13: 0,
-            fork_user_r14: 0,
-            fork_user_r15: 0,
             fs_base: 0,
             in_syscall: false,
             syscall_user_cr3: 0,
@@ -887,22 +876,6 @@ impl Thread {
         self.fs_base
     }
 
-    /// fork_user_rflags を取得
-    pub fn fork_user_rflags(&self) -> u64 {
-        self.fork_user_rflags
-    }
-
-    pub fn fork_user_callee_saved(&self) -> (u64, u64, u64, u64, u64, u64) {
-        (
-            self.fork_user_rbx,
-            self.fork_user_rbp,
-            self.fork_user_r12,
-            self.fork_user_r13,
-            self.fork_user_r14,
-            self.fork_user_r15,
-        )
-    }
-
     /// fork の子プロセス用スレッドを作成
     ///
     /// 子スレッドはユーザー空間で fork() の戻り値として 0 を返す
@@ -910,12 +883,6 @@ impl Thread {
         process_id: ProcessId,
         user_context: SyscallUserContext,
         fs_base: u64,
-        user_rbx: u64,
-        user_rbp: u64,
-        user_r12: u64,
-        user_r13: u64,
-        user_r14: u64,
-        user_r15: u64,
         kernel_stack: u64,
         kernel_stack_size: usize,
     ) -> Self {
@@ -941,35 +908,21 @@ impl Thread {
                     crate::task::exit_current_task(crate::syscall::EINVAL);
                 }
             };
-            let (entry, stack, rflags, fs, rbx, rbp, r12, r13, r14, r15) =
-                match with_thread(tid, |thread| {
-                    (
-                        thread.user_entry(),
-                        thread.user_stack(),
-                        thread.fork_user_rflags(),
-                        thread.fs_base(),
-                        thread.fork_user_rbx,
-                        thread.fork_user_rbp,
-                        thread.fork_user_r12,
-                        thread.fork_user_r13,
-                        thread.fork_user_r14,
-                        thread.fork_user_r15,
-                    )
-                }) {
-                    Some(v) => v,
-                    None => {
-                        crate::warn!("fork_child_trampoline: Thread not found");
-                        crate::audit::log(
-                            crate::audit::AuditEventKind::Fault,
-                            "fork_child_trampoline missing thread metadata",
-                        );
-                        crate::task::exit_current_task(crate::syscall::EINVAL);
-                    }
-                };
+            let (user_context, fs_base) = match with_thread(tid, |thread| {
+                (thread.syscall_user_context(), thread.fs_base())
+            }) {
+                Some(v) => v,
+                None => {
+                    crate::warn!("fork_child_trampoline: Thread not found");
+                    crate::audit::log(
+                        crate::audit::AuditEventKind::Fault,
+                        "fork_child_trampoline missing thread metadata",
+                    );
+                    crate::task::exit_current_task(crate::syscall::EINVAL);
+                }
+            };
             unsafe {
-                crate::task::usermode::jump_to_usermode_fork_child(
-                    entry, stack, rflags, fs, rbx, rbp, r12, r13, r14, r15,
-                );
+                crate::task::usermode::jump_to_usermode_fork_child(user_context, fs_base);
             }
         }
 
@@ -992,13 +945,6 @@ impl Thread {
             user_entry: user_context.rip,
             user_stack: user_context.rsp,
             user_arg0: 0,
-            fork_user_rflags: user_context.rflags,
-            fork_user_rbx: user_rbx,
-            fork_user_rbp: user_rbp,
-            fork_user_r12: user_r12,
-            fork_user_r13: user_r13,
-            fork_user_r14: user_r14,
-            fork_user_r15: user_r15,
             fs_base,
             in_syscall: false,
             syscall_user_cr3: 0,
@@ -1041,23 +987,6 @@ impl Thread {
 
     pub fn set_syscall_user_context(&mut self, context: SyscallUserContext) {
         self.syscall_user_context = context;
-    }
-
-    pub fn set_fork_user_callee_saved(
-        &mut self,
-        rbx: u64,
-        rbp: u64,
-        r12: u64,
-        r13: u64,
-        r14: u64,
-        r15: u64,
-    ) {
-        self.fork_user_rbx = rbx;
-        self.fork_user_rbp = rbp;
-        self.fork_user_r12 = r12;
-        self.fork_user_r13 = r13;
-        self.fork_user_r14 = r14;
-        self.fork_user_r15 = r15;
     }
 
     pub fn set_futex_timed_out(&mut self, timed_out: bool) {

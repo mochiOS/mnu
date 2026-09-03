@@ -839,6 +839,26 @@ pub struct SavedSyscallFrame {
     num: u64,
 }
 
+const _: () = {
+    assert!(core::mem::size_of::<SavedSyscallFrame>() == 16 * 8);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, user_rsp) == 0);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, r15) == 8);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, r14) == 16);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, r13) == 24);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, r12) == 32);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, rbx) == 40);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, rbp) == 48);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, user_rflags) == 56);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, user_rip) == 64);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, arg5) == 72);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, arg4) == 80);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, arg3) == 88);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, arg2) == 96);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, arg1) == 104);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, arg0) == 112);
+    assert!(core::mem::offset_of!(SavedSyscallFrame, num) == 120);
+};
+
 /// fork/clone 用に、現在スレッドへユーザー復帰コンテキストを保存する
 #[no_mangle]
 pub extern "sysv64" fn save_user_context_for_fork(frame: *const SavedSyscallFrame) {
@@ -852,6 +872,12 @@ pub extern "sysv64" fn save_user_context_for_fork(frame: *const SavedSyscallFram
                 rip: frame.user_rip,
                 rsp: frame.user_rsp,
                 rflags: frame.user_rflags,
+                rdi: frame.arg0,
+                rsi: frame.arg1,
+                rdx: frame.arg2,
+                r8: frame.arg4,
+                r9: frame.arg5,
+                r10: frame.arg3,
                 rbp: frame.rbp,
                 rbx: frame.rbx,
                 r12: frame.r12,
@@ -859,9 +885,6 @@ pub extern "sysv64" fn save_user_context_for_fork(frame: *const SavedSyscallFram
                 r14: frame.r14,
                 r15: frame.r15,
             });
-            thread.set_fork_user_callee_saved(
-                frame.rbx, frame.rbp, frame.r12, frame.r13, frame.r14, frame.r15,
-            );
         });
     }
 }
