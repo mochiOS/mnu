@@ -258,14 +258,23 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
         .flatten()
     {
         UserFramebufferInfo {
-            addr: 0,
-            size: u64::from(info.stride)
-                .saturating_mul(u64::from(info.height))
-                .saturating_mul(4),
+            addr: info.surface_address,
+            size: if info.shared_surface {
+                info.surface_size
+            } else {
+                u64::from(info.stride)
+                    .saturating_mul(u64::from(info.height))
+                    .saturating_mul(4)
+            },
             width: info.width,
             height: info.height,
             stride: info.stride,
-            format: 1,
+            format: 1
+                | if info.shared_surface {
+                    mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_SHARED_SURFACE
+                } else {
+                    0
+                },
         }
     } else {
         return ENXIO;
@@ -367,6 +376,26 @@ pub fn framebuffer_transfer_limit() -> u64 {
     }
 }
 
+pub fn commit_framebuffer(position: u64, size: u64) -> u64 {
+    use crate::capability::Capability;
+    use crate::syscall::types::{EACCES, EINVAL, EIO, SUCCESS};
+
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
+        return EACCES;
+    }
+    let x = position as u32;
+    let y = (position >> 32) as u32;
+    let width = size as u32;
+    let height = (size >> 32) as u32;
+    if width == 0 || height == 0 {
+        return EINVAL;
+    }
+    match crate::platform::commit_display(x, y, width, height) {
+        Ok(()) => SUCCESS,
+        Err(_) => EIO,
+    }
+}
+
 pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     use crate::capability::Capability;
     use crate::syscall::types::{EACCES, EINVAL, ENOMEM, ENXIO, SUCCESS};
@@ -377,19 +406,29 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     if virt_addr == 0 || size == 0 || (virt_addr & 0xfff) != 0 || (size & 0xfff) != 0 {
         return EINVAL;
     }
-    let Some(info) = crate::util::vga::get_info() else {
+    let shared_surface = crate::platform::display_info().ok().filter(|info| {
+        info.shared_surface && info.surface_address != 0 && info.surface_size != 0
+    });
+    let (fb_base, fb_offset, framebuffer_size, mmio) = if let Some(info) = shared_surface {
+        (
+            info.surface_address & !0xfff,
+            info.surface_address & 0xfff,
+            info.surface_size,
+            false,
+        )
+    } else if let Some(info) = crate::util::vga::get_info() {
+        (info.addr & !0xfff, info.addr & 0xfff, info.size as u64, true)
+    } else {
         return ENXIO;
     };
-    let fb_base = info.addr & !0xfff;
-    let fb_offset = info.addr - fb_base;
-    let required = match (info.size as u64).checked_add(fb_offset) {
+    let required = match framebuffer_size.checked_add(fb_offset) {
         Some(v) => (v + 0xfff) & !0xfff,
         None => return EINVAL,
     };
     if size < required {
         return EINVAL;
     }
-    if !crate::mem::frame::is_allowed_mmio_range(fb_base, required) {
+    if mmio && !crate::mem::frame::is_allowed_mmio_range(fb_base, required) {
         return EACCES;
     }
     let Some(pid) = crate::syscall::security::current_process_id() else {
@@ -667,6 +706,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
             present_framebuffer(arg0, arg1, arg2, arg3)
         }
         x if x == SyscallNumber::FramebufferTransferLimit as u64 => framebuffer_transfer_limit(),
+        x if x == SyscallNumber::CommitFramebuffer as u64 => commit_framebuffer(arg0, arg1),
         x if x == SyscallNumber::StorageControl as u64 => storage::control(arg0, arg1),
         x if x == SyscallNumber::PerformanceSnapshot as u64 => performance::snapshot(arg0, arg1),
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),

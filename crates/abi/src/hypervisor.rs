@@ -34,6 +34,7 @@ pub const DOMAIN_FEATURE_FRAMEBUFFER: u64 = 1 << 17;
 pub const FRAMEBUFFER_FORMAT_RGB: u32 = 1;
 pub const FRAMEBUFFER_FORMAT_BGR: u32 = 2;
 pub const FRAMEBUFFER_FORMAT_MEDIATED: u32 = 1 << 31;
+pub const FRAMEBUFFER_FORMAT_SHARED_SURFACE: u32 = 1 << 30;
 pub const FIRMWARE_FRAMEBUFFER_MAX_TRANSFER: usize = 64 * 1024;
 
 pub const DOMAIN_CAPABILITY_DEVICE_QUERY: u64 = 1 << 0;
@@ -63,6 +64,8 @@ pub const DOMAIN_CRASH_STATUS_RESTARTED: u32 = 2;
 pub const EVENT_CHANNEL_NO_EVENT: u64 = 0;
 pub const GRANT_REF_INVALID: u64 = 0;
 pub const GRANT_FLAG_WRITABLE: u64 = 1 << 0;
+pub const GRANT_RANGE_PAGE_COUNT_SHIFT: u32 = 32;
+pub const GRANT_RANGE_FLAGS_MASK: u64 = u32::MAX as u64;
 pub const DOMAIN_DEVICE_ADDRESS_LIMIT: u64 = 1_u64 << 40;
 
 pub const HYPERCALL_SUCCESS: u64 = 0;
@@ -97,6 +100,7 @@ pub enum HypercallNumber {
     GrantQuery = 22,
     EventPoll = 23,
     FirmwareFramebufferPresent = 24,
+    GrantCreateRange = 25,
 }
 
 #[repr(u64)]

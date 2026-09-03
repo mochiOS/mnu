@@ -21,6 +21,9 @@ pub struct DisplayInfo {
     pub red_offset: u8,
     pub green_offset: u8,
     pub blue_offset: u8,
+    pub surface_address: u64,
+    pub surface_size: u64,
+    pub shared_surface: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +38,8 @@ pub struct PlatformOps {
     pub display_transfer_limit: fn() -> Result<usize, PlatformError>,
     pub present_display:
         fn(x: u32, y: u32, width: u32, height: u32, pixels: &[u8]) -> Result<(), PlatformError>,
+    pub commit_display:
+        fn(x: u32, y: u32, width: u32, height: u32) -> Result<(), PlatformError>,
     pub device_control: fn(
         operation: u16,
         device_id: u32,
@@ -76,6 +81,10 @@ pub fn present_display(
     pixels: &[u8],
 ) -> Result<(), PlatformError> {
     with_ops(|ops| (ops.present_display)(x, y, width, height, pixels))
+}
+
+pub fn commit_display(x: u32, y: u32, width: u32, height: u32) -> Result<(), PlatformError> {
+    with_ops(|ops| (ops.commit_display)(x, y, width, height))
 }
 
 pub fn device_control(
