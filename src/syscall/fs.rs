@@ -7,7 +7,6 @@ use super::types::{
 use crate::capability::Capability;
 use crate::capability::path::{
     self, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner,
-    PathType, UserPath,
 };
 use crate::task::fd_table::{
     FD_BASE, FdTable, FileHandle, FileHandleCap, O_CLOEXEC, PROCESS_MAX_FDS,
@@ -228,10 +227,20 @@ fn ensure_fs_capability_access_for_process(
         }
         let missing_rights = needed_rights & !entry.rights.bits;
         if missing_rights != 0 {
-            enforce_fs_path_capability_for_process(path, missing_rights, pid_raw)?;
+            enforce_fs_capabilities_for_process(
+                entry.read_capability,
+                entry.write_capability,
+                missing_rights,
+                pid_raw,
+            )?;
         }
     } else {
-        enforce_fs_path_capability_for_process(path, needed_rights, pid_raw)?;
+        enforce_fs_capabilities_for_process(
+            Capability::FsReadAll,
+            Capability::FsWriteAll,
+            needed_rights,
+            pid_raw,
+        )?;
     }
     Ok(())
 }
@@ -450,120 +459,31 @@ fn capability_requirement_satisfied(
     has_required || (required != broad && has_broad)
 }
 
-fn cap_for_path(path_type: PathType, needed_rights: u32) -> Capability {
-    let is_write = (needed_rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) != 0;
-    let is_read = (needed_rights & PATH_READ) != 0 || (needed_rights & PATH_LIST) != 0;
-
-    match path_type {
-        PathType::Temporary => {
-            if is_write {
-                Capability::FsWriteTmp
-            } else {
-                Capability::FsReadTmp
-            }
-        }
-        PathType::User(UserPath::Documents) => {
-            if is_write {
-                Capability::FsWriteUserDocuments
-            } else {
-                Capability::FsReadUserDocuments
-            }
-        }
-        PathType::User(UserPath::Download) => {
-            if is_write {
-                Capability::FsWriteUserDownloads
-            } else {
-                Capability::FsReadUserDownloads
-            }
-        }
-        PathType::User(UserPath::Desktop) => {
-            if is_write {
-                Capability::FsWriteUserDesktop
-            } else {
-                Capability::FsReadUserDesktop
-            }
-        }
-        PathType::User(UserPath::Images) => {
-            if is_write {
-                Capability::FsWriteUserPictures
-            } else {
-                Capability::FsReadUserPictures
-            }
-        }
-        PathType::User(UserPath::Musics) => {
-            if is_write {
-                Capability::FsWriteUserMusic
-            } else {
-                Capability::FsReadUserMusic
-            }
-        }
-        PathType::User(UserPath::Movies) => {
-            if is_write {
-                Capability::FsWriteUserVideos
-            } else {
-                Capability::FsReadUserVideos
-            }
-        }
-        PathType::User(UserPath::Develop)
-        | PathType::User(UserPath::Home)
-        | PathType::User(UserPath::HomeRoot) => {
-            if is_write {
-                Capability::FsWriteUser
-            } else {
-                Capability::FsReadUser
-            }
-        }
-        PathType::Binary
-        | PathType::Libraries(_)
-        | PathType::System(_)
-        | PathType::Config
-        | PathType::Mount(_)
-        | PathType::Var(_)
-        | PathType::Root
-        | PathType::Custom => {
-            if is_write {
-                Capability::FsWriteAll
-            } else if is_read {
-                Capability::FsReadAll
-            } else {
-                Capability::FsReadAll
-            }
-        }
+fn enforce_required_capability(
+    required: Capability,
+    broad: Capability,
+    pid_raw: u64,
+) -> Result<(), u64> {
+    let has_required = process_has_cap(pid_raw, required);
+    let has_broad = process_has_cap(pid_raw, broad);
+    if capability_requirement_satisfied(required, broad, has_required, has_broad) {
+        Ok(())
+    } else {
+        Err(EACCES)
     }
 }
 
-fn enforce_fs_path_capability_for_process(
-    path: &str,
+fn enforce_fs_capabilities_for_process(
+    read_capability: Capability,
+    write_capability: Capability,
     needed_rights: u32,
     pid_raw: u64,
 ) -> Result<(), u64> {
-    let path_type = path::classify_path(path);
-    let read_rights = needed_rights & (PATH_READ | PATH_LIST | PATH_EXEC);
-    if read_rights != 0 {
-        let required = cap_for_path(path_type, PATH_READ);
-        let has_required = process_has_cap(pid_raw, required);
-        let has_read_all = process_has_cap(pid_raw, Capability::FsReadAll);
-        if !capability_requirement_satisfied(
-            required,
-            Capability::FsReadAll,
-            has_required,
-            has_read_all,
-        ) {
-            return Err(EACCES);
-        }
+    if needed_rights & (PATH_READ | PATH_LIST | PATH_EXEC) != 0 {
+        enforce_required_capability(read_capability, Capability::FsReadAll, pid_raw)?;
     }
     if (needed_rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) != 0 {
-        let required = cap_for_path(path_type, PATH_WRITE);
-        let has_required = process_has_cap(pid_raw, required);
-        let has_write_all = process_has_cap(pid_raw, Capability::FsWriteAll);
-        if !capability_requirement_satisfied(
-            required,
-            Capability::FsWriteAll,
-            has_required,
-            has_write_all,
-        ) {
-            return Err(EACCES);
-        }
+        enforce_required_capability(write_capability, Capability::FsWriteAll, pid_raw)?;
     }
     Ok(())
 }

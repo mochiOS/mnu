@@ -169,20 +169,6 @@ impl KernelCapability {
 /// mnuはその意味や許可UIの分類を解釈しません。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Capability {
-    FsReadUserDocuments,
-    FsWriteUserDocuments,
-    FsReadUserDownloads,
-    FsWriteUserDownloads,
-    FsReadUserDesktop,
-    FsWriteUserDesktop,
-    FsReadUserPictures,
-    FsWriteUserPictures,
-    FsReadUserMusic,
-    FsWriteUserMusic,
-    FsReadUserVideos,
-    FsWriteUserVideos,
-    FsReadUser,
-    FsWriteUser,
     FsReadTmp,
     FsWriteTmp,
     FsReadRemovable,
@@ -225,20 +211,6 @@ impl Capability {
     fn builtin_name(self) -> Option<&'static str> {
         use Capability::*;
         Some(match self {
-            FsReadUserDocuments => "fs.read.user.documents",
-            FsWriteUserDocuments => "fs.write.user.documents",
-            FsReadUserDownloads => "fs.read.user.downloads",
-            FsWriteUserDownloads => "fs.write.user.downloads",
-            FsReadUserDesktop => "fs.read.user.desktop",
-            FsWriteUserDesktop => "fs.write.user.desktop",
-            FsReadUserPictures => "fs.read.user.pictures",
-            FsWriteUserPictures => "fs.write.user.pictures",
-            FsReadUserMusic => "fs.read.user.music",
-            FsWriteUserMusic => "fs.write.user.music",
-            FsReadUserVideos => "fs.read.user.videos",
-            FsWriteUserVideos => "fs.write.user.videos",
-            FsReadUser => "fs.read.user",
-            FsWriteUser => "fs.write.user",
             FsReadTmp => "fs.read.tmp",
             FsWriteTmp => "fs.write.tmp",
             FsReadRemovable => "fs.read.removable",
@@ -289,21 +261,7 @@ impl Capability {
     pub fn is_delegable(&self) -> bool {
         matches!(
             self,
-            Capability::FsReadUserDocuments
-                | Capability::FsWriteUserDocuments
-                | Capability::FsReadUserDownloads
-                | Capability::FsWriteUserDownloads
-                | Capability::FsReadUserDesktop
-                | Capability::FsWriteUserDesktop
-                | Capability::FsReadUserPictures
-                | Capability::FsWriteUserPictures
-                | Capability::FsReadUserMusic
-                | Capability::FsWriteUserMusic
-                | Capability::FsReadUserVideos
-                | Capability::FsWriteUserVideos
-                | Capability::FsReadUser
-                | Capability::FsWriteUser
-                | Capability::FsReadTmp
+            Capability::FsReadTmp
                 | Capability::FsWriteTmp
                 | Capability::FsReadRemovable
                 | Capability::FsWriteRemovable
@@ -317,20 +275,6 @@ impl Capability {
     pub fn bootstrap_capabilities() -> &'static [Capability] {
         use Capability::*;
         const BOOTSTRAP: &[Capability] = &[
-            FsReadUserDocuments,
-            FsWriteUserDocuments,
-            FsReadUserDownloads,
-            FsWriteUserDownloads,
-            FsReadUserDesktop,
-            FsWriteUserDesktop,
-            FsReadUserPictures,
-            FsWriteUserPictures,
-            FsReadUserMusic,
-            FsWriteUserMusic,
-            FsReadUserVideos,
-            FsWriteUserVideos,
-            FsReadUser,
-            FsWriteUser,
             FsReadTmp,
             FsWriteTmp,
             FsReadRemovable,
@@ -436,10 +380,8 @@ fn intern_dynamic_capability(name: &str) -> Option<Capability> {
     })
 }
 
-/// `parent` が `child` を含意するか（階層継承）
-///
-/// ここでの含意は「より広い権限が、より細かい権限を内包する」関係を表す。
-/// 例: `fs.read.all` は `fs.read.user.documents` を含意する。
+/// `parent` が、カーネル組み込みの `child` を含意するかを返す。
+/// 上位層が定義する権限同士の関係はmnuでは解釈しない。
 pub fn capability_implies(parent: Capability, child: Capability) -> bool {
     use Capability::*;
 
@@ -452,51 +394,9 @@ pub fn capability_implies(parent: Capability, child: Capability) -> bool {
         // これを持つプロセスは隔離を回避できるため、付与経路は信頼済みでなければならない。
         Unsandboxed => true,
 
-        FsReadAll => matches!(
-            child,
-            FsReadUser
-                | FsReadUserDocuments
-                | FsReadUserDownloads
-                | FsReadUserDesktop
-                | FsReadUserPictures
-                | FsReadUserMusic
-                | FsReadUserVideos
-                | FsReadTmp
-                | FsReadRemovable
-        ),
+        FsReadAll => matches!(child, FsReadTmp | FsReadRemovable),
 
-        FsWriteAll => matches!(
-            child,
-            FsWriteUser
-                | FsWriteUserDocuments
-                | FsWriteUserDownloads
-                | FsWriteUserDesktop
-                | FsWriteUserPictures
-                | FsWriteUserMusic
-                | FsWriteUserVideos
-                | FsWriteTmp
-                | FsWriteRemovable
-        ),
-
-        FsReadUser => matches!(
-            child,
-            FsReadUserDocuments
-                | FsReadUserDownloads
-                | FsReadUserDesktop
-                | FsReadUserPictures
-                | FsReadUserMusic
-                | FsReadUserVideos
-        ),
-
-        FsWriteUser => matches!(
-            child,
-            FsWriteUserDocuments
-                | FsWriteUserDownloads
-                | FsWriteUserDesktop
-                | FsWriteUserPictures
-                | FsWriteUserMusic
-                | FsWriteUserVideos
-        ),
+        FsWriteAll => matches!(child, FsWriteTmp | FsWriteRemovable),
 
         _ => false,
     }

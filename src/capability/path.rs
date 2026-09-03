@@ -7,6 +7,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use super::Capability;
+
 pub const PATH_READ: u32 = 1 << 0;
 pub const PATH_WRITE: u32 = 1 << 1;
 pub const PATH_EXEC: u32 = 1 << 2;
@@ -19,9 +21,10 @@ pub const PATH_MANAGE: u32 = 1 << 7;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathCapability {
     pub path: String,
-    pub path_type: PathType,
     pub owner: PathOwner,
     pub rights: PathRights,
+    pub read_capability: Capability,
+    pub write_capability: Capability,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,86 +51,11 @@ impl PathRights {
     }
 }
 
-#[repr(u16)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PathType {
-    Root,
-    User(UserPath),
-    Binary,
-    Libraries(LibraryPath),
-    Temporary,
-    System(SystemPath),
-    Config,
-    Mount(MountPath),
-    Var(VarPath),
-    Custom,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum UserPath {
-    HomeRoot,
-    Home,
-    Documents,
-    Movies,
-    Develop,
-    Desktop,
-    Download,
-    Musics,
-    Images,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum SystemPath {
-    Root,
-    Kernel,
-    Boot,
-    Services,
-    Log,
-    State,
-    Cache,
-    Drivers,
-    Devices,
-    Runtime,
-    Security,
-    Policy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum LibraryPath {
-    Root,
-    Shared,
-    Static,
-    Runtime,
-    Frameworks,
-    PlugKit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MountPath {
-    Root,
-    Disk,
-    Device,
-    Network,
-    External,
-    Temporary,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum VarPath {
-    Root,
-    Log,
-    Cache,
-    State,
-    Spool,
-    Lock,
-    Runtime,
-    Temporary,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathRegistryError {
     AlreadyRegistered,
     InvalidPath,
+    InvalidCapability,
 }
 
 static PATH_REGISTRY: Mutex<Option<BTreeMap<String, PathCapability>>> = Mutex::new(None);
@@ -161,21 +89,6 @@ fn normalize_path(path: &str) -> Option<String> {
     Some(normalized)
 }
 
-pub fn classify_path(path: &str) -> PathType {
-    let Some(normalized) = normalize_path(path) else {
-        return PathType::Custom;
-    };
-    if normalized == "/" {
-        return PathType::Root;
-    }
-
-    if let Some(registered) = lookup_path(&normalized) {
-        return registered.path_type;
-    }
-
-    PathType::Custom
-}
-
 pub fn path_owner_for_current_process(
     pid: u64,
     privilege: crate::task::PrivilegeLevel,
@@ -195,13 +108,29 @@ pub fn register_path(
     let Some(normalized) = normalize_path(path) else {
         return Err(PathRegistryError::InvalidPath);
     };
-    let path_type = classify_path(&normalized);
+    register_path_with_capabilities(
+        normalized,
+        owner,
+        rights,
+        Capability::FsReadAll,
+        Capability::FsWriteAll,
+    )
+}
+
+fn register_path_with_capabilities(
+    normalized: String,
+    owner: PathOwner,
+    rights: PathRights,
+    read_capability: Capability,
+    write_capability: Capability,
+) -> Result<(), PathRegistryError> {
     with_registry(|registry| {
         let map = registry.get_or_insert_with(BTreeMap::new);
         if let Some(existing) = map.get(&normalized) {
             if existing.owner == owner
                 && existing.rights == rights
-                && existing.path_type == path_type
+                && existing.read_capability == read_capability
+                && existing.write_capability == write_capability
             {
                 return Ok(());
             }
@@ -211,46 +140,38 @@ pub fn register_path(
             normalized.clone(),
             PathCapability {
                 path: normalized,
-                path_type,
                 owner,
                 rights,
+                read_capability,
+                write_capability,
             },
         );
         Ok(())
     })
 }
 
-pub fn register_typed_path(
+fn register_configured_path(
     path: &str,
-    path_type: PathType,
-    owner: PathOwner,
+    read_capability: &str,
+    write_capability: &str,
     rights: PathRights,
 ) -> Result<(), PathRegistryError> {
     let Some(normalized) = normalize_path(path) else {
         return Err(PathRegistryError::InvalidPath);
     };
-    with_registry(|registry| {
-        let map = registry.get_or_insert_with(BTreeMap::new);
-        if let Some(existing) = map.get(&normalized) {
-            if existing.owner == owner
-                && existing.rights == rights
-                && existing.path_type == path_type
-            {
-                return Ok(());
-            }
-            return Err(PathRegistryError::AlreadyRegistered);
-        }
-        map.insert(
-            normalized.clone(),
-            PathCapability {
-                path: normalized,
-                path_type,
-                owner,
-                rights,
-            },
-        );
-        Ok(())
-    })
+    let Some(read_capability) = Capability::intern(read_capability) else {
+        return Err(PathRegistryError::InvalidCapability);
+    };
+    let Some(write_capability) = Capability::intern(write_capability) else {
+        return Err(PathRegistryError::InvalidCapability);
+    };
+    register_path_with_capabilities(
+        normalized,
+        PathOwner::Any,
+        rights,
+        read_capability,
+        write_capability,
+    )
 }
 
 pub fn register_service_paths(service_pid: u64, paths: &[(&str, PathRights)]) -> usize {
@@ -278,52 +199,61 @@ pub fn init_from_kernel_config() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let Some(path_type) = parse_config_path_type(key.trim()) else {
+        if key.trim() != "capability.path" {
+            continue;
+        }
+        let Some(rule) = parse_configured_path(value) else {
             continue;
         };
-        let path = value.trim();
-        let rights = PathRights::new(PATH_READ | PATH_EXEC | PATH_LIST);
-        let _ = register_typed_path(path, path_type, PathOwner::Any, rights);
+        let _ = register_configured_path(
+            rule.path,
+            rule.read_capability,
+            rule.write_capability,
+            rule.rights,
+        );
     }
 }
 
-fn parse_config_path_type(key: &str) -> Option<PathType> {
-    let kind = key.strip_prefix("capability.path.")?;
-    match kind {
-        "binary" => Some(PathType::Binary),
-        "tmp" | "temporary" => Some(PathType::Temporary),
-        "config" => Some(PathType::Config),
-        "mount" => Some(PathType::Mount(MountPath::Root)),
-        "var" => Some(PathType::Var(VarPath::Root)),
-        "system" => Some(PathType::System(SystemPath::Root)),
-        "system.kernel" => Some(PathType::System(SystemPath::Kernel)),
-        "system.boot" => Some(PathType::System(SystemPath::Boot)),
-        "system.services" => Some(PathType::System(SystemPath::Services)),
-        "system.log" => Some(PathType::System(SystemPath::Log)),
-        "system.state" => Some(PathType::System(SystemPath::State)),
-        "system.cache" => Some(PathType::System(SystemPath::Cache)),
-        "system.drivers" => Some(PathType::System(SystemPath::Drivers)),
-        "system.devices" => Some(PathType::System(SystemPath::Devices)),
-        "system.runtime" => Some(PathType::System(SystemPath::Runtime)),
-        "system.security" => Some(PathType::System(SystemPath::Security)),
-        "system.policy" => Some(PathType::System(SystemPath::Policy)),
-        "libraries" => Some(PathType::Libraries(LibraryPath::Shared)),
-        "libraries.shared" => Some(PathType::Libraries(LibraryPath::Shared)),
-        "libraries.static" => Some(PathType::Libraries(LibraryPath::Static)),
-        "libraries.runtime" => Some(PathType::Libraries(LibraryPath::Runtime)),
-        "libraries.frameworks" => Some(PathType::Libraries(LibraryPath::Frameworks)),
-        "libraries.plugkit" => Some(PathType::Libraries(LibraryPath::PlugKit)),
-        "user" => Some(PathType::User(UserPath::HomeRoot)),
-        "user.home" => Some(PathType::User(UserPath::Home)),
-        "user.documents" => Some(PathType::User(UserPath::Documents)),
-        "user.movies" => Some(PathType::User(UserPath::Movies)),
-        "user.develop" => Some(PathType::User(UserPath::Develop)),
-        "user.desktop" => Some(PathType::User(UserPath::Desktop)),
-        "user.downloads" => Some(PathType::User(UserPath::Download)),
-        "user.music" => Some(PathType::User(UserPath::Musics)),
-        "user.images" => Some(PathType::User(UserPath::Images)),
-        _ => None,
+struct ConfiguredPath<'a> {
+    path: &'a str,
+    read_capability: &'a str,
+    write_capability: &'a str,
+    rights: PathRights,
+}
+
+fn parse_configured_path(value: &str) -> Option<ConfiguredPath<'_>> {
+    let mut fields = value.split(';');
+    let path = fields.next()?.trim();
+    let read_capability = fields.next()?.trim();
+    let write_capability = fields.next()?.trim();
+    let rights = parse_rights(fields.next()?.trim())?;
+    if fields.next().is_some() {
+        return None;
     }
+    Some(ConfiguredPath {
+        path,
+        read_capability,
+        write_capability,
+        rights,
+    })
+}
+
+fn parse_rights(value: &str) -> Option<PathRights> {
+    let mut bits = 0;
+    for right in value.split(',').map(str::trim) {
+        bits |= match right {
+            "read" => PATH_READ,
+            "write" => PATH_WRITE,
+            "exec" => PATH_EXEC,
+            "create" => PATH_CREATE,
+            "delete" => PATH_DELETE,
+            "list" => PATH_LIST,
+            "mount" => PATH_MOUNT,
+            "manage" => PATH_MANAGE,
+            _ => return None,
+        };
+    }
+    Some(PathRights::new(bits))
 }
 
 pub fn lookup_path(path: &str) -> Option<PathCapability> {
