@@ -233,19 +233,22 @@ struct UserFramebufferInfo {
 pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
     use crate::syscall::types::{ENXIO, SUCCESS};
 
+    let mediated = crate::hypervisor_guest::is_active();
     let out = if let Some(info) = crate::util::vga::get_info() {
         UserFramebufferInfo {
-            // The firmware address is a guest-visible token, not a stable
-            // userspace MMIO mapping after GPU quarantine and resume.  Pixels
-            // are submitted to the hypervisor in bounded batches instead.
-            addr: 0,
+            addr: if mediated { 0 } else { info.addr },
             size: info.size as u64,
             width: info.width as u32,
             height: info.height as u32,
             stride: info.stride as u32,
-            format: 1 | mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_MEDIATED,
+            format: 1
+                | if mediated {
+                    mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_MEDIATED
+                } else {
+                    0
+                },
         }
-    } else if let Some(info) = crate::hypervisor_guest::is_active()
+    } else if let Some(info) = mediated
         .then(crate::platform::display_info)
         .transpose()
         .ok()
