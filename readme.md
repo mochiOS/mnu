@@ -29,9 +29,8 @@ To run the mnu kernel, you can use QEMU. After building the kernel, you can run 
 - The mnu kernel is not the place to directly implement OS features.
 - Policy decisions live in service code; the kernel performs final enforcement only.
 - Filesystems and disks are treated as cext boundaries, not kernel features.
-- Capabilities are split into `KernelCapability` and `UserCapability`.
-- `UserCapability` applies to applications and normal services as a high-level permission.
 - `KernelCapability` is a low-level permission the kernel enforces directly.
+- Product policy and high-level permission semantics stay outside mnu.
 - `KernelCapability` should bind to concrete kernel objects such as process handles, IPC endpoints, VM objects, MMIO regions, IRQ lines, cext instances, and device handles.
 - IPC should center on endpoints, not raw thread IDs.
 - Failures should be contained inside the kernel boundary, including process kill, cext stop, endpoint close, capability revoke, MMIO unmap, IRQ release, waiter wake, and audit logging.
