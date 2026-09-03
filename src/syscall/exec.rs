@@ -22,12 +22,6 @@ struct InitialUserStack {
     page_data: Vec<u8>,
 }
 
-struct LoadedExec {
-    data: Vec<u8>,
-    source: &'static str,
-    exec_path: String,
-}
-
 struct UserPageTableGuard(Option<u64>);
 
 impl UserPageTableGuard {
@@ -705,27 +699,21 @@ fn exec_internal(
             }
         }
     }
-    let loaded = load_exec_image(path, role);
-    if let Some(LoadedExec {
-        data,
-        source,
-        exec_path,
-    }) = loaded
-    {
-        if enforce_path_access && !crate::policy::signature::verify_exec(&exec_path, &data) {
-            crate::warn!("exec: signature verification failed for '{}'", exec_path);
+    if let Some((data, source)) = load_exec_image(path, role) {
+        if enforce_path_access && !crate::policy::signature::verify_exec(path, &data) {
+            crate::warn!("exec: signature verification failed for '{}'", path);
             return crate::syscall::types::EPERM;
         }
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",
-            exec_path,
+            path,
             source,
             data.len()
         );
         exec_with_data(
             &data,
             &process_name,
-            &exec_path,
+            path,
             args,
             envp,
             parent_override,
@@ -741,12 +729,8 @@ fn exec_internal(
     }
 }
 
-fn load_exec_image(path: &str, role: ManifestRole) -> Option<LoadedExec> {
-    load_regular_exec_image(path, role).map(|(data, source)| LoadedExec {
-        data,
-        source,
-        exec_path: path.to_string(),
-    })
+fn load_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static str)> {
+    load_regular_exec_image(path, role)
 }
 
 fn load_regular_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static str)> {
@@ -1490,28 +1474,27 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
             return EINVAL;
         }
     };
-    let path = path_owned.as_str();
-
     let Some(pid) = crate::syscall::security::current_process_id() else {
         return crate::syscall::types::EACCES;
     };
-    if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(path, pid) {
+    if let Err(errno) =
+        crate::syscall::fs::ensure_fs_path_executable_for_process(&path_owned, pid)
+    {
         return errno;
     }
 
-    let exec_path = path_owned.clone();
-    let aslr_seed = next_aslr_seed(exec_path.as_str());
-    let (data_vec, source) = match load_exec_image(path, ManifestRole::Unknown) {
-        Some(LoadedExec { data, source, .. }) => (data, source),
+    let aslr_seed = next_aslr_seed(&path_owned);
+    let (data_vec, source) = match load_exec_image(&path_owned, ManifestRole::Unknown) {
+        Some(loaded) => loaded,
         None => return ENOENT,
     };
-    if !crate::policy::signature::verify_exec(exec_path.as_str(), &data_vec) {
-        crate::warn!("execve: signature verification failed for '{}'", exec_path);
+    if !crate::policy::signature::verify_exec(&path_owned, &data_vec) {
+        crate::warn!("execve: signature verification failed for '{}'", path_owned);
         return EPERM;
     }
     crate::info!(
         "execve: loaded '{}' from {} ({} bytes)",
-        exec_path,
+        path_owned,
         source,
         data_vec.len()
     );
@@ -1614,12 +1597,12 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
 
     // ユーザースタックをセットアップ (Linux x86_64 ABI: argc, argv[], NULL, envp[], NULL, auxv[])
     // argv / envp をユーザー空間から読み込む
-    let mut argv_strings = read_user_ptr_array(argv, 256);
-    if argv_strings.is_empty() {
-        argv_strings.push(path_owned.clone());
-    }
+    let argv_strings = read_user_ptr_array(argv, 256);
     let envp_strings = read_user_ptr_array(envp, 1024);
-    let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    let mut argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    if argv_refs.is_empty() {
+        argv_refs.push(&path_owned);
+    }
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
     let auxv_entries = [
         (3u64, phdr_vaddr),
@@ -1645,7 +1628,13 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         stack_end_vaddr,
         initial_rsp,
         page_data,
-    } = match build_initial_user_stack(aslr_seed, &argv_refs, &envp_refs, &exec_path, &auxv_entries)
+    } = match build_initial_user_stack(
+        aslr_seed,
+        &argv_refs,
+        &envp_refs,
+        &path_owned,
+        &auxv_entries,
+    )
     {
         Ok(stack) => stack,
         Err(errno) => return errno,
@@ -1726,7 +1715,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         p.set_ipc_mapping_end(0);
         p.set_stack_bottom(stack_base_vaddr);
         p.set_stack_top(stack_end_vaddr + 4096);
-        p.set_exe_path(&exec_path);
+        p.set_exe_path(&path_owned);
         crate::debug!(
             "[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}",
             p.name(),
