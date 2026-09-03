@@ -251,6 +251,7 @@ fn current_process_kernel_authorities() -> Option<KernelAuthoritySet> {
 
 fn parse_requested_exec_grants(
     caps_list: &[String],
+    can_intern: bool,
 ) -> Result<(CapabilitySet, KernelAuthoritySet), u64> {
     use crate::syscall::types::EINVAL;
 
@@ -261,7 +262,12 @@ fn parse_requested_exec_grants(
             authorities.insert(authority);
             continue;
         }
-        let Some(cap) = Capability::from_str(spec.as_str()) else {
+        let cap = if can_intern {
+            Capability::intern(spec.as_str())
+        } else {
+            Capability::from_str(spec.as_str())
+        };
+        let Some(cap) = cap else {
             return Err(EINVAL);
         };
         if matches!(cap, Capability::MemoryPhysMap) {
@@ -276,13 +282,7 @@ fn validate_requested_exec_capabilities(
     caps: &CapabilitySet,
     authorities: &KernelAuthoritySet,
 ) -> Result<(), u64> {
-    use crate::syscall::types::{EINVAL, EPERM};
-
-    for cap in caps.iter() {
-        if !cap.is_kernel_enforced() {
-            return Err(EINVAL);
-        }
-    }
+    use crate::syscall::types::EPERM;
 
     let Some(caller_caps) = current_process_capabilities() else {
         return Ok(());
@@ -534,7 +534,10 @@ fn exec_manifest_common(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let (caps, authorities) = match parse_requested_exec_grants(&caps_list) {
+    let can_intern = current_process_capabilities().is_none_or(|caps| {
+        caps.contains(crate::capability::Capability::CapabilitiesManage)
+    });
+    let (caps, authorities) = match parse_requested_exec_grants(&caps_list, can_intern) {
         Ok(grants) => grants,
         Err(errno) => return errno,
     };

@@ -163,17 +163,10 @@ impl KernelCapability {
     }
 }
 
-/// capability の公開レベル
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum CapabilityClass {
-    UserGrantable,
-    Privileged,
-    SystemOnly,
-}
-
-/// capability（権限）
+/// mnu が直接強制する権限と、上位層が定義する不透明な権限です。
 ///
-/// 文字列名は `Capability::as_str()` / `Capability::from_str()` で相互変換する。
+/// `Dynamic` の値は起動中だけ有効な内部IDです。外部ABIでは引き続き名前を使い、
+/// mnuはその意味や許可UIの分類を解釈しません。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Capability {
     FsReadUserDocuments,
@@ -197,12 +190,6 @@ pub enum Capability {
     FsReadAll,
     FsWriteAll,
 
-    NetConnect,
-    NetListen,
-    NetRaw,
-    NetTlsConnect,
-    NetHttpRequest,
-
     IpcClient,
     IpcServer,
 
@@ -210,127 +197,34 @@ pub enum Capability {
     ProcessInspect,
     ProcessKill,
 
-    WindowCreate,
-    WindowOverlay,
-    WindowSecureOverlay,
-    WindowDecorate,
-    WindowCapture,
-
     DisplayRead,
-    DisplayCapture,
-
-    InputKeyboard,
-    InputKeyboardGlobal,
-    InputPointer,
-    InputPointerGlobal,
-    InputGamepad,
-
-    AudioPlayback,
-    AudioRecord,
-
-    ClipboardRead,
-    ClipboardWrite,
-
-    NotificationSend,
-
-    CameraAccess,
-    MicrophoneAccess,
-    LocationAccess,
-
-    BluetoothAccess,
     UsbAccess,
     SerialAccess,
-
-    PowerShutdown,
-    PowerReboot,
-    PowerSuspend,
-
     SystemTimeRead,
     SystemRandomRead,
-    SystemTimeSet,
-    SystemInfoRead,
-    SystemLogsRead,
-
-    PackageInstall,
-    PackageRemove,
-    PackageUpdate,
-
     ServiceRegister,
-    ServiceControl,
-
-    VmCreate,
-    VmControl,
-
     DmaAllocate,
     MemoryPhysMap,
     MemoryPhysTranslate,
-
-    KernelModuleLoad,
     KernelDebug,
-
     DeviceGpu,
-    DeviceAudio,
     DeviceInput,
     DeviceStorage,
     DeviceNet,
-
-    AccountSelfRead,
-    AccountSelfModify,
-    AccountAuthenticate,
-    AccountOtherRead,
-    AccountOtherModify,
-
     SettingsRead,
     SettingsWrite,
     CapabilitiesManage,
-
     Unsandboxed,
-
-    DeveloperDebug,
     DeveloperProfile,
-    DeveloperTracing,
-
     SignatureRead,
     SignatureWrite,
+    Dynamic(u32),
 }
 
 impl Capability {
-    /// ユーザーへ昇格要求を許してよいかを分類する
-    pub fn class(&self) -> CapabilityClass {
+    fn builtin_name(self) -> Option<&'static str> {
         use Capability::*;
-        match self {
-            FsReadUserDocuments | FsWriteUserDocuments | FsReadUserDownloads
-            | FsWriteUserDownloads | FsReadUserDesktop | FsWriteUserDesktop
-            | FsReadUserPictures | FsWriteUserPictures | FsReadUserMusic | FsWriteUserMusic
-            | FsReadUserVideos | FsWriteUserVideos | FsReadUser | FsWriteUser | FsReadTmp
-            | FsWriteTmp | FsReadRemovable | FsWriteRemovable | NetConnect | NetListen
-            | NetTlsConnect | NetHttpRequest | WindowCreate | WindowOverlay | DisplayRead
-            | InputKeyboard | InputPointer | AudioPlayback | AudioRecord | ClipboardRead
-            | ClipboardWrite | NotificationSend | SystemTimeRead | SystemInfoRead
-            | SystemLogsRead | AccountSelfRead | AccountSelfModify | SettingsRead => {
-                CapabilityClass::UserGrantable
-            }
-            FsReadAll | FsWriteAll | NetRaw | WindowDecorate | WindowCapture | DisplayCapture
-            | InputKeyboardGlobal | InputPointerGlobal | InputGamepad | CameraAccess
-            | MicrophoneAccess | LocationAccess | BluetoothAccess | UsbAccess | SerialAccess
-            | PowerShutdown | PowerReboot | PowerSuspend | SystemTimeSet | PackageInstall
-            | PackageRemove | PackageUpdate | ServiceRegister | ServiceControl | VmCreate
-            | VmControl | DeviceGpu | DeviceAudio | DeviceInput | DeviceStorage | DeviceNet
-            | AccountAuthenticate | AccountOtherRead | AccountOtherModify | SettingsWrite => {
-                CapabilityClass::Privileged
-            }
-            ProcessSpawn | ProcessInspect | ProcessKill | IpcClient | IpcServer
-            | WindowSecureOverlay | DmaAllocate | MemoryPhysMap | MemoryPhysTranslate
-            | KernelModuleLoad | KernelDebug | CapabilitiesManage | SystemRandomRead
-            | Unsandboxed | DeveloperDebug | DeveloperProfile | DeveloperTracing
-            | SignatureRead | SignatureWrite => CapabilityClass::SystemOnly,
-        }
-    }
-
-    /// 文字列名へ変換する
-    pub fn as_str(&self) -> &'static str {
-        use Capability::*;
-        match self {
+        Some(match self {
             FsReadUserDocuments => "fs.read.user.documents",
             FsWriteUserDocuments => "fs.write.user.documents",
             FsReadUserDownloads => "fs.read.user.downloads",
@@ -351,278 +245,78 @@ impl Capability {
             FsWriteRemovable => "fs.write.removable",
             FsReadAll => "fs.read.all",
             FsWriteAll => "fs.write.all",
-
-            NetConnect => "net.connect",
-            NetListen => "net.listen",
-            NetRaw => "net.raw",
-            NetTlsConnect => "net.tls.connect",
-            NetHttpRequest => "net.http.request",
-
             IpcClient => "ipc.client",
             IpcServer => "ipc.server",
-
             ProcessSpawn => "process.spawn",
             ProcessInspect => "process.inspect",
             ProcessKill => "process.kill",
-
-            WindowCreate => "window.create",
-            WindowOverlay => "window.overlay",
-            WindowSecureOverlay => "window.secure-overlay",
-            WindowDecorate => "window.decorate",
-            WindowCapture => "window.capture",
-
             DisplayRead => "display.read",
-            DisplayCapture => "display.capture",
-
-            InputKeyboard => "input.keyboard",
-            InputKeyboardGlobal => "input.keyboard.global",
-            InputPointer => "input.pointer",
-            InputPointerGlobal => "input.pointer.global",
-            InputGamepad => "input.gamepad",
-
-            AudioPlayback => "audio.playback",
-            AudioRecord => "audio.record",
-
-            ClipboardRead => "clipboard.read",
-            ClipboardWrite => "clipboard.write",
-
-            NotificationSend => "notification.send",
-
-            CameraAccess => "camera.access",
-            MicrophoneAccess => "microphone.access",
-            LocationAccess => "location.access",
-
-            BluetoothAccess => "bluetooth.access",
             UsbAccess => "usb.access",
             SerialAccess => "serial.access",
-
-            PowerShutdown => "power.shutdown",
-            PowerReboot => "power.reboot",
-            PowerSuspend => "power.suspend",
-
             SystemTimeRead => "system.time.read",
             SystemRandomRead => "system.random.read",
-            SystemTimeSet => "system.time.set",
-            SystemInfoRead => "system.info.read",
-            SystemLogsRead => "system.logs.read",
-
-            PackageInstall => "package.install",
-            PackageRemove => "package.remove",
-            PackageUpdate => "package.update",
-
             ServiceRegister => "service.register",
-            ServiceControl => "service.control",
-
-            VmCreate => "vm.create",
-            VmControl => "vm.control",
-
             DmaAllocate => "dma.allocate",
             MemoryPhysMap => "memory.phys.map",
             MemoryPhysTranslate => "memory.phys.translate",
-
-            KernelModuleLoad => "kernel.module.load",
             KernelDebug => "kernel.debug",
-
             DeviceGpu => "device.gpu",
-            DeviceAudio => "device.audio",
             DeviceInput => "device.input",
             DeviceStorage => "device.storage",
             DeviceNet => "device.net",
-
-            AccountSelfRead => "account.self.read",
-            AccountSelfModify => "account.self.modify",
-            AccountAuthenticate => "account.authenticate",
-            AccountOtherRead => "account.other.read",
-            AccountOtherModify => "account.other.modify",
-
             SettingsRead => "settings.read",
             SettingsWrite => "settings.write",
             CapabilitiesManage => "capabilities.manage",
-
             Unsandboxed => "unsandboxed",
-
-            DeveloperDebug => "developer.debug",
             DeveloperProfile => "developer.profile",
-            DeveloperTracing => "developer.tracing",
-
             SignatureRead => "signature.db.read",
             SignatureWrite => "signature.db.write",
-        }
-    }
-
-    /// 文字列名から変換する（不明な文字列は `None`）
-    pub fn from_str(s: &str) -> Option<Self> {
-        use Capability::*;
-        let cap = match s {
-            "fs.read.user.documents" => FsReadUserDocuments,
-            "fs.write.user.documents" => FsWriteUserDocuments,
-            "fs.read.user.downloads" => FsReadUserDownloads,
-            "fs.write.user.downloads" => FsWriteUserDownloads,
-            "fs.read.user.desktop" => FsReadUserDesktop,
-            "fs.write.user.desktop" => FsWriteUserDesktop,
-            "fs.read.user.pictures" => FsReadUserPictures,
-            "fs.write.user.pictures" => FsWriteUserPictures,
-            "fs.read.user.music" => FsReadUserMusic,
-            "fs.write.user.music" => FsWriteUserMusic,
-            "fs.read.user.videos" => FsReadUserVideos,
-            "fs.write.user.videos" => FsWriteUserVideos,
-            "fs.read.user" => FsReadUser,
-            "fs.write.user" => FsWriteUser,
-            "fs.read.tmp" => FsReadTmp,
-            "fs.write.tmp" => FsWriteTmp,
-            "fs.read.removable" => FsReadRemovable,
-            "fs.write.removable" => FsWriteRemovable,
-            "fs.read.all" => FsReadAll,
-            "fs.write.all" => FsWriteAll,
-
-            "net.connect" => NetConnect,
-            "net.listen" => NetListen,
-            "net.raw" => NetRaw,
-            "net.tls.connect" => NetTlsConnect,
-            "net.http.request" => NetHttpRequest,
-
-            "ipc.client" => IpcClient,
-            "ipc.server" => IpcServer,
-
-            "process.spawn" => ProcessSpawn,
-            "process.inspect" => ProcessInspect,
-            "process.kill" => ProcessKill,
-
-            "window.create" => WindowCreate,
-            "window.overlay" => WindowOverlay,
-            "window.secure-overlay" => WindowSecureOverlay,
-            "window.decorate" => WindowDecorate,
-            "window.capture" => WindowCapture,
-
-            "display.read" => DisplayRead,
-            "display.capture" => DisplayCapture,
-
-            "input.keyboard" => InputKeyboard,
-            "input.keyboard.global" => InputKeyboardGlobal,
-            "input.pointer" => InputPointer,
-            "input.pointer.global" => InputPointerGlobal,
-            "input.gamepad" => InputGamepad,
-
-            "audio.playback" => AudioPlayback,
-            "audio.record" => AudioRecord,
-
-            "clipboard.read" => ClipboardRead,
-            "clipboard.write" => ClipboardWrite,
-
-            "notification.send" => NotificationSend,
-
-            "camera.access" => CameraAccess,
-            "microphone.access" => MicrophoneAccess,
-            "location.access" => LocationAccess,
-
-            "bluetooth.access" => BluetoothAccess,
-            "usb.access" => UsbAccess,
-            "serial.access" => SerialAccess,
-
-            "power.shutdown" => PowerShutdown,
-            "power.reboot" => PowerReboot,
-            "power.suspend" => PowerSuspend,
-
-            "system.time.read" => SystemTimeRead,
-            "system.random.read" => SystemRandomRead,
-            "system.time.set" => SystemTimeSet,
-            "system.info.read" => SystemInfoRead,
-            "system.logs.read" => SystemLogsRead,
-
-            "package.install" => PackageInstall,
-            "package.remove" => PackageRemove,
-            "package.update" => PackageUpdate,
-
-            "service.register" => ServiceRegister,
-            "service.control" => ServiceControl,
-
-            "vm.create" => VmCreate,
-            "vm.control" => VmControl,
-
-            "dma.allocate" => DmaAllocate,
-            "memory.phys.map" => MemoryPhysMap,
-            "memory.phys.translate" => MemoryPhysTranslate,
-
-            "kernel.module.load" => KernelModuleLoad,
-            "kernel.debug" => KernelDebug,
-
-            "device.gpu" => DeviceGpu,
-            "device.audio" => DeviceAudio,
-            "device.input" => DeviceInput,
-            "device.storage" => DeviceStorage,
-            "device.net" => DeviceNet,
-
-            "account.self.read" => AccountSelfRead,
-            "account.self.modify" => AccountSelfModify,
-            "account.authenticate" => AccountAuthenticate,
-            "account.other.read" => AccountOtherRead,
-            "account.other.modify" => AccountOtherModify,
-
-            "settings.read" => SettingsRead,
-            "settings.write" => SettingsWrite,
-            "capabilities.manage" => CapabilitiesManage,
-
-            "unsandboxed" => Unsandboxed,
-
-            "developer.debug" => DeveloperDebug,
-            "developer.profile" => DeveloperProfile,
-            "developer.tracing" => DeveloperTracing,
-
-            "signature.db.write" => SignatureWrite,
-            "signature.db.read" => SignatureRead,
-
-            _ => return None,
-        };
-        Some(cap)
-    }
-
-    pub fn to_kernel_capability(&self) -> Option<KernelCapability> {
-        use Capability::*;
-        Some(match self {
-            ProcessKill => KernelCapability::ProcessKill,
-            ProcessSpawn => KernelCapability::ProcessSpawn,
-            IpcClient => KernelCapability::IpcEndpointSend,
-            IpcServer => KernelCapability::IpcEndpointRecv,
-            VmCreate | VmControl => KernelCapability::VmMap,
-            DmaAllocate => KernelCapability::DmaAllocate,
-            MemoryPhysMap => KernelCapability::PhysMap,
-            MemoryPhysTranslate => KernelCapability::PhysTranslate,
-            KernelModuleLoad => KernelCapability::CextLoad,
-            KernelDebug => KernelCapability::KernelDebug,
-            SignatureRead => KernelCapability::SignatureRead,
-            SignatureWrite => KernelCapability::SignatureWrite,
-            _ => return None,
+            Dynamic(_) => return None,
         })
     }
 
-    /// カーネルが最終的に強制する capability かどうか
-    ///
-    /// 現行の設計では、ここに列挙される capability はすべてカーネルが
-    /// 付与・検証の最終責任を持つ。
-    pub fn is_kernel_enforced(&self) -> bool {
-        Self::kernel_enforced_capabilities().contains(self)
+    pub fn from_str(s: &str) -> Option<Self> {
+        builtin_capability(s).or_else(|| lookup_dynamic_capability(s))
     }
 
-    /// 他プロセスへ委譲可能かどうか。
-    ///
-    /// `Unsandboxed` や物理メモリ、プロセス生成のような強い権限は
-    /// 低い権限のプロセスへ転送しない。
+    pub fn intern(s: &str) -> Option<Self> {
+        if !valid_capability_name(s) {
+            return None;
+        }
+        builtin_capability(s).or_else(|| intern_dynamic_capability(s))
+    }
+
     pub fn is_delegable(&self) -> bool {
-        !matches!(
+        matches!(
             self,
-            Capability::Unsandboxed
-                | Capability::ProcessSpawn
-                | Capability::KernelDebug
-                | Capability::DmaAllocate
-                | Capability::MemoryPhysMap
-                | Capability::MemoryPhysTranslate
+            Capability::FsReadUserDocuments
+                | Capability::FsWriteUserDocuments
+                | Capability::FsReadUserDownloads
+                | Capability::FsWriteUserDownloads
+                | Capability::FsReadUserDesktop
+                | Capability::FsWriteUserDesktop
+                | Capability::FsReadUserPictures
+                | Capability::FsWriteUserPictures
+                | Capability::FsReadUserMusic
+                | Capability::FsWriteUserMusic
+                | Capability::FsReadUserVideos
+                | Capability::FsWriteUserVideos
+                | Capability::FsReadUser
+                | Capability::FsWriteUser
+                | Capability::FsReadTmp
+                | Capability::FsWriteTmp
+                | Capability::FsReadRemovable
+                | Capability::FsWriteRemovable
+                | Capability::DisplayRead
+                | Capability::SystemTimeRead
+                | Capability::SettingsRead
+                | Capability::Dynamic(_)
         )
     }
 
-    /// カーネルが強制対象として扱う capability 一覧
-    pub fn kernel_enforced_capabilities() -> &'static [Capability] {
+    pub fn bootstrap_capabilities() -> &'static [Capability] {
         use Capability::*;
-        const KERNEL_ENFORCED: &[Capability] = &[
+        const BOOTSTRAP: &[Capability] = &[
             FsReadUserDocuments,
             FsWriteUserDocuments,
             FsReadUserDownloads,
@@ -643,86 +337,103 @@ impl Capability {
             FsWriteRemovable,
             FsReadAll,
             FsWriteAll,
-            NetConnect,
-            NetListen,
-            NetRaw,
-            NetTlsConnect,
-            NetHttpRequest,
             IpcClient,
             IpcServer,
             ProcessSpawn,
             ProcessInspect,
             ProcessKill,
-            WindowCreate,
-            WindowOverlay,
-            WindowSecureOverlay,
-            WindowDecorate,
-            WindowCapture,
             DisplayRead,
-            DisplayCapture,
-            InputKeyboard,
-            InputKeyboardGlobal,
-            InputPointer,
-            InputPointerGlobal,
-            InputGamepad,
-            AudioPlayback,
-            AudioRecord,
-            ClipboardRead,
-            ClipboardWrite,
-            NotificationSend,
-            CameraAccess,
-            MicrophoneAccess,
-            LocationAccess,
-            BluetoothAccess,
             UsbAccess,
             SerialAccess,
-            PowerShutdown,
-            PowerReboot,
-            PowerSuspend,
             SystemTimeRead,
             SystemRandomRead,
-            SystemTimeSet,
-            SystemInfoRead,
-            SystemLogsRead,
-            PackageInstall,
-            PackageRemove,
-            PackageUpdate,
             ServiceRegister,
-            ServiceControl,
-            VmCreate,
-            VmControl,
             DmaAllocate,
             MemoryPhysMap,
             MemoryPhysTranslate,
-            KernelModuleLoad,
             KernelDebug,
             DeviceGpu,
-            DeviceAudio,
             DeviceInput,
             DeviceStorage,
             DeviceNet,
-            AccountSelfRead,
-            AccountSelfModify,
-            AccountAuthenticate,
-            AccountOtherRead,
-            AccountOtherModify,
             SettingsRead,
             SettingsWrite,
             CapabilitiesManage,
             Unsandboxed,
-            DeveloperDebug,
             DeveloperProfile,
-            DeveloperTracing,
             SignatureRead,
             SignatureWrite,
         ];
-        KERNEL_ENFORCED
+        BOOTSTRAP
     }
+}
 
-    /// 将来の拡張のための全 capability 一覧
-    pub fn all_capabilities() -> &'static [Capability] {
-        Self::kernel_enforced_capabilities()
+#[derive(Default)]
+struct DynamicCapabilityRegistry {
+    names: Vec<String>,
+}
+
+static DYNAMIC_CAPABILITIES: spin::Mutex<Option<DynamicCapabilityRegistry>> =
+    spin::Mutex::new(None);
+
+fn with_dynamic_registry<R>(f: impl FnOnce(&mut DynamicCapabilityRegistry) -> R) -> R {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut registry = DYNAMIC_CAPABILITIES.lock();
+        f(registry.get_or_insert_with(DynamicCapabilityRegistry::default))
+    })
+}
+
+fn valid_capability_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let endpoint_is_valid = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    !bytes.is_empty()
+        && bytes.len() <= 512
+        && endpoint_is_valid(bytes[0])
+        && endpoint_is_valid(bytes[bytes.len() - 1])
+        && !bytes.windows(2).any(|pair| pair == b"..")
+        && bytes.iter().copied().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+}
+
+fn builtin_capability(name: &str) -> Option<Capability> {
+    Capability::bootstrap_capabilities()
+        .iter()
+        .copied()
+        .find(|capability| capability.builtin_name() == Some(name))
+}
+
+fn lookup_dynamic_capability(name: &str) -> Option<Capability> {
+    if !valid_capability_name(name) {
+        return None;
     }
+    with_dynamic_registry(|registry| {
+        registry
+            .names
+            .iter()
+            .position(|registered| registered == name)
+            .map(|id| Capability::Dynamic(id as u32))
+    })
+}
+
+fn intern_dynamic_capability(name: &str) -> Option<Capability> {
+    const MAX_DYNAMIC_CAPABILITIES: usize = 4096;
+
+    with_dynamic_registry(|registry| {
+        if let Some(id) = registry
+            .names
+            .iter()
+            .position(|registered| registered == name)
+        {
+            return Some(Capability::Dynamic(id as u32));
+        }
+        if registry.names.len() >= MAX_DYNAMIC_CAPABILITIES {
+            return None;
+        }
+        let id = registry.names.len() as u32;
+        registry.names.push(name.to_string());
+        Some(Capability::Dynamic(id))
+    })
 }
 
 /// `parent` が `child` を含意するか（階層継承）
@@ -805,8 +516,7 @@ pub struct KernelAuthoritySet {
 /// capability 文字列の解析エラー
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CapabilityParseError {
-    /// 未知の capability 名
-    UnknownCapability { name: String },
+    InvalidCapability { name: String },
 }
 
 impl CapabilitySet {
@@ -864,8 +574,8 @@ impl CapabilitySet {
     pub fn from_strings(list: &[String]) -> Result<Self, CapabilityParseError> {
         let mut set = Self::empty();
         for s in list {
-            let Some(cap) = Capability::from_str(s.as_str()) else {
-                return Err(CapabilityParseError::UnknownCapability {
+            let Some(cap) = Capability::intern(s.as_str()) else {
+                return Err(CapabilityParseError::InvalidCapability {
                     name: s.to_string(),
                 });
             };

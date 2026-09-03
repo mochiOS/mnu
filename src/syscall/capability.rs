@@ -11,8 +11,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::capability::{
-    kernel_authority_implies, parse_kernel_authority_spec, Capability, CapabilityClass,
-    KernelAuthority, KernelCapability,
+    kernel_authority_implies, parse_kernel_authority_spec, Capability, KernelAuthority,
+    KernelCapability,
 };
 use crate::syscall::copy_from_user;
 use crate::syscall::types::{EACCES, EFAULT, EINVAL, ENOSYS, SUCCESS};
@@ -208,13 +208,13 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
         {
             return EACCES;
         }
-        let cap = match parse_capability_token(cap_spec) {
+        let cap = match intern_capability_token(cap_spec) {
             Some(cap) => cap,
             None => return EINVAL,
         };
         match cap {
             CapabilityToken::Plain(capability) => {
-                if capability.class() != CapabilityClass::UserGrantable {
+                if !capability.is_delegable() {
                     return EACCES;
                 }
                 let inserted = crate::task::with_process_mut(dest_process, |proc| {
@@ -387,6 +387,13 @@ fn parse_capability_token(spec: &str) -> Option<CapabilityToken> {
         return Some(CapabilityToken::Authority(authority));
     }
     Capability::from_str(spec).map(CapabilityToken::Plain)
+}
+
+fn intern_capability_token(spec: &str) -> Option<CapabilityToken> {
+    if let Some(authority) = parse_kernel_authority_spec(spec) {
+        return Some(CapabilityToken::Authority(authority));
+    }
+    Capability::intern(spec).map(CapabilityToken::Plain)
 }
 
 fn read_capability_token_from_user(cap_ptr: u64, cap_len: u64) -> Result<CapabilityToken, u64> {

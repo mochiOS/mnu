@@ -84,7 +84,7 @@ fn kernel_main() -> ! {
     crate::smp::start_secondary_cpus();
 
     let mut caps = crate::capability::CapabilitySet::empty();
-    for cap in crate::capability::Capability::kernel_enforced_capabilities() {
+    for cap in crate::capability::Capability::bootstrap_capabilities() {
         if matches!(
             cap,
             crate::capability::Capability::DmaAllocate
