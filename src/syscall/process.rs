@@ -478,6 +478,21 @@ pub fn fork() -> u64 {
         Some(pid) => pid,
         None => return ENOSYS,
     };
+    let mut live_threads = 0usize;
+    crate::task::for_each_thread(|thread| {
+        if thread.process_id() == parent_pid
+            && thread.state() != crate::task::ThreadState::Terminated
+        {
+            live_threads += 1;
+        }
+    });
+    if live_threads != 1 {
+        crate::audit::log(
+            crate::audit::AuditEventKind::Policy,
+            "fork rejected until cross-CPU TLB shootdown is available",
+        );
+        return EAGAIN;
+    }
     let parent_has_mmio =
         crate::task::with_process(parent_pid, |p| p.has_mmio_mappings()).unwrap_or(false);
     if parent_has_mmio {
@@ -539,20 +554,34 @@ pub fn fork() -> u64 {
         None => return ENOSYS,
     };
 
-    let child_pt = match crate::mem::paging::clone_user_page_table(parent_pt) {
+    let child_pt = match crate::mem::paging::clone_user_page_table(parent_pt, |vaddr| {
+        if parent_dma_buffers.iter().any(|dma| {
+            dma.end()
+                .is_some_and(|end| vaddr >= dma.virt_start() && vaddr < end)
+        }) {
+            return crate::mem::paging::ForkPagePolicy::Exclude;
+        }
+        if let Some(region) = parent_mmap_regions
+            .iter()
+            .find(|region| region.contains(vaddr))
+        {
+            if region.is_shared() {
+                crate::mem::paging::ForkPagePolicy::Shared
+            } else if region.is_writable() {
+                crate::mem::paging::ForkPagePolicy::PrivateWritable
+            } else {
+                crate::mem::paging::ForkPagePolicy::Private
+            }
+        } else {
+            crate::mem::paging::ForkPagePolicy::Private
+        }
+    }) {
         Ok(pt) => pt,
         Err(err) => {
             crate::warn!("fork: clone_user_page_table failed: {:?}", err);
             return ENOMEM;
         }
     };
-    for dma in &parent_dma_buffers {
-        let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
-            child_pt,
-            dma.virt_start(),
-            dma.len(),
-        );
-    }
 
     let (user_context, parent_fs) = crate::task::with_thread(parent_tid, |thread| {
         (thread.syscall_user_context(), thread.fs_base())
@@ -763,26 +792,16 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool) -> bool {
             None => return Err(EINVAL),
         };
 
-        let maybe_phys = crate::mem::paging::virt_to_phys_in_table(pt_phys, page_addr);
-        if let Some(phys) = maybe_phys {
+        if crate::mem::paging::virt_to_phys_in_table(pt_phys, page_addr).is_some() {
             if !is_write {
                 crate::debug!("[MMAP_FAULT] page already mapped {:#x}", page_addr);
                 return Err(EINVAL);
             }
-            let frame = match x86_64::structures::paging::PhysFrame::from_start_address(
-                x86_64::PhysAddr::new(phys),
-            ) {
-                Ok(frame) => frame,
-                Err(_) => return Err(EINVAL),
-            };
-            let page = x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(
-                page_addr,
-            ));
-            let flags = x86_64::structures::paging::PageTableFlags::PRESENT
-                | x86_64::structures::paging::PageTableFlags::WRITABLE
-                | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
-                | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
-            if crate::mem::paging::map_page(page, frame, flags).is_err() {
+            if crate::mem::paging::protect_range_in_table(
+                pt_phys, page_addr, 4096, true, true, false,
+            )
+            .is_err()
+            {
                 crate::debug!("[MMAP_FAULT] remap writable failed for {:#x}", page_addr);
                 return Err(ENOMEM);
             }
@@ -1209,13 +1228,15 @@ pub fn alloc_shared_pages(
         Some(Err(errno)) => return errno,
         None => return ENOMEM,
     };
+    let rollback =
+        |mapped| rollback_shared_pages(pid, pt_phys, virt_start, map_len, old_heap_end, mapped);
 
     let mut mapped = 0usize;
     for index in 0..page_count {
         let frame = match crate::mem::frame::allocate_zeroed_frame() {
             Ok(frame) => frame,
             Err(_) => {
-                rollback_shared_pages(pid, pt_phys, virt_start, old_heap_end, mapped);
+                rollback(mapped);
                 return ENOMEM;
             }
         };
@@ -1223,10 +1244,18 @@ pub fn alloc_shared_pages(
         let virt = virt_start + (index as u64) * 4096;
         if crate::mem::paging::map_page_in_table(pt_phys, virt, phys, true, true).is_err() {
             let _ = crate::mem::frame::deallocate_frame(frame);
-            rollback_shared_pages(pid, pt_phys, virt_start, old_heap_end, mapped);
+            rollback(mapped);
             return ENOMEM;
         }
         mapped += 1;
+    }
+
+    let region = crate::task::MmapRegion::anonymous(virt_start, map_len, 0x3, 0x1, true, true);
+    let registered = crate::task::with_process_mut(pid, |process| process.add_mmap_region(region))
+        .unwrap_or(false);
+    if !registered {
+        rollback(mapped);
+        return ENOMEM;
     }
 
     if phys_pages_ptr != 0 {
@@ -1234,7 +1263,7 @@ pub fn alloc_shared_pages(
             let output = match phys_pages_ptr.checked_add((index as u64) * 8) {
                 Some(output) => output,
                 None => {
-                    rollback_shared_pages(pid, pt_phys, virt_start, old_heap_end, mapped);
+                    rollback(mapped);
                     return EFAULT;
                 }
             };
@@ -1245,12 +1274,12 @@ pub fn alloc_shared_pages(
             ) {
                 Some((phys, _)) => phys.as_u64() & !0xfff,
                 None => {
-                    rollback_shared_pages(pid, pt_phys, virt_start, old_heap_end, mapped);
+                    rollback(mapped);
                     return EFAULT;
                 }
             };
             if let Err(errno) = super::copy_to_user(output, &phys.to_ne_bytes()) {
-                rollback_shared_pages(pid, pt_phys, virt_start, old_heap_end, mapped);
+                rollback(mapped);
                 return errno;
             }
         }
@@ -1262,17 +1291,16 @@ fn rollback_shared_pages(
     pid: crate::task::ProcessId,
     pt_phys: u64,
     virt_start: u64,
+    map_len: u64,
     old_heap_end: u64,
     mapped: usize,
 ) {
     if mapped != 0 {
-        let _ = crate::mem::paging::unmap_range_in_table(
-            pt_phys,
-            virt_start,
-            (mapped as u64) * 4096,
-        );
+        let _ =
+            crate::mem::paging::unmap_range_in_table(pt_phys, virt_start, (mapped as u64) * 4096);
     }
     let _ = crate::task::with_process_mut(pid, |process| {
+        process.remove_mmap_region(virt_start, map_len);
         if process.heap_end() >= virt_start {
             process.set_heap_end(old_heap_end);
         }

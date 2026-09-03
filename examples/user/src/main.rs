@@ -46,6 +46,8 @@ const EVENT_WAIT_A_FAIL: &[u8] = b"event: wait a failed\n";
 const EVENT_SIGNAL_B_FAIL: &[u8] = b"event: signal b failed\n";
 const EVENT_POLL_FAIL: &[u8] = b"event: poll failed\n";
 static THREAD_TEST_DONE: AtomicBool = AtomicBool::new(false);
+static THREAD_TEST_READY: AtomicBool = AtomicBool::new(false);
+static THREAD_TEST_RELEASE: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn is_error(ret: u64) -> bool {
@@ -358,6 +360,8 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
 
 fn run_process_spawn_test() -> bool {
     const EXPECTED_BYTE: u8 = 0xa5;
+    const CHILD_BYTE: u8 = 0x5a;
+    const SHARED_BYTE: u8 = 0x3c;
 
     let create_fd = user::file_open(SPAWN_MMAP_TEST_PATH, 0o2 | 0o100 | 0o1000);
     if create_fd == 0 || is_error(create_fd) || user::file_write(create_fd, &[EXPECTED_BYTE]) != 1 {
@@ -377,7 +381,7 @@ fn run_process_spawn_test() -> bool {
         let _ = user::file_close(fd);
         return false;
     }
-    let mapping = user::memory_map(0, PAGE_SIZE, 1, 0x2, fd);
+    let mapping = user::memory_map(0, PAGE_SIZE, 3, 0x2, fd);
     if mapping == 0 || is_error(mapping) {
         let _ = user::file_close(fd);
         return false;
@@ -394,15 +398,164 @@ fn run_process_spawn_test() -> bool {
         return false;
     }
     if child == 0 {
+        unsafe {
+            core::ptr::write_volatile(mapping as *mut u8, CHILD_BYTE);
+        }
         let mapped_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
         user::process_exit(u64::from(mapped_byte));
     }
 
     let mut status = 0i32;
     let waited = user::process_wait(child, (&mut status as *mut i32) as u64, 0);
+    let parent_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
     let _ = user::memory_unmap(mapping, PAGE_SIZE);
+    if waited != child || status != i32::from(CHILD_BYTE) << 8 || parent_byte != EXPECTED_BYTE {
+        let _ = user::file_close(fd);
+        return false;
+    }
+    if !verify_parent_copy_on_write() {
+        let _ = user::file_close(fd);
+        return false;
+    }
+
+    let shared_mapping = user::memory_map(0, PAGE_SIZE, 3, 0x1, fd);
+    if shared_mapping == 0 || is_error(shared_mapping) {
+        let _ = user::file_close(fd);
+        return false;
+    }
+    let _ = unsafe { core::ptr::read_volatile(shared_mapping as *const u8) };
+    let child = user::process_spawn(0, 0);
+    if is_error(child) {
+        let _ = user::memory_unmap(shared_mapping, PAGE_SIZE);
+        let _ = user::file_close(fd);
+        return false;
+    }
+    if child == 0 {
+        unsafe {
+            core::ptr::write_volatile(shared_mapping as *mut u8, SHARED_BYTE);
+        }
+        user::process_exit(u64::from(SHARED_BYTE));
+    }
+    let mut status = 0i32;
+    let waited = user::process_wait(child, (&mut status as *mut i32) as u64, 0);
+    let shared_byte = unsafe { core::ptr::read_volatile(shared_mapping as *const u8) };
+    let _ = user::memory_unmap(shared_mapping, PAGE_SIZE);
     let _ = user::file_close(fd);
-    waited == child && status == i32::from(EXPECTED_BYTE) << 8
+    if waited != child || status != i32::from(SHARED_BYTE) << 8 || shared_byte != SHARED_BYTE {
+        return false;
+    }
+
+    if !verify_allocated_shared_page_fork() {
+        return false;
+    }
+
+    let mut children = [0u64; 4];
+    for (index, child_slot) in children.iter_mut().enumerate() {
+        let exit_code = index as u64 + 1;
+        let child = user::process_spawn(0, 0);
+        if is_error(child) {
+            return false;
+        }
+        if child == 0 {
+            user::process_exit(exit_code);
+        }
+        *child_slot = child;
+    }
+    for (index, child) in children.into_iter().enumerate() {
+        let exit_code = index as u64 + 1;
+        let mut status = 0i32;
+        if user::process_wait(child, (&mut status as *mut i32) as u64, 0) != child
+            || status != (exit_code as i32) << 8
+        {
+            return false;
+        }
+    }
+    for exit_code in 5u64..=15 {
+        let child = user::process_spawn(0, 0);
+        if is_error(child) {
+            return false;
+        }
+        if child == 0 {
+            user::process_exit(exit_code);
+        }
+        let mut status = 0i32;
+        if user::process_wait(child, (&mut status as *mut i32) as u64, 0) != child
+            || status != (exit_code as i32) << 8
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn verify_parent_copy_on_write() -> bool {
+    const ORIGINAL_BYTE: u8 = 0x42;
+    const PARENT_BYTE: u8 = 0x7b;
+
+    let mapping = user::memory_map(0, PAGE_SIZE, 3, MAP_ANONYMOUS_PRIVATE, 0);
+    if mapping == 0 || is_error(mapping) {
+        return false;
+    }
+    unsafe {
+        core::ptr::write_volatile(mapping as *mut u8, ORIGINAL_BYTE);
+    }
+
+    let child = user::process_spawn(0, 0);
+    if is_error(child) {
+        let _ = user::memory_unmap(mapping, PAGE_SIZE);
+        return false;
+    }
+    if child == 0 {
+        let _ = user::sleep(1);
+        let child_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
+        user::process_exit(u64::from(child_byte));
+    }
+
+    unsafe {
+        core::ptr::write_volatile(mapping as *mut u8, PARENT_BYTE);
+    }
+    let mut status = 0i32;
+    let waited = user::process_wait(child, (&mut status as *mut i32) as u64, 0);
+    let parent_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
+    let unmapped = user::memory_unmap(mapping, PAGE_SIZE);
+    waited == child
+        && status == i32::from(ORIGINAL_BYTE) << 8
+        && parent_byte == PARENT_BYTE
+        && expect_success(unmapped)
+}
+
+fn verify_allocated_shared_page_fork() -> bool {
+    const CHILD_BYTE: u8 = 0x6d;
+
+    let mut physical_page = [0u64; 1];
+    let mapping = user::alloc_shared_pages(1, physical_page.as_mut_ptr() as u64, 1, 0);
+    if mapping == 0 || is_error(mapping) || physical_page[0] == 0 {
+        return false;
+    }
+    unsafe {
+        core::ptr::write_volatile(mapping as *mut u8, 0x21);
+    }
+
+    let child = user::process_spawn(0, 0);
+    if is_error(child) {
+        let _ = user::memory_unmap(mapping, PAGE_SIZE);
+        return false;
+    }
+    if child == 0 {
+        unsafe {
+            core::ptr::write_volatile(mapping as *mut u8, CHILD_BYTE);
+        }
+        user::process_exit(u64::from(CHILD_BYTE));
+    }
+
+    let mut status = 0i32;
+    let waited = user::process_wait(child, (&mut status as *mut i32) as u64, 0);
+    let shared_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
+    let unmapped = user::memory_unmap(mapping, PAGE_SIZE);
+    waited == child
+        && status == i32::from(CHILD_BYTE) << 8
+        && shared_byte == CHILD_BYTE
+        && expect_success(unmapped)
 }
 
 fn verify_exec_measurements() -> bool {
@@ -429,14 +582,23 @@ fn verify_exec_measurements() -> bool {
     write_decimal(1, snapshot.process_activity.fork_pages_copied);
     write_literal(1, b" pages_shared=");
     write_decimal(1, snapshot.process_activity.fork_pages_shared);
+    write_literal(1, b" cow_faults=");
+    write_decimal(1, snapshot.process_activity.copy_on_write_faults);
+    write_literal(1, b" cow_copies=");
+    write_decimal(1, snapshot.process_activity.copy_on_write_pages_copied);
     write_literal(1, b"\n");
 
+    let fork_pages = snapshot
+        .process_activity
+        .fork_pages_copied
+        .saturating_add(snapshot.process_activity.fork_pages_shared);
     snapshot.counters[CounterMetric::ExecutableBytesRead as usize] != 0
         && snapshot.latencies[LatencyMetric::ExecParse as usize].count != 0
         && snapshot.latencies[LatencyMetric::ExecLoad as usize].count != 0
         && snapshot.latencies[LatencyMetric::ExecEntry as usize].count != 0
         && snapshot.process_activity.fork_latency.count != 0
-        && snapshot.process_activity.fork_pages_copied != 0
+        && fork_pages != 0
+        && snapshot.process_activity.copy_on_write_faults != 0
 }
 
 fn run_fs_benchmark() -> u64 {
@@ -519,12 +681,18 @@ fn run_fs_chunk_benchmark(path: &str, chunk: usize, total_bytes: usize) -> u64 {
 }
 
 extern "C" fn runnable_thread_entry(_arg: u64) {
+    THREAD_TEST_READY.store(true, Ordering::Release);
+    while !THREAD_TEST_RELEASE.load(Ordering::Acquire) {
+        let _ = user::yield_now();
+    }
     THREAD_TEST_DONE.store(true, Ordering::Release);
     let _ = user::thread_exit(0);
 }
 
 fn run_thread_test() -> bool {
     THREAD_TEST_DONE.store(false, Ordering::Release);
+    THREAD_TEST_READY.store(false, Ordering::Release);
+    THREAD_TEST_RELEASE.store(false, Ordering::Release);
     let stack_bytes = STACK_SIZE + PAGE_SIZE;
     let stack_base = user::memory_map(0, stack_bytes, 3, MAP_ANONYMOUS_PRIVATE, 0);
     if stack_base == 0 || is_error(stack_base) {
@@ -538,6 +706,29 @@ fn run_thread_test() -> bool {
     }
     let _ = user::sleep(1);
     for _ in 0..256 {
+        if THREAD_TEST_READY.load(Ordering::Acquire) {
+            break;
+        }
+        let _ = user::yield_now();
+    }
+    if !THREAD_TEST_READY.load(Ordering::Acquire) {
+        write_literal(1, b"thread: helper did not become ready\n");
+        THREAD_TEST_RELEASE.store(true, Ordering::Release);
+        return false;
+    }
+    let fork_result = user::process_spawn(0, 0);
+    if fork_result != mnu_abi::EAGAIN {
+        write_literal(1, b"thread: fork result=");
+        write_decimal(1, fork_result);
+        write_literal(1, b" expected=");
+        write_decimal(1, mnu_abi::EAGAIN);
+        write_literal(1, b"\n");
+        THREAD_TEST_RELEASE.store(true, Ordering::Release);
+        return false;
+    }
+    THREAD_TEST_RELEASE.store(true, Ordering::Release);
+    let _ = user::sleep(1);
+    for _ in 0..256 {
         if THREAD_TEST_DONE.load(Ordering::Acquire) {
             let _ = user::memory_unmap(stack_base, stack_bytes);
             return true;
@@ -545,6 +736,7 @@ fn run_thread_test() -> bool {
         let _ = user::yield_now();
     }
     let _ = user::memory_unmap(stack_base, stack_bytes);
+    write_literal(1, b"thread: helper did not exit\n");
     false
 }
 

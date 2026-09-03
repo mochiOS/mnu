@@ -4,12 +4,14 @@
 
 use crate::info;
 use crate::mem::frame;
+use crate::mem::frame_refs::FrameReferenceTable;
 use crate::result::{Kernel, Memory, Result};
 use core::arch::asm;
 use spin::Mutex;
 use x86_64 as arch64;
 
 use x86_64::registers::control::{Cr3, Cr3Flags};
+use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::{
     structures::paging::{
         FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
@@ -27,8 +29,18 @@ pub static KERNEL_L4_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::A
 /// `KERNEL_L4_PHYS` has been initialized. Physical address zero is valid for an
 /// a virtualized guest, so the address itself cannot double as an initialization sentinel.
 static KERNEL_L4_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SHARED_USER_FRAMES: Mutex<FrameReferenceTable> = Mutex::new(FrameReferenceTable::new());
 /// x86-64 canonical ユーザー空間上限
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
+const COPY_ON_WRITE: PageTableFlags = PageTableFlags::BIT_9;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForkPagePolicy {
+    Private,
+    PrivateWritable,
+    Shared,
+    Exclude,
+}
 
 #[cfg(target_os = "none")]
 unsafe extern "C" {
@@ -439,6 +451,124 @@ fn page_is_user_mapped_in_table(table_phys: u64, page_addr: u64) -> bool {
     })
 }
 
+fn with_user_leaf_entry_mut<R>(
+    table_phys: u64,
+    page_addr: u64,
+    inspect: impl FnOnce(&mut PageTableEntry) -> R,
+) -> Option<R> {
+    let phys_off = physical_memory_offset()?;
+    let vaddr = VirtAddr::new(page_addr);
+    let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
+    let l4e = &l4[vaddr.p4_index()];
+    if l4e.is_unused() || !l4e.flags().contains(PageTableFlags::PRESENT) {
+        return None;
+    }
+    let l3 = unsafe { &mut *((l4e.addr().as_u64() + phys_off) as *mut PageTable) };
+    let l3e = &l3[vaddr.p3_index()];
+    if l3e.is_unused()
+        || !l3e.flags().contains(PageTableFlags::PRESENT)
+        || l3e.flags().contains(PageTableFlags::HUGE_PAGE)
+    {
+        return None;
+    }
+    let l2 = unsafe { &mut *((l3e.addr().as_u64() + phys_off) as *mut PageTable) };
+    let l2e = &l2[vaddr.p2_index()];
+    if l2e.is_unused()
+        || !l2e.flags().contains(PageTableFlags::PRESENT)
+        || l2e.flags().contains(PageTableFlags::HUGE_PAGE)
+    {
+        return None;
+    }
+    let l1 = unsafe { &mut *((l2e.addr().as_u64() + phys_off) as *mut PageTable) };
+    Some(inspect(&mut l1[vaddr.p1_index()]))
+}
+
+fn retain_shared_user_frame(phys: u64) -> Result<()> {
+    SHARED_USER_FRAMES.lock().retain(phys)
+}
+
+fn release_user_frame(phys: u64) {
+    if SHARED_USER_FRAMES.lock().release(phys) {
+        deallocate_4k_frame_by_phys(phys);
+    }
+}
+
+fn flush_page_if_active(table_phys: u64, page_addr: u64) {
+    let (current_cr3, _) = Cr3::read();
+    if current_cr3.start_address().as_u64() == table_phys {
+        unsafe {
+            core::arch::asm!(
+                "invlpg [{}]",
+                in(reg) page_addr,
+                options(nostack, preserves_flags)
+            );
+        }
+    }
+}
+
+pub fn resolve_copy_on_write(table_phys: u64, address: u64) -> Result<bool> {
+    let page_addr = address & !0xfff;
+    let Some((old_address, old_flags)) =
+        translate_addr_in_table(table_phys, VirtAddr::new(page_addr))
+    else {
+        return Ok(false);
+    };
+    let old_phys = old_address.as_u64();
+    if !old_flags.contains(COPY_ON_WRITE) || old_flags.contains(PageTableFlags::WRITABLE) {
+        return Ok(false);
+    }
+
+    let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+    let replacement = frame::allocate_frame()?;
+    let replacement_phys = replacement.start_address().as_u64();
+    let mut used_replacement = false;
+    let mut updated_entry = false;
+    let resolved = {
+        let mut references = SHARED_USER_FRAMES.lock();
+        with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
+            let flags = entry.flags();
+            if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(COPY_ON_WRITE) {
+                return true;
+            }
+            if entry.addr().as_u64() != old_phys
+                || !flags.contains(COPY_ON_WRITE)
+            {
+                return false;
+            }
+
+            let mut writable_flags = flags | PageTableFlags::WRITABLE;
+            writable_flags.remove(COPY_ON_WRITE);
+            if references.release(old_phys) {
+                entry.set_addr(PhysAddr::new(old_phys), writable_flags);
+            } else {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (old_phys + phys_off) as *const u8,
+                        (replacement_phys + phys_off) as *mut u8,
+                        4096,
+                    );
+                }
+                entry.set_addr(PhysAddr::new(replacement_phys), writable_flags);
+                used_replacement = true;
+            }
+            updated_entry = true;
+            true
+        })
+        .unwrap_or(false)
+    };
+
+    if !used_replacement {
+        let _ = frame::deallocate_frame(replacement);
+    }
+    if resolved {
+        flush_page_if_active(table_phys, page_addr);
+    }
+    if updated_entry {
+        crate::performance::record_copy_on_write_fault(used_replacement);
+    }
+    Ok(resolved)
+}
+
 fn translate_user_addr_in_table(
     table_phys: u64,
     addr: u64,
@@ -539,6 +669,11 @@ pub fn copy_to_user_in_table(table_phys: u64, dst_ptr: u64, src: &[u8]) -> Resul
         let cur = dst_ptr
             .checked_add(copied as u64)
             .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
+        if user_page_flags_in_table(table_phys, cur & !0xfff)
+            .is_some_and(|flags| flags.contains(COPY_ON_WRITE))
+        {
+            resolve_copy_on_write(table_phys, cur)?;
+        }
         let (phys, page_off) = translate_user_addr_in_table(table_phys, cur, true)
             .ok_or(Kernel::Memory(Memory::PermissionDenied))?;
         nospec_usercopy_barrier();
@@ -1056,11 +1191,16 @@ fn is_preinstalled_user_mapping(vaddr: u64) -> bool {
     is_current_descriptor_table_vaddr(vaddr) || crate::percpu::is_syscall_shared_vaddr(vaddr)
 }
 
-/// 既存のユーザーページテーブルをフルコピーして新しいページテーブルを返す
+/// 既存のユーザーアドレス空間をfork用に複製する。
 ///
 /// - カーネル共有マッピングは `create_user_page_table()` により初期化
-/// - USER_ACCESSIBLE な4KiBページを新規フレームへコピー
-pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
+/// - privateな4KiBページはCopy-on-Writeで共有
+/// - shared mappingは書込み属性を保ったまま共有
+/// - huge pageは分割しながらコピー
+pub fn clone_user_page_table(
+    src_table_phys: u64,
+    page_policy: impl Fn(u64) -> ForkPagePolicy,
+) -> Result<u64> {
     use x86_64::structures::paging::PageTableFlags as Flags;
 
     struct DstTableGuard(Option<u64>);
@@ -1156,7 +1296,7 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
         Ok((l1_phys + phys_off) as *mut PageTable)
     }
 
-    fn clone_page(
+    fn copy_page(
         dst_l4: &mut PageTable,
         vaddr: u64,
         src_phys: u64,
@@ -1186,7 +1326,28 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
         Ok(())
     }
 
+    fn share_page(
+        dst_l4: &mut PageTable,
+        vaddr: u64,
+        src_phys: u64,
+        flags: Flags,
+        phys_off: u64,
+    ) -> Result<()> {
+        let l1_ptr = ensure_leaf_table_for_vaddr(dst_l4, vaddr, phys_off, true)?;
+        let l1 = unsafe { &mut *l1_ptr };
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(vaddr));
+        let l1e = &mut l1[page.p1_index()];
+        if !l1e.is_unused() && l1e.flags().contains(Flags::PRESENT) {
+            return Err(Kernel::Memory(Memory::AlreadyMapped));
+        }
+
+        retain_shared_user_frame(src_phys)?;
+        l1e.set_addr(PhysAddr::new(src_phys), flags);
+        Ok(())
+    }
+
     let mut copied_pages = 0u64;
+    let mut shared_pages = 0u64;
     for l4i in 0usize..256 {
         let l4e = &src_l4[l4i];
         if l4e.is_unused() || !l4e.flags().contains(Flags::PRESENT) {
@@ -1220,7 +1381,10 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
                         if is_preinstalled_user_mapping(vaddr) {
                             continue;
                         }
-                        clone_page(
+                        if page_policy(vaddr) == ForkPagePolicy::Exclude {
+                            continue;
+                        }
+                        copy_page(
                             dst_l4,
                             vaddr,
                             src_phys_base + ((sub as u64) << 12),
@@ -1231,9 +1395,9 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
                     }
                     continue;
                 }
-                let src_l1 = unsafe { &*((l2e.addr().as_u64() + phys_off) as *const PageTable) };
+                let src_l1 = unsafe { &mut *((l2e.addr().as_u64() + phys_off) as *mut PageTable) };
                 for l1i in 0usize..512 {
-                    let pte = &src_l1[l1i];
+                    let pte = &mut src_l1[l1i];
                     if pte.is_unused() {
                         continue;
                     }
@@ -1251,15 +1415,34 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
                     if is_preinstalled_user_mapping(vaddr) {
                         continue;
                     }
-                    clone_page(dst_l4, vaddr, pte.addr().as_u64(), src_flags, phys_off)?;
-                    copied_pages += 1;
+                    let policy = page_policy(vaddr);
+                    match policy {
+                        ForkPagePolicy::Exclude => continue,
+                        ForkPagePolicy::Shared => {
+                            share_page(dst_l4, vaddr, pte.addr().as_u64(), src_flags, phys_off)?;
+                            shared_pages += 1;
+                        }
+                        ForkPagePolicy::Private | ForkPagePolicy::PrivateWritable => {
+                            let mut shared_flags = src_flags;
+                            if policy == ForkPagePolicy::PrivateWritable
+                                || src_flags.contains(Flags::WRITABLE)
+                                || src_flags.contains(COPY_ON_WRITE)
+                            {
+                                shared_flags.remove(Flags::WRITABLE);
+                                shared_flags.insert(COPY_ON_WRITE);
+                                pte.set_addr(pte.addr(), shared_flags);
+                            }
+                            share_page(dst_l4, vaddr, pte.addr().as_u64(), shared_flags, phys_off)?;
+                            shared_pages += 1;
+                        }
+                    }
                 }
             }
         }
     }
 
     dst_guard.disarm();
-    crate::performance::record_process_fork(started, copied_pages, 0);
+    crate::performance::record_process_fork(started, copied_pages, shared_pages);
     Ok(dst_table_phys)
 }
 
@@ -1729,7 +1912,7 @@ pub fn protect_range_in_table(
         if present {
             new_flags |= Flags::PRESENT;
         }
-        if writable {
+        if writable && !existing_flags.contains(COPY_ON_WRITE) {
             new_flags |= Flags::WRITABLE;
         }
         if !executable {
@@ -1803,7 +1986,7 @@ pub fn unmap_range_in_table(table_phys: u64, addr: u64, length: u64) -> Result<(
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
         if let Ok((frame, flush)) = pt.unmap(page) {
             flush.ignore();
-            let _ = frame::deallocate_frame(frame);
+            release_user_frame(frame.start_address().as_u64());
         }
         page_addr += 4096;
     }
@@ -1867,7 +2050,7 @@ fn destroy_user_l1_table(l1_phys: u64, phys_off: u64, vaddr_base: u64) {
             l1[i].set_unused();
             continue;
         }
-        deallocate_4k_frame_by_phys(entry.addr().as_u64());
+        release_user_frame(entry.addr().as_u64());
         l1[i].set_unused();
     }
     deallocate_4k_frame_by_phys(l1_phys);

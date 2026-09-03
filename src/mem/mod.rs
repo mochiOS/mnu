@@ -6,6 +6,7 @@ use crate::{debug, info, interrupt, MemoryRegion, Result};
 
 pub mod allocator;
 pub mod frame;
+mod frame_refs;
 pub mod gdt;
 pub mod paging;
 pub mod tss;

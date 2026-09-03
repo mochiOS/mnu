@@ -778,9 +778,40 @@ extern "x86-interrupt" fn page_fault_handler(
     let faulting_addr = Cr2::read().unwrap_or(VirtAddr::new(0));
     let is_user_mode = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
     let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(is_user_mode);
+    let user_page_table = is_user_mode
+        .then(|| {
+            crate::task::current_thread_id()
+                .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
+                .and_then(|pid| {
+                    crate::task::with_process(pid, |process| process.page_table()).flatten()
+                })
+        })
+        .flatten();
+
+    let mut copy_on_write_failed = false;
+    if is_user_mode
+        && error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION)
+        && error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE)
+    {
+        if let Some(table) = user_page_table {
+            match crate::mem::paging::resolve_copy_on_write(table, faulting_addr.as_u64()) {
+                Ok(true) => {
+                    leave_to_user(entered_from_user);
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!("copy-on-write fault resolution failed: {:?}", error);
+                    copy_on_write_failed = true;
+                }
+            }
+        }
+    }
 
     if is_user_mode
-        && !error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION)
+        && !copy_on_write_failed
+        && (!error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION)
+            || error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE))
         && crate::syscall::process::handle_user_mmap_fault(
             faulting_addr.as_u64(),
             error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE),
@@ -810,10 +841,10 @@ extern "x86-interrupt" fn page_fault_handler(
     );
 
     let translated = if is_user_mode {
-        crate::task::current_thread_id()
-            .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-            .and_then(|pid| crate::task::with_process(pid, |p| p.page_table()).flatten())
-            .and_then(|pt| crate::mem::paging::virt_to_phys_in_table(pt, faulting_addr.as_u64()))
+        user_page_table
+            .and_then(|table| {
+                crate::mem::paging::virt_to_phys_in_table(table, faulting_addr.as_u64())
+            })
             .map(PhysAddr::new)
     } else {
         crate::mem::paging::translate_addr(faulting_addr)
