@@ -1077,6 +1077,7 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
         }
     }
 
+    let started = crate::performance::process_fork_start();
     let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
     // Disable SMAP/SMEP while walking and copying user page tables
     let _smap_guard = crate::cpu::SmapSmepGuard::new();
@@ -1185,6 +1186,7 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
         Ok(())
     }
 
+    let mut copied_pages = 0u64;
     for l4i in 0usize..256 {
         let l4e = &src_l4[l4i];
         if l4e.is_unused() || !l4e.flags().contains(Flags::PRESENT) {
@@ -1225,6 +1227,7 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
                             src_flags,
                             phys_off,
                         )?;
+                        copied_pages += 1;
                     }
                     continue;
                 }
@@ -1249,12 +1252,14 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
                         continue;
                     }
                     clone_page(dst_l4, vaddr, pte.addr().as_u64(), src_flags, phys_off)?;
+                    copied_pages += 1;
                 }
             }
         }
     }
 
     dst_guard.disarm();
+    crate::performance::record_process_fork(started, copied_pages, 0);
     Ok(dst_table_phys)
 }
 

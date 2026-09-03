@@ -417,10 +417,26 @@ fn verify_exec_measurements() -> bool {
         return false;
     }
 
+    write_literal(1, b"process.fork: count=");
+    write_decimal(1, snapshot.process_activity.fork_latency.count);
+    write_literal(1, b" p50_cycles=");
+    write_decimal(1, snapshot.process_activity.fork_latency.p50_cycles);
+    write_literal(1, b" p95_cycles=");
+    write_decimal(1, snapshot.process_activity.fork_latency.p95_cycles);
+    write_literal(1, b" p99_cycles=");
+    write_decimal(1, snapshot.process_activity.fork_latency.p99_cycles);
+    write_literal(1, b" pages_copied=");
+    write_decimal(1, snapshot.process_activity.fork_pages_copied);
+    write_literal(1, b" pages_shared=");
+    write_decimal(1, snapshot.process_activity.fork_pages_shared);
+    write_literal(1, b"\n");
+
     snapshot.counters[CounterMetric::ExecutableBytesRead as usize] != 0
         && snapshot.latencies[LatencyMetric::ExecParse as usize].count != 0
         && snapshot.latencies[LatencyMetric::ExecLoad as usize].count != 0
         && snapshot.latencies[LatencyMetric::ExecEntry as usize].count != 0
+        && snapshot.process_activity.fork_latency.count != 0
+        && snapshot.process_activity.fork_pages_copied != 0
 }
 
 fn run_fs_benchmark() -> u64 {

@@ -136,6 +136,16 @@ static VFS_TEMPORARY_BUFFER_BYTES: AtomicU64 = AtomicU64::new(0);
 static VFS_PATH_CLONE_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "performance-instrumentation")]
 static VFS_PATH_CLONE_BYTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static PROCESS_FORK_LATENCY: AtomicHistogram = AtomicHistogram::new();
+#[cfg(feature = "performance-instrumentation")]
+static PROCESS_FORK_PAGES_COPIED: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static PROCESS_FORK_PAGES_SHARED: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static COPY_ON_WRITE_FAULTS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-instrumentation")]
+static COPY_ON_WRITE_PAGES_COPIED: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "performance-instrumentation")]
 const ALLOCATION_THREAD_SLOTS: usize = 64;
@@ -442,6 +452,42 @@ pub fn record_latency_cycles(metric: LatencyMetric, cycles: u64) {
 }
 
 #[inline]
+pub fn process_fork_start() -> u64 {
+    #[cfg(feature = "performance-instrumentation")]
+    return timestamp();
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    0
+}
+
+#[inline]
+pub fn record_process_fork(start: u64, copied_pages: u64, shared_pages: u64) {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        PROCESS_FORK_LATENCY.record(elapsed_cycles(start));
+        PROCESS_FORK_PAGES_COPIED.fetch_add(copied_pages, Ordering::Relaxed);
+        PROCESS_FORK_PAGES_SHARED.fetch_add(shared_pages, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = (start, copied_pages, shared_pages);
+}
+
+#[inline]
+pub fn record_copy_on_write_fault(copied_page: bool) {
+    #[cfg(feature = "performance-instrumentation")]
+    {
+        COPY_ON_WRITE_FAULTS.fetch_add(1, Ordering::Relaxed);
+        if copied_page {
+            COPY_ON_WRITE_PAGES_COPIED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(not(feature = "performance-instrumentation"))]
+    let _ = copied_page;
+}
+
+#[inline]
 pub fn record_vfs_metadata_query() {
     #[cfg(feature = "performance-instrumentation")]
     VFS_METADATA_QUERIES.fetch_add(1, Ordering::Relaxed);
@@ -600,8 +646,8 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
     use mnu_abi::performance::{
         FrameActivitySnapshot, FrameAllocatorSnapshot, GaugeSnapshot, KernelPerformanceSnapshot,
         PERFORMANCE_FLAG_INSTRUMENTED, PERFORMANCE_FLAG_INVARIANT_TSC, PERFORMANCE_FLAG_RDTSCP,
-        PERFORMANCE_FLAG_WEAK_SNAPSHOT, PERFORMANCE_SNAPSHOT_VERSION, TimerActivitySnapshot,
-        VfsActivitySnapshot,
+        PERFORMANCE_FLAG_WEAK_SNAPSHOT, PERFORMANCE_SNAPSHOT_VERSION, ProcessActivitySnapshot,
+        TimerActivitySnapshot, VfsActivitySnapshot,
     };
 
     let clock = clock_info();
@@ -702,6 +748,13 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
             temporary_buffer_bytes: VFS_TEMPORARY_BUFFER_BYTES.load(Ordering::Relaxed),
             path_clone_allocations: VFS_PATH_CLONE_ALLOCATIONS.load(Ordering::Relaxed),
             path_clone_bytes: VFS_PATH_CLONE_BYTES.load(Ordering::Relaxed),
+        },
+        process_activity: ProcessActivitySnapshot {
+            fork_latency: distribution_snapshot(PROCESS_FORK_LATENCY.snapshot()),
+            fork_pages_copied: PROCESS_FORK_PAGES_COPIED.load(Ordering::Relaxed),
+            fork_pages_shared: PROCESS_FORK_PAGES_SHARED.load(Ordering::Relaxed),
+            copy_on_write_faults: COPY_ON_WRITE_FAULTS.load(Ordering::Relaxed),
+            copy_on_write_pages_copied: COPY_ON_WRITE_PAGES_COPIED.load(Ordering::Relaxed),
         },
     }
 }

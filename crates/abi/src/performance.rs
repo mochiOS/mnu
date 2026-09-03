@@ -1,10 +1,11 @@
-pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 7;
+pub const PERFORMANCE_SNAPSHOT_VERSION: u32 = 8;
 pub const PERFORMANCE_SNAPSHOT_V1_SIZE: usize = 1_200;
 pub const PERFORMANCE_SNAPSHOT_V2_SIZE: usize = 1_896;
 pub const PERFORMANCE_SNAPSHOT_V3_SIZE: usize = 1_992;
 pub const PERFORMANCE_SNAPSHOT_V4_SIZE: usize = 2_064;
 pub const PERFORMANCE_SNAPSHOT_V5_SIZE: usize = 2_840;
 pub const PERFORMANCE_SNAPSHOT_V6_SIZE: usize = 2_984;
+pub const PERFORMANCE_SNAPSHOT_V7_SIZE: usize = 3_072;
 pub const PERFORMANCE_CPU_SLOTS: usize = 64;
 
 pub const PERFORMANCE_FLAG_INSTRUMENTED: u64 = 1 << 0;
@@ -257,6 +258,16 @@ pub struct VfsActivitySnapshot {
     pub path_clone_bytes: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcessActivitySnapshot {
+    pub fork_latency: DistributionSnapshot,
+    pub fork_pages_copied: u64,
+    pub fork_pages_shared: u64,
+    pub copy_on_write_faults: u64,
+    pub copy_on_write_pages_copied: u64,
+}
+
 impl VfsActivitySnapshot {
     pub fn saturating_sub(self, earlier: Self) -> Self {
         Self {
@@ -327,6 +338,8 @@ pub struct KernelPerformanceSnapshot {
     pub timer_activity: TimerActivitySnapshot,
     /// v7 extension. The v6 prefix above must remain byte-for-byte stable.
     pub vfs_activity: VfsActivitySnapshot,
+    /// v8 extension. The v7 prefix above must remain byte-for-byte stable.
+    pub process_activity: ProcessActivitySnapshot,
 }
 
 impl Default for KernelPerformanceSnapshot {
@@ -356,6 +369,7 @@ impl Default for KernelPerformanceSnapshot {
             frame_activity: FrameActivitySnapshot::default(),
             timer_activity: TimerActivitySnapshot::default(),
             vfs_activity: VfsActivitySnapshot::default(),
+            process_activity: ProcessActivitySnapshot::default(),
         }
     }
 }
@@ -392,7 +406,11 @@ mod tests {
             core::mem::offset_of!(KernelPerformanceSnapshot, vfs_activity),
             PERFORMANCE_SNAPSHOT_V6_SIZE
         );
-        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 3_072);
+        assert_eq!(
+            core::mem::offset_of!(KernelPerformanceSnapshot, process_activity),
+            PERFORMANCE_SNAPSHOT_V7_SIZE
+        );
+        assert_eq!(core::mem::size_of::<KernelPerformanceSnapshot>(), 3_152);
         assert_eq!(core::mem::align_of::<KernelPerformanceSnapshot>(), 8);
     }
 
