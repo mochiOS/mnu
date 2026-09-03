@@ -133,11 +133,10 @@ impl LaunchContract {
 }
 
 const SYS_WRITE: u64 = mnu_abi::SyscallNumber::Write as u64;
-const SYS_EXIT: u64 = mnu_abi::SyscallNumber::Exit as u64;
 const SYS_GETPID: u64 = mnu_abi::SyscallNumber::GetPid as u64;
 const SYS_GETTID: u64 = mnu_abi::SyscallNumber::GetTid as u64;
 const SYS_EXEC: u64 = mnu_abi::SyscallNumber::Exec as u64;
-const SYS_EXEC_WITH_CAPS: u64 = mnu_abi::SyscallNumber::ExecWithCapabilities as u64;
+const SYS_EXEC_MANIFEST: u64 = mnu_abi::SyscallNumber::ExecManifest as u64;
 const SYS_PROCESS_EXIT: u64 = mnu_abi::SyscallNumber::ProcessExit as u64;
 const SYS_PROCESS_SPAWN: u64 = mnu_abi::SyscallNumber::ProcessSpawn as u64;
 const SYS_PROCESS_WAIT: u64 = mnu_abi::SyscallNumber::ProcessWait as u64;
@@ -172,7 +171,6 @@ const SYS_EVENT_SIGNAL: u64 = mnu_abi::SyscallNumber::EventSignal as u64;
 const SYS_EVENT_POLL: u64 = mnu_abi::SyscallNumber::EventPoll as u64;
 const SYS_TIME_NOW: u64 = mnu_abi::SyscallNumber::TimeNow as u64;
 const SYS_SERVICE_SPAWN: u64 = mnu_abi::SyscallNumber::ServiceSpawn as u64;
-const SYS_WAIT: u64 = mnu_abi::SyscallNumber::Wait as u64;
 const SYS_YIELD: u64 = mnu_abi::SyscallNumber::Yield as u64;
 const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
 const SYS_GET_TICKS: u64 = mnu_abi::SyscallNumber::GetTicks as u64;
@@ -188,8 +186,8 @@ const SYS_FILE_WRITE: u64 = mnu_abi::SyscallNumber::FileWrite as u64;
 const SYS_FILE_SEEK: u64 = mnu_abi::SyscallNumber::FileSeek as u64;
 const STDOUT_FD: u64 = 1;
 const PLUGKIT_TEST_DRIVER_PATH: &str = "/plugkit/test/entry.elf";
-const CORE_SERVICE_FS_TEST_PATH: &str = "/tmp/core.service.fs-test";
-const SIGNATURE_DB_PATH: &str = "/libraries/system/execution.allowlist";
+const INIT_FS_TEST_PATH: &str = "/tmp/init.fs-test";
+const SIGNATURE_DB_PATH: &str = "/policy/execution.allowlist";
 const SIGNATURE_ALLOW_PATH: &str = "/tmp/captest.bin";
 const SIGNATURE_DENY_PATH: &str = "/tmp/unsigned.bin";
 const ROOTFS_BENCH_PATH: &str = "/tmp/testdata";
@@ -581,12 +579,13 @@ fn exec_with_capabilities(path: &str, caps: &[&str]) -> u64 {
     }
 
     unsafe {
-        syscall4(
-            SYS_EXEC_WITH_CAPS,
+        syscall5(
+            SYS_EXEC_MANIFEST,
             path_buf.as_ptr() as u64,
             0,
             caps_buf.as_ptr() as u64,
             len as u64,
+            mnu_abi::exec::ProcessRole::Tool as u64,
         )
     }
 }
@@ -641,6 +640,9 @@ fn launch_plugkit_test_driver() -> Option<u64> {
 fn recv_ipc_response(buf: &mut [u8]) -> Option<(u64, usize)> {
     let rc = ipc_recv_wait_bytes(buf);
     if rc == 0 || rc & (1u64 << 63) != 0 {
+        let mut line = LineBuf::new();
+        let _ = core::fmt::write(&mut line, format_args!("plugkit-test recv error {rc:#x}"));
+        write_line(line.as_str());
         return None;
     }
     Some((rc >> 32, (rc & 0xffff_ffff) as usize))
@@ -649,6 +651,9 @@ fn recv_ipc_response(buf: &mut [u8]) -> Option<(u64, usize)> {
 fn ipc_round_trip(dest: u64, msg: &str, buf: &mut [u8]) -> Option<usize> {
     let sent = ipc_send_bytes(dest, msg.as_bytes());
     if sent & (1u64 << 63) != 0 {
+        let mut line = LineBuf::new();
+        let _ = core::fmt::write(&mut line, format_args!("plugkit-test send error {sent:#x}"));
+        write_line(line.as_str());
         return None;
     }
     loop {
@@ -708,8 +713,8 @@ fn format_line(prefix: &str, bytes: u64, elapsed_ms: u64, mib_s: f64) -> LineBuf
 }
 
 pub fn path_registry_self_test() -> bool {
-    write_line("[core.service][path-map]");
-    write_line("/tmp/core.service.fs-test\towner=service\trights=read|write|create\ttype=Custom");
+    write_line("[init][path-map]");
+    write_line("/tmp/init.fs-test\towner=service\trights=read|write|create\ttype=Custom");
     let line = alloc::format!(
         "{}\towner=service\trights=read|list\ttype=Custom",
         ROOTFS_BENCH_PATH
@@ -721,7 +726,7 @@ pub fn path_registry_self_test() -> bool {
 fn fileio_self_test() -> bool {
     const TICK_MS: u64 = 2;
 
-    let path = CORE_SERVICE_FS_TEST_PATH;
+    let path = INIT_FS_TEST_PATH;
     let payload = unsafe {
         core::slice::from_raw_parts(
             core::ptr::addr_of!(FS_TEST_WRITE_BUF) as *const u8,
@@ -788,13 +793,13 @@ fn fileio_self_test() -> bool {
     };
 
     let write_line_buf = format_line(
-        "[core.service][fs-test] write",
+        "[init][fs-test] write",
         wrote,
         write_elapsed_ms,
         write_mib_s,
     );
     let read_line_buf = format_line(
-        "[core.service][fs-test] read ",
+        "[init][fs-test] read ",
         read,
         read_elapsed_ms,
         read_mib_s,
@@ -893,17 +898,6 @@ fn plugkit_ipc_self_test() -> bool {
     }
 }
 
-pub fn exit(code: u64) -> ! {
-    unsafe {
-        let _ = syscall1(SYS_EXIT, code);
-    }
-    loop {
-        unsafe {
-            asm!("pause", options(nomem, nostack, preserves_flags));
-        }
-    }
-}
-
 pub fn getpid() -> u64 {
     unsafe { syscall0(SYS_GETPID) }
 }
@@ -977,7 +971,7 @@ pub fn exec_without_caps(path: &str) -> u64 {
 
 pub fn wait_for_any_child() -> Result<(u64, i32), u64> {
     let mut status: i32 = -1;
-    let waited = unsafe { syscall3(SYS_WAIT, u64::MAX, &mut status as *mut i32 as u64, 0) };
+    let waited = process_wait(u64::MAX, &mut status as *mut i32 as u64, 0);
     if waited & (1u64 << 63) == 0 {
         Ok((waited, status))
     } else {
@@ -988,7 +982,7 @@ pub fn wait_for_any_child() -> Result<(u64, i32), u64> {
 pub fn test_launch_contract_keeps_all_required_fields() -> bool {
     let digest = [0xAB; 32];
     let contract = LaunchContract::new(
-        "core.service",
+        "init",
         "mnu",
         true,
         ManifestRole::CoreService,
@@ -996,7 +990,7 @@ pub fn test_launch_contract_keeps_all_required_fields() -> bool {
         InstallSource::Initfs,
     );
 
-    contract.package_id == "core.service"
+    contract.package_id == "init"
         && contract.publisher_id == "mnu"
         && contract.signature_trusted
         && contract.manifest_role == ManifestRole::CoreService
@@ -1047,8 +1041,8 @@ fn signature_db_self_test() -> bool {
     let Ok(text) = core::str::from_utf8(&total) else {
         return false;
     };
-    text.contains("mnu-signature-db v1")
-        && text.contains("record core.service ")
+    text.contains("mnu-execution-allowlist v1")
+        && text.contains("record /init ")
         && text.contains("record /plugkit/test/entry.elf ")
 }
 
@@ -1150,7 +1144,7 @@ fn find_process_state_by_name(expected_name: &[u8]) -> Option<u64> {
     None
 }
 
-pub fn test_syscall_list_processes_includes_core_service() -> bool {
+pub fn test_syscall_list_processes_includes_init() -> bool {
     let mut buf = [0u8; 2048];
     let count = list_processes(&mut buf);
     if count == 0 {
@@ -1162,7 +1156,7 @@ pub fn test_syscall_list_processes_includes_core_service() -> bool {
     for idx in 0..max_records {
         let start = idx * record_size;
         let end = start + record_size;
-        if process_record_matches_name(&buf[start..end], b"core.service") {
+        if process_record_matches_name(&buf[start..end], b"init") {
             return true;
         }
     }
@@ -1248,7 +1242,7 @@ fn physical_map_regression_self_test() -> bool {
     true
 }
 
-fn test_allowed_capabilities_on_core_service() -> bool {
+fn test_allowed_capabilities_on_init() -> bool {
     let spawn = has_capability("process.spawn");
     if !spawn {
         write_line("selftest: missing process.spawn");
@@ -1295,7 +1289,7 @@ pub fn run_self_test() -> bool {
     }
 
     write_line("selftest: allowed-checks");
-    if !test_allowed_capabilities_on_core_service() {
+    if !test_allowed_capabilities_on_init() {
         write_line("selftest: capability check failed");
         return false;
     }

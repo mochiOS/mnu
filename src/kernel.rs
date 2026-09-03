@@ -90,19 +90,13 @@ fn kernel_main() -> ! {
             crate::capability::Capability::DmaAllocate
                 | crate::capability::Capability::MemoryPhysMap
                 | crate::capability::Capability::MemoryPhysTranslate
+                | crate::capability::Capability::Unsandboxed
         ) {
             continue;
         }
         caps.insert(*cap);
     }
-    let mut kernel_authorities = crate::capability::KernelAuthoritySet::empty();
-    kernel_authorities.insert(crate::capability::KernelAuthority::new(
-        crate::capability::KernelCapability::PhysMap,
-        crate::capability::KernelObjectRef::MmioRegion {
-            base: 0,
-            size: u64::MAX - 0xfff,
-        },
-    ));
+    let kernel_authorities = crate::capability::KernelAuthoritySet::empty();
 
     // 起動後の構成はカーネルではなく init が決める。
     info!("Starting init");

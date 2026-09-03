@@ -21,16 +21,7 @@ pub enum SpawnDelegateKind {
     Driver = 2,
 }
 
-/// manifest 上の役割
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManifestRole {
-    CoreService,
-    Service,
-    Application,
-    Driver,
-    Tool,
-    Unknown,
-}
+pub use mnu_abi::exec::ProcessRole as ManifestRole;
 
 /// 起動に必要な最小メタデータ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

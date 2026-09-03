@@ -129,13 +129,16 @@ fn read_nul_args_from_user(
 fn read_nul_caps_from_user(caps_ptr: u64, caps_total_len: u64) -> Result<Vec<String>, u64> {
     use crate::syscall::types::EINVAL;
 
-    if caps_ptr == 0 {
+    if caps_total_len == 0 {
         return Ok(Vec::new());
+    }
+    if caps_ptr == 0 {
+        return Err(EINVAL);
     }
     let Ok(len) = usize::try_from(caps_total_len) else {
         return Err(EINVAL);
     };
-    if len == 0 || len > 1024 {
+    if len > 1024 {
         return Err(EINVAL);
     }
 
@@ -223,15 +226,7 @@ fn validate_requested_exec_capabilities(
 }
 
 fn parse_manifest_role(raw: u64) -> Option<ManifestRole> {
-    match raw {
-        1 => Some(ManifestRole::CoreService),
-        2 => Some(ManifestRole::Service),
-        3 => Some(ManifestRole::Application),
-        4 => Some(ManifestRole::Driver),
-        5 => Some(ManifestRole::Tool),
-        6 => Some(ManifestRole::Unknown),
-        _ => None,
-    }
+    ManifestRole::from_raw(raw)
 }
 
 /// カーネル内から実行可能ファイルを読み込み実行するシステムコール
@@ -717,6 +712,10 @@ fn exec_internal(
         exec_path,
     }) = loaded
     {
+        if enforce_path_access && !crate::policy::signature::verify_exec(&exec_path, &data) {
+            crate::warn!("exec: signature verification failed for '{}'", exec_path);
+            return crate::syscall::types::EPERM;
+        }
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",
             exec_path,
