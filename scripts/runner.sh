@@ -8,6 +8,7 @@ TARGET_DIR="${ROOT_DIR}/target/uefi"
 
 KERNEL_TARGET_NAME="x86_64-unknown-none"
 USER_TARGET_NAME="x86_64-unknown-none"
+KERNEL_FEATURES="${MNU_KERNEL_FEATURES:-kernel-bin}"
 
 USER_BUILD_DIR="${TARGET_DIR}/user-build"
 BOOT_BUILD_DIR="${TARGET_DIR}/boot-build"
@@ -96,7 +97,7 @@ echo "[build] kernel"
 cargo build \
     --release \
     --target "${KERNEL_TARGET_NAME}" \
-    --features kernel-bin \
+    --features "${KERNEL_FEATURES}" \
     --manifest-path "${ROOT_DIR}/Cargo.toml"
 
 echo "[build] userland"

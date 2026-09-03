@@ -22,6 +22,38 @@ struct InitialUserStack {
     page_data: Vec<u8>,
 }
 
+struct ExecMeasurement {
+    #[cfg(feature = "performance-instrumentation")]
+    started: u64,
+}
+
+impl ExecMeasurement {
+    #[inline]
+    fn start() -> Self {
+        Self {
+            #[cfg(feature = "performance-instrumentation")]
+            started: crate::performance::timestamp(),
+        }
+    }
+
+    #[inline]
+    fn finish(self, result: u64) -> u64 {
+        if result & (1 << 63) == 0 {
+            self.record();
+        }
+        result
+    }
+
+    #[inline]
+    fn record(self) {
+        #[cfg(feature = "performance-instrumentation")]
+        crate::performance::record_latency(
+            crate::performance::LatencyMetric::ExecEntry,
+            self.started,
+        );
+    }
+}
+
 struct UserPageTableGuard(Option<u64>);
 
 impl UserPageTableGuard {
@@ -680,6 +712,7 @@ fn exec_internal(
     security_identity: Option<&str>,
     enforce_path_access: bool,
 ) -> u64 {
+    let measurement = ExecMeasurement::start();
     let mut process_name = name_override
         .map(|s| s.to_string())
         .unwrap_or_else(|| derive_process_name(path));
@@ -710,7 +743,7 @@ fn exec_internal(
             source,
             data.len()
         );
-        exec_with_data(
+        measurement.finish(exec_with_data(
             &data,
             &process_name,
             path,
@@ -722,7 +755,7 @@ fn exec_internal(
             requested_credentials,
             requested_privilege,
             security_identity,
-        )
+        ))
     } else {
         crate::warn!("exec: file not found: {}", path);
         crate::syscall::types::ENOENT
@@ -730,7 +763,12 @@ fn exec_internal(
 }
 
 fn load_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static str)> {
-    load_regular_exec_image(path, role)
+    let loaded = load_regular_exec_image(path, role)?;
+    crate::performance::increment(
+        crate::performance::CounterMetric::ExecutableBytesRead,
+        loaded.0.len() as u64,
+    );
+    Some(loaded)
 }
 
 fn load_regular_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static str)> {
@@ -773,6 +811,7 @@ fn derive_process_name(path: &str) -> String {
 
 /// Exec by streaming image with zero-copy frame transfer when possible.
 pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
+    let measurement = ExecMeasurement::start();
     if !caller_has_process_spawn_capability() {
         return crate::syscall::types::EPERM;
     }
@@ -798,7 +837,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     if let Some(data) =
         crate::init::fs::read_rootfs(&path).or_else(|| crate::cext::fs::read_all(&path))
     {
-        return exec_with_data(
+        return measurement.finish(exec_with_data(
             &data,
             &path,
             &path,
@@ -810,7 +849,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
             None,
             None,
             None,
-        );
+        ));
     }
 
     crate::syscall::types::ENOENT
@@ -1458,6 +1497,7 @@ fn read_user_ptr_array(array_ptr: u64, max_entries: usize) -> Vec<String> {
 pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     use crate::syscall::types::{EINVAL, ENOENT, EPERM};
 
+    let measurement = ExecMeasurement::start();
     if path_ptr == 0 {
         crate::warn!("execve: null path pointer");
         return EINVAL;
@@ -1737,6 +1777,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     crate::task::with_process_mut(pid, |p| p.fd_table_mut().close_cloexec_fds());
 
     // 新しいページテーブルに切り替えてジャンプ
+    measurement.record();
     unsafe {
         crate::mem::paging::switch_page_table(new_pt_phys);
         crate::task::jump_to_usermode(entry, initial_rsp, 0);
@@ -1751,6 +1792,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
 pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
+    let measurement = ExecMeasurement::start();
     if !caller_has_process_spawn_capability() {
         return EPERM;
     }
@@ -1769,7 +1811,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         return e;
     }
 
-    exec_with_data(
+    measurement.finish(exec_with_data(
         &owned,
         "user_exec",
         "user_exec",
@@ -1781,7 +1823,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         None,
         None,
         None,
-    )
+    ))
 }
 
 /// メモリ上の ELF バッファと実行パス名から新プロセスを起動するシステムコール
@@ -1793,6 +1835,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
 pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
+    let measurement = ExecMeasurement::start();
     if !caller_has_process_spawn_capability() {
         return EPERM;
     }
@@ -1814,7 +1857,7 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         return e;
     }
 
-    exec_with_data(
+    measurement.finish(exec_with_data(
         &owned,
         process_name,
         path.as_str(),
@@ -1826,7 +1869,7 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         None,
         None,
         None,
-    )
+    ))
 }
 
 /// メモリ上の ELF バッファと実行パス名・引数から新プロセスを起動するシステムコール
@@ -1844,6 +1887,7 @@ pub fn exec_from_buffer_named_args_syscall(
 ) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
+    let measurement = ExecMeasurement::start();
     if !caller_has_process_spawn_capability() {
         return EPERM;
     }
@@ -1871,7 +1915,7 @@ pub fn exec_from_buffer_named_args_syscall(
         return e;
     }
 
-    exec_with_data(
+    measurement.finish(exec_with_data(
         &owned,
         process_name,
         path.as_str(),
@@ -1883,7 +1927,7 @@ pub fn exec_from_buffer_named_args_syscall(
         None,
         None,
         None,
-    )
+    ))
 }
 
 /// メモリ上の ELF バッファと実行パス名・引数・要求元スレッドIDから新プロセスを起動するシステムコール
@@ -1896,6 +1940,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
 ) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
+    let measurement = ExecMeasurement::start();
     if !caller_has_process_spawn_capability() {
         return EPERM;
     }
@@ -1949,7 +1994,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         None
     };
 
-    exec_with_data(
+    measurement.finish(exec_with_data(
         &owned,
         process_name,
         path.as_str(),
@@ -1961,5 +2006,5 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         None,
         None,
         None,
-    )
+    ))
 }

@@ -171,6 +171,7 @@ const SYS_EVENT_SIGNAL: u64 = mnu_abi::SyscallNumber::EventSignal as u64;
 const SYS_EVENT_POLL: u64 = mnu_abi::SyscallNumber::EventPoll as u64;
 const SYS_TIME_NOW: u64 = mnu_abi::SyscallNumber::TimeNow as u64;
 const SYS_SERVICE_SPAWN: u64 = mnu_abi::SyscallNumber::ServiceSpawn as u64;
+const SYS_PERFORMANCE_SNAPSHOT: u64 = mnu_abi::SyscallNumber::PerformanceSnapshot as u64;
 const SYS_YIELD: u64 = mnu_abi::SyscallNumber::Yield as u64;
 const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
 const SYS_GET_TICKS: u64 = mnu_abi::SyscallNumber::GetTicks as u64;
@@ -333,6 +334,18 @@ pub fn process_spawn(flags: u64, reserved: u64) -> u64 {
 
 pub fn process_wait(pid: u64, status_ptr: u64, flags: u64) -> u64 {
     unsafe { syscall3(SYS_PROCESS_WAIT, pid, status_ptr, flags) }
+}
+
+pub fn performance_snapshot(
+    snapshot: &mut mnu_abi::performance::KernelPerformanceSnapshot,
+) -> u64 {
+    unsafe {
+        syscall2(
+            SYS_PERFORMANCE_SNAPSHOT,
+            snapshot as *mut _ as u64,
+            core::mem::size_of_val(snapshot) as u64,
+        )
+    }
 }
 
 fn exec_and_wait(path: &str, caps: &[&str]) -> Option<i32> {

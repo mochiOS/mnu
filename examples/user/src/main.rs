@@ -34,6 +34,7 @@ const STAGE_CAP: &[u8] = b"stage: capability\n";
 const STAGE_THREAD: &[u8] = b"stage: thread\n";
 const STAGE_SPAWN: &[u8] = b"stage: process_spawn\n";
 const STAGE_FS_BENCH: &[u8] = b"stage: fs bench\n";
+const STAGE_PERFORMANCE: &[u8] = b"stage: performance counters\n";
 const FS_BYTES_LINE: &[u8] = b" bytes, ";
 const FS_TICK_HZ_LINE: &[u8] = b" tick_hz=";
 const FS_ELAPSED_MS_LINE: &[u8] = b" elapsed_ms=";
@@ -358,6 +359,22 @@ fn run_process_spawn_test() -> bool {
     true
 }
 
+fn verify_exec_measurements() -> bool {
+    use mnu_abi::performance::{CounterMetric, KernelPerformanceSnapshot, LatencyMetric};
+
+    let mut snapshot = KernelPerformanceSnapshot::default();
+    let result = user::performance_snapshot(&mut snapshot);
+    if result == mnu_abi::ENOTSUP {
+        return true;
+    }
+    if is_error(result) {
+        return false;
+    }
+
+    snapshot.counters[CounterMetric::ExecutableBytesRead as usize] != 0
+        && snapshot.latencies[LatencyMetric::ExecEntry as usize].count != 0
+}
+
 fn run_fs_benchmark() -> u64 {
     // Keep the benchmark on a service-owned path so the baseline self-test
     // does not depend on unimplemented rootfs path-registry wiring.
@@ -480,6 +497,14 @@ fn run_all_tests() -> u64 {
     let _ = user::write(1, STAGE_SPAWN.as_ptr() as u64, STAGE_SPAWN.len() as u64);
     if !run_process_spawn_test() {
         return 9;
+    }
+    let _ = user::write(
+        1,
+        STAGE_PERFORMANCE.as_ptr() as u64,
+        STAGE_PERFORMANCE.len() as u64,
+    );
+    if !verify_exec_measurements() {
+        return 10;
     }
     let _ = user::write(
         1,
