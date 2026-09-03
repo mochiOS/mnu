@@ -2,8 +2,7 @@ use crate::capability::{
     parse_kernel_authority_spec, Capability, CapabilitySet, KernelAuthoritySet,
 };
 use crate::policy::{
-    caller_can_grant_capabilities_on_exec, claim_init_pid, release_init_pid,
-    resolve_exec_privilege, ManifestRole,
+    caller_can_grant_capabilities_on_exec, claim_init_pid, release_init_pid, resolve_exec_privilege,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -15,7 +14,7 @@ mod image;
 
 use image::{map_elf_image, ElfImageLayout};
 
-use mnu_abi::exec::{ENVIRONMENT_PREFIX, SECURITY_IDENTITY_PREFIX};
+use mnu_abi::exec::{ExecutionClass, ENVIRONMENT_PREFIX, SECURITY_IDENTITY_PREFIX};
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct InitialUserStack {
@@ -300,8 +299,8 @@ fn validate_requested_exec_capabilities(
     Ok(())
 }
 
-fn parse_manifest_role(raw: u64) -> Option<ManifestRole> {
-    ManifestRole::from_raw(raw)
+fn parse_execution_class(raw: u64) -> Option<ExecutionClass> {
+    ExecutionClass::from_raw(raw)
 }
 
 pub fn exec_manifest_syscall(
@@ -309,14 +308,14 @@ pub fn exec_manifest_syscall(
     args_ptr: u64,
     caps_ptr: u64,
     caps_total_len: u64,
-    role_raw: u64,
+    execution_class_raw: u64,
 ) -> u64 {
     exec_manifest_common(
         path_ptr,
         args_ptr,
         caps_ptr,
         caps_total_len,
-        role_raw,
+        execution_class_raw,
         None,
         None,
     )
@@ -339,7 +338,7 @@ pub fn exec_manifest_with_credentials_syscall(
     if let Err(errno) = crate::syscall::copy_from_user(request_ptr, &mut request) {
         return errno;
     }
-    let role_raw = u64::from_le_bytes([
+    let execution_class_raw = u64::from_le_bytes([
         request[0], request[1], request[2], request[3], request[4], request[5], request[6],
         request[7],
     ]);
@@ -371,7 +370,7 @@ pub fn exec_manifest_with_credentials_syscall(
         args_ptr,
         caps_ptr,
         caps_total_len,
-        role_raw,
+        execution_class_raw,
         Some(crate::task::ProcessCredentials::user(uid, gid)),
         None,
     )
@@ -394,7 +393,7 @@ pub fn exec_manifest_for_requester_syscall(
     if let Err(errno) = crate::syscall::copy_from_user(request_ptr, &mut request) {
         return errno;
     }
-    let role_raw = u64::from_le_bytes([
+    let execution_class_raw = u64::from_le_bytes([
         request[0], request[1], request[2], request[3], request[4], request[5], request[6],
         request[7],
     ]);
@@ -454,7 +453,7 @@ pub fn exec_manifest_for_requester_syscall(
         args_ptr,
         caps_ptr,
         caps_total_len,
-        role_raw,
+        execution_class_raw,
         Some(credentials),
         Some(requester_pid),
     )
@@ -465,28 +464,23 @@ fn exec_manifest_common(
     args_ptr: u64,
     caps_ptr: u64,
     caps_total_len: u64,
-    role_raw: u64,
+    execution_class_raw: u64,
     credentials: Option<crate::task::ProcessCredentials>,
     parent_override: Option<crate::task::ProcessId>,
 ) -> u64 {
     use crate::syscall::types::{EACCES, EINVAL, EPERM};
 
-    let Some(role) = parse_manifest_role(role_raw) else {
+    let Some(execution_class) = parse_execution_class(execution_class_raw) else {
         return EINVAL;
     };
-    let allowed = match role {
-        ManifestRole::CoreService | ManifestRole::Service => {
-            crate::policy::caller_can_launch_service()
-        }
-        ManifestRole::Driver => crate::policy::caller_can_launch_driver(),
-        ManifestRole::Application | ManifestRole::Tool | ManifestRole::Unknown => {
-            caller_has_process_spawn_capability()
-        }
+    let allowed = match execution_class {
+        ExecutionClass::Privileged => crate::policy::caller_can_launch_privileged(),
+        ExecutionClass::Unprivileged => caller_has_process_spawn_capability(),
     };
     if !allowed {
         crate::warn!(
-            "exec_manifest denied role={:?} caller.service_or_core={} caller.process.spawn={}",
-            role,
+            "exec_manifest denied class={:?} caller.service_or_core={} caller.process.spawn={}",
+            execution_class,
             crate::policy::caller_is_service_or_core_process(),
             caller_has_process_spawn_capability()
         );
@@ -523,8 +517,8 @@ fn exec_manifest_common(
 
     if !caller_can_grant_capabilities_on_exec() {
         crate::warn!(
-            "exec_manifest capability grant denied role={:?} caller.service_or_core={} caller.process.spawn={}",
-            role,
+            "exec_manifest capability grant denied class={:?} caller.service_or_core={} caller.process.spawn={}",
+            execution_class,
             crate::policy::caller_is_service_or_core_process(),
             caller_has_process_spawn_capability()
         );
@@ -534,9 +528,8 @@ fn exec_manifest_common(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let can_intern = current_process_capabilities().is_none_or(|caps| {
-        caps.contains(crate::capability::Capability::CapabilitiesManage)
-    });
+    let can_intern = current_process_capabilities()
+        .is_none_or(|caps| caps.contains(crate::capability::Capability::CapabilitiesManage));
     let (caps, authorities) = match parse_requested_exec_grants(&caps_list, can_intern) {
         Ok(grants) => grants,
         Err(errno) => return errno,
@@ -554,11 +547,9 @@ fn exec_manifest_common(
         return errno;
     }
 
-    let requested_privilege = match role {
-        ManifestRole::CoreService | ManifestRole::Service => {
-            Some(crate::task::PrivilegeLevel::Service)
-        }
-        _ => Some(crate::task::PrivilegeLevel::User),
+    let requested_privilege = match execution_class {
+        ExecutionClass::Privileged => Some(crate::task::PrivilegeLevel::Service),
+        ExecutionClass::Unprivileged => Some(crate::task::PrivilegeLevel::User),
     };
 
     exec_internal(
@@ -570,7 +561,7 @@ fn exec_manifest_common(
         Some(authorities),
         credentials,
         requested_privilege,
-        Some(role),
+        execution_class,
         parent_override,
         security_identity,
         true,
@@ -592,10 +583,11 @@ pub fn exec_kernel_with_name_caps_and_authorities(
     initial_kernel_authorities: KernelAuthoritySet,
     requested_privilege: crate::task::PrivilegeLevel,
 ) -> u64 {
-    let manifest_role = match requested_privilege {
-        crate::task::PrivilegeLevel::Core => Some(ManifestRole::CoreService),
-        crate::task::PrivilegeLevel::Service => Some(ManifestRole::Service),
-        _ => Some(ManifestRole::Unknown),
+    let execution_class = match requested_privilege {
+        crate::task::PrivilegeLevel::Core | crate::task::PrivilegeLevel::Service => {
+            ExecutionClass::Privileged
+        }
+        crate::task::PrivilegeLevel::User => ExecutionClass::Unprivileged,
     };
     exec_internal(
         path,
@@ -606,7 +598,7 @@ pub fn exec_kernel_with_name_caps_and_authorities(
         Some(initial_kernel_authorities),
         None,
         Some(requested_privilege),
-        manifest_role,
+        execution_class,
         None,
         None,
         false,
@@ -622,7 +614,7 @@ fn exec_internal(
     initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_credentials: Option<crate::task::ProcessCredentials>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
-    manifest_role: Option<ManifestRole>,
+    execution_class: ExecutionClass,
     parent_override: Option<crate::task::ProcessId>,
     security_identity: Option<&str>,
     enforce_path_access: bool,
@@ -634,7 +626,6 @@ fn exec_internal(
     if let Some(alias) = crate::task::process::process_alias_for_executable(path) {
         process_name = alias;
     }
-    let role = manifest_role.unwrap_or(ManifestRole::Unknown);
     if enforce_path_access {
         let access_process = parent_override.or_else(|| {
             crate::task::current_thread_id()
@@ -647,7 +638,7 @@ fn exec_internal(
             }
         }
     }
-    if let Some((data, source)) = load_exec_image(path, role) {
+    if let Some((data, source)) = load_exec_image(path, execution_class) {
         if enforce_path_access && !crate::policy::signature::verify_exec(path, &data) {
             crate::warn!("exec: signature verification failed for '{}'", path);
             return crate::syscall::types::EPERM;
@@ -679,8 +670,8 @@ fn exec_internal(
     }
 }
 
-fn load_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static str)> {
-    let loaded = load_regular_exec_image(path, role)?;
+fn load_exec_image(path: &str, execution_class: ExecutionClass) -> Option<(Vec<u8>, &'static str)> {
+    let loaded = load_regular_exec_image(path, execution_class)?;
     crate::performance::increment(
         crate::performance::CounterMetric::ExecutableBytesRead,
         loaded.0.len() as u64,
@@ -688,8 +679,11 @@ fn load_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static 
     Some(loaded)
 }
 
-fn load_regular_exec_image(path: &str, role: ManifestRole) -> Option<(Vec<u8>, &'static str)> {
-    if matches!(role, ManifestRole::CoreService | ManifestRole::Service) {
+fn load_regular_exec_image(
+    path: &str,
+    execution_class: ExecutionClass,
+) -> Option<(Vec<u8>, &'static str)> {
+    if execution_class == ExecutionClass::Privileged {
         if let Some(data) = crate::init::fs::read_initfs(path) {
             return Some((data, "initfs"));
         }
@@ -916,7 +910,11 @@ fn exec_with_data(
         } = match map_elf_image(data, new_pt_phys, measurement) {
             Ok(layout) => layout,
             Err(errno) => {
-                crate::warn!("exec: invalid or unmappable ELF image '{}': {}", exec_path, errno);
+                crate::warn!(
+                    "exec: invalid or unmappable ELF image '{}': {}",
+                    exec_path,
+                    errno
+                );
                 return errno;
             }
         };
@@ -1115,21 +1113,19 @@ fn exec_with_data(
         }
         // allocate kernel stack for the new thread
         let kstack_size = crate::config::kernel().exec.kernel_thread_stack_size;
-        let kstack = match crate::task::thread::allocate_kernel_stack_in_table(
-            kstack_size,
-            new_pt_phys,
-        ) {
-            Some(a) => a,
-            None => {
-                crate::warn!("Failed to allocate kernel stack for thread");
-                let _ = crate::task::remove_process(pid);
-                if is_boot_init {
-                    let _ = release_init_pid(pid.as_u64());
+        let kstack =
+            match crate::task::thread::allocate_kernel_stack_in_table(kstack_size, new_pt_phys) {
+                Some(a) => a,
+                None => {
+                    crate::warn!("Failed to allocate kernel stack for thread");
+                    let _ = crate::task::remove_process(pid);
+                    if is_boot_init {
+                        let _ = release_init_pid(pid.as_u64());
+                    }
+                    let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
+                    return crate::syscall::types::ENOMEM;
                 }
-                let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
-                return crate::syscall::types::ENOMEM;
-            }
-        };
+            };
         new_pt_guard.disarm();
 
         // ユーザーモードスレッドを作成
@@ -1277,14 +1273,13 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     let Some(pid) = crate::syscall::security::current_process_id() else {
         return crate::syscall::types::EACCES;
     };
-    if let Err(errno) =
-        crate::syscall::fs::ensure_fs_path_executable_for_process(&path_owned, pid)
+    if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(&path_owned, pid)
     {
         return errno;
     }
 
     let aslr_seed = next_aslr_seed(&path_owned);
-    let (data_vec, source) = match load_exec_image(&path_owned, ManifestRole::Unknown) {
+    let (data_vec, source) = match load_exec_image(&path_owned, ExecutionClass::Unprivileged) {
         Some(loaded) => loaded,
         None => return ENOENT,
     };
@@ -1357,8 +1352,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         &envp_refs,
         &path_owned,
         &auxv_entries,
-    )
-    {
+    ) {
         Ok(stack) => stack,
         Err(errno) => return errno,
     };
@@ -1418,12 +1412,11 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         Some(p) => p,
         None => return EINVAL,
     };
-    let kernel_stack = match crate::task::with_thread(current_tid, |thread| {
-        thread.kernel_stack_base()
-    }) {
-        Some(base) => base,
-        None => return EINVAL,
-    };
+    let kernel_stack =
+        match crate::task::with_thread(current_tid, |thread| thread.kernel_stack_base()) {
+            Some(base) => base,
+            None => return EINVAL,
+        };
     if !crate::task::remap_kernel_stack_user_table(kernel_stack, new_pt_phys) {
         return crate::syscall::types::ENOMEM;
     }

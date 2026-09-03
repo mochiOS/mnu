@@ -9,49 +9,53 @@ pub const ENVIRONMENT_PREFIX: &str = "__MNU_EXEC_ENV=";
 /// that launches the process decides what the identity represents.
 pub const SECURITY_IDENTITY_PREFIX: &str = "__MNU_EXEC_SECURITY_IDENTITY=";
 
-/// Process role supplied to the manifest-based exec syscall.
+/// Kernel privilege requested by a manifest-based exec syscall.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
-pub enum ProcessRole {
-    CoreService = 1,
-    Service = 2,
-    Application = 3,
-    Driver = 4,
-    Tool = 5,
-    Unknown = 6,
+pub enum ExecutionClass {
+    Privileged = 2,
+    Unprivileged = 3,
 }
 
-impl ProcessRole {
+impl ExecutionClass {
+    /// Values 1 and 4 through 6 are accepted for compatibility with the old
+    /// role-based wire format. Their product meaning is not interpreted.
     pub const fn from_raw(raw: u64) -> Option<Self> {
         match raw {
-            1 => Some(Self::CoreService),
-            2 => Some(Self::Service),
-            3 => Some(Self::Application),
-            4 => Some(Self::Driver),
-            5 => Some(Self::Tool),
-            6 => Some(Self::Unknown),
+            1 | 2 => Some(Self::Privileged),
+            3..=6 => Some(Self::Unprivileged),
             _ => None,
         }
+    }
+
+    pub const fn as_raw(self) -> u64 {
+        self as u64
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ProcessRole;
+    use super::ExecutionClass;
 
     #[test]
-    fn process_roles_round_trip_through_the_syscall_value() {
-        for role in [
-            ProcessRole::CoreService,
-            ProcessRole::Service,
-            ProcessRole::Application,
-            ProcessRole::Driver,
-            ProcessRole::Tool,
-            ProcessRole::Unknown,
-        ] {
-            assert_eq!(ProcessRole::from_raw(role as u64), Some(role));
+    fn execution_classes_accept_current_and_legacy_values() {
+        assert_eq!(
+            ExecutionClass::from_raw(1),
+            Some(ExecutionClass::Privileged)
+        );
+        assert_eq!(
+            ExecutionClass::from_raw(2),
+            Some(ExecutionClass::Privileged)
+        );
+        for raw in 3..=6 {
+            assert_eq!(
+                ExecutionClass::from_raw(raw),
+                Some(ExecutionClass::Unprivileged)
+            );
         }
-        assert_eq!(ProcessRole::from_raw(0), None);
-        assert_eq!(ProcessRole::from_raw(7), None);
+        assert_eq!(ExecutionClass::Privileged.as_raw(), 2);
+        assert_eq!(ExecutionClass::Unprivileged.as_raw(), 3);
+        assert_eq!(ExecutionClass::from_raw(0), None);
+        assert_eq!(ExecutionClass::from_raw(7), None);
     }
 }

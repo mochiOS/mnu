@@ -11,17 +11,6 @@ pub mod signature;
 /// ブート時にカーネルが起動した init プロセスID
 /// 0 は未登録。
 static INIT_PID: AtomicU64 = AtomicU64::new(0);
-static SERVICE_SPAWN_DELEGATE_PID: AtomicU64 = AtomicU64::new(0);
-static DRIVER_SPAWN_DELEGATE_PID: AtomicU64 = AtomicU64::new(0);
-
-#[repr(u64)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpawnDelegateKind {
-    Service = 1,
-    Driver = 2,
-}
-
-pub use mnu_abi::exec::ProcessRole as ManifestRole;
 
 /// 起動に必要な最小メタデータ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,21 +46,6 @@ pub fn release_init_pid(pid: u64) -> bool {
         .is_ok()
 }
 
-fn delegate_slot(kind: SpawnDelegateKind) -> &'static AtomicU64 {
-    match kind {
-        SpawnDelegateKind::Service => &SERVICE_SPAWN_DELEGATE_PID,
-        SpawnDelegateKind::Driver => &DRIVER_SPAWN_DELEGATE_PID,
-    }
-}
-
-pub fn register_spawn_delegate(kind: SpawnDelegateKind, pid: u64) {
-    delegate_slot(kind).store(pid, Ordering::SeqCst);
-}
-
-pub fn spawn_delegate_pid(kind: SpawnDelegateKind) -> u64 {
-    delegate_slot(kind).load(Ordering::SeqCst)
-}
-
 fn caller_pid() -> Option<ProcessId> {
     crate::task::current_thread_id()
         .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
@@ -93,8 +67,8 @@ fn caller_has_process_spawn_capability() -> bool {
     })
 }
 
-/// `.service` 実行を許可するか
-pub fn caller_can_launch_service() -> bool {
+/// 特権プロセスの起動を許可するか。
+pub fn caller_can_launch_privileged() -> bool {
     let Some(caller_pid) = caller_pid() else {
         // カーネルコンテキストからの起動は許可
         return true;
@@ -116,50 +90,7 @@ pub fn caller_can_launch_service() -> bool {
         .unwrap_or(false);
     }
 
-    let delegate_pid_raw = spawn_delegate_pid(SpawnDelegateKind::Service);
-    if delegate_pid_raw == 0 || caller_pid.as_u64() != delegate_pid_raw {
-        return caller_is_service_or_core() && caller_has_process_spawn_capability();
-    }
-    let delegate_pid = ProcessId::from_u64(delegate_pid_raw);
-    crate::task::with_process(delegate_pid, |p| {
-        let state = p.state();
-        let alive = state != crate::task::ProcessState::Zombie
-            && state != crate::task::ProcessState::Terminated;
-        let privileged = matches!(
-            p.privilege(),
-            PrivilegeLevel::Service | PrivilegeLevel::Core
-        );
-        alive && privileged
-    })
-    .unwrap_or(false)
-}
-
-pub fn caller_can_launch_driver() -> bool {
-    let Some(caller_pid) = caller_pid() else {
-        return true;
-    };
-
-    let init_pid_raw = init_pid();
-    if init_pid_raw != 0 && caller_pid.as_u64() == init_pid_raw {
-        return true;
-    }
-
-    let delegate_pid_raw = spawn_delegate_pid(SpawnDelegateKind::Driver);
-    if delegate_pid_raw == 0 || caller_pid.as_u64() != delegate_pid_raw {
-        return caller_is_service_or_core() && caller_has_process_spawn_capability();
-    }
-    let delegate_pid = ProcessId::from_u64(delegate_pid_raw);
-    crate::task::with_process(delegate_pid, |p| {
-        let state = p.state();
-        let alive = state != crate::task::ProcessState::Zombie
-            && state != crate::task::ProcessState::Terminated;
-        let privileged = matches!(
-            p.privilege(),
-            PrivilegeLevel::Service | PrivilegeLevel::Core
-        );
-        alive && privileged
-    })
-    .unwrap_or(false)
+    caller_is_service_or_core() && caller_has_process_spawn_capability()
 }
 
 /// exec 時に capability を付与できるか

@@ -238,7 +238,7 @@ pub const STORAGE_QUERY_PARTITION_RANGE: u64 = 2;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExecManifestCredentials {
-    pub role: u64,
+    pub execution_class: u64,
     pub uid: u32,
     pub gid: u32,
     pub reserved: u64,
@@ -248,7 +248,7 @@ pub struct ExecManifestCredentials {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExecManifestRequester {
-    pub role: u64,
+    pub execution_class: u64,
     pub requester_tid: u64,
     pub reserved: u64,
 }

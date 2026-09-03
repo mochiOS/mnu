@@ -61,11 +61,8 @@ pub fn validate_user_ptr(ptr: u64, len: u64) -> bool {
         while address < end {
             let next_page = (address | 0xfff).saturating_add(1).min(end);
             let chunk_len = next_page - address;
-            let resident = crate::mem::paging::is_user_range_mapped_in_table(
-                table_phys,
-                address,
-                chunk_len,
-            );
+            let resident =
+                crate::mem::paging::is_user_range_mapped_in_table(table_phys, address, chunk_len);
             if !resident {
                 let valid_region = process.find_mmap_region(address).is_some_and(|region| {
                     region.allows_read_at(address)
@@ -130,51 +127,6 @@ pub fn read_user_cstring(ptr: u64, max_len: usize) -> Result<String, u64> {
         bytes.push(b);
     }
     Err(EINVAL)
-}
-
-pub fn service_delegate_register(kind_raw: u64, pid_raw: u64) -> u64 {
-    use crate::capability::Capability;
-    use crate::policy::SpawnDelegateKind;
-    use crate::syscall::types::{EACCES, EINVAL, ESRCH, SUCCESS};
-
-    let caller_pid = match crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-    {
-        Some(pid) => pid,
-        None => return EACCES,
-    };
-    let init_pid = crate::policy::init_pid();
-    let is_init = init_pid != 0 && caller_pid.as_u64() == init_pid;
-    let can_register =
-        crate::syscall::security::caller_has_any_capability(&[Capability::ServiceRegister]);
-    if !is_init && !can_register {
-        return EACCES;
-    }
-
-    let kind = match kind_raw {
-        1 => SpawnDelegateKind::Service,
-        2 => SpawnDelegateKind::Driver,
-        _ => return EINVAL,
-    };
-
-    let pid = crate::task::ProcessId::from_u64(pid_raw);
-    let valid = crate::task::with_process(pid, |p| {
-        let state = p.state();
-        let alive = state != crate::task::ProcessState::Zombie
-            && state != crate::task::ProcessState::Terminated;
-        let privileged = matches!(
-            p.privilege(),
-            crate::task::PrivilegeLevel::Service | crate::task::PrivilegeLevel::Core
-        );
-        alive && privileged
-    })
-    .unwrap_or(false);
-    if !valid {
-        return ESRCH;
-    }
-
-    crate::policy::register_spawn_delegate(kind, pid_raw);
-    SUCCESS
 }
 
 pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
@@ -632,9 +584,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::ProcessExit as u64 => process::exit(arg0),
         x if x == SyscallNumber::ProcessSpawn as u64 => process::spawn(arg0, arg1),
         x if x == SyscallNumber::ServiceSpawn as u64 => ENOSYS,
-        x if x == SyscallNumber::ServiceDelegateRegister as u64 => {
-            service_delegate_register(arg0, arg1)
-        }
+        x if x == SyscallNumber::ServiceDelegateRegister as u64 => ENOSYS,
         x if x == SyscallNumber::DriverSpawn as u64 => ENOSYS,
         x if x == SyscallNumber::DmaAlloc as u64 => dma::alloc(arg0, arg1),
         x if x == SyscallNumber::DmaFree as u64 => dma::free(arg0),
