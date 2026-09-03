@@ -825,13 +825,6 @@ fn is_process_creation_syscall(num: u64) -> bool {
     num == SyscallNumber::Fork as u64
         || num == SyscallNumber::Clone as u64
         || num == SyscallNumber::Execve as u64
-        || num == SyscallNumber::Exec as u64
-        || num == SyscallNumber::ExecFromBuffer as u64
-        || num == SyscallNumber::ExecFromBufferNamed as u64
-        || num == SyscallNumber::ExecFromBufferNamedArgs as u64
-        || num == SyscallNumber::ExecFromBufferNamedArgsWithRequester as u64
-        || num == SyscallNumber::ExecFromFsStream as u64
-        || num == SyscallNumber::ExecWithCapabilities as u64
         || num == SyscallNumber::ProcessSpawn as u64
         || num == SyscallNumber::ExecManifest as u64
         || num == SyscallNumber::ExecManifestWithCredentials as u64
