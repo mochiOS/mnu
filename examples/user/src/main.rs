@@ -372,6 +372,8 @@ fn verify_exec_measurements() -> bool {
     }
 
     snapshot.counters[CounterMetric::ExecutableBytesRead as usize] != 0
+        && snapshot.latencies[LatencyMetric::ExecParse as usize].count != 0
+        && snapshot.latencies[LatencyMetric::ExecLoad as usize].count != 0
         && snapshot.latencies[LatencyMetric::ExecEntry as usize].count != 0
 }
 

@@ -25,6 +25,10 @@ struct InitialUserStack {
 struct ExecMeasurement {
     #[cfg(feature = "performance-instrumentation")]
     started: u64,
+    #[cfg(feature = "performance-instrumentation")]
+    parse_cycles: u64,
+    #[cfg(feature = "performance-instrumentation")]
+    load_cycles: u64,
 }
 
 impl ExecMeasurement {
@@ -33,7 +37,39 @@ impl ExecMeasurement {
         Self {
             #[cfg(feature = "performance-instrumentation")]
             started: crate::performance::timestamp(),
+            #[cfg(feature = "performance-instrumentation")]
+            parse_cycles: 0,
+            #[cfg(feature = "performance-instrumentation")]
+            load_cycles: 0,
         }
+    }
+
+    #[inline]
+    fn parse<T>(&mut self, operation: impl FnOnce() -> T) -> T {
+        #[cfg(feature = "performance-instrumentation")]
+        let started = crate::performance::timestamp();
+        let result = operation();
+        #[cfg(feature = "performance-instrumentation")]
+        {
+            self.parse_cycles = self
+                .parse_cycles
+                .saturating_add(crate::performance::elapsed_cycles(started));
+        }
+        result
+    }
+
+    #[inline]
+    fn load<T>(&mut self, operation: impl FnOnce() -> T) -> T {
+        #[cfg(feature = "performance-instrumentation")]
+        let started = crate::performance::timestamp();
+        let result = operation();
+        #[cfg(feature = "performance-instrumentation")]
+        {
+            self.load_cycles = self
+                .load_cycles
+                .saturating_add(crate::performance::elapsed_cycles(started));
+        }
+        result
     }
 
     #[inline]
@@ -47,10 +83,20 @@ impl ExecMeasurement {
     #[inline]
     fn record(self) {
         #[cfg(feature = "performance-instrumentation")]
-        crate::performance::record_latency(
-            crate::performance::LatencyMetric::ExecEntry,
-            self.started,
-        );
+        {
+            crate::performance::record_latency_cycles(
+                crate::performance::LatencyMetric::ExecParse,
+                self.parse_cycles,
+            );
+            crate::performance::record_latency_cycles(
+                crate::performance::LatencyMetric::ExecLoad,
+                self.load_cycles,
+            );
+            crate::performance::record_latency(
+                crate::performance::LatencyMetric::ExecEntry,
+                self.started,
+            );
+        }
     }
 }
 
@@ -712,7 +758,7 @@ fn exec_internal(
     security_identity: Option<&str>,
     enforce_path_access: bool,
 ) -> u64 {
-    let measurement = ExecMeasurement::start();
+    let mut measurement = ExecMeasurement::start();
     let mut process_name = name_override
         .map(|s| s.to_string())
         .unwrap_or_else(|| derive_process_name(path));
@@ -743,7 +789,7 @@ fn exec_internal(
             source,
             data.len()
         );
-        measurement.finish(exec_with_data(
+        let result = exec_with_data(
             &data,
             &process_name,
             path,
@@ -755,7 +801,9 @@ fn exec_internal(
             requested_credentials,
             requested_privilege,
             security_identity,
-        ))
+            &mut measurement,
+        );
+        measurement.finish(result)
     } else {
         crate::warn!("exec: file not found: {}", path);
         crate::syscall::types::ENOENT
@@ -811,7 +859,7 @@ fn derive_process_name(path: &str) -> String {
 
 /// Exec by streaming image with zero-copy frame transfer when possible.
 pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
-    let measurement = ExecMeasurement::start();
+    let mut measurement = ExecMeasurement::start();
     if !caller_has_process_spawn_capability() {
         return crate::syscall::types::EPERM;
     }
@@ -837,7 +885,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     if let Some(data) =
         crate::init::fs::read_rootfs(&path).or_else(|| crate::cext::fs::read_all(&path))
     {
-        return measurement.finish(exec_with_data(
+        let result = exec_with_data(
             &data,
             &path,
             &path,
@@ -849,7 +897,9 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
             None,
             None,
             None,
-        ));
+            &mut measurement,
+        );
+        return measurement.finish(result);
     }
 
     crate::syscall::types::ENOENT
@@ -1011,6 +1061,7 @@ fn exec_with_data(
     requested_credentials: Option<crate::task::ProcessCredentials>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     security_identity: Option<&str>,
+    measurement: &mut ExecMeasurement,
 ) -> u64 {
     crate::debug!("exec: name={}", process_name);
     let aslr_seed = next_aslr_seed(process_name);
@@ -1025,7 +1076,7 @@ fn exec_with_data(
 
         // MED-27修正: エントリポイントが0の場合はELFが無効として拒否する
         // 以前はentry=0のままプロセスを作成し、仮想アドレス0にジャンプしていた
-        let entry = match crate::elf::entry_point(data) {
+        let entry = match measurement.parse(|| crate::elf::entry_point(data)) {
             Some(e) if e != 0 => e,
             _ => {
                 crate::warn!("exec: ELF entry point is 0 or missing, rejecting");
@@ -1054,7 +1105,7 @@ fn exec_with_data(
         let mut phdr_vaddr: u64 = 0;
         let mut phentsize: u64 = 0;
         let mut phnum: u64 = 0;
-        if let Some(eh) = crate::elf::parse_elf_header(data) {
+        if let Some(eh) = measurement.parse(|| crate::elf::parse_elf_header(data)) {
             if eh.e_machine != EM_X86_64 {
                 crate::warn!("ELF e_machine {:#x} is not x86-64, rejecting", eh.e_machine);
                 return crate::syscall::types::EINVAL;
@@ -1080,7 +1131,7 @@ fn exec_with_data(
                         return crate::syscall::types::EINVAL;
                     }
                 };
-                if let Some(ph) = crate::elf::parse_phdr(data, off_hdr) {
+                if let Some(ph) = measurement.parse(|| crate::elf::parse_phdr(data, off_hdr)) {
                     if ph.p_type == crate::elf::PT_LOAD {
                         let vaddr = ph.p_vaddr;
                         let memsz = ph.p_memsz;
@@ -1135,15 +1186,18 @@ fn exec_with_data(
                             load_base_set = true;
                         }
 
-                        if let Err(e) = crate::mem::paging::map_and_copy_segment_to(
-                            new_pt_phys,
-                            vaddr,
-                            filesz,
-                            memsz,
-                            seg_src,
-                            writable,
-                            executable,
-                        ) {
+                        let mapped = measurement.load(|| {
+                            crate::mem::paging::map_and_copy_segment_to(
+                                new_pt_phys,
+                                vaddr,
+                                filesz,
+                                memsz,
+                                seg_src,
+                                writable,
+                                executable,
+                            )
+                        });
+                        if let Err(e) = mapped {
                             crate::warn!("Failed to map segment at {:#x}: {:?}", vaddr, e);
                             crate::warn!(
                                 "  new_pt_phys={:#x}, filesz={}, memsz={}, writable={}, executable={}",
@@ -1497,7 +1551,7 @@ fn read_user_ptr_array(array_ptr: u64, max_entries: usize) -> Vec<String> {
 pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     use crate::syscall::types::{EINVAL, ENOENT, EPERM};
 
-    let measurement = ExecMeasurement::start();
+    let mut measurement = ExecMeasurement::start();
     if path_ptr == 0 {
         crate::warn!("execve: null path pointer");
         return EINVAL;
@@ -1541,7 +1595,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     let data: &[u8] = &data_vec;
 
     // ELF エントリポイントとセグメントを解析
-    let entry = match crate::elf::entry_point(data) {
+    let entry = match measurement.parse(|| crate::elf::entry_point(data)) {
         Some(e) if e != 0 => e,
         None => return EINVAL,
         _ => return EINVAL,
@@ -1559,7 +1613,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     let mut phdr_vaddr: u64 = 0;
     let mut phentsize: u64 = 0;
     let mut phnum: u64 = 0;
-    if let Some(eh) = crate::elf::parse_elf_header(data) {
+    if let Some(eh) = measurement.parse(|| crate::elf::parse_elf_header(data)) {
         // ELFアーキテクチャ検証 (MED-07)
         if eh.e_machine != EM_X86_64 {
             crate::warn!("execve: ELF e_machine {:#x} is not x86-64", eh.e_machine);
@@ -1582,7 +1636,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
                 Some(o) if o < data.len() => o,
                 _ => return EINVAL,
             };
-            if let Some(ph) = crate::elf::parse_phdr(data, off_hdr) {
+            if let Some(ph) = measurement.parse(|| crate::elf::parse_phdr(data, off_hdr)) {
                 if ph.p_type == crate::elf::PT_LOAD {
                     // ELFセグメントのvaddrがユーザー空間内であることを検証 (CRIT-05)
                     if ph.p_vaddr >= USER_SPACE_END_EXECVE {
@@ -1618,15 +1672,18 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
                         }
                     };
                     let seg_src = &data[src_off..src_end];
-                    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
-                        new_pt_phys,
-                        ph.p_vaddr,
-                        ph.p_filesz,
-                        ph.p_memsz,
-                        seg_src,
-                        (ph.p_flags & 0x2) != 0,
-                        (ph.p_flags & 0x1) != 0,
-                    ) {
+                    let mapped = measurement.load(|| {
+                        crate::mem::paging::map_and_copy_segment_to(
+                            new_pt_phys,
+                            ph.p_vaddr,
+                            ph.p_filesz,
+                            ph.p_memsz,
+                            seg_src,
+                            (ph.p_flags & 0x2) != 0,
+                            (ph.p_flags & 0x1) != 0,
+                        )
+                    });
+                    if let Err(error) = mapped {
                         return mapping_error_errno(error);
                     }
                 }
@@ -1792,7 +1849,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
 pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
-    let measurement = ExecMeasurement::start();
+    let mut measurement = ExecMeasurement::start();
     if !caller_has_process_spawn_capability() {
         return EPERM;
     }
@@ -1811,7 +1868,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         return e;
     }
 
-    measurement.finish(exec_with_data(
+    let result = exec_with_data(
         &owned,
         "user_exec",
         "user_exec",
@@ -1823,7 +1880,9 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         None,
         None,
         None,
-    ))
+        &mut measurement,
+    );
+    measurement.finish(result)
 }
 
 /// メモリ上の ELF バッファと実行パス名から新プロセスを起動するシステムコール
@@ -1835,7 +1894,7 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
 pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
-    let measurement = ExecMeasurement::start();
+    let mut measurement = ExecMeasurement::start();
     if !caller_has_process_spawn_capability() {
         return EPERM;
     }
@@ -1857,7 +1916,7 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         return e;
     }
 
-    measurement.finish(exec_with_data(
+    let result = exec_with_data(
         &owned,
         process_name,
         path.as_str(),
@@ -1869,7 +1928,9 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
         None,
         None,
         None,
-    ))
+        &mut measurement,
+    );
+    measurement.finish(result)
 }
 
 /// メモリ上の ELF バッファと実行パス名・引数から新プロセスを起動するシステムコール
@@ -1887,7 +1948,7 @@ pub fn exec_from_buffer_named_args_syscall(
 ) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
-    let measurement = ExecMeasurement::start();
+    let mut measurement = ExecMeasurement::start();
     if !caller_has_process_spawn_capability() {
         return EPERM;
     }
@@ -1915,7 +1976,7 @@ pub fn exec_from_buffer_named_args_syscall(
         return e;
     }
 
-    measurement.finish(exec_with_data(
+    let result = exec_with_data(
         &owned,
         process_name,
         path.as_str(),
@@ -1927,7 +1988,9 @@ pub fn exec_from_buffer_named_args_syscall(
         None,
         None,
         None,
-    ))
+        &mut measurement,
+    );
+    measurement.finish(result)
 }
 
 /// メモリ上の ELF バッファと実行パス名・引数・要求元スレッドIDから新プロセスを起動するシステムコール
@@ -1940,7 +2003,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
 ) -> u64 {
     use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
-    let measurement = ExecMeasurement::start();
+    let mut measurement = ExecMeasurement::start();
     if !caller_has_process_spawn_capability() {
         return EPERM;
     }
@@ -1994,7 +2057,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         None
     };
 
-    measurement.finish(exec_with_data(
+    let result = exec_with_data(
         &owned,
         process_name,
         path.as_str(),
@@ -2006,5 +2069,7 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         None,
         None,
         None,
-    ))
+        &mut measurement,
+    );
+    measurement.finish(result)
 }

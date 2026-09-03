@@ -429,11 +429,16 @@ pub fn cycles_to_nanoseconds(cycles: u64) -> Option<u64> {
 
 #[inline]
 pub fn record_latency(metric: LatencyMetric, start: u64) {
+    record_latency_cycles(metric, elapsed_cycles(start));
+}
+
+#[inline]
+pub fn record_latency_cycles(metric: LatencyMetric, cycles: u64) {
     #[cfg(feature = "performance-instrumentation")]
-    LATENCIES[crate::percpu::current_cpu_id()][metric as usize].record(elapsed_cycles(start));
+    LATENCIES[crate::percpu::current_cpu_id()][metric as usize].record(cycles);
 
     #[cfg(not(feature = "performance-instrumentation"))]
-    let _ = (metric, start);
+    let _ = (metric, cycles);
 }
 
 #[inline]
