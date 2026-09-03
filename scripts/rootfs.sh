@@ -36,7 +36,7 @@ need_file "${ROOTFS_SOURCE_DIR}"
 mkdir -p "$(dirname "${ROOTFS_IMG}")"
 rm -rf "${ROOTFS_STAGE}"
 mkdir -p "${ROOTFS_STAGE}"
-mkdir -p "${ROOTFS_STAGE}/tmp" "${ROOTFS_STAGE}/libraries/system" "${ROOTFS_STAGE}/system/logs"
+mkdir -p "${ROOTFS_STAGE}/tmp" "${ROOTFS_STAGE}/policy"
 
 if [[ "${ROOTFS_CLEAN_INITFS}" != "0" ]]; then
     rm -rf "${INITFS_STAGE}"
@@ -54,7 +54,7 @@ fi
 if [[ -n "${SIGNATURE_DB_SRC}" ]]; then
     need_file "${SIGNATURE_DB_SRC}"
     install -m 0644 "${SIGNATURE_DB_SRC}" \
-        "${ROOTFS_STAGE}/libraries/system/execution.allowlist"
+        "${ROOTFS_STAGE}/policy/execution.allowlist"
 fi
 
 ROOT_ENTRY="$(find "${ROOTFS_STAGE}" -mindepth 1 -maxdepth 1 ! -type d -print -quit)"

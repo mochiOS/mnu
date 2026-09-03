@@ -540,10 +540,12 @@ fn efi_main(image: Handle, mut st: SystemTable<Boot>) -> Status {
         BOOT_INFO.smp_handoff_size = size_of::<SmpHandoff>() as u32;
         BOOT_INFO.smp_trampoline_addr = 0;
         BOOT_INFO.smp_trampoline_size = 0;
-        SMP_HANDOFF = SmpHandoff::new();
-        SMP_HANDOFF
+        let handoff = SmpHandoff::new();
+        handoff
             .boot_info_ptr
             .store(core::ptr::addr_of!(BOOT_INFO) as u64, Ordering::Relaxed);
+        // The BSP is the only CPU running until the initialized handoff is published.
+        core::ptr::addr_of_mut!(SMP_HANDOFF).write(handoff);
     }
 
     slog!(

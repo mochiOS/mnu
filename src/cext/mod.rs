@@ -19,7 +19,6 @@ use crate::task::ResourceLimits;
 
 pub mod disk;
 pub mod fs;
-mod registry;
 
 const MCX_CEXT_ABI: u16 = 3;
 const MCX_LOG_ERROR: u32 = 0;
@@ -108,16 +107,9 @@ pub struct CextInstance {
 static NEXT_CEXT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_MODULE_LOAD_BASE: AtomicU64 = AtomicU64::new(0);
 static CEXT_REGISTRY: Mutex<Option<BTreeMap<u64, CextInstance>>> = Mutex::new(None);
-static BUILTIN_CEXTS: Mutex<Option<BTreeMap<String, CextKind>>> = Mutex::new(None);
 
 fn with_registry_mut<R>(f: impl FnOnce(&mut BTreeMap<u64, CextInstance>) -> R) -> R {
     let mut guard = CEXT_REGISTRY.lock();
-    let map = guard.get_or_insert_with(BTreeMap::new);
-    f(map)
-}
-
-fn with_builtin_registry_mut<R>(f: impl FnOnce(&mut BTreeMap<String, CextKind>) -> R) -> R {
-    let mut guard = BUILTIN_CEXTS.lock();
     let map = guard.get_or_insert_with(BTreeMap::new);
     f(map)
 }
@@ -167,16 +159,6 @@ pub fn revoke(id: u64) -> bool {
 
 pub fn unregister(id: u64) -> bool {
     with_registry_mut(|registry| registry.remove(&id).is_some())
-}
-
-pub fn register_builtin_cext(name: &str, kind: CextKind) {
-    with_builtin_registry_mut(|registry| {
-        registry.insert(name.to_string(), kind);
-    });
-}
-
-fn builtin_kind(name: &str) -> Option<CextKind> {
-    with_builtin_registry_mut(|registry| registry.get(name).copied())
 }
 
 type FsInitFn = unsafe extern "C" fn(api: *const McxKernelApi) -> *const McxFsOps;
@@ -268,62 +250,16 @@ static KERNEL_API: McxKernelApi = McxKernelApi {
     now_seconds: kernel_now_seconds,
 };
 
-fn register_disk_module(init_addr: u64, module_version: u16) -> bool {
+fn register_disk_provider(init_addr: u64, module_version: u16) -> bool {
     let init: DiskInitFn = unsafe { core::mem::transmute(init_addr) };
     let ops = unsafe { init(&KERNEL_API) };
     !ops.is_null() && disk::activate_bundle(module_version, ops)
 }
 
-fn register_fs_module(init_addr: u64, module_version: u16) -> bool {
+fn register_filesystem_provider(init_addr: u64, module_version: u16) -> bool {
     let init: FsInitFn = unsafe { core::mem::transmute(init_addr) };
     let ops = unsafe { init(&KERNEL_API) };
     !ops.is_null() && fs::activate_bundle(module_version, ops)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DeclaredCext {
-    name: String,
-    kind: String,
-    version: u16,
-    artifact: Option<String>,
-    source_manifest: Option<String>,
-}
-
-fn parse_declared_cexts() -> Option<Vec<DeclaredCext>> {
-    let bytes = crate::init::fs::read("/cexts.manifest")?;
-    let text = core::str::from_utf8(&bytes).ok()?;
-    let mut out = Vec::new();
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut parts = line.split('|');
-        let name = parts.next()?.trim();
-        let kind = parts.next()?.trim();
-        let version = parts.next()?.trim().parse::<u16>().ok()?;
-        let artifact = parts
-            .next()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-        let source_manifest = parts
-            .next()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-        if name.is_empty() || kind.is_empty() {
-            return None;
-        }
-        out.push(DeclaredCext {
-            name: name.to_string(),
-            kind: kind.to_string(),
-            version,
-            artifact,
-            source_manifest,
-        });
-    }
-    Some(out)
 }
 
 struct CextHeader {
@@ -443,6 +379,35 @@ fn parse_bundle_manifest(bytes: &[u8]) -> Option<BundleManifest> {
     })
 }
 
+fn provider_kind(interfaces: &[String]) -> Option<CextKind> {
+    let mut kind = None;
+    for interface in interfaces {
+        let candidate = if interface == "block.device" {
+            Some(CextKind::BlockDevice)
+        } else if interface.starts_with("filesystem.") {
+            Some(CextKind::Filesystem)
+        } else {
+            None
+        };
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        if kind.is_some_and(|current| current != candidate) {
+            return None;
+        }
+        kind = Some(candidate);
+    }
+    kind
+}
+
+fn register_provider(kind: CextKind, init_addr: u64, version: u16) -> bool {
+    match kind {
+        CextKind::BlockDevice => register_disk_provider(init_addr, version),
+        CextKind::Filesystem => register_filesystem_provider(init_addr, version),
+        CextKind::DeviceService | CextKind::Other => false,
+    }
+}
+
 fn load_bundle_directories() -> bool {
     let Some(entries) = crate::init::fs::initfs_readdir_path("/") else {
         return false;
@@ -497,17 +462,13 @@ fn load_bundle_directories() -> bool {
             }
             continue;
         };
-        // Boot-stage cext bundles are loaded before rootfs is mounted, so execution.allowlist
-        // is not reachable yet. Initfs itself is treated as the trusted boot boundary.
-        if builtin_kind(&manifest.name).is_none() {
-            crate::warn!("cext: unregistered bundle {}", manifest.name);
-            continue;
-        }
-        let Some(reg) = registry::registrations()
-            .into_iter()
-            .find(|r| r.name == manifest.name)
-        else {
-            crate::warn!("cext: no module registration for {}", manifest.name);
+        // Boot-stage bundles are covered by the signed initfs trust boundary. The kernel
+        // selects an ABI adapter from the interfaces, never from a product-specific name.
+        let Some(kind) = provider_kind(&manifest.provides) else {
+            crate::warn!(
+                "cext: unsupported provider interfaces for {}",
+                manifest.name
+            );
             continue;
         };
         let Some(meta) = parse_cext(&entry_bytes) else {
@@ -524,21 +485,13 @@ fn load_bundle_directories() -> bool {
             );
             continue;
         }
-        if meta.module_version != reg.version {
-            crate::warn!(
-                "cext: unsupported module version for {} (expected {}, got {})",
-                meta.name,
-                reg.version,
-                meta.module_version
-            );
-            continue;
-        }
         let Some(mut module) = load_elf_symbol(&meta.elf, "mnu_module_init") else {
             crate::warn!("cext: mnu_module_init not found in {}", entry_path);
             continue;
         };
-        if (reg.register)(module.address, meta.module_version) {
+        if register_provider(kind, module.address, meta.module_version) {
             module.keep_mapped();
+            load_cext(&manifest.name, kind, None);
             crate::info!(
                 "cext: loaded bundle {} v{} id={} provides={:?} requires={:?}",
                 meta.name,
@@ -975,82 +928,7 @@ pub fn init_runtime_config() {
 
 #[inline]
 pub fn load_modules() {
-    if load_bundle_directories() {
-        return;
-    }
-
-    let Some(declared) = parse_declared_cexts() else {
-        crate::warn!("cext: missing /cexts.manifest");
-        return;
-    };
-
-    for entry in declared {
-        match entry.kind.as_str() {
-            "built-in" => {
-                if let Some(kind) = builtin_kind(&entry.name) {
-                    crate::info!("cext: verified built-in {} ({:?})", entry.name, kind);
-                } else {
-                    crate::warn!("cext: built-in {} not registered", entry.name);
-                }
-                continue;
-            }
-            "module" => {}
-            other => {
-                crate::warn!("cext: unsupported kind {} for {}", other, entry.name);
-                continue;
-            }
-        }
-
-        let module_path = alloc::format!("/Modules/{}.cext", entry.name);
-        let Some(bytes) = crate::init::fs::read(&module_path) else {
-            crate::warn!("cext: missing module artifact {}", module_path);
-            continue;
-        };
-
-        let Some(meta) = parse_cext(&bytes) else {
-            crate::warn!("cext: invalid cext package {}", module_path);
-            continue;
-        };
-        if meta.name != entry.name || meta.module_version != entry.version {
-            crate::warn!(
-                "cext: manifest mismatch for {} (manifest v{}, package v{})",
-                entry.name,
-                entry.version,
-                meta.module_version
-            );
-            continue;
-        }
-
-        let Some(reg) = registry::registrations()
-            .into_iter()
-            .find(|r| r.name == meta.name)
-        else {
-            crate::warn!("cext: unknown module {}", meta.name);
-            continue;
-        };
-
-        if meta.module_version != reg.version {
-            crate::warn!(
-                "cext: version mismatch for {} (expected {}, got {})",
-                meta.name,
-                reg.version,
-                meta.module_version
-            );
-            continue;
-        }
-
-        let Some(mut module) = load_elf_symbol(&meta.elf, "mnu_module_init") else {
-            crate::warn!("cext: mnu_module_init not found in {}.cext", meta.name);
-            continue;
-        };
-
-        if (reg.register)(module.address, meta.module_version) {
-            module.keep_mapped();
-            crate::info!("cext: loaded {}.cext v{}", meta.name, meta.module_version);
-        } else {
-            crate::warn!("cext: {} init returned null ops", meta.name);
-        }
-        let _ = &entry.source_manifest;
-        let _ = &entry.artifact;
+    if !load_bundle_directories() {
+        crate::warn!("cext: no boot bundles found");
     }
 }

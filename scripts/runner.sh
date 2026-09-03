@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
+
 TARGET_DIR="${ROOT_DIR}/target/uefi"
 
 KERNEL_TARGET_NAME="x86_64-unknown-none"
@@ -10,6 +12,7 @@ USER_TARGET_NAME="x86_64-unknown-none"
 USER_BUILD_DIR="${TARGET_DIR}/user-build"
 BOOT_BUILD_DIR="${TARGET_DIR}/boot-build"
 PLUGKIT_BUILD_DIR="${TARGET_DIR}/plugkit-build"
+CEXT_BUNDLES_DIR="${MNU_CEXT_BUNDLES_DIR:-}"
 
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
@@ -37,7 +40,29 @@ need_file() {
     [[ -f "$1" ]] || die "required file not found: $1"
 }
 
+need_dir() {
+    [[ -d "$1" ]] || die "required directory not found: $1"
+}
+
+stage_cext_bundles() {
+    [[ -n "${CEXT_BUNDLES_DIR}" ]] \
+        || die "MNU_CEXT_BUNDLES_DIR must name a directory containing boot cext bundles"
+    need_dir "${CEXT_BUNDLES_DIR}"
+
+    local count=0
+    while IFS= read -r -d '' bundle_dir; do
+        need_file "${bundle_dir}/manifest.toml"
+        need_file "${bundle_dir}/entry"
+        cp -a "${bundle_dir}" "${INITFS_STAGE}/$(basename "${bundle_dir}")"
+        count=$((count + 1))
+    done < <(find "${CEXT_BUNDLES_DIR}" -mindepth 1 -maxdepth 1 -type d -name '*.cext' -print0)
+
+    [[ "${count}" -gt 0 ]] || die "no cext bundles found in ${CEXT_BUNDLES_DIR}"
+}
+
 need_cmd cargo
+need_cmd cp
+need_cmd find
 need_cmd perl
 need_cmd openssl
 need_cmd qemu-system-x86_64
@@ -60,16 +85,12 @@ need_file "${ROOT_DIR}/examples/user/linker.ld"
 need_file "${ROOT_DIR}/examples/boot/Cargo.toml"
 need_file "${ROOT_DIR}/examples/plugkit/test/Cargo.toml"
 need_file "${ROOT_DIR}/examples/plugkit/test/about.toml"
-need_file "${ROOT_DIR}/scripts/cexts.sh"
 need_file "${ROOT_DIR}/scripts/rootfs.sh"
 need_file "${ROOT_DIR}/scripts/signature_db.pl"
 
 mkdir -p "${TARGET_DIR}" "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}"
 
 ./scripts/generate_testdata.pl
-
-# shellcheck disable=SC1090
-source "${ROOT_DIR}/scripts/cexts.sh"
 
 echo "[build] kernel"
 cargo build \
@@ -141,27 +162,23 @@ mkdir -p "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}/tmp"
 install -m 0644 "${KERNEL_BIN}" "${ESP_DIR}/kernel"
 install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 
-install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/core.service"
+install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/init"
 install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/tmp/captest.bin"
 install -m 0755 "${CAPTEST_BIN}" "${INITFS_STAGE}/tmp/unsigned.bin"
 install -m 0755 "${USER_BIN}" "${INITFS_STAGE}/tmp/hello.bin"
 mkdir -p "${INITFS_STAGE}/plugkit/test"
 install -m 0644 "${ROOT_DIR}/examples/plugkit/test/about.toml" "${INITFS_STAGE}/plugkit/test/about.toml"
 install -m 0755 "${PLUGKIT_TEST_BIN}" "${INITFS_STAGE}/plugkit/test/entry.elf"
-stage_module_cexts
+stage_cext_bundles
 
 echo "[build] signature db"
 SIGNATURE_DB_ARGS=(
     --output "${SIGNATURE_DB_STAGE}"
-    --entry "core.service=${USER_BIN}"
+    --entry "/init=${USER_BIN}"
     --entry "/plugkit/test/entry.elf=${PLUGKIT_TEST_BIN}"
     --entry "/tmp/hello.bin=${USER_BIN}"
     --entry "/tmp/captest.bin=${CAPTEST_BIN}"
 )
-while IFS= read -r -d '' module_path; do
-    module_name="$(basename "${module_path}")"
-    SIGNATURE_DB_ARGS+=(--entry "/Modules/${module_name}=${module_path}")
-done < <(find "${INITFS_STAGE}/Modules" -maxdepth 1 -type f -name '*.cext' -print0 2>/dev/null || true)
 perl "${ROOT_DIR}/scripts/signature_db.pl" "${SIGNATURE_DB_ARGS[@]}"
 
 echo "[build] rootfs"
@@ -212,6 +229,8 @@ QEMU_ARGS=(
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
     -drive "if=pflash,format=raw,file=${OVMF_VARS}"
     -drive "format=raw,file=${ESP_IMG}"
+    -drive "if=none,id=rootfs,format=raw,file=${TARGET_DIR}/rootfs.img"
+    -device "virtio-blk-pci,drive=rootfs"
 )
 
 if [[ "${DEBUG:-0}" != "0" ]]; then
