@@ -23,7 +23,7 @@ const CAP_IPC_CLIENT: &[u8] = b"ipc.client";
 const CAP_IPC_SERVER: &[u8] = b"ipc.server";
 const CAP_INVALID: &[u8] = b"no.such.capability";
 const MAP_ANONYMOUS_PRIVATE: u64 = 0x22;
-const MEMORY_SYNC_TEST_PATH: &[u8] = b"/tmp/core.service.msync-test";
+const MEMORY_SYNC_TEST_PATH: &[u8] = b"/tmp/init.msync-test";
 const PASS_LINE: &[u8] = b"USERLAND SELF-TEST PASS\n";
 const FAIL_LINE: &[u8] = b"USERLAND SELF-TEST FAIL\n";
 const STAGE_MEMORY: &[u8] = b"stage: memory\n";
@@ -139,7 +139,7 @@ fn run_memory_tests() -> bool {
     }
 
     let path =
-        core::str::from_utf8(MEMORY_SYNC_TEST_PATH).unwrap_or("/tmp/core.service.msync-test");
+        core::str::from_utf8(MEMORY_SYNC_TEST_PATH).unwrap_or("/tmp/init.msync-test");
     let create_fd = user::file_open(path, 0o2 | 0o100 | 0o1000);
     if create_fd == 0 || is_error(create_fd) {
         write_literal(1, b"memory: sync file create failed\n");
@@ -332,7 +332,7 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
         }
 
         let reply_ret =
-            user::ipc_reply(sender, SHORT_PONG.as_ptr() as u64, SHORT_PONG.len() as u64);
+            user::ipc_send(sender, SHORT_PONG.as_ptr() as u64, SHORT_PONG.len() as u64);
         if !expect_success(reply_ret) {
             return 64;
         }
@@ -361,7 +361,7 @@ fn run_process_spawn_test() -> bool {
 fn run_fs_benchmark() -> u64 {
     // Keep the benchmark on a service-owned path so the baseline self-test
     // does not depend on unimplemented rootfs path-registry wiring.
-    let path = "/tmp/core.service.fs-test";
+    let path = "/tmp/init.fs-test";
     for &chunk in FS_BENCH_CHUNKS {
         let read_code = run_fs_chunk_benchmark(path, chunk, FS_BENCH_READ_BYTES);
         if read_code != 0 {

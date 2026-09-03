@@ -91,16 +91,19 @@ pub fn endpoint_is_valid(endpoint: IpcEndpoint) -> bool {
     }
 }
 
-pub fn endpoint_rights_for_process(_process_id: u64) -> EndpointRights {
+pub fn endpoint_rights_for_process(process_id: u64) -> EndpointRights {
+    let process_id = crate::task::ProcessId::from_u64(process_id);
     let mut rights = EndpointRights::empty();
-    if crate::syscall::security::caller_has_any_capability(&[
+    if crate::task::process::process_has_capability(
+        process_id,
         crate::capability::Capability::IpcClient,
-    ]) {
+    ) {
         rights = rights.union(EndpointRights::SEND);
     }
-    if crate::syscall::security::caller_has_any_capability(&[
+    if crate::task::process::process_has_capability(
+        process_id,
         crate::capability::Capability::IpcServer,
-    ]) {
+    ) {
         rights = rights.union(EndpointRights::RECV);
     }
     rights
@@ -222,7 +225,7 @@ pub fn create(flags: u64, _reserved: u64) -> u64 {
 }
 
 pub fn call(
-    dest_thread_id: u64,
+    dest_endpoint_handle: u64,
     req_ptr: u64,
     req_len: u64,
     reply_ptr: u64,
@@ -234,6 +237,14 @@ pub fn call(
     ]) {
         return EACCES;
     }
+    let dest_record = match endpoint_record_from_handle(dest_endpoint_handle) {
+        Some(record) => record,
+        None => return EINVAL,
+    };
+    if !dest_record.rights.contains(EndpointRights::RECV) {
+        return EACCES;
+    }
+    let dest_thread_id = dest_record.thread_id;
     let caller = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
         None => return EINVAL,
@@ -1807,7 +1818,10 @@ fn recv_blocking_for_thread(
                             boxes[idx].waiter = 0;
                         }
                     }
-                    return 0;
+                    // A message or another wakeup raced with the transition to sleep.
+                    // Retry the queue before registering a new waiter; a blocking receive
+                    // must not surface that internal race as an empty result.
+                    continue;
                 }
             }
         }

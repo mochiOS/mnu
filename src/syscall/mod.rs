@@ -665,6 +665,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::IpcSend as u64 => ipc::send(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcSendPages as u64 => ipc::send_pages(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::IpcRecv as u64 => ipc::recv(arg0, arg1),
+        x if x == SyscallNumber::IpcRecvWait as u64 => ipc::recv_blocking(arg0, arg1),
         x if x == SyscallNumber::IpcCall as u64 => ipc::call(arg0, arg1, arg2, arg3, arg4),
         x if x == SyscallNumber::IpcReply as u64 => ipc::reply(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcWait as u64 => ipc::wait(arg0, arg1, arg2),

@@ -1679,7 +1679,7 @@ pub fn random_fill(buf_ptr: u64, len: u64) -> u64 {
 /// - `len`: プロセス名の長さ
 ///
 /// # 戻り値
-/// 見つかった場合はスレッドID、見つからない場合は0
+/// 見つかった場合は世代付きIPC endpoint handle、見つからない場合は0
 pub fn find_process_by_name(name_ptr: u64, len: u64) -> u64 {
     use crate::task;
     use core::str;
@@ -1727,5 +1727,7 @@ pub fn find_process_by_name(name_ptr: u64, len: u64) -> u64 {
         }
     });
 
-    thread_id.unwrap_or(0)
+    thread_id
+        .and_then(crate::syscall::ipc::ensure_endpoint_handle_for_thread)
+        .unwrap_or(0)
 }

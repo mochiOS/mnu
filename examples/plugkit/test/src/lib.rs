@@ -3,11 +3,8 @@
 
 extern crate alloc;
 
-use alloc::string::{String, ToString};
 use alloc::vec;
-use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
-use core::fmt::Write;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const HEAP_SIZE: usize = 128 * 1024;
@@ -76,24 +73,6 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 use plugkit::prelude::*;
-
-const ABOUT_PATH: &str = "/plugkit/test/about.toml";
-const DEFAULT_PACKAGE_ID: &str = "com.mnu.plugkit.test.null";
-
-#[derive(Clone, Debug, Default)]
-struct AboutManifest {
-    package_id: String,
-    package_name: String,
-    version: String,
-    entry: String,
-    api_version: u32,
-    driver_class: String,
-    match_bus: String,
-    match_vendor_id: u32,
-    match_device_id: u32,
-    capabilities: Vec<String>,
-    provides: Vec<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestCommand {
@@ -186,192 +165,17 @@ impl PlugKitDriver for NullDriver {
 
 driver!(NullDriver);
 
-fn trim_comment(line: &str) -> &str {
-    let mut in_string = false;
-    let mut escape = false;
-    for (idx, ch) in line.char_indices() {
-        match ch {
-            '"' if !escape => in_string = !in_string,
-            '#' if !in_string => return line[..idx].trim_end(),
-            '\\' if !escape => escape = true,
-            _ => escape = false,
-        }
-    }
-    line.trim_end()
-}
-
-fn split_kv(line: &str) -> Option<(&str, &str)> {
-    let (k, v) = line.split_once('=')?;
-    Some((k.trim(), v.trim()))
-}
-
-fn unquote(value: &str) -> Option<String> {
-    let value = value.trim();
-    if !value.starts_with('"') || !value.ends_with('"') || value.len() < 2 {
-        return None;
-    }
-    let mut out = String::new();
-    let mut chars = value[1..value.len() - 1].chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next()? {
-            '"' => out.push('"'),
-            '\\' => out.push('\\'),
-            'n' => out.push('\n'),
-            'r' => out.push('\r'),
-            't' => out.push('\t'),
-            other => out.push(other),
-        }
-    }
-    Some(out)
-}
-
-fn parse_u32_like(value: &str) -> Option<u32> {
-    let value = if value.trim().starts_with('"') {
-        unquote(value)?
-    } else {
-        value.trim().to_string()
-    };
-    if let Some(hex) = value.strip_prefix("0x") {
-        return u32::from_str_radix(hex, 16).ok();
-    }
-    if let Some(hex) = value.strip_prefix("0X") {
-        return u32::from_str_radix(hex, 16).ok();
-    }
-    value.parse::<u32>().ok()
-}
-
-fn parse_array(value: &str) -> Option<Vec<String>> {
-    let value = value.trim();
-    if !value.starts_with('[') || !value.ends_with(']') {
-        return None;
-    }
-    let inner = value[1..value.len() - 1].trim();
-    let mut out = Vec::new();
-    if inner.is_empty() {
-        return Some(out);
-    }
-    for raw in inner.split(',') {
-        let item = raw.trim();
-        if item.is_empty() {
-            continue;
-        }
-        out.push(unquote(item).unwrap_or_else(|| item.trim_matches('"').to_string()));
-    }
-    Some(out)
-}
-
-fn parse_about(text: &str) -> Option<AboutManifest> {
-    let mut manifest = AboutManifest::default();
-    let mut section = "";
-
-    for raw_line in text.lines() {
-        let line = trim_comment(raw_line).trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            section = line;
-            continue;
-        }
-        let (key, value) = split_kv(line)?;
-        match section {
-            "[driver]" => match key {
-                "id" => manifest.package_id = unquote(value).unwrap_or_else(|| value.to_string()),
-                "name" => {
-                    manifest.package_name = unquote(value).unwrap_or_else(|| value.to_string())
-                }
-                "version" => manifest.version = unquote(value).unwrap_or_else(|| value.to_string()),
-                "entry" => manifest.entry = unquote(value).unwrap_or_else(|| value.to_string()),
-                _ => {}
-            },
-            "[plugkit]" => match key {
-                "api" => manifest.api_version = parse_u32_like(value).unwrap_or(1),
-                "driver_class" => {
-                    manifest.driver_class = unquote(value).unwrap_or_else(|| value.to_string())
-                }
-                _ => {}
-            },
-            "[[match]]" => match key {
-                "bus" => manifest.match_bus = unquote(value).unwrap_or_else(|| value.to_string()),
-                "vendor_id" => manifest.match_vendor_id = parse_u32_like(value).unwrap_or(0),
-                "device_id" => manifest.match_device_id = parse_u32_like(value).unwrap_or(0),
-                _ => {}
-            },
-            "[capabilities]" => match key {
-                "requires" => manifest.capabilities = parse_array(value)?,
-                _ => {}
-            },
-            "[provides]" => match key {
-                "interfaces" => manifest.provides = parse_array(value)?,
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    if manifest.package_id.is_empty() {
-        manifest.package_id = DEFAULT_PACKAGE_ID.to_string();
-    }
-    if manifest.entry.is_empty() {
-        manifest.entry = "entry.elf".to_string();
-    }
-    Some(manifest)
-}
-
 pub fn write_line(s: &str) {
-    let _ = s;
-}
-
-fn read_text_file(path: &str) -> Option<String> {
-    let fd = file_open(path, 0)?;
-    let mut data = Vec::new();
-    let mut buf = [0u8; 512];
-    loop {
-        let read = file_read(fd, &mut buf);
-        if read == 0 {
-            break;
-        }
-        if read & (1u64 << 63) != 0 {
-            let _ = file_close(fd);
-            return None;
-        }
-        let n = read as usize;
-        data.extend_from_slice(&buf[..n]);
-        if n < buf.len() {
-            break;
-        }
+    unsafe {
+        let _ = syscall3(SYS_WRITE, STDOUT_FD, s.as_ptr() as u64, s.len() as u64);
+        let newline = b'\n';
+        let _ = syscall3(
+            SYS_WRITE,
+            STDOUT_FD,
+            core::ptr::addr_of!(newline) as u64,
+            1,
+        );
     }
-    let _ = file_close(fd);
-    String::from_utf8(data).ok()
-}
-
-fn fake_device_from_manifest(manifest: &AboutManifest) -> PlugKitDevice {
-    let mut spec = DeviceSpec::new(
-        "/platform/plugkit-test0",
-        "plugkit-test0",
-        DeviceBus::Platform,
-        DeviceClass::Other,
-    );
-    spec.vendor_id = Some(manifest.match_vendor_id);
-    spec.device_id = Some(manifest.match_device_id);
-    register_device(spec)
-}
-
-fn device_matches_manifest(manifest: &AboutManifest, device: &PlugKitDevice) -> bool {
-    let bus_ok = match manifest.match_bus.as_str() {
-        "platform" => device.bus() == DeviceBus::Platform,
-        "pci" => device.bus() == DeviceBus::Pci,
-        "usb" => device.bus() == DeviceBus::Usb,
-        "virtio" => device.bus() == DeviceBus::Virtio,
-        _ => device.bus() == DeviceBus::Other,
-    };
-    bus_ok
-        && device.vendor_id() == Some(manifest.match_vendor_id)
-        && device.device_id() == Some(manifest.match_device_id)
 }
 
 fn parse_command(msg: &str) -> (TestCommand, &str) {
@@ -391,10 +195,6 @@ fn parse_command(msg: &str) -> (TestCommand, &str) {
         _ => TestCommand::Unknown,
     };
     (parsed, rest)
-}
-
-fn has_required_cap(manifest: &AboutManifest, required: &str) -> bool {
-    manifest.capabilities.iter().any(|cap| cap == required)
 }
 
 fn append_log(state: &mut DriverState, text: &str) {
@@ -510,7 +310,7 @@ fn recv_message(buf: &mut [u8]) -> Result<(u64, usize), u64> {
 
 pub fn run() -> ! {
     let mut state = DriverState::default();
-    let core_tid = find_process_by_name("core.service");
+    let core_tid = find_process_by_name("init");
     if core_tid != 0 {
         let _ = ipc_send(core_tid, b"ready");
     }
@@ -578,38 +378,10 @@ fn find_process_by_name(name: &str) -> u64 {
     }
 }
 
-fn file_open(path: &str, flags: u64) -> Option<u64> {
-    let mut path_buf = [0u8; 128];
-    let bytes = path.as_bytes();
-    if bytes.len() + 1 > path_buf.len() {
-        return None;
-    }
-    path_buf[..bytes.len()].copy_from_slice(bytes);
-    path_buf[bytes.len()] = 0;
-    let fd = unsafe { syscall2(SYS_FILE_OPEN, path_buf.as_ptr() as u64, flags) };
-    (fd & (1u64 << 63) == 0).then_some(fd)
-}
-
-fn file_read(fd: u64, buf: &mut [u8]) -> u64 {
-    unsafe { syscall3(SYS_FILE_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) }
-}
-
-fn file_write(fd: u64, buf: &[u8]) -> u64 {
-    unsafe { syscall3(SYS_FILE_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) }
-}
-
-fn file_close(fd: u64) -> u64 {
-    unsafe { syscall1(SYS_FILE_CLOSE, fd) }
-}
-
-const SYS_FILE_OPEN: u64 = mnu_abi::SyscallNumber::FileOpen as u64;
-const SYS_FILE_READ: u64 = mnu_abi::SyscallNumber::FileRead as u64;
-const SYS_FILE_WRITE: u64 = mnu_abi::SyscallNumber::FileWrite as u64;
-const SYS_FILE_CLOSE: u64 = mnu_abi::SyscallNumber::FileClose as u64;
 const SYS_IPC_SEND: u64 = mnu_abi::SyscallNumber::IpcSend as u64;
 const SYS_IPC_RECV_WAIT: u64 = mnu_abi::SyscallNumber::IpcRecvWait as u64;
 const SYS_FIND_PROCESS_BY_NAME: u64 = mnu_abi::SyscallNumber::FindProcessByName as u64;
-const SYS_EXIT: u64 = mnu_abi::SyscallNumber::Exit as u64;
+const SYS_PROCESS_EXIT: u64 = mnu_abi::SyscallNumber::ProcessExit as u64;
 
 #[inline(always)]
 unsafe fn syscall1(n: u64, a0: u64) -> u64 {
@@ -664,7 +436,7 @@ unsafe fn syscall3(n: u64, a0: u64, a1: u64, a2: u64) -> u64 {
 
 fn exit(code: u64) -> ! {
     unsafe {
-        let _ = syscall1(SYS_EXIT, code);
+        let _ = syscall1(SYS_PROCESS_EXIT, code);
     }
     loop {
         core::hint::spin_loop();

@@ -276,7 +276,8 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov ds, ax",
         "mov es, ax",
 
-        "nop",
+        // Assert that the assembly entry switched CR3 before any Rust code runs.
+        "call {verify_kernel_page_table}",
 
         // fork/spawn 用に、直近のユーザー文脈と callee-saved registers を保存する。
         "mov rdi, rsp",
@@ -391,6 +392,7 @@ pub unsafe extern "C" fn syscall_entry() {
         user_rsp_tmp_off = const crate::percpu::GS_SYSCALL_USER_RSP_TMP_OFFSET,
         user_r10_tmp_off = const crate::percpu::GS_SYSCALL_USER_R10_TMP_OFFSET,
         trampoline_rsp_off = const crate::percpu::GS_SYSCALL_TRAMPOLINE_RSP_OFFSET,
+        verify_kernel_page_table = sym verify_kernel_page_table_before_rust,
         save_user_context_for_fork = sym crate::syscall::save_user_context_for_fork,
         fs_base_fn = sym current_thread_fs_base_for_sysret,
         dispatch = sym super::syscall_dispatch_sysv,
