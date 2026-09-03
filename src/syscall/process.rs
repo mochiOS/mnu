@@ -82,7 +82,7 @@ fn writeback_shared_mmap_region(
     if data.is_empty() {
         return SUCCESS;
     }
-    if !region.is_shared() || !region.is_writable() {
+    if !region.is_shared() || !region.allows_write_range(sync_start, data.len() as u64) {
         return EINVAL;
     }
 
@@ -567,10 +567,8 @@ pub fn fork() -> u64 {
         {
             if region.is_shared() {
                 crate::mem::paging::ForkPagePolicy::Shared
-            } else if region.is_writable() {
-                crate::mem::paging::ForkPagePolicy::PrivateWritable
             } else {
-                crate::mem::paging::ForkPagePolicy::Private
+                crate::mem::paging::ForkPagePolicy::PrivateWritable
             }
         } else {
             crate::mem::paging::ForkPagePolicy::Private
@@ -780,14 +778,18 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool, is_execute: bool)
             "[MMAP_FAULT] region start={:#x} len={:#x} writable={} shared={}",
             region.start(),
             region.len(),
-            region.is_writable(),
+            region.allows_write_at(fault_addr),
             region.is_shared()
         );
-        if is_write && !region.is_writable() {
+        if !region.allows_read_at(fault_addr) {
+            crate::debug!("[MMAP_FAULT] access fault on inaccessible mapping");
+            return Err(EPERM);
+        }
+        if is_write && !region.allows_write_at(fault_addr) {
             crate::debug!("[MMAP_FAULT] write fault on read-only mapping");
             return Err(EPERM);
         }
-        if is_execute && !region.is_executable() {
+        if is_execute && !region.allows_execute_at(fault_addr) {
             crate::debug!("[MMAP_FAULT] instruction fault on non-executable mapping");
             return Err(EPERM);
         }
@@ -827,8 +829,8 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool, is_execute: bool)
             copy_len as u64,
             4096,
             src,
-            is_write && region.is_writable(),
-            region.is_executable(),
+            is_write && region.allows_write_at(fault_addr),
+            region.allows_execute_at(fault_addr),
         )
         .is_err()
         {
@@ -867,6 +869,13 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
     if length == 0 {
         return EINVAL;
     }
+    const PROT_READ: u64 = 0x1;
+    const PROT_WRITE: u64 = 0x2;
+    const PROT_EXEC: u64 = 0x4;
+    const SUPPORTED_PROT: u64 = PROT_READ | PROT_WRITE | PROT_EXEC;
+    if prot & !SUPPORTED_PROT != 0 || prot & (PROT_WRITE | PROT_EXEC) == PROT_WRITE | PROT_EXEC {
+        return EINVAL;
+    }
     // Retain a hard upper bound for large signed executable payloads.
     const MAX_MMAP_BACKING_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -897,7 +906,9 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
         return ENOMEM;
     }
 
-    let writable = (prot & 0x2) != 0;
+    let present = prot != 0;
+    let writable = (prot & PROT_WRITE) != 0;
+    let executable = (prot & PROT_EXEC) != 0;
     let shared = (flags & 0x1) != 0;
     let file_backing = if anonymous {
         None
@@ -987,10 +998,18 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
                 0,
                 size,
                 &[],
-                true,
-                false,
+                writable,
+                executable,
             )
             .is_err()
+            {
+                return Err(ENOMEM);
+            }
+            if !present
+                && crate::mem::paging::protect_user_range_in_table(
+                    pt_phys, map_start, size, false, false, false,
+                )
+                .is_err()
             {
                 return Err(ENOMEM);
             }
@@ -1098,7 +1117,7 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
     .flatten();
 
     if let Some(mut region) = backing_region {
-        if region.is_shared() && region.is_writable() {
+        if region.is_shared() {
             let region_len = region.len();
             let path = region.backing().file_path().to_string();
             let dirty_pages = region.take_dirty_pages();
@@ -1163,7 +1182,7 @@ pub fn memory_share(addr: u64, length: u64, flags: u64) -> u64 {
         if region_start != region.start() || share_len > region.len() {
             return false;
         }
-        if !region.is_writable() {
+        if !region.allows_write_range(region_start, share_len) {
             return false;
         }
         region.set_shared(true);
@@ -1352,7 +1371,7 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
             if sync_end > region_end {
                 return Err(EINVAL);
             }
-            if !region.is_shared() || !region.is_writable() {
+            if !region.is_shared() || !region.allows_write_range(sync_start, sync_len) {
                 return Err(EINVAL);
             }
             Ok(region.start())

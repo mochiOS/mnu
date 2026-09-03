@@ -165,6 +165,83 @@ pub fn ioctl(_fd: u64, request: u64, arg: u64) -> u64 {
     }
 }
 
+#[inline(never)]
+fn memory_protection_error(error: crate::Kernel) -> u64 {
+    match error {
+        crate::Kernel::Memory(crate::result::Memory::NotMapped) => EFAULT,
+        crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => ENOMEM,
+        crate::Kernel::Memory(crate::result::Memory::PermissionDenied)
+        | crate::Kernel::Memory(crate::result::Memory::InvalidAddress)
+        | crate::Kernel::Memory(crate::result::Memory::AlignmentError)
+        | crate::Kernel::InvalidParam => EINVAL,
+        _ => EFAULT,
+    }
+}
+
+#[inline(never)]
+fn memory_range_is_mapped(
+    process: &crate::task::Process,
+    table_phys: u64,
+    start: u64,
+    end: u64,
+) -> bool {
+    let mut page = start;
+    while page < end {
+        let has_page = crate::mem::paging::has_user_page_entry_in_table(table_phys, page);
+        let has_region = process
+            .find_mmap_region(page)
+            .and_then(|region| region.end())
+            .is_some_and(|region_end| page + 4096 <= region_end);
+        if !has_page && !has_region {
+            return false;
+        }
+        page += 4096;
+    }
+    true
+}
+
+#[inline(never)]
+fn protect_memory_pages(
+    table_phys: u64,
+    start: u64,
+    end: u64,
+    present: bool,
+    writable: bool,
+    executable: bool,
+) -> Result<(), u64> {
+    let mut page = start;
+    while page < end {
+        crate::mem::paging::protect_user_page_if_mapped(
+            table_phys, page, present, writable, executable,
+        )
+        .map_err(memory_protection_error)?;
+        page += 4096;
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn record_mmap_protection(
+    process: &mut crate::task::Process,
+    start: u64,
+    end: u64,
+    prot: u64,
+) -> bool {
+    for region in process.mmap_regions_mut() {
+        let Some(region_end) = region.end() else {
+            return false;
+        };
+        let overlap_start = start.max(region.start());
+        let overlap_end = end.min(region_end);
+        if overlap_start < overlap_end
+            && !region.set_protection(overlap_start, overlap_end - overlap_start, prot)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// mprotect システムコール
 ///
 /// x86_64 の現在のユーザー保護モデルでは READ は常に許可単位になるため、
@@ -211,22 +288,22 @@ pub fn mprotect(addr: u64, len: u64, prot: u64) -> u64 {
         Some(p) => p,
         None => return ESRCH,
     };
-    let table_phys = match crate::task::with_process(pid, |p| p.page_table()).flatten() {
-        Some(pt) => pt,
-        None => return EINVAL,
-    };
-
-    match crate::mem::paging::protect_user_range_in_table(
-        table_phys, start, length, present, writable, executable,
-    ) {
-        Ok(()) => SUCCESS,
-        Err(crate::Kernel::Memory(crate::result::Memory::NotMapped)) => EFAULT,
-        Err(crate::Kernel::Memory(crate::result::Memory::OutOfMemory)) => ENOMEM,
-        Err(crate::Kernel::Memory(crate::result::Memory::PermissionDenied))
-        | Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress))
-        | Err(crate::Kernel::Memory(crate::result::Memory::AlignmentError))
-        | Err(crate::Kernel::InvalidParam) => EINVAL,
-        Err(_) => EFAULT,
+    let end = start + length;
+    let result = crate::task::with_process_mut(pid, |process| {
+        let table_phys = process.page_table().ok_or(EINVAL)?;
+        if !memory_range_is_mapped(process, table_phys, start, end) {
+            return Err(EFAULT);
+        }
+        protect_memory_pages(table_phys, start, end, present, writable, executable)?;
+        if !record_mmap_protection(process, start, end, prot) {
+            return Err(EFAULT);
+        }
+        Ok(())
+    });
+    match result {
+        Some(Ok(())) => SUCCESS,
+        Some(Err(errno)) => errno,
+        None => ESRCH,
     }
 }
 

@@ -198,10 +198,25 @@ static mut FS_TEST_WRITE_BUF: [u8; FS_TEST_SIZE] = [0x55; FS_TEST_SIZE];
 static mut FS_TEST_READ_BUF: [u8; FS_TEST_SIZE] = [0; FS_TEST_SIZE];
 
 fn bss_zero_fill_self_test() -> bool {
+    const PAGE_BYTES: usize = 4096;
     let buffer = core::ptr::addr_of!(FS_TEST_READ_BUF).cast::<u8>();
+    let first_is_zero = unsafe { core::ptr::read_volatile(buffer) == 0 };
+    let last_is_zero = unsafe { core::ptr::read_volatile(buffer.add(FS_TEST_SIZE - 1)) == 0 };
+    if !first_is_zero || !last_is_zero {
+        return false;
+    }
+
+    let middle_page =
+        ((buffer as usize + FS_TEST_SIZE / 2 + PAGE_BYTES - 1) & !(PAGE_BYTES - 1)) as u64;
+    if memory_protect(middle_page, PAGE_BYTES as u64, 6) == 0
+        || memory_protect(middle_page, PAGE_BYTES as u64, 0) != 0
+        || memory_protect(middle_page, PAGE_BYTES as u64, 3) != 0
+    {
+        return false;
+    }
     unsafe {
-        core::ptr::read_volatile(buffer) == 0
-            && core::ptr::read_volatile(buffer.add(FS_TEST_SIZE - 1)) == 0
+        core::ptr::write_volatile(middle_page as *mut u8, 0x5a);
+        core::ptr::read_volatile(middle_page as *const u8) == 0x5a
     }
 }
 

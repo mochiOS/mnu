@@ -460,13 +460,19 @@ fn with_user_leaf_entry_mut<R>(
     let vaddr = VirtAddr::new(page_addr);
     let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
     let l4e = &l4[vaddr.p4_index()];
-    if l4e.is_unused() || !l4e.flags().contains(PageTableFlags::PRESENT) {
+    if l4e.is_unused()
+        || !l4e
+            .flags()
+            .contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
+    {
         return None;
     }
     let l3 = unsafe { &mut *((l4e.addr().as_u64() + phys_off) as *mut PageTable) };
     let l3e = &l3[vaddr.p3_index()];
     if l3e.is_unused()
-        || !l3e.flags().contains(PageTableFlags::PRESENT)
+        || !l3e
+            .flags()
+            .contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
         || l3e.flags().contains(PageTableFlags::HUGE_PAGE)
     {
         return None;
@@ -474,13 +480,85 @@ fn with_user_leaf_entry_mut<R>(
     let l2 = unsafe { &mut *((l3e.addr().as_u64() + phys_off) as *mut PageTable) };
     let l2e = &l2[vaddr.p2_index()];
     if l2e.is_unused()
-        || !l2e.flags().contains(PageTableFlags::PRESENT)
+        || !l2e
+            .flags()
+            .contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
         || l2e.flags().contains(PageTableFlags::HUGE_PAGE)
     {
         return None;
     }
     let l1 = unsafe { &mut *((l2e.addr().as_u64() + phys_off) as *mut PageTable) };
     Some(inspect(&mut l1[vaddr.p1_index()]))
+}
+
+pub fn has_user_page_entry_in_table(table_phys: u64, page_addr: u64) -> bool {
+    with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
+        !entry.is_unused() && entry.flags().contains(PageTableFlags::USER_ACCESSIBLE)
+    })
+    .unwrap_or(false)
+}
+
+#[inline(never)]
+pub fn protect_user_page_if_mapped(
+    table_phys: u64,
+    page_addr: u64,
+    present: bool,
+    writable: bool,
+    executable: bool,
+) -> Result<bool> {
+    use crate::result::{Kernel, Memory};
+
+    if present && writable && executable {
+        return Err(Kernel::Memory(Memory::PermissionDenied));
+    }
+    let initial_flags = match with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
+        (!entry.is_unused() && entry.flags().contains(PageTableFlags::USER_ACCESSIBLE))
+            .then(|| entry.flags())
+    })
+    .flatten()
+    {
+        Some(flags) => flags,
+        None => return Ok(false),
+    };
+
+    if writable && initial_flags.contains(COPY_ON_WRITE) {
+        if !initial_flags.contains(PageTableFlags::PRESENT) {
+            with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
+                let mut flags = entry.flags();
+                flags.insert(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
+                flags.remove(PageTableFlags::WRITABLE);
+                entry.set_addr(entry.addr(), flags);
+            })
+            .ok_or(Kernel::Memory(Memory::NotMapped))?;
+            flush_page_if_active(table_phys, page_addr);
+        }
+        if !resolve_copy_on_write(table_phys, page_addr)? {
+            return Err(Kernel::Memory(Memory::PermissionDenied));
+        }
+    }
+
+    with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
+        let mut flags = entry.flags();
+        flags.remove(
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+        );
+        flags.insert(PageTableFlags::USER_ACCESSIBLE);
+        if present {
+            flags.insert(PageTableFlags::PRESENT);
+            if writable {
+                flags.insert(PageTableFlags::WRITABLE);
+            }
+            if !executable {
+                flags.insert(PageTableFlags::NO_EXECUTE);
+            }
+        } else {
+            flags.insert(PageTableFlags::NO_EXECUTE);
+        }
+        entry.set_addr(entry.addr(), flags);
+    })
+    .ok_or(Kernel::Memory(Memory::NotMapped))?;
+    flush_page_if_active(table_phys, page_addr);
+    Ok(true)
 }
 
 fn retain_shared_user_frame(phys: u64) -> Result<()> {
@@ -1851,8 +1929,7 @@ pub fn protect_user_range_in_table(
         }
 
         let mut new_flags = existing_flags;
-        new_flags
-            .remove(Flags::PRESENT | Flags::USER_ACCESSIBLE | Flags::WRITABLE | Flags::NO_EXECUTE);
+        new_flags.remove(Flags::PRESENT | Flags::WRITABLE | Flags::NO_EXECUTE);
         if present {
             new_flags |= Flags::PRESENT | Flags::USER_ACCESSIBLE;
             if writable {
@@ -1861,6 +1938,8 @@ pub fn protect_user_range_in_table(
             if !executable {
                 new_flags |= Flags::NO_EXECUTE;
             }
+        } else {
+            new_flags |= Flags::USER_ACCESSIBLE | Flags::NO_EXECUTE;
         }
 
         let flush = unsafe {

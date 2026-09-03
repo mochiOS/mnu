@@ -68,7 +68,7 @@ pub fn validate_user_ptr(ptr: u64, len: u64) -> bool {
             );
             if !resident {
                 let valid_region = process.find_mmap_region(address).is_some_and(|region| {
-                    region.is_readable()
+                    region.allows_read_at(address)
                         && region
                             .end()
                             .is_some_and(|region_end| next_page <= region_end)

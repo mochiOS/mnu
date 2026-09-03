@@ -60,9 +60,17 @@ pub struct MmapRegion {
     start: u64,
     len: u64,
     prot: u64,
+    protection_ranges: alloc::vec::Vec<MmapProtectionRange>,
     flags: u64,
     backing: MmapBacking,
     dirty_pages: alloc::vec::Vec<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MmapProtectionRange {
+    start: u64,
+    end: u64,
+    prot: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -164,6 +172,7 @@ impl MmapRegion {
             start,
             len,
             prot,
+            protection_ranges: alloc::vec::Vec::new(),
             flags,
             backing: MmapBacking::File {
                 path,
@@ -187,6 +196,7 @@ impl MmapRegion {
             start,
             len,
             prot,
+            protection_ranges: alloc::vec::Vec::new(),
             flags,
             backing: MmapBacking::Anonymous {
                 data: alloc::vec::Vec::new(),
@@ -260,12 +270,91 @@ impl MmapRegion {
         (self.prot & 0x2) != 0
     }
 
-    pub fn is_readable(&self) -> bool {
-        (self.prot & 0x1) != 0
+    pub fn allows_read_at(&self, address: u64) -> bool {
+        self.protection_at(address).is_some_and(|prot| prot != 0)
     }
 
-    pub fn is_executable(&self) -> bool {
-        (self.prot & 0x4) != 0
+    pub fn allows_write_at(&self, address: u64) -> bool {
+        self.protection_at(address)
+            .is_some_and(|prot| prot & 0x2 != 0)
+    }
+
+    pub fn allows_execute_at(&self, address: u64) -> bool {
+        self.protection_at(address)
+            .is_some_and(|prot| prot & 0x4 != 0)
+    }
+
+    #[inline(never)]
+    pub fn allows_write_range(&self, start: u64, len: u64) -> bool {
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        let mut address = start;
+        while address < end {
+            if !self.allows_write_at(address) {
+                return false;
+            }
+            address = (address | 0xfff).saturating_add(1).min(end);
+        }
+        true
+    }
+
+    #[inline(never)]
+    pub fn set_protection(&mut self, start: u64, len: u64, prot: u64) -> bool {
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        if start < self.start || end > self.end().unwrap_or(0) || start >= end {
+            return false;
+        }
+
+        let previous = core::mem::take(&mut self.protection_ranges);
+        let mut ranges = alloc::vec::Vec::with_capacity(previous.len() + 1);
+        for range in previous {
+            if range.end <= start || range.start >= end {
+                ranges.push(range);
+                continue;
+            }
+            if range.start < start {
+                ranges.push(MmapProtectionRange {
+                    end: start,
+                    ..range
+                });
+            }
+            if range.end > end {
+                ranges.push(MmapProtectionRange {
+                    start: end,
+                    ..range
+                });
+            }
+        }
+        if prot != self.prot {
+            ranges.push(MmapProtectionRange { start, end, prot });
+        }
+        ranges.sort_unstable_by_key(|range| range.start);
+
+        for range in ranges {
+            if let Some(last) = self.protection_ranges.last_mut() {
+                if last.end == range.start && last.prot == range.prot {
+                    last.end = range.end;
+                    continue;
+                }
+            }
+            self.protection_ranges.push(range);
+        }
+        true
+    }
+
+    fn protection_at(&self, address: u64) -> Option<u64> {
+        if !self.contains(address) {
+            return None;
+        }
+        Some(
+            self.protection_ranges
+                .iter()
+                .find(|range| address >= range.start && address < range.end)
+                .map_or(self.prot, |range| range.prot),
+        )
     }
 
     pub fn is_shared(&self) -> bool {

@@ -114,6 +114,33 @@ fn run_memory_tests() -> bool {
     let mut expected = [0u8; PAGE_SIZE as usize];
     let mut read_back = [0u8; PAGE_SIZE as usize];
 
+    let inaccessible = user::memory_map(0, PAGE_SIZE, 0, MAP_ANONYMOUS_PRIVATE, 0);
+    if inaccessible == 0 || is_error(inaccessible) {
+        write_literal(1, b"memory: inaccessible mmap failed\n");
+        return false;
+    }
+    if !expect_success(user::memory_protect(inaccessible, PAGE_SIZE, 3)) {
+        write_literal(1, b"memory: inaccessible mprotect failed\n");
+        return false;
+    }
+    unsafe {
+        core::ptr::write_volatile(inaccessible as *mut u8, 0xa5);
+        if core::ptr::read_volatile(inaccessible as *const u8) != 0xa5 {
+            return false;
+        }
+    }
+    if !expect_success(user::memory_unmap(inaccessible, PAGE_SIZE)) {
+        write_literal(1, b"memory: inaccessible munmap failed\n");
+        return false;
+    }
+
+    let writable_executable = user::memory_map(0, PAGE_SIZE, 6, MAP_ANONYMOUS_PRIVATE, 0);
+    if !is_error(writable_executable) {
+        let _ = user::memory_unmap(writable_executable, PAGE_SIZE);
+        write_literal(1, b"memory: writable executable mmap allowed\n");
+        return false;
+    }
+
     for (i, byte) in initial.iter_mut().enumerate() {
         *byte = (i as u8).wrapping_mul(3).wrapping_add(1);
     }
