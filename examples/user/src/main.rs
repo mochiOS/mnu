@@ -356,7 +356,19 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
 }
 
 fn run_process_spawn_test() -> bool {
-    true
+    const CHILD_EXIT_CODE: u64 = 37;
+
+    let child = user::process_spawn(0, 0);
+    if is_error(child) {
+        return false;
+    }
+    if child == 0 {
+        user::process_exit(CHILD_EXIT_CODE);
+    }
+
+    let mut status = 0i32;
+    let waited = user::process_wait(child, (&mut status as *mut i32) as u64, 0);
+    waited == child && status == (CHILD_EXIT_CODE as i32) << 8
 }
 
 fn verify_exec_measurements() -> bool {
