@@ -694,10 +694,14 @@ fn load_regular_exec_image(
     path: &str,
     execution_class: ExecutionClass,
 ) -> Option<(Vec<u8>, &'static str)> {
+    // A file bundled in initfs belongs to the authenticated boot generation and
+    // shadows a same-named file on a previously installed filesystem. This is
+    // independent of privilege: boot applications and their services must not
+    // be assembled from different releases.
+    if let Some(data) = crate::init::fs::read_initfs(path) {
+        return Some((data, "initfs"));
+    }
     if execution_class == ExecutionClass::Privileged {
-        if let Some(data) = crate::init::fs::read_initfs(path) {
-            return Some((data, "initfs"));
-        }
         if let Some(data) = crate::cext::fs::read_all(path) {
             return Some((data, "cext"));
         }
