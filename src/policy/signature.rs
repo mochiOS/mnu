@@ -16,6 +16,7 @@ struct SignatureDatabase {
 }
 
 static SIGNATURE_DB: Mutex<Option<SignatureDatabase>> = Mutex::new(None);
+static BOOT_SIGNATURE_DB: Mutex<Option<SignatureDatabase>> = Mutex::new(None);
 
 fn hex_val(byte: u8) -> Option<u8> {
     match byte {
@@ -91,6 +92,23 @@ fn load_db_from_rootfs() -> bool {
     true
 }
 
+fn load_db_from_initfs() -> bool {
+    let Some(allowlist_path) = crate::config::kernel().policy_paths.execution_allowlist() else {
+        crate::warn!("boot execution allowlist path is not configured");
+        return false;
+    };
+    let Some(bytes) = crate::init::fs::read_initfs(allowlist_path) else {
+        crate::warn!("boot execution allowlist: missing {}", allowlist_path);
+        return false;
+    };
+    let Some(db) = parse_db(&bytes) else {
+        crate::warn!("boot execution allowlist: invalid {}", allowlist_path);
+        return false;
+    };
+    *BOOT_SIGNATURE_DB.lock() = Some(db);
+    true
+}
+
 fn ensure_loaded() -> bool {
     if SIGNATURE_DB.lock().is_some() {
         true
@@ -109,14 +127,19 @@ fn sha256_digest(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-pub fn verify_exec(path: &str, data: &[u8]) -> bool {
-    if !ensure_loaded() {
+fn verify_with_database(
+    database: &Mutex<Option<SignatureDatabase>>,
+    path: &str,
+    data: &[u8],
+    ensure_database: impl FnOnce() -> bool,
+) -> bool {
+    if database.lock().is_none() && !ensure_database() {
         return false;
     }
 
     let digest_bytes = sha256_digest(data);
 
-    let guard = SIGNATURE_DB.lock();
+    let guard = database.lock();
     let Some(db) = guard.as_ref() else {
         return false;
     };
@@ -130,4 +153,14 @@ pub fn verify_exec(path: &str, data: &[u8]) -> bool {
 
     crate::warn!("execution allowlist: no matching record for {}", path);
     false
+}
+
+pub fn verify_exec(path: &str, data: &[u8]) -> bool {
+    verify_with_database(&SIGNATURE_DB, path, data, ensure_loaded)
+}
+
+/// initfs から読み込んだシステムバイナリを、同じ initfs 内の台帳で検証する。
+/// マウント済み rootfs の世代には依存しない。
+pub fn verify_boot_exec(path: &str, data: &[u8]) -> bool {
+    verify_with_database(&BOOT_SIGNATURE_DB, path, data, load_db_from_initfs)
 }

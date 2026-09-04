@@ -22,6 +22,13 @@ const MAX_PIPES: usize = 64;
 const PIPE_BUFFER_CAP: usize = 64 * 1024;
 const UNIX_EXECUTE: u32 = 1 << 31;
 
+/// ブート中のシステムサービスは実行ファイルと付随するマニフェストを
+/// 同じ initfs 世代から読む。インストール済み rootfs が先にマウントされても、
+/// 両者を混在させない。
+fn initfs_precedes_runtime_fs(path: &str) -> bool {
+    path.starts_with("/system/services/") || path.starts_with("/system/packages/")
+}
+
 fn transferred_io_bytes(result: u64) -> u64 {
     (result <= MAX_IO_BYTES as u64)
         .then_some(result)
@@ -525,6 +532,11 @@ fn mode_for_stat(mode: u16) -> u32 {
 #[inline]
 pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64, u32, u32)> {
     crate::performance::record_vfs_metadata_query();
+    if initfs_precedes_runtime_fs(path) {
+        if let Some((mode, size)) = crate::init::fs::initfs_file_metadata(path) {
+            return Some((mode, size, 0, 0));
+        }
+    }
     crate::cext::fs::file_metadata(path)
         .or_else(|| crate::init::fs::file_metadata(path).map(|(mode, size)| (mode, size, 0, 0)))
 }
@@ -537,6 +549,11 @@ pub(crate) fn readdir_rootfs_first(path: &str) -> Option<Vec<String>> {
 #[inline]
 fn read_file_range_rootfs_first(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
     crate::performance::record_vfs_read_range();
+    if initfs_precedes_runtime_fs(path) {
+        if let Some(read) = crate::init::fs::read_range_initfs(path, offset, buf) {
+            return Some(read);
+        }
+    }
     crate::cext::fs::read_range(path, offset, buf)
         .or_else(|| crate::init::fs::read_range_rootfs(path, offset, buf))
         .or_else(|| crate::init::fs::read_range(path, offset, buf))

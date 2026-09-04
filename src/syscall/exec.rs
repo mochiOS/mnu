@@ -639,9 +639,20 @@ fn exec_internal(
         }
     }
     if let Some((data, source)) = load_exec_image(path, execution_class) {
-        if enforce_path_access && !crate::policy::signature::verify_exec(path, &data) {
-            crate::warn!("exec: signature verification failed for '{}'", path);
-            return crate::syscall::types::EPERM;
+        if enforce_path_access {
+            let signature_valid = if source == "initfs" {
+                crate::policy::signature::verify_boot_exec(path, &data)
+            } else {
+                crate::policy::signature::verify_exec(path, &data)
+            };
+            if !signature_valid {
+                crate::warn!(
+                    "exec: signature verification failed for '{}' from {}",
+                    path,
+                    source
+                );
+                return crate::syscall::types::EPERM;
+            }
         }
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",

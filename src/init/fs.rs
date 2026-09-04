@@ -207,6 +207,16 @@ pub fn read_range_rootfs(name: &str, offset: u64, buf: &mut [u8]) -> Option<usiz
     }
 }
 
+/// initfs だけからファイル範囲を読み取る。
+pub fn read_range_initfs(name: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
+    read_range_in(ext2_image(), name, offset, buf)
+}
+
+/// initfs だけからファイルのメタデータを取得する。
+pub fn initfs_file_metadata(path: &str) -> Option<(u16, u64)> {
+    file_metadata_in(ext2_image(), path)
+}
+
 pub fn rootfs_file_metadata(path: &str) -> Option<(u16, u64)> {
     if rootfs_image().is_empty() {
         None
