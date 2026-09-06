@@ -274,7 +274,9 @@ impl VfsActivitySnapshot {
             metadata_queries: self
                 .metadata_queries
                 .saturating_sub(earlier.metadata_queries),
-            read_range_calls: self.read_range_calls.saturating_sub(earlier.read_range_calls),
+            read_range_calls: self
+                .read_range_calls
+                .saturating_sub(earlier.read_range_calls),
             write_range_calls: self
                 .write_range_calls
                 .saturating_sub(earlier.write_range_calls),
@@ -299,7 +301,9 @@ impl VfsActivitySnapshot {
             path_clone_allocations: self
                 .path_clone_allocations
                 .saturating_sub(earlier.path_clone_allocations),
-            path_clone_bytes: self.path_clone_bytes.saturating_sub(earlier.path_clone_bytes),
+            path_clone_bytes: self
+                .path_clone_bytes
+                .saturating_sub(earlier.path_clone_bytes),
         }
     }
 }

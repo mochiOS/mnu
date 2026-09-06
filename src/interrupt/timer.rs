@@ -30,6 +30,9 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: Interrupt
     let ticks = TIMER_TICKS
         .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
+    if ticks.is_multiple_of(PIT_HZ * 5) {
+        crate::hypervisor_guest::watchdog_heartbeat();
+    }
     crate::syscall::time::wake_due_sleepers(ticks);
     crate::syscall::process::wake_due_futex_waiters(ticks);
 

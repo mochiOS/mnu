@@ -8,8 +8,7 @@ use mnu_abi::boot::{
 
 const PAGE_SIZE: u64 = 4096;
 const MAX_RESERVED_RANGES: usize = 5;
-const RECLAIMED_MEMORY_MAP_CAPACITY: usize =
-    MAX_BOOT_MEMORY_REGIONS + MAX_RESERVED_RANGES * 2;
+const RECLAIMED_MEMORY_MAP_CAPACITY: usize = MAX_BOOT_MEMORY_REGIONS + MAX_RESERVED_RANGES * 2;
 const PREPARATION_UNATTEMPTED: u8 = 0;
 const PREPARATION_SUCCEEDED: u8 = 1;
 const PREPARATION_FAILED: u8 = 2;
@@ -103,14 +102,12 @@ fn copy_smp_handoff(source: &SmpHandoff) {
         source.boot_info_ptr.load(Ordering::Relaxed),
         Ordering::Relaxed,
     );
-    KERNEL_SMP_HANDOFF.kernel_cr3.store(
-        source.kernel_cr3.load(Ordering::Relaxed),
-        Ordering::Relaxed,
-    );
-    KERNEL_SMP_HANDOFF.ap_count.store(
-        source.ap_count.load(Ordering::Relaxed),
-        Ordering::Relaxed,
-    );
+    KERNEL_SMP_HANDOFF
+        .kernel_cr3
+        .store(source.kernel_cr3.load(Ordering::Relaxed), Ordering::Relaxed);
+    KERNEL_SMP_HANDOFF
+        .ap_count
+        .store(source.ap_count.load(Ordering::Relaxed), Ordering::Relaxed);
 }
 
 fn usable_bytes(memory_map: &[MemoryRegion]) -> u64 {
@@ -200,12 +197,9 @@ pub unsafe fn prepare_boot_info(
         core::ptr::addr_of_mut!(KERNEL_MEMORY_MAP).cast::<MemoryRegion>(),
         RECLAIMED_MEMORY_MAP_CAPACITY,
     );
-    let output_len = build_reclaimed_memory_map(
-        source_memory_map,
-        &reserved[..reserved_len],
-        output,
-    )
-    .map_err(BootMemoryError::Transform)?;
+    let output_len =
+        build_reclaimed_memory_map(source_memory_map, &reserved[..reserved_len], output)
+            .map_err(BootMemoryError::Transform)?;
 
     let target = core::ptr::addr_of_mut!(KERNEL_BOOT_INFO).cast::<BootInfo>();
     core::ptr::copy_nonoverlapping(source, target, 1);

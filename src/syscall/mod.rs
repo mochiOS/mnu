@@ -244,12 +244,11 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
             width: info.width as u32,
             height: info.height as u32,
             stride: info.stride as u32,
-            format: 1
-                | if mediated {
-                    mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_MEDIATED
-                } else {
-                    0
-                },
+            format: 1 | if mediated {
+                mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_MEDIATED
+            } else {
+                0
+            },
         }
     } else if let Some(info) = mediated
         .then(crate::platform::display_info)
@@ -269,12 +268,11 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
             width: info.width,
             height: info.height,
             stride: info.stride,
-            format: 1
-                | if info.shared_surface {
-                    mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_SHARED_SURFACE
-                } else {
-                    0
-                },
+            format: 1 | if info.shared_surface {
+                mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_SHARED_SURFACE
+            } else {
+                0
+            },
         }
     } else {
         return ENXIO;
@@ -406,9 +404,9 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     if virt_addr == 0 || size == 0 || (virt_addr & 0xfff) != 0 || (size & 0xfff) != 0 {
         return EINVAL;
     }
-    let shared_surface = crate::platform::display_info().ok().filter(|info| {
-        info.shared_surface && info.surface_address != 0 && info.surface_size != 0
-    });
+    let shared_surface = crate::platform::display_info()
+        .ok()
+        .filter(|info| info.shared_surface && info.surface_address != 0 && info.surface_size != 0);
     let (fb_base, fb_offset, framebuffer_size, mmio) = if let Some(info) = shared_surface {
         (
             info.surface_address & !0xfff,
@@ -417,7 +415,12 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
             false,
         )
     } else if let Some(info) = crate::util::vga::get_info() {
-        (info.addr & !0xfff, info.addr & 0xfff, info.size as u64, true)
+        (
+            info.addr & !0xfff,
+            info.addr & 0xfff,
+            info.size as u64,
+            true,
+        )
     } else {
         return ENXIO;
     };

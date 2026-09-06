@@ -169,12 +169,7 @@ pub fn write_line(s: &str) {
     unsafe {
         let _ = syscall3(SYS_WRITE, STDOUT_FD, s.as_ptr() as u64, s.len() as u64);
         let newline = b'\n';
-        let _ = syscall3(
-            SYS_WRITE,
-            STDOUT_FD,
-            core::ptr::addr_of!(newline) as u64,
-            1,
-        );
+        let _ = syscall3(SYS_WRITE, STDOUT_FD, core::ptr::addr_of!(newline) as u64, 1);
     }
 }
 

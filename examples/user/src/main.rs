@@ -169,8 +169,7 @@ fn run_memory_tests() -> bool {
         return false;
     }
 
-    let path =
-        core::str::from_utf8(MEMORY_SYNC_TEST_PATH).unwrap_or("/tmp/init.msync-test");
+    let path = core::str::from_utf8(MEMORY_SYNC_TEST_PATH).unwrap_or("/tmp/init.msync-test");
     let create_fd = user::file_open(path, 0o2 | 0o100 | 0o1000);
     if create_fd == 0 || is_error(create_fd) {
         write_literal(1, b"memory: sync file create failed\n");
@@ -362,8 +361,7 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
             return 63;
         }
 
-        let reply_ret =
-            user::ipc_send(sender, SHORT_PONG.as_ptr() as u64, SHORT_PONG.len() as u64);
+        let reply_ret = user::ipc_send(sender, SHORT_PONG.as_ptr() as u64, SHORT_PONG.len() as u64);
         if !expect_success(reply_ret) {
             return 64;
         }

@@ -401,8 +401,8 @@ fn wake_parent_ipc_waiter(exited_pid: crate::task::ProcessId) {
 /// 指定されたスレッドをTerminated状態にして削除
 pub fn terminate_thread(id: ThreadId) {
     let previous_state = super::thread::replace_thread_state(id, ThreadState::Terminated);
-    let running_elsewhere = Some(id) != current_thread_id()
-        && previous_state == Some(ThreadState::Running);
+    let running_elsewhere =
+        Some(id) != current_thread_id() && previous_state == Some(ThreadState::Running);
 
     if Some(id) == current_thread_id() {
         crate::syscall::process::clear_futex_waiter(id);

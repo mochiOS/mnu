@@ -134,9 +134,8 @@ fn ensure_syscall_shared_region_for_cpu(cpu_id: usize) {
         return;
     }
 
-    let [state_frame, stack_frame] = allocate_syscall_frames().unwrap_or_else(|_| {
-        panic!("failed to allocate syscall shared pages for cpu {}", cpu_id)
-    });
+    let [state_frame, stack_frame] = allocate_syscall_frames()
+        .unwrap_or_else(|_| panic!("failed to allocate syscall shared pages for cpu {}", cpu_id));
     let state_phys = state_frame.start_address().as_u64();
     let stack_phys = stack_frame.start_address().as_u64();
 

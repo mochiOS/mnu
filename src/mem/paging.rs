@@ -608,9 +608,7 @@ pub fn resolve_copy_on_write(table_phys: u64, address: u64) -> Result<bool> {
             if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(COPY_ON_WRITE) {
                 return true;
             }
-            if entry.addr().as_u64() != old_phys
-                || !flags.contains(COPY_ON_WRITE)
-            {
+            if entry.addr().as_u64() != old_phys || !flags.contains(COPY_ON_WRITE) {
                 return false;
             }
 

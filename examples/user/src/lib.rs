@@ -297,9 +297,7 @@ pub fn process_wait(pid: u64, status_ptr: u64, flags: u64) -> u64 {
     unsafe { syscall3(SYS_PROCESS_WAIT, pid, status_ptr, flags) }
 }
 
-pub fn performance_snapshot(
-    snapshot: &mut mnu_abi::performance::KernelPerformanceSnapshot,
-) -> u64 {
+pub fn performance_snapshot(snapshot: &mut mnu_abi::performance::KernelPerformanceSnapshot) -> u64 {
     unsafe {
         syscall2(
             SYS_PERFORMANCE_SNAPSHOT,
@@ -772,12 +770,7 @@ fn fileio_self_test() -> bool {
         write_elapsed_ms,
         write_mib_s,
     );
-    let read_line_buf = format_line(
-        "[init][fs-test] read ",
-        read,
-        read_elapsed_ms,
-        read_mib_s,
-    );
+    let read_line_buf = format_line("[init][fs-test] read ", read, read_elapsed_ms, read_mib_s);
     write_line(write_line_buf.as_str());
     write_line(read_line_buf.as_str());
 

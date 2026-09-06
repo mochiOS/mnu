@@ -1,5 +1,5 @@
 use core::arch::{asm, x86_64::__cpuid_count};
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 #[cfg(feature = "performance-instrumentation")]
 use core::sync::atomic::AtomicU64;
@@ -645,9 +645,9 @@ pub fn boot_milestone(milestone: BootMilestone) -> Option<u64> {
 pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
     use mnu_abi::performance::{
         FrameActivitySnapshot, FrameAllocatorSnapshot, GaugeSnapshot, KernelPerformanceSnapshot,
+        ProcessActivitySnapshot, TimerActivitySnapshot, VfsActivitySnapshot,
         PERFORMANCE_FLAG_INSTRUMENTED, PERFORMANCE_FLAG_INVARIANT_TSC, PERFORMANCE_FLAG_RDTSCP,
-        PERFORMANCE_FLAG_WEAK_SNAPSHOT, PERFORMANCE_SNAPSHOT_VERSION, ProcessActivitySnapshot,
-        TimerActivitySnapshot, VfsActivitySnapshot,
+        PERFORMANCE_FLAG_WEAK_SNAPSHOT, PERFORMANCE_SNAPSHOT_VERSION,
     };
 
     let clock = clock_info();

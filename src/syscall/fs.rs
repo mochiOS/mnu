@@ -4,12 +4,12 @@ use super::types::{
     EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS,
     ENOTDIR, EOVERFLOW, EPIPE, EROFS, ESRCH, SUCCESS,
 };
-use crate::capability::Capability;
 use crate::capability::path::{
-    self, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner,
+    self, PathOwner, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE,
 };
+use crate::capability::Capability;
 use crate::task::fd_table::{
-    FD_BASE, FdTable, FileHandle, FileHandleCap, O_CLOEXEC, PROCESS_MAX_FDS,
+    FdTable, FileHandle, FileHandleCap, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -2317,10 +2317,9 @@ pub fn file_sync(fd: u64) -> u64 {
 #[cfg(test)]
 mod unix_mode_tests {
     use super::{
-        O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE,
-        UNIX_EXECUTE, access_mode_rights, capability_requirement_satisfied,
-        open_path_required_rights, path_is_in_identity_storage, sticky_directory_allows_delete,
-        unix_mode_allows,
+        access_mode_rights, capability_requirement_satisfied, open_path_required_rights,
+        path_is_in_identity_storage, sticky_directory_allows_delete, unix_mode_allows, O_CREAT,
+        O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, UNIX_EXECUTE,
     };
     use crate::capability::Capability;
 
