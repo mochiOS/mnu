@@ -101,7 +101,6 @@ pub enum HypercallNumber {
     EventPoll = 23,
     FirmwareFramebufferPresent = 24,
     GrantCreateRange = 25,
-    WatchdogHeartbeat = 26,
 }
 
 #[repr(u64)]

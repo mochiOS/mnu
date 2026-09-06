@@ -37,10 +37,10 @@ pub use thread::{
     current_thread_id, current_thread_slot, for_each_thread, free_kernel_stack,
     kernel_stack_high_water_bytes, kernel_stack_table_in_use, peek_next_thread,
     reclaim_current_cpu_kernel_stack, remap_kernel_stack_user_table, remove_thread,
-    retire_current_kernel_stack, set_current_thread, set_thread_state, set_thread_state_at_slot,
-    thread_count, thread_id_exists, thread_slot_index, thread_slot_index_and_generation,
-    thread_slot_index_and_generation_by_u64, thread_slot_index_by_u64, thread_to_process_id,
-    with_thread, with_thread_at_slot, with_thread_at_slot_mut, with_thread_mut, Thread,
-    ThreadQueue,
+    retire_current_kernel_stack, set_current_thread, set_thread_state,
+    set_thread_state_at_slot, thread_count, thread_id_exists, thread_slot_index,
+    thread_slot_index_and_generation, thread_slot_index_and_generation_by_u64,
+    thread_slot_index_by_u64, thread_to_process_id, with_thread, with_thread_at_slot,
+    with_thread_at_slot_mut, with_thread_mut, Thread, ThreadQueue,
 };
 pub use usermode::{jump_to_usermode, jump_to_usermode_fork_child};

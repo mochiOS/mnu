@@ -109,19 +109,19 @@ fn kernel_main() -> ! {
         crate::task::PrivilegeLevel::Service,
     );
     crate::info!("init pid = {:#x}", init_pid);
-    if init_pid != 0 && task::with_process(task::ProcessId::from_u64(init_pid), |_| ()).is_some() {
+    if init_pid != 0
+        && task::with_process(task::ProcessId::from_u64(init_pid), |_| ()).is_some()
+    {
         crate::policy::register_init_pid(init_pid);
-        if let Some(capabilities) =
-            task::with_process(task::ProcessId::from_u64(init_pid), |proc| {
-                let spawn = proc
-                    .capabilities()
-                    .contains(crate::capability::Capability::ProcessSpawn);
-                let inspect = proc
-                    .capabilities()
-                    .contains(crate::capability::Capability::ProcessInspect);
-                (spawn, inspect)
-            })
-        {
+        if let Some(capabilities) = task::with_process(task::ProcessId::from_u64(init_pid), |proc| {
+            let spawn = proc
+                .capabilities()
+                .contains(crate::capability::Capability::ProcessSpawn);
+            let inspect = proc
+                .capabilities()
+                .contains(crate::capability::Capability::ProcessInspect);
+            (spawn, inspect)
+        }) {
             crate::info!(
                 "init caps: process.spawn={} process.inspect={}",
                 capabilities.0,

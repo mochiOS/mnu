@@ -93,9 +93,3 @@ pub fn invoke(number: HypercallNumber, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     }
     result
 }
-
-pub fn watchdog_heartbeat() {
-    if is_active() {
-        let _ = invoke(HypercallNumber::WatchdogHeartbeat, 0, 0, 0);
-    }
-}

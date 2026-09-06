@@ -50,7 +50,8 @@ const FRAME_FREE_COOKIE_CONST: u64 = 0x8f1d_3b79_2c4a_6e15;
 #[cfg(feature = "frame-allocation-failure-injection")]
 const FAILURE_INJECTION_DISABLED: usize = usize::MAX;
 #[cfg(feature = "frame-allocation-failure-injection")]
-static ALLOCATION_FAILURE_COUNTDOWN: AtomicUsize = AtomicUsize::new(FAILURE_INJECTION_DISABLED);
+static ALLOCATION_FAILURE_COUNTDOWN: AtomicUsize =
+    AtomicUsize::new(FAILURE_INJECTION_DISABLED);
 
 #[cfg(feature = "frame-allocation-failure-injection")]
 fn take_injected_allocation_failure() -> bool {

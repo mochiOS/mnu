@@ -27,8 +27,9 @@ fn page_align_up(addr: u64) -> Option<u64> {
 
 fn release_dma_frames(phys_start: u64, page_count: usize) {
     for page_index in 0..page_count {
-        let frame =
-            PhysFrame::containing_address(PhysAddr::new(phys_start + (page_index as u64) * 4096));
+        let frame = PhysFrame::containing_address(PhysAddr::new(
+            phys_start + (page_index as u64) * 4096,
+        ));
         let _ = crate::mem::frame::deallocate_frame(frame);
     }
 }
@@ -115,8 +116,9 @@ pub fn alloc(length: u64, out_ptr: u64) -> u64 {
     };
 
     let buffer = DmaBuffer::new(handle, virt_start, size, phys_start, page_count);
-    let reserved = crate::task::with_process_mut(pid, |process| process.add_dma_buffer(buffer))
-        .unwrap_or(false);
+    let reserved =
+        crate::task::with_process_mut(pid, |process| process.add_dma_buffer(buffer))
+            .unwrap_or(false);
     if !reserved {
         let _ = crate::task::with_process_mut(pid, |process| process.set_dma_end(old_dma_end));
         release_dma_frames(phys_start, page_count);

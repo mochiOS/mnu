@@ -247,7 +247,8 @@ fn trampoline_layout() -> &'static TrampolineLayout {
             gdtr_load_off: core::ptr::addr_of!(__mnu_ap_trampoline_gdtr_load) as usize - start,
             pm32_jump_off: core::ptr::addr_of!(__mnu_ap_trampoline_pm32_jump) as usize - start,
             pm32_entry_off: core::ptr::addr_of!(__mnu_ap_trampoline_pm32_entry) as usize - start,
-            kernel_cr3_load_off: core::ptr::addr_of!(__mnu_ap_trampoline_kernel_cr3_load) as usize
+            kernel_cr3_load_off: core::ptr::addr_of!(__mnu_ap_trampoline_kernel_cr3_load)
+                as usize
                 - start,
             lm64_jump_off: core::ptr::addr_of!(__mnu_ap_trampoline_lm64_jump) as usize - start,
             lm64_entry_off: core::ptr::addr_of!(__mnu_ap_trampoline_lm64_entry) as usize - start,

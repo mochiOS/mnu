@@ -38,7 +38,8 @@ pub struct PlatformOps {
     pub display_transfer_limit: fn() -> Result<usize, PlatformError>,
     pub present_display:
         fn(x: u32, y: u32, width: u32, height: u32, pixels: &[u8]) -> Result<(), PlatformError>,
-    pub commit_display: fn(x: u32, y: u32, width: u32, height: u32) -> Result<(), PlatformError>,
+    pub commit_display:
+        fn(x: u32, y: u32, width: u32, height: u32) -> Result<(), PlatformError>,
     pub device_control: fn(
         operation: u16,
         device_id: u32,

@@ -328,18 +328,15 @@ pub fn retire_current_kernel_stack(base: u64) {
 
 pub fn kernel_stack_table_in_use(table: u64) -> bool {
     table != 0
-        && KSTACK_SLOTS
-            .lock()
-            .iter()
-            .any(|slot| slot.user_page_table == table && slot.mapped_pages != 0)
+        && KSTACK_SLOTS.lock().iter().any(|slot| {
+            slot.user_page_table == table && slot.mapped_pages != 0
+        })
 }
 
 pub fn kernel_stack_high_water_bytes() -> u32 {
     #[cfg(feature = "performance-instrumentation")]
     {
-        return KSTACK_HIGH_WATER
-            .load(Ordering::Relaxed)
-            .min(u64::from(u32::MAX)) as u32;
+        return KSTACK_HIGH_WATER.load(Ordering::Relaxed).min(u64::from(u32::MAX)) as u32;
     }
     #[cfg(not(feature = "performance-instrumentation"))]
     0
@@ -384,7 +381,8 @@ pub fn reclaim_current_cpu_kernel_stack() {
 }
 
 fn stack_base_for_slot(slot_index: usize) -> u64 {
-    KSTACK_ARENA_BASE + (slot_index * KSTACK_SLOT_STRIDE + KSTACK_GUARD_BYTES) as u64
+    KSTACK_ARENA_BASE
+        + (slot_index * KSTACK_SLOT_STRIDE + KSTACK_GUARD_BYTES) as u64
 }
 
 fn stack_slot_index(base: u64) -> Option<usize> {
@@ -496,7 +494,9 @@ pub fn allocate_kernel_stack_in_table(size: usize, user_page_table: u64) -> Opti
     }
     let (slot_index, base) = {
         let mut slots = KSTACK_SLOTS.lock();
-        let slot_index = slots.iter().position(|slot| slot.mapped_pages == 0)?;
+        let slot_index = slots
+            .iter()
+            .position(|slot| slot.mapped_pages == 0)?;
         slots[slot_index] = KernelStackSlot {
             user_page_table,
             requested_bytes: size as u32,

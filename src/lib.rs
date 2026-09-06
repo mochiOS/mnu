@@ -49,11 +49,11 @@ pub mod config;
 pub mod kernel;
 
 #[cfg(not(test))]
-/// ELF周り
-pub mod elf;
-#[cfg(not(test))]
 /// メモリ管理、GDT、TSSを含む
 pub mod mem;
+#[cfg(not(test))]
+/// ELF周り
+pub mod elf;
 
 #[cfg(not(test))]
 /// 起動ポリシー、manifest、署名検証の境界

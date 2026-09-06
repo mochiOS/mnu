@@ -446,7 +446,7 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_key_value, KernelConfig};
+    use super::{KernelConfig, apply_key_value};
 
     #[test]
     fn optional_policy_paths_are_empty_by_default() {
