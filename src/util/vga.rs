@@ -260,6 +260,20 @@ pub fn get_info() -> Option<FramebufferInfo> {
 
 /// フレームバッファを初期化
 pub fn init(addr: u64, size: usize, width: usize, height: usize, stride: usize) {
+    // A headless boot must leave FB_INFO empty so platform display discovery
+    // can supply the hardware renderer instead of a zero-sized framebuffer.
+    let required = stride
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4));
+    if addr == 0
+        || width == 0
+        || height == 0
+        || stride < width
+        || required.is_none_or(|bytes| bytes > size)
+        || addr.checked_add(size as u64).is_none()
+    {
+        return;
+    }
     FB_INFO.call_once(|| FramebufferInfo {
         addr,
         size,

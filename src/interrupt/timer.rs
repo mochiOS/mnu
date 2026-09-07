@@ -15,6 +15,14 @@ const PIT_BASE_HZ: u64 = 1_193_182;
 /// タイマー割り込みカウンタ
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
+fn advance_clock() {
+    let ticks = TIMER_TICKS
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    crate::syscall::time::wake_due_sleepers(ticks);
+    crate::syscall::process::wake_due_futex_waiters(ticks);
+}
+
 /// タイマー割り込みハンドラ（IRQ0）
 ///
 /// ## Arguments
@@ -26,12 +34,7 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: Interrupt
     );
     normalize_user_iret_frame(&mut stack_frame);
 
-    // タイマーカウンタを増加
-    let ticks = TIMER_TICKS
-        .fetch_add(1, Ordering::Relaxed)
-        .saturating_add(1);
-    crate::syscall::time::wake_due_sleepers(ticks);
-    crate::syscall::process::wake_due_futex_waiters(ticks);
+    advance_clock();
 
     // スケジューラのティックを実行
     let should_schedule = crate::task::scheduler_tick();
@@ -50,13 +53,19 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: Interrupt
     crate::syscall::syscall_entry::kpti_leave_after_trap(entered_from_user);
 }
 
-/// Per-CPU Local APIC timer handler used by secondary processors.
+/// Per-CPU timer; the bootstrap CPU also supplies timekeeping in a PV guest.
 pub extern "x86-interrupt" fn local_timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
     crate::performance::increment(crate::performance::CounterMetric::TimerInterrupts, 1);
     let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(
         stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3,
     );
     normalize_user_iret_frame(&mut stack_frame);
+
+    // PV guests have no PIT. Advance shared time on the bootstrap CPU only,
+    // so secondary CPUs do not multiply the clock rate.
+    if crate::hypervisor_guest::is_active() && crate::percpu::current_cpu_id() == 0 {
+        advance_clock();
+    }
 
     let should_schedule = crate::task::scheduler_tick();
     crate::smp::local_apic_eoi();
