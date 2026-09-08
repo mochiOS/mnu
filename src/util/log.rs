@@ -31,7 +31,7 @@ fn level_to_u8(level: LogLevel) -> u8 {
 }
 
 fn should_log(level: LogLevel) -> bool {
-    level_to_u8(level) >= LOG_LEVEL.load(Ordering::Relaxed)
+    cfg!(debug_assertions) && level_to_u8(level) >= LOG_LEVEL.load(Ordering::Relaxed)
 }
 
 /// ログレベルを設定

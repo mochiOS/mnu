@@ -2238,6 +2238,21 @@ pub fn destroy_user_page_table(table_phys: u64) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub enum MappingCache {
+    WriteBack,
+    Uncached,
+}
+
+impl MappingCache {
+    fn flags(self) -> PageTableFlags {
+        match self {
+            Self::WriteBack => PageTableFlags::empty(),
+            Self::Uncached => PageTableFlags::WRITE_THROUGH | PageTableFlags::NO_CACHE,
+        }
+    }
+}
+
 /// 物理アドレス範囲をユーザープロセスのページテーブルにマップする
 ///
 /// フレームバッファなどの MMIO 領域をユーザー空間へ公開するために使用する。
@@ -2253,6 +2268,7 @@ pub fn map_physical_range_to_user(
     virt_addr: u64,
     phys_addr: u64,
     size: u64,
+    cache: MappingCache,
 ) -> Result<()> {
     use crate::result::{Kernel, Memory};
     use x86_64::structures::paging::PageTableFlags as Flags;
@@ -2267,15 +2283,12 @@ pub fn map_physical_range_to_user(
     let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
     let mut pt = unsafe { OffsetPageTable::new(l4, VirtAddr::new(phys_off)) };
 
-    // This helper is reserved for device-backed user mappings such as the GOP
-    // framebuffer.  Mapping PCI MMIO as normal write-back RAM can retain or
-    // combine stores in CPU caches instead of delivering them to the device.
+    // MMIO must remain uncached; shared RAM must match its write-back aliases.
     let flags = Flags::PRESENT
         | Flags::WRITABLE
         | Flags::USER_ACCESSIBLE
         | Flags::NO_EXECUTE
-        | Flags::WRITE_THROUGH
-        | Flags::NO_CACHE;
+        | cache.flags();
 
     let virt_start = virt_addr & !0xfffu64;
     let phys_start = phys_addr & !0xfffu64;

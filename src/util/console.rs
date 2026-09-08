@@ -155,7 +155,9 @@ impl fmt::Write for HypervisorConsole {
 #[macro_export]
 macro_rules! sprint {
     ($($arg:tt)*) => {
-        $crate::util::console::print(format_args!($($arg)*))
+        if cfg!(debug_assertions) {
+            $crate::util::console::print(format_args!($($arg)*))
+        }
     };
 }
 

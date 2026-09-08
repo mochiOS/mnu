@@ -41,6 +41,7 @@ pub struct PlatformOps {
     pub commit_display:
         fn(x: u32, y: u32, width: u32, height: u32) -> Result<(), PlatformError>,
     pub device_control: fn(
+        authority: &str,
         operation: u16,
         device_id: u32,
         arguments: [u64; 4],
@@ -88,9 +89,10 @@ pub fn commit_display(x: u32, y: u32, width: u32, height: u32) -> Result<(), Pla
 }
 
 pub fn device_control(
+    authority: &str,
     operation: u16,
     device_id: u32,
     arguments: [u64; 4],
 ) -> Result<DeviceControlResponse, PlatformError> {
-    with_ops(|ops| (ops.device_control)(operation, device_id, arguments))
+    with_ops(|ops| (ops.device_control)(authority, operation, device_id, arguments))
 }

@@ -194,7 +194,9 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
         None => return ENOMEM,
     }
 
-    if crate::mem::paging::map_physical_range_to_user(pt_phys, virt_addr, phys_addr, size).is_err()
+    if crate::mem::paging::map_physical_range_to_user(
+        pt_phys, virt_addr, phys_addr, size, crate::mem::paging::MappingCache::Uncached,
+    ).is_err()
     {
         let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(pt_phys, virt_addr, size);
         let _ =
@@ -437,7 +439,12 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     let Some(pt_phys) = crate::task::with_process(pid, |proc| proc.page_table()).flatten() else {
         return ENOMEM;
     };
-    if crate::mem::paging::map_physical_range_to_user(pt_phys, virt_addr, fb_base, required)
+    let cache = if mmio {
+        crate::mem::paging::MappingCache::Uncached
+    } else {
+        crate::mem::paging::MappingCache::WriteBack
+    };
+    if crate::mem::paging::map_physical_range_to_user(pt_phys, virt_addr, fb_base, required, cache)
         .is_err()
     {
         return ENOMEM;
@@ -708,6 +715,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::FramebufferTransferLimit as u64 => framebuffer_transfer_limit(),
         x if x == SyscallNumber::CommitFramebuffer as u64 => commit_framebuffer(arg0, arg1),
         x if x == SyscallNumber::StorageControl as u64 => storage::control(arg0, arg1),
+        x if x == SyscallNumber::DeviceControl as u64 => storage::device_control(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::PerformanceSnapshot as u64 => performance::snapshot(arg0, arg1),
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),

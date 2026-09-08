@@ -8,7 +8,25 @@ const EIO: u64 = (-5_i64) as u64;
 const EINVAL: u64 = (-22_i64) as u64;
 
 pub fn control(request_ptr: u64, response_ptr: u64) -> u64 {
-    if !crate::syscall::security::caller_has_any_capability(&[Capability::DeviceStorage]) {
+    control_authorized(request_ptr, response_ptr, "device.storage")
+}
+
+pub fn device_control(request_ptr: u64, response_ptr: u64, authority_ptr: u64, authority_len: u64) -> u64 {
+    let mut name = [0u8; 128];
+    if authority_len == 0 || authority_len > name.len() as u64 {
+        return EINVAL;
+    }
+    let name = &mut name[..authority_len as usize];
+    if crate::syscall::copy_from_user(authority_ptr, name).is_err() {
+        return EFAULT;
+    }
+    let Ok(authority) = core::str::from_utf8(name) else { return EINVAL; };
+    control_authorized(request_ptr, response_ptr, authority)
+}
+
+fn control_authorized(request_ptr: u64, response_ptr: u64, authority: &str) -> u64 {
+    let Some(capability) = Capability::from_str(authority) else { return EACCES; };
+    if !crate::syscall::security::caller_has_any_capability(&[capability]) {
         return EACCES;
     }
     let mut request_bytes = [0_u8; core::mem::size_of::<StorageControlRequest>()];
@@ -20,6 +38,7 @@ pub fn control(request_ptr: u64, response_ptr: u64) -> u64 {
         return EINVAL;
     }
     let response = match crate::platform::device_control(
+        authority,
         request.operation,
         request.device_id,
         request.arguments,

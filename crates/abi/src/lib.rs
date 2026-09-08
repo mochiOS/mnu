@@ -200,6 +200,7 @@ pub enum SyscallNumber {
     PerformanceSnapshot = 612,
     FramebufferTransferLimit = 613,
     CommitFramebuffer = 614,
+    DeviceControl = 615,
     CheckGravityExist = 999,
 }
 
@@ -221,6 +222,10 @@ pub struct StorageControlResponse {
     pub device_id: u32,
     pub values: [u64; 4],
 }
+
+/// Opaque platform device messages; the selected capability scopes operations.
+pub type DeviceControlRequest = StorageControlRequest;
+pub type DeviceControlResponse = StorageControlResponse;
 
 /// `arguments[0]` 番目のストレージ候補を返します。
 pub const STORAGE_CONTROL_LIST_DEVICE: u16 = 0;
