@@ -311,7 +311,7 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         None => return EINVAL,
     };
     let target_handle = {
-        let mut boxes = lock_mailboxes();
+        let boxes = lock_mailboxes();
         let (idx, _) = match crate::task::thread_slot_index_and_generation_by_u64(current) {
             Some(v) => v,
             None => return EINVAL,
@@ -323,7 +323,6 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         if pending == 0 || pending != dest_thread_id {
             return EACCES;
         }
-        boxes[idx].reply_to = 0;
         pending
     };
     if target_handle == 0 {
@@ -333,8 +332,16 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         Some(thread_id) => thread_id,
         None => return EINVAL,
     };
-    let _ = caller_handle;
-    send_to_thread_id_with_kind(target_thread, caller_handle, buf_ptr, len, true, false)
+    let status = send_to_thread_id_with_kind(target_thread, caller_handle, buf_ptr, len, true, false);
+    if status == 0 {
+        let mut boxes = lock_mailboxes();
+        if let Some((idx, _)) = crate::task::thread_slot_index_and_generation_by_u64(current) {
+            if idx < MAX_THREADS {
+                boxes[idx].reply_to = 0;
+            }
+        }
+    }
+    status
 }
 
 fn recv_blocking_reply_for_thread(
@@ -477,7 +484,8 @@ pub fn send_map_header_to_endpoint(endpoint: IpcEndpoint, map_start: u64, total:
 
 #[inline]
 fn ipc_mailbox_cap() -> usize {
-    crate::config::kernel().ipc.mailbox_cap.min(MAILBOX_CAP)
+    // At least one ordinary message and one synchronous reply must fit.
+    crate::config::kernel().ipc.mailbox_cap.clamp(2, MAILBOX_CAP)
 }
 
 #[inline]
@@ -600,8 +608,11 @@ impl Mailbox {
         }
     }
 
-    fn reserve_slot(&mut self) -> Option<usize> {
-        if self.free_count == 0 || self.count >= ipc_mailbox_cap() {
+    fn reserve_slot(&mut self, is_reply: bool) -> Option<usize> {
+        // A caller waiting for a reply cannot drain ordinary notifications.
+        // Keep one queue slot available for its outstanding synchronous call.
+        let limit = ipc_mailbox_cap().saturating_sub(usize::from(!is_reply));
+        if self.free_count == 0 || self.count >= limit {
             return None;
         }
         self.free_count -= 1;
@@ -615,7 +626,7 @@ impl Mailbox {
 
     fn alloc_slot(&mut self) -> Option<usize> {
         let message = allocate_message()?;
-        let Some(idx) = self.reserve_slot() else {
+        let Some(idx) = self.reserve_slot(false) else {
             release_message(message);
             return None;
         };
@@ -624,7 +635,7 @@ impl Mailbox {
     }
 
     fn enqueue_message(&mut self, message: Box<Message>) -> Result<(), ()> {
-        let Some(slot_idx) = self.reserve_slot() else {
+        let Some(slot_idx) = self.reserve_slot(message.is_reply) else {
             release_message(message);
             return Err(());
         };
