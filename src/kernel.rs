@@ -149,6 +149,7 @@ pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
         crate::error!("Boot ABI validation failed: {:?}", error);
         halt_forever();
     }
+    crate::percpu::configure_boot_cpu(boot_info);
     match crate::boot_memory::preparation_status() {
         Some(crate::boot_memory::BootMemoryPreparation::Succeeded { reclaimed_bytes }) => {
             crate::info!("Reclaimed {} bootloader bytes", reclaimed_bytes)
@@ -180,6 +181,7 @@ pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo, boot_stack_top: u64) -> ! {
+    crate::percpu::enable_multiple_cpus();
     let Some(boot_info) = (unsafe { boot_info.as_ref() }) else {
         halt_forever();
     };

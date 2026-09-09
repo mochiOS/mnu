@@ -62,6 +62,24 @@ impl SyscallPerCpuState {
 static CPU_STATES: [PerCpuState; MAX_CPUS] = [const { PerCpuState::new() }; MAX_CPUS];
 static SYSCALL_STATE_PHYS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static SYSCALL_STACK_PHYS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static SINGLE_CPU_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Cache identity only when boot topology contains exactly one enabled CPU.
+/// This avoids a serializing CPUID (and a VM exit in a guest) on every access
+/// to thread, allocator, syscall and scheduler CPU-local state.
+pub(crate) fn configure_boot_cpu(boot_info: &crate::BootInfo) {
+    if boot_info.cpu_enabled == 1 && boot_info.cpu_apic_id_count == 1 {
+        let id = local_apic_id();
+        if id < MAX_CPUS as u32 && id == boot_info.cpu_apic_ids[0] {
+            SINGLE_CPU_ID.store(u64::from(id), Ordering::Release);
+        }
+    }
+}
+
+/// Must precede any CPU-local access on a newly entering secondary CPU.
+pub(crate) fn enable_multiple_cpus() {
+    SINGLE_CPU_ID.store(u64::MAX, Ordering::Release);
+}
 
 #[inline]
 fn state_for_current_cpu() -> &'static PerCpuState {
@@ -215,6 +233,10 @@ fn syscall_state_for_current_cpu() -> &'static SyscallPerCpuState {
 
 #[inline]
 pub fn current_cpu_id() -> usize {
+    let single = SINGLE_CPU_ID.load(Ordering::Acquire);
+    if single < MAX_CPUS as u64 {
+        return single as usize;
+    }
     let apic_id = local_apic_id() as usize;
     if apic_id < MAX_CPUS {
         apic_id
