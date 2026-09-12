@@ -62,7 +62,6 @@ pub struct FsConfig {
 #[derive(Clone, Default)]
 pub struct PolicyPaths {
     identity_storage_root: String,
-    execution_allowlist: String,
     audit_log: String,
     process_aliases: String,
 }
@@ -70,10 +69,6 @@ pub struct PolicyPaths {
 impl PolicyPaths {
     pub fn identity_storage_root(&self) -> Option<&str> {
         configured_path(&self.identity_storage_root)
-    }
-
-    pub fn execution_allowlist(&self) -> Option<&str> {
-        configured_path(&self.execution_allowlist)
     }
 
     pub fn audit_log(&self) -> Option<&str> {
@@ -346,9 +341,6 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
         "policy.identity_storage_root" => {
             set_policy_path(&mut config.policy_paths.identity_storage_root, value);
         }
-        "policy.execution_allowlist" => {
-            set_policy_path(&mut config.policy_paths.execution_allowlist, value);
-        }
         "policy.audit_log" => {
             set_policy_path(&mut config.policy_paths.audit_log, value);
         }
@@ -456,26 +448,5 @@ mod tests {
         assert_eq!(config.policy_paths.execution_allowlist(), None);
         assert_eq!(config.policy_paths.audit_log(), None);
         assert_eq!(config.policy_paths.process_aliases(), None);
-    }
-
-    #[test]
-    fn policy_paths_accept_only_canonical_absolute_paths() {
-        let mut config = KernelConfig::default();
-
-        apply_key_value(
-            &mut config,
-            "policy.execution_allowlist",
-            "/policy/allowlist/",
-        );
-        assert_eq!(
-            config.policy_paths.execution_allowlist(),
-            Some("/policy/allowlist")
-        );
-
-        apply_key_value(&mut config, "policy.execution_allowlist", "../untrusted");
-        assert_eq!(
-            config.policy_paths.execution_allowlist(),
-            Some("/policy/allowlist")
-        );
     }
 }

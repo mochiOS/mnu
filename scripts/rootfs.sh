@@ -51,12 +51,6 @@ if [[ -f "${ROOTFS_SOURCE_DIR}/../testdata" ]]; then
     install -m 0644 "${ROOTFS_SOURCE_DIR}/../testdata" "${INITFS_STAGE}/tmp/testdata"
 fi
 
-if [[ -n "${SIGNATURE_DB_SRC}" ]]; then
-    need_file "${SIGNATURE_DB_SRC}"
-    install -m 0644 "${SIGNATURE_DB_SRC}" \
-        "${ROOTFS_STAGE}/policy/execution.allowlist"
-fi
-
 ROOT_ENTRY="$(find "${ROOTFS_STAGE}" -mindepth 1 -maxdepth 1 ! -type d -print -quit)"
 [[ -z "${ROOT_ENTRY}" ]] || die "rootfs root must contain directories only: ${ROOT_ENTRY}"
 

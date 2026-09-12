@@ -133,7 +133,6 @@ readelf -h "${USER_BIN}" | grep -E 'Type:|Entry point address:' || true
 echo "[check] selftest marker"
 strings "${USER_BIN}" | grep -n 'selftest: enter' || true
 
-SIGNATURE_DB_STAGE="${TARGET_DIR}/execution.allowlist"
 echo "[build] bootloader"
 cargo build \
     --release \
@@ -171,23 +170,12 @@ install -m 0644 "${ROOT_DIR}/examples/plugkit/test/about.toml" "${INITFS_STAGE}/
 install -m 0755 "${PLUGKIT_TEST_BIN}" "${INITFS_STAGE}/plugkit/test/entry.elf"
 stage_cext_bundles
 
-echo "[build] signature db"
-SIGNATURE_DB_ARGS=(
-    --output "${SIGNATURE_DB_STAGE}"
-    --entry "/init=${USER_BIN}"
-    --entry "/plugkit/test/entry.elf=${PLUGKIT_TEST_BIN}"
-    --entry "/tmp/hello.bin=${USER_BIN}"
-    --entry "/tmp/captest.bin=${CAPTEST_BIN}"
-)
-perl "${ROOT_DIR}/scripts/signature_db.pl" "${SIGNATURE_DB_ARGS[@]}"
-
 echo "[build] rootfs"
 ROOTFS_SOURCE_DIR="${ROOT_DIR}/examples/fs/rootfs" \
 INITFS_STAGE="${INITFS_STAGE}" \
 ROOTFS_STAGE="${ROOTFS_STAGE}" \
 ROOTFS_IMG="${TARGET_DIR}/rootfs.img" \
 ROOTFS_CLEAN_INITFS=0 \
-SIGNATURE_DB_SRC="${SIGNATURE_DB_STAGE}" \
 bash "${ROOT_DIR}/scripts/rootfs.sh"
 
 echo "[build] initfs"

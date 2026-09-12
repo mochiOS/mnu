@@ -6,8 +6,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::task::{PrivilegeLevel, ProcessId};
 
-pub mod signature;
-
 /// ブート時にカーネルが起動した init プロセスID
 /// 0 は未登録。
 static INIT_PID: AtomicU64 = AtomicU64::new(0);

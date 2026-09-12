@@ -639,21 +639,6 @@ fn exec_internal(
         }
     }
     if let Some((data, source)) = load_exec_image(path, execution_class) {
-        if enforce_path_access {
-            let signature_valid = if source == "initfs" {
-                crate::policy::signature::verify_boot_exec(path, &data)
-            } else {
-                crate::policy::signature::verify_exec(path, &data)
-            };
-            if !signature_valid {
-                crate::warn!(
-                    "exec: signature verification failed for '{}' from {}",
-                    path,
-                    source
-                );
-                return crate::syscall::types::EPERM;
-            }
-        }
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",
             path,
@@ -1298,10 +1283,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         Some(loaded) => loaded,
         None => return ENOENT,
     };
-    if !crate::policy::signature::verify_exec(&path_owned, &data_vec) {
-        crate::warn!("execve: signature verification failed for '{}'", path_owned);
-        return EPERM;
-    }
+    
     crate::info!(
         "execve: loaded '{}' from {} ({} bytes)",
         path_owned,
