@@ -64,7 +64,7 @@ fn spawn_ap_idle_thread() -> Result<(task::ThreadId, usize)> {
 /// カーネルメイン関数
 fn kernel_main() -> ! {
     util::log::set_level(LogLevel::Info);
-    debug!("Kernel started");
+    debug!("mnu kernel started");
 
     if let Some(handoff) = crate::smp::handoff() {
         let kernel_cr3 = crate::percpu::kernel_cr3();
@@ -143,40 +143,73 @@ fn kernel_main() -> ! {
 
 /// カーネルエントリポイント（kernel binary から呼ばれる）
 pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
-    crate::performance::mark_boot(crate::performance::BootMilestone::MnuEntry);
-    crate::util::console::init();
-    if let Err(error) = boot_info.validate() {
-        crate::error!("Boot ABI validation failed: {:?}", error);
-        halt_forever();
-    }
-    crate::percpu::configure_boot_cpu(boot_info);
-    match crate::boot_memory::preparation_status() {
-        Some(crate::boot_memory::BootMemoryPreparation::Succeeded { reclaimed_bytes }) => {
-            crate::info!("Reclaimed {} bootloader bytes", reclaimed_bytes)
-        }
-        Some(crate::boot_memory::BootMemoryPreparation::Failed) => {
-            crate::warn!("Bootloader memory reclamation was skipped")
-        }
-        None => {}
-    }
-    unsafe {
-        crate::init::fs::set_image(boot_info.initfs_addr, boot_info.initfs_size as usize);
-        crate::init::fs::set_rootfs(boot_info.rootfs_addr, boot_info.rootfs_size as usize);
-    }
-    crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
-    match kinit(boot_info) {
-        Ok(_) => {}
-        Err(e) => {
-            handle_kernel_error(e);
-            halt_forever();
-        }
-    }
+	early_serial("kernel: start\n");
 
-    create_kernel_proc().unwrap_or_else(|e| {
-        handle_kernel_error(e);
-        halt_forever();
-    });
-    task::start_scheduling();
+	early_serial("kernel: mark boot\n");
+	crate::performance::mark_boot(crate::performance::BootMilestone::MnuEntry);
+	early_serial("kernel: mark boot ok\n");
+
+	early_serial("kernel: console init\n");
+	crate::util::console::init();
+	early_serial("kernel: console init ok\n");
+
+	early_serial("kernel: validate boot info\n");
+	if let Err(error) = boot_info.validate() {
+		early_serial("kernel: boot info invalid\n");
+		crate::error!("Boot ABI validation failed: {:?}", error);
+		halt_forever();
+	}
+	early_serial("kernel: boot info valid\n");
+
+	early_serial("kernel: configure boot cpu\n");
+	crate::percpu::configure_boot_cpu(boot_info);
+	early_serial("kernel: configure boot cpu ok\n");
+
+	early_serial("kernel: preparation status\n");
+	match crate::boot_memory::preparation_status() {
+		Some(crate::boot_memory::BootMemoryPreparation::Succeeded { reclaimed_bytes }) => {
+			crate::info!("Reclaimed {} bootloader bytes", reclaimed_bytes)
+		}
+		Some(crate::boot_memory::BootMemoryPreparation::Failed) => {
+			crate::warn!("Bootloader memory reclamation was skipped")
+		}
+		None => {}
+	}
+	early_serial("kernel: preparation status ok\n");
+
+	early_serial("kernel: set fs images\n");
+	unsafe {
+		crate::init::fs::set_image(boot_info.initfs_addr, boot_info.initfs_size as usize);
+		crate::init::fs::set_rootfs(boot_info.rootfs_addr, boot_info.rootfs_size as usize);
+	}
+	early_serial("kernel: set fs images ok\n");
+
+	early_serial("kernel: set smp handoff\n");
+	crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
+	early_serial("kernel: set smp handoff ok\n");
+
+	early_serial("kernel: enter kinit\n");
+	match kinit(boot_info) {
+		Ok(_) => {
+			early_serial("kernel: kinit ok\n");
+		}
+		Err(e) => {
+			early_serial("kernel: kinit failed\n");
+			handle_kernel_error(e);
+			halt_forever();
+		}
+	}
+
+	early_serial("kernel: create kernel process\n");
+	create_kernel_proc().unwrap_or_else(|e| {
+		early_serial("kernel: create kernel process failed\n");
+		handle_kernel_error(e);
+		halt_forever();
+	});
+	early_serial("kernel: create kernel process ok\n");
+
+	early_serial("kernel: start scheduling\n");
+	task::start_scheduling();
 }
 
 #[unsafe(no_mangle)]
@@ -262,6 +295,34 @@ fn create_kernel_proc() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn early_serial(text: &str) {
+	for byte in text.bytes() {
+		unsafe {
+			let mut status: u8;
+
+			loop {
+				core::arch::asm!(
+					"in al, dx",
+					in("dx") 0x3fdu16,
+					out("al") status,
+					options(nomem, nostack, preserves_flags),
+				);
+
+				if status & 0x20 != 0 {
+					break;
+				}
+			}
+
+			core::arch::asm!(
+				"out dx, al",
+				in("dx") 0x3f8u16,
+				in("al") byte,
+				options(nomem, nostack, preserves_flags),
+			);
+		}
+	}
 }
 
 /// システムを無限ループで停止
