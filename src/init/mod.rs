@@ -14,34 +14,17 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         boot_info.stride as usize,
     );
 
-    // CPU機能の初期化（SSE/FPU有効化）
-    crate::cpu::init();
-    let clock = crate::performance::initialize_clock();
-    crate::info!(
-        "Performance clock: invariant_tsc={} rdtscp={} frequency_khz={} source={:?}",
-        clock.invariant_tsc,
-        clock.rdtscp,
-        clock.frequency_khz,
-        clock.source
-    );
-    if let Err(error) =
-        crate::random::initialize(&boot_info.entropy_seed, boot_info.entropy_seed_valid != 0)
-    {
-        crate::warn!("CSPRNG unavailable: {:?}", error);
-    }
-    if !crate::hypervisor_guest::is_active() {
-        if let Err(error) = crate::syscall::time::initialize_realtime() {
-            crate::warn!("UTC wall clock unavailable: {:?}", error);
-        }
-    }
+	// CPU機能の初期化（SSE/FPU有効化）
+	crate::cpu::init();
 
-    let memory_map = unsafe {
-        core::slice::from_raw_parts(
-            boot_info.memory_map_addr as *const MemoryRegion,
-            boot_info.memory_map_len as usize,
-        )
-    };
+	let memory_map = unsafe {
+		core::slice::from_raw_parts(
+			boot_info.memory_map_addr as *const MemoryRegion,
+			boot_info.memory_map_len as usize,
+		)
+	};
 
+	
     crate::info!("Memory map has {} regions", memory_map.len());
     for (i, region) in memory_map.iter().enumerate() {
         debug!(
@@ -62,13 +45,36 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         }
     }
 
-    // 先にフレームアロケータを初期化
-    mem::init_frame_allocator(memory_map)?;
-    crate::performance::mark_boot(crate::performance::BootMilestone::PageAllocatorReady);
+	// 先にフレームアロケータを初期化
+	crate::info!("kinit: before frame allocator");
+	mem::init_frame_allocator(memory_map)?;
+	crate::performance::mark_boot(crate::performance::BootMilestone::PageAllocatorReady);
 
-    // メモリ管理の初期化
-    mem::init(boot_info)?;
-    crate::performance::mark_boot(crate::performance::BootMilestone::EarlyMemoryReady);
+	// メモリ管理の初期化
+	crate::info!("kinit: before mem init");
+	mem::init(boot_info)?;
+	crate::performance::mark_boot(crate::performance::BootMilestone::EarlyMemoryReady);
+
+	crate::info!("kinit: successed memory init");
+
+	let clock = crate::performance::initialize_clock();
+    crate::info!(
+        "Performance clock: invariant_tsc={} rdtscp={} frequency_khz={} source={:?}",
+        clock.invariant_tsc,
+        clock.rdtscp,
+        clock.frequency_khz,
+        clock.source
+    );
+    if let Err(error) =
+        crate::random::initialize(&boot_info.entropy_seed, boot_info.entropy_seed_valid != 0)
+    {
+        crate::warn!("CSPRNG unavailable: {:?}", error);
+    }
+    if !crate::hypervisor_guest::is_active() {
+        if let Err(error) = crate::syscall::time::initialize_realtime() {
+            crate::warn!("UTC wall clock unavailable: {:?}", error);
+        }
+    }
 
     #[cfg(feature = "frame-allocation-failure-injection")]
     crate::percpu::verify_syscall_frame_allocation_rollback()?;
@@ -100,9 +106,6 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         }
     }
 
-    // MED-32修正: PIT初期化をCPU割り込み有効化より前に実行する
-    // 以前は enable() が init_pit() より先だったため、PIT未初期化状態でタイマー割り込みが
-    // 発生する可能性があった。正しい初期化順序: PIT→スケジューラ→タイマー→割り込み有効化
     task::init_scheduler();
     crate::performance::mark_boot(crate::performance::BootMilestone::SchedulerStarted);
     if crate::hypervisor_guest::is_active() {
