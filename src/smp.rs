@@ -733,6 +733,11 @@ pub fn start_secondary_cpus() {
     }
 
     prepare_secondary_timer();
+    if enable_local_scheduler_timer() {
+        crate::info!("Bootstrap CPU scheduler timer initialized");
+    } else {
+        crate::warn!("Bootstrap CPU scheduler timer unavailable");
+    }
 
     if unsafe { install_trampoline(boot_info) }.is_none() {
         crate::warn!("AP trampoline installation failed; skipping AP startup");

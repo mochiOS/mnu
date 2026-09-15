@@ -1,4 +1,5 @@
 use crate::interrupt::spinlock::SpinLock;
+use core::sync::atomic::Ordering;
 use spin::Once;
 
 use super::context::switch_to_thread_with_slots;
@@ -544,84 +545,104 @@ pub fn schedule_and_switch() {
 ///
 /// スケジューラを開始して最初のスレッドにジャンプ
 pub fn start_scheduling() -> ! {
-    // 最初のスレッドを選択
-    if let Some(first_id) = super::thread::peek_next_thread() {
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            // 最初のスレッドを Running 状態に設定
-            set_thread_state(first_id, ThreadState::Running);
-            with_thread(first_id, |thread| {
-                crate::info!(
-                    "Starting first thread: {} (id={:?})",
-                    thread.name(),
-                    thread.id()
-                );
-            });
 
-            // 最初のスレッドへ switch_to_thread でジャンプ（戻ってこない）
-            // user/kernel どちらも switch_context 経由で正しく動作する
-            unsafe {
-                if let Some((pid, interactive_score, cpu_burst_score)) =
-                    with_thread(first_id, |thread| {
-                        (
-                            thread.process_id(),
-                            thread.interactive_score(),
-                            thread.cpu_burst_score(),
-                        )
-                    })
-                {
-                    let (process_priority, is_foreground) =
-                        crate::task::with_process(pid, |process| {
-                            (process.priority(), process.is_foreground())
-                        })
-                        .unwrap_or((0, false));
-                    let first_slice = time_slice_ticks_for_thread(
-                        is_foreground,
-                        process_priority,
-                        interactive_score,
-                        cpu_burst_score,
-                    );
-                    scheduler().lock().set_time_slice(first_slice);
-                }
-                let first_slot = {
-                    let queue = THREAD_QUEUE.lock();
-                    queue.slot_index(first_id)
-                };
-                match first_slot {
-                    Some(first_slot) => {
-                        switch_to_thread_with_slots(None, first_id, first_slot);
-                    }
-                    None => {
-                        crate::audit::log(
-                            crate::audit::AuditEventKind::Fault,
-                            "start_scheduling could not resolve first thread slot",
-                        );
-                        x86_64::instructions::interrupts::disable();
-                        loop {
-                            x86_64::instructions::hlt();
-                        }
-                    }
-                }
-            }
-        });
+	// 最初のスレッドを選択
+	if let Some(first_id) = super::thread::peek_next_thread() {
 
-        crate::audit::log(
-            crate::audit::AuditEventKind::Fault,
-            "start_scheduling switch_to_thread returned unexpectedly",
-        );
-        x86_64::instructions::interrupts::disable();
-        loop {
-            x86_64::instructions::hlt();
-        }
-    } else {
-        crate::audit::log(
-            crate::audit::AuditEventKind::Fault,
-            "start_scheduling found no threads to schedule",
-        );
-        x86_64::instructions::interrupts::disable();
-        loop {
-            x86_64::instructions::hlt();
-        }
-    }
+		x86_64::instructions::interrupts::without_interrupts(|| {
+
+			// 最初のスレッドを Running 状態に設定
+			set_thread_state(first_id, ThreadState::Running);
+
+			with_thread(first_id, |thread| {
+
+				crate::info!(
+					"Starting first thread: {} (id={:?})",
+					thread.name(),
+					thread.id()
+				);
+			});
+
+			// 最初のスレッドへ switch_to_thread でジャンプ（戻ってこない）
+			// user/kernel どちらも switch_context 経由で正しく動作する
+			unsafe {
+				if let Some((pid, interactive_score, cpu_burst_score)) =
+					with_thread(first_id, |thread| {
+						(
+							thread.process_id(),
+							thread.interactive_score(),
+							thread.cpu_burst_score(),
+						)
+					})
+				{
+
+					let (process_priority, is_foreground) =
+						crate::task::with_process(pid, |process| {
+							(process.priority(), process.is_foreground())
+						})
+						.unwrap_or((0, false));
+
+					let first_slice = time_slice_ticks_for_thread(
+						is_foreground,
+						process_priority,
+						interactive_score,
+						cpu_burst_score,
+					);
+
+					scheduler().lock().set_time_slice(first_slice);
+				} else {
+				}
+
+				let first_slot = {
+					let queue = THREAD_QUEUE.lock();
+					queue.slot_index(first_id)
+				};
+
+				match first_slot {
+					Some(first_slot) => {
+
+						switch_to_thread_with_slots(None, first_id, first_slot);
+					}
+					None => {
+
+						crate::audit::log(
+							crate::audit::AuditEventKind::Fault,
+							"start_scheduling could not resolve first thread slot",
+						);
+
+						x86_64::instructions::interrupts::disable();
+
+						loop {
+							x86_64::instructions::hlt();
+						}
+					}
+				}
+			}
+		});
+
+		crate::audit::log(
+			crate::audit::AuditEventKind::Fault,
+			"start_scheduling switch_to_thread returned unexpectedly",
+		);
+
+		x86_64::instructions::interrupts::disable();
+
+		loop {
+			x86_64::instructions::hlt();
+		}
+	} else {
+
+		crate::audit::log(
+			crate::audit::AuditEventKind::Fault,
+			"start_scheduling found no threads to schedule",
+		);
+
+		x86_64::instructions::interrupts::disable();
+
+		loop {
+			x86_64::instructions::hlt();
+		}
+	}
 }
 
 /// 現在のプロセス全体を終了させる。

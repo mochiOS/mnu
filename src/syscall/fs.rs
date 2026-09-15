@@ -1486,6 +1486,12 @@ pub fn fsync(fd: u64) -> u64 {
     }
 }
 
+pub fn fdatasync(fd: u64) -> u64 {
+    // The ext2 cext currently has no deferred metadata cache, so its sync
+    // operation is also the ordering barrier required for data-only sync.
+    fsync(fd)
+}
+
 /// truncate システムコール（最小実装）
 pub fn truncate(path_ptr: u64, len: u64) -> u64 {
     if path_ptr == 0 {

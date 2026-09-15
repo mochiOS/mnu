@@ -57,3 +57,5 @@ pub fn fill(destination: &mut [u8]) -> Result<(), RandomError> {
         .fill(destination)
         .map_err(|_| RandomError::Uninitialized)
 }
+
+// random ran dom ra ndom r amdom haaahhhaaaaaaaaas

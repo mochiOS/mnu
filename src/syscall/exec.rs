@@ -887,6 +887,7 @@ fn exec_with_data(
         let new_pt_phys = match crate::mem::paging::create_user_page_table() {
             Ok(phys) => phys,
             Err(e) => {
+                crate::kernel::early_serial("exec: create page table failed\n");
                 crate::warn!(
                     "Failed to create user page table for {}: {:?}",
                     process_name,
@@ -910,6 +911,7 @@ fn exec_with_data(
         } = match map_elf_image(data, new_pt_phys, measurement) {
             Ok(layout) => layout,
             Err(errno) => {
+                crate::kernel::early_serial("exec: map ELF failed\n");
                 crate::warn!(
                     "exec: invalid or unmappable ELF image '{}': {}",
                     exec_path,
@@ -961,7 +963,10 @@ fn exec_with_data(
             page_data,
         } = match build_initial_user_stack(aslr_seed, &all_args, envp, exec_path, &auxv_entries) {
             Ok(stack) => stack,
-            Err(errno) => return errno,
+            Err(errno) => {
+                crate::kernel::early_serial("exec: build stack failed\n");
+                return errno;
+            }
         };
         let exec = crate::config::kernel().exec;
 
@@ -983,6 +988,7 @@ fn exec_with_data(
             true,
             false,
         ) {
+            crate::kernel::early_serial("exec: map stack lower failed\n");
             crate::warn!("Failed to allocate user stack lower: {:?}", e);
             return mapping_error_errno(e);
         }
@@ -997,6 +1003,7 @@ fn exec_with_data(
             true,
             false,
         ) {
+            crate::kernel::early_serial("exec: map stack top failed\n");
             crate::warn!("Failed to allocate user stack top: {:?}", e);
             return mapping_error_errno(e);
         }
@@ -1098,14 +1105,19 @@ fn exec_with_data(
         }
         let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
             Ok(base) => base,
-            Err(errno) => return errno,
+            Err(errno) => {
+                crate::kernel::early_serial("exec: map TLS failed\n");
+                return errno;
+            }
         };
         let pid = proc.id();
         if is_boot_init && !claim_init_pid(pid.as_u64()) {
+            crate::kernel::early_serial("exec: init claim failed\n");
             crate::warn!("init is already running, rejecting duplicate launch");
             return crate::syscall::types::EINVAL;
         }
         if crate::task::add_process(proc).is_none() {
+            crate::kernel::early_serial("exec: add process failed\n");
             if is_boot_init {
                 let _ = release_init_pid(pid.as_u64());
             }
@@ -1160,7 +1172,6 @@ fn exec_with_data(
             let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
             return crate::syscall::types::EINVAL;
         }
-
         // report scheduling state
         crate::debug!(
             "exec: scheduler_enabled={} thread_count={}",

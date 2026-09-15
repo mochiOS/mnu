@@ -1035,11 +1035,18 @@ impl Drop for IncompleteUserPageTable {
 /// ## Returns
 /// 新しいL4テーブルの物理アドレス
 pub fn create_user_page_table() -> Result<u64> {
-    let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+    let phys_off = match physical_memory_offset() {
+        Some(offset) => offset,
+        None => {
+            crate::kernel::early_serial("paging: physical offset missing\n");
+            return Err(Kernel::Memory(Memory::NotMapped));
+        }
+    };
 
     // カーネルの「元の」L4テーブルを使用する（syscall中はCR3がユーザープロセスのテーブルなため）
     let kernel_l4_phys = KERNEL_L4_PHYS.load(core::sync::atomic::Ordering::Relaxed);
     if !KERNEL_L4_READY.load(core::sync::atomic::Ordering::Acquire) {
+        crate::kernel::early_serial("paging: kernel L4 not ready\n");
         return Err(Kernel::Memory(Memory::NotMapped));
     }
     let kernel_l4 = unsafe { &*((kernel_l4_phys + phys_off) as *const PageTable) };
@@ -1067,12 +1074,35 @@ pub fn create_user_page_table() -> Result<u64> {
 
         // L3[0]: 最初の1GB（カーネルコード・スタックとユーザーコードが混在）
         if !kernel_l3[0].is_unused() {
-            let kernel_l2_phys = kernel_l3[0].addr().as_u64();
-            let new_l2_phys = clone_kernel_l2_table_without_user_entries(kernel_l2_phys, phys_off)?;
+            let kernel_l3_flags = kernel_l3[0].flags();
+            let new_l2_phys = if kernel_l3_flags.contains(PageTableFlags::HUGE_PAGE) {
+                let new_l2_frame = allocate_zeroed_page_table()?;
+                let new_l2_phys = new_l2_frame.start_address().as_u64();
+                let new_l2 =
+                    unsafe { &mut *((new_l2_phys + phys_off) as *mut PageTable) };
+                let huge_phys = kernel_l3[0].addr().as_u64();
+                let mut leaf_flags = kernel_l3_flags;
+                leaf_flags.remove(PageTableFlags::USER_ACCESSIBLE);
+                for (index, entry) in new_l2.iter_mut().enumerate() {
+                    entry.set_addr(
+                        PhysAddr::new(huge_phys + (index as u64 * 2 * 1024 * 1024)),
+                        leaf_flags,
+                    );
+                }
+                new_l2_phys
+            } else {
+                clone_kernel_l2_table_without_user_entries(
+                    kernel_l3[0].addr().as_u64(),
+                    phys_off,
+                )?
+            };
+            let mut new_l3_flags = kernel_l3_flags | PageTableFlags::USER_ACCESSIBLE;
+            new_l3_flags.remove(PageTableFlags::HUGE_PAGE);
+            new_l3_flags |= PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
 
             new_l3[0].set_addr(
                 PhysAddr::new(new_l2_phys),
-                kernel_l3[0].flags() | PageTableFlags::USER_ACCESSIBLE,
+                new_l3_flags,
             );
         }
     }
@@ -1118,6 +1148,7 @@ pub fn create_user_page_table() -> Result<u64> {
     }
 
     if let Err(error) = map_cpu_descriptor_tables_in_user_table(new_l4_phys) {
+        crate::kernel::early_serial("paging: descriptor mapping failed\n");
         crate::warn!(
             "Failed to map CPU descriptor tables into user page table: {:?}",
             error
@@ -1125,6 +1156,7 @@ pub fn create_user_page_table() -> Result<u64> {
         return Err(error);
     }
     if let Err(error) = crate::percpu::map_syscall_shared_region_in_table(new_l4_phys) {
+        crate::kernel::early_serial("paging: syscall region mapping failed\n");
         crate::warn!(
             "Failed to map syscall shared region into user page table: {:?}",
             error
@@ -1137,7 +1169,7 @@ pub fn create_user_page_table() -> Result<u64> {
 }
 
 fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
-    fn mark_descriptor_page_user_readable(table_phys: u64, page: u64) -> Result<()> {
+    fn map_descriptor_page_supervisor_only(table_phys: u64, page: u64) -> Result<()> {
         use x86_64::structures::paging::PageTableFlags as Flags;
 
         let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
@@ -1146,6 +1178,7 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
 
         let l4e = &mut l4[vaddr.p4_index()];
         if l4e.is_unused() || !l4e.flags().contains(Flags::PRESENT) {
+            crate::kernel::early_serial("paging: descriptor L4 missing\n");
             return Err(Kernel::Memory(Memory::NotMapped));
         }
         l4e.set_addr(l4e.addr(), l4e.flags() | Flags::USER_ACCESSIBLE);
@@ -1153,16 +1186,25 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
         let l3 = unsafe { &mut *((l4e.addr().as_u64() + phys_off) as *mut PageTable) };
         let l3e = &mut l3[vaddr.p3_index()];
         if l3e.is_unused() || !l3e.flags().contains(Flags::PRESENT) {
+            crate::kernel::early_serial("paging: descriptor L3 missing\n");
             return Err(Kernel::Memory(Memory::NotMapped));
         }
         if l3e.flags().contains(Flags::HUGE_PAGE) {
+            crate::kernel::early_serial("paging: descriptor L3 huge\n");
             return Err(Kernel::Memory(Memory::InvalidAddress));
         }
         l3e.set_addr(l3e.addr(), l3e.flags() | Flags::USER_ACCESSIBLE);
 
         let l2 = unsafe { &mut *((l3e.addr().as_u64() + phys_off) as *mut PageTable) };
         let l2e = &mut l2[vaddr.p2_index()];
-        if l2e.is_unused() || !l2e.flags().contains(Flags::PRESENT) {
+        if l2e.is_unused() {
+            let new_l1_frame = allocate_zeroed_page_table()?;
+            l2e.set_addr(
+                new_l1_frame.start_address(),
+                Flags::PRESENT | Flags::WRITABLE | Flags::USER_ACCESSIBLE,
+            );
+        } else if !l2e.flags().contains(Flags::PRESENT) {
+            crate::kernel::early_serial("paging: descriptor L2 not present\n");
             return Err(Kernel::Memory(Memory::NotMapped));
         }
 
@@ -1189,18 +1231,18 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
         let l1 = unsafe { &mut *((l2e.addr().as_u64() + phys_off) as *mut PageTable) };
         let l1e = &mut l1[vaddr.p1_index()];
         if l1e.is_unused() || !l1e.flags().contains(Flags::PRESENT) {
-            let phys = translate_addr(vaddr)
-                .ok_or(Kernel::Memory(Memory::NotMapped))?
-                .as_u64()
-                & !0xfff;
+            let Some(phys) = translate_addr(vaddr).map(|address| address.as_u64() & !0xfff) else {
+                crate::kernel::early_serial("paging: descriptor translation missing\n");
+                return Err(Kernel::Memory(Memory::NotMapped));
+            };
             l1e.set_addr(
                 PhysAddr::new(phys),
-                Flags::PRESENT | Flags::USER_ACCESSIBLE | Flags::NO_EXECUTE,
+                Flags::PRESENT | Flags::NO_EXECUTE,
             );
         } else {
             let mut flags = l1e.flags();
-            flags.remove(Flags::WRITABLE);
-            flags |= Flags::USER_ACCESSIBLE | Flags::NO_EXECUTE;
+            flags.remove(Flags::WRITABLE | Flags::USER_ACCESSIBLE);
+            flags |= Flags::NO_EXECUTE;
             l1e.set_addr(l1e.addr(), flags);
         }
 
@@ -1215,7 +1257,7 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
             | 0xfff;
         let mut page = start;
         while page <= end {
-            mark_descriptor_page_user_readable(table_phys, page)?;
+            map_descriptor_page_supervisor_only(table_phys, page)?;
             page = page
                 .checked_add(4096)
                 .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
@@ -1239,6 +1281,7 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
     ]);
 
     if let Err(error) = map_current_range(table_phys, gdt_base, gdt_limit) {
+        crate::kernel::early_serial("paging: GDT mapping failed\n");
         crate::warn!(
             "Failed to map GDT range {:#x}+{:#x}: {:?}",
             gdt_base,
@@ -1248,6 +1291,7 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
         return Err(error);
     }
     if let Err(error) = map_current_range(table_phys, idt_base, idt_limit) {
+        crate::kernel::early_serial("paging: IDT mapping failed\n");
         crate::warn!(
             "Failed to map IDT range {:#x}+{:#x}: {:?}",
             idt_base,

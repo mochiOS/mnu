@@ -729,9 +729,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Read as u64 => fs::read(arg0, arg1, arg2),
         x if x == SyscallNumber::Open as u64 => fs::open(arg0, arg1),
         x if x == SyscallNumber::Lseek as u64 => fs::seek(arg0, arg1 as i64, arg2),
-        x if x == SyscallNumber::Fsync as u64 || x == SyscallNumber::Fdatasync as u64 => {
-            fs::fsync(arg0)
-        }
+        x if x == SyscallNumber::Fsync as u64 => fs::fsync(arg0),
+        x if x == SyscallNumber::Fdatasync as u64 => fs::fdatasync(arg0),
         x if x == SyscallNumber::Truncate as u64 => fs::truncate(arg0, arg1),
         x if x == SyscallNumber::Chmod as u64 => fs::chmod(arg0, arg1),
         x if x == SyscallNumber::Chown as u64 => fs::chown(arg0, arg1, arg2),

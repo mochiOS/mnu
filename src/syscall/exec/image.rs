@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 
 const EM_X86_64: u16 = 0x3e;
 const PAGE_SIZE: u64 = 4096;
+const USER_EXEC_ADDRESS_MIN: u64 = 0x0040_0000;
 const USER_ADDRESS_MAX: u64 = 0x0000_7fff_ffff_ffff;
 const PF_EXECUTE: u32 = 0x1;
 const PF_WRITE: u32 = 0x2;
@@ -63,7 +64,10 @@ fn deferred_zero_range(
 fn validate_load_segment(data: &[u8], segment: &crate::elf::Elf64Phdr) -> Result<(), u64> {
     use crate::syscall::types::EINVAL;
 
-    if segment.p_memsz < segment.p_filesz || segment.p_vaddr >= USER_ADDRESS_MAX {
+    if segment.p_memsz < segment.p_filesz
+        || segment.p_vaddr < USER_EXEC_ADDRESS_MIN
+        || segment.p_vaddr >= USER_ADDRESS_MAX
+    {
         return Err(EINVAL);
     }
     let memory_end = segment.p_vaddr.checked_add(segment.p_memsz).ok_or(EINVAL)?;
