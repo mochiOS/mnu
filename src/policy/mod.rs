@@ -101,12 +101,15 @@ pub fn caller_is_service_or_core_process() -> bool {
     caller_is_service_or_core()
 }
 
-/// Core processes are the only user-space callers allowed to perform the
-/// authenticated-boot bootstrap before capability.service exists.
-pub fn caller_is_core_process() -> bool {
-    caller_pid()
-        .and_then(|pid| crate::task::with_process(pid, |process| process.privilege()))
-        == Some(PrivilegeLevel::Core)
+/// Whether the caller is the kernel-selected init process for this boot.
+///
+/// init runs in user mode with `Service` privilege, so checking for
+/// `PrivilegeLevel::Core` here would reject the authenticated bootstrap of
+/// logger.service and capability.service. Binding the exception to the PID
+/// registered by the kernel keeps it unavailable to every other service.
+pub fn caller_is_bootstrap_init_process() -> bool {
+    let init_pid_raw = init_pid();
+    init_pid_raw != 0 && caller_pid().is_some_and(|pid| pid.as_u64() == init_pid_raw)
 }
 
 /// exec に対して明示された privilege を最終的に決定する

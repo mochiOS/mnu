@@ -633,7 +633,7 @@ fn exec_manifest_common(
             return EACCES;
         }
         Some(authorization.executable_digest)
-    } else if crate::policy::caller_is_core_process() {
+    } else if crate::policy::caller_is_bootstrap_init_process() {
         // core.service launches logger and capability.service from the
         // authenticated boot generation before the policy service exists.
         None
