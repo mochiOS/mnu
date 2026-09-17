@@ -14,7 +14,14 @@ mod image;
 
 use image::{map_elf_image, ElfImageLayout};
 
-use mnu_abi::exec::{ExecutionClass, ENVIRONMENT_PREFIX, SECURITY_IDENTITY_PREFIX};
+use mnu_abi::exec::{
+    APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX,
+    APPLICATION_PROVENANCE_PREFIX, APPLICATION_SUBJECT_KEY_ID_PREFIX, ENVIRONMENT_PREFIX,
+    EXECUTABLE_DIGEST_PREFIX, EXEC_AUTHORIZATION_CLASS_PREFIX,
+    EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE, EXEC_AUTHORIZATION_KIND_PREFIX,
+    EXEC_AUTHORIZATION_KIND_SPAWN, ExecutionClass, SECURITY_IDENTITY_PREFIX,
+};
+use sha2::{Digest, Sha256};
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct InitialUserStack {
@@ -318,6 +325,7 @@ pub fn exec_manifest_syscall(
         execution_class_raw,
         None,
         None,
+        None,
     )
 }
 
@@ -372,6 +380,7 @@ pub fn exec_manifest_with_credentials_syscall(
         caps_total_len,
         execution_class_raw,
         Some(crate::task::ProcessCredentials::user(uid, gid)),
+        None,
         None,
     )
 }
@@ -456,6 +465,7 @@ pub fn exec_manifest_for_requester_syscall(
         execution_class_raw,
         Some(credentials),
         Some(requester_pid),
+        Some(requester),
     )
 }
 
@@ -467,6 +477,7 @@ fn exec_manifest_common(
     execution_class_raw: u64,
     credentials: Option<crate::task::ProcessCredentials>,
     parent_override: Option<crate::task::ProcessId>,
+    authorization_thread_override: Option<crate::task::ThreadId>,
 ) -> u64 {
     use crate::syscall::types::{EACCES, EINVAL, EPERM};
 
@@ -498,22 +509,71 @@ fn exec_manifest_common(
     };
     let mut extra_args: Vec<&str> = Vec::new();
     let mut envp: Vec<&str> = Vec::new();
-    let mut security_identity: Option<&str> = None;
+    let mut identity_package: Option<&str> = None;
+    let mut identity_developer: Option<&str> = None;
+    let mut identity_subject_key: Option<[u8; 32]> = None;
+    let mut identity_provenance: Option<crate::task::process::ApplicationProvenance> = None;
     for item in &extra_args_owned {
         if let Some(env) = item.strip_prefix(ENVIRONMENT_PREFIX) {
             if env.is_empty() || !env.contains('=') {
                 return EINVAL;
             }
             envp.push(env);
-        } else if let Some(value) = item.strip_prefix(SECURITY_IDENTITY_PREFIX) {
-            if security_identity.is_some() || !valid_security_identity(value) {
+        } else if item.starts_with(SECURITY_IDENTITY_PREFIX) {
+            // Opaque identities are no longer accepted. A trusted launcher must
+            // provide the complete structured identity below.
+            return EINVAL;
+        } else if let Some(value) = item.strip_prefix(APPLICATION_PACKAGE_ID_PREFIX) {
+            if identity_package.is_some() || !valid_security_identity(value) {
                 return EINVAL;
             }
-            security_identity = Some(value);
+            identity_package = Some(value);
+        } else if let Some(value) = item.strip_prefix(APPLICATION_DEVELOPER_ID_PREFIX) {
+            if identity_developer.is_some() || !valid_security_identity(value) {
+                return EINVAL;
+            }
+            identity_developer = Some(value);
+        } else if let Some(value) = item.strip_prefix(APPLICATION_SUBJECT_KEY_ID_PREFIX) {
+            if identity_subject_key.is_some() {
+                return EINVAL;
+            }
+            identity_subject_key = Some(match decode_subject_key_id(value) {
+                Some(value) => value,
+                None => return EINVAL,
+            });
+        } else if let Some(value) = item.strip_prefix(APPLICATION_PROVENANCE_PREFIX) {
+            if identity_provenance.is_some() {
+                return EINVAL;
+            }
+            identity_provenance = Some(match value {
+                "built-in" => crate::task::process::ApplicationProvenance::BuiltIn,
+                "verified-package" => {
+                    crate::task::process::ApplicationProvenance::VerifiedPackage
+                }
+                "development" => crate::task::process::ApplicationProvenance::Development,
+                _ => return EINVAL,
+            });
         } else {
             extra_args.push(item.as_str());
         }
     }
+    let application_identity = match (
+        identity_package,
+        identity_developer,
+        identity_subject_key,
+        identity_provenance,
+    ) {
+        (None, None, None, None) => None,
+        (Some(package), Some(developer), Some(subject_key), Some(provenance)) => {
+            Some(crate::task::process::ApplicationIdentity::new(
+                package.to_string(),
+                developer.to_string(),
+                subject_key,
+                provenance,
+            ))
+        }
+        _ => return EINVAL,
+    };
 
     if !caller_can_grant_capabilities_on_exec() {
         crate::warn!(
@@ -547,6 +607,41 @@ fn exec_manifest_common(
         return errno;
     }
 
+    let authorization_pid = parent_override.or_else(crate::syscall::security::current_process_id);
+    let authorization_thread =
+        authorization_thread_override.or_else(crate::task::current_thread_id);
+    let authorization = authorization_pid
+        .zip(authorization_thread)
+        .and_then(|(pid, thread)| {
+            crate::task::with_process_mut(pid, |process| {
+                process.take_exec_authorization(&path, thread)
+            })
+            .flatten()
+        });
+    let expected_digest = if let Some(authorization) = authorization {
+        let caps_match = caps.is_subset_of(&authorization.capabilities)
+            && authorization.capabilities.is_subset_of(&caps);
+        let authorities_match = authorities.is_subset_of(&authorization.kernel_authorities)
+            && authorization.kernel_authorities.is_subset_of(&authorities);
+        if authorization.kind != crate::task::process::PendingExecKind::Spawn
+            || authorization.execution_class != execution_class
+            || application_identity.as_ref() != Some(&authorization.identity)
+            || !caps_match
+            || !authorities_match
+        {
+            crate::warn!("exec_manifest: security decision mismatch for '{}'", path);
+            return EACCES;
+        }
+        Some(authorization.executable_digest)
+    } else if crate::policy::caller_is_core_process() {
+        // core.service launches logger and capability.service from the
+        // authenticated boot generation before the policy service exists.
+        None
+    } else {
+        crate::warn!("exec_manifest: no matching spawn authorization for '{}'", path);
+        return EACCES;
+    };
+
     let requested_privilege = match execution_class {
         ExecutionClass::Privileged => Some(crate::task::PrivilegeLevel::Service),
         ExecutionClass::Unprivileged => Some(crate::task::PrivilegeLevel::User),
@@ -563,8 +658,9 @@ fn exec_manifest_common(
         requested_privilege,
         execution_class,
         parent_override,
-        security_identity,
+        application_identity,
         true,
+        expected_digest,
     )
 }
 
@@ -574,6 +670,193 @@ fn valid_security_identity(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
+}
+
+fn decode_subject_key_id(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut output = [0u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = decode_hex(pair[0])?;
+        let low = decode_hex(pair[1])?;
+        output[index] = high << 4 | low;
+    }
+    Some(output)
+}
+
+fn decode_hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
+}
+
+pub fn authorize_exec_syscall(
+    requester_endpoint: u64,
+    path_ptr: u64,
+    identity_ptr: u64,
+    caps_ptr: u64,
+    caps_total_len: u64,
+) -> u64 {
+    use crate::syscall::types::{EACCES, EINVAL};
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::CapabilitiesManage,
+    ]) {
+        return EACCES;
+    }
+    let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
+        Ok(path) => path,
+        Err(_) => return EINVAL,
+    };
+    let identity_items = match read_nul_args_from_user(identity_ptr, 1024, 7) {
+        Ok(items) => items,
+        Err(errno) => return errno,
+    };
+    let mut package = None;
+    let mut developer = None;
+    let mut subject_key = None;
+    let mut provenance = None;
+    let mut executable_digest = None;
+    let mut authorization_kind = None;
+    let mut execution_class = None;
+    for item in &identity_items {
+        if let Some(value) = item.strip_prefix(APPLICATION_PACKAGE_ID_PREFIX) {
+            package = Some(value);
+        } else if let Some(value) = item.strip_prefix(APPLICATION_DEVELOPER_ID_PREFIX) {
+            developer = Some(value);
+        } else if let Some(value) = item.strip_prefix(APPLICATION_SUBJECT_KEY_ID_PREFIX) {
+            subject_key = decode_subject_key_id(value);
+        } else if let Some(value) = item.strip_prefix(APPLICATION_PROVENANCE_PREFIX) {
+            provenance = match value {
+                "built-in" => Some(crate::task::process::ApplicationProvenance::BuiltIn),
+                "verified-package" => Some(
+                    crate::task::process::ApplicationProvenance::VerifiedPackage,
+                ),
+                "development" => Some(crate::task::process::ApplicationProvenance::Development),
+                _ => None,
+            };
+        } else if let Some(value) = item.strip_prefix(EXECUTABLE_DIGEST_PREFIX) {
+            if executable_digest.is_some() {
+                return EINVAL;
+            }
+            executable_digest = decode_subject_key_id(value);
+        } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_KIND_PREFIX) {
+            if authorization_kind.is_some() {
+                return EINVAL;
+            }
+            authorization_kind = match value {
+                EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE => {
+                    Some(crate::task::process::PendingExecKind::ImageReplace)
+                }
+                EXEC_AUTHORIZATION_KIND_SPAWN => {
+                    Some(crate::task::process::PendingExecKind::Spawn)
+                }
+                _ => None,
+            };
+        } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_CLASS_PREFIX) {
+            if execution_class.is_some() {
+                return EINVAL;
+            }
+            execution_class = match value {
+                "privileged" => Some(ExecutionClass::Privileged),
+                "unprivileged" => Some(ExecutionClass::Unprivileged),
+                _ => None,
+            };
+        } else {
+            return EINVAL;
+        }
+    }
+    let (
+        Some(package),
+        Some(developer),
+        Some(subject_key),
+        Some(provenance),
+        Some(executable_digest),
+        Some(authorization_kind),
+        Some(execution_class),
+    ) = (
+        package,
+        developer,
+        subject_key,
+        provenance,
+        executable_digest,
+        authorization_kind,
+        execution_class,
+    )
+    else {
+        return EINVAL;
+    };
+    if !valid_security_identity(package) || !valid_security_identity(developer) {
+        return EINVAL;
+    }
+    let caps_list = match read_nul_caps_from_user(caps_ptr, caps_total_len) {
+        Ok(caps) => caps,
+        Err(errno) => return errno,
+    };
+    let (capabilities, kernel_authorities) = match parse_requested_exec_grants(&caps_list, false) {
+        Ok(grants) => grants,
+        Err(_) => return EINVAL,
+    };
+    let (target_thread, target_pid) = if requester_endpoint == 0 {
+        let Some(thread) = crate::task::current_thread_id() else {
+            return EINVAL;
+        };
+        let Some(pid) = crate::syscall::security::current_process_id() else {
+            return EINVAL;
+        };
+        (thread, pid)
+    } else {
+        let Some(requester_tid) = crate::syscall::ipc::resolve_sender_thread_id(requester_endpoint)
+        else {
+            return EINVAL;
+        };
+        let thread = crate::task::ThreadId::from_u64(requester_tid);
+        let Some(pid) = crate::task::with_thread(
+            thread,
+            |thread| thread.process_id(),
+        ) else {
+            return EINVAL;
+        };
+        (thread, pid)
+    };
+    let allowed = crate::task::with_process(target_pid, |process| match authorization_kind {
+        crate::task::process::PendingExecKind::ImageReplace => {
+            capabilities.is_subset_of(process.capabilities())
+                && kernel_authorities.is_subset_of(process.kernel_authorities())
+        }
+        crate::task::process::PendingExecKind::Spawn => process
+            .capabilities()
+            .contains(crate::capability::Capability::ProcessSpawn),
+    })
+    .unwrap_or(false);
+    if !allowed {
+        return EACCES;
+    }
+    let authorization = crate::task::process::PendingExecSecurity {
+        path,
+        authorized_thread: target_thread,
+        executable_digest,
+        capabilities,
+        kernel_authorities,
+        identity: crate::task::process::ApplicationIdentity::new(
+            package.to_string(),
+            developer.to_string(),
+            subject_key,
+            provenance,
+        ),
+        kind: authorization_kind,
+        execution_class,
+    };
+    if crate::task::with_process_mut(target_pid, |process| {
+        process.authorize_next_exec(authorization)
+    })
+    .is_none()
+    {
+        return EINVAL;
+    }
+    crate::syscall::types::SUCCESS
 }
 
 pub fn exec_kernel_with_name_caps_and_authorities(
@@ -602,6 +885,7 @@ pub fn exec_kernel_with_name_caps_and_authorities(
         None,
         None,
         false,
+        None,
     )
 }
 
@@ -616,8 +900,9 @@ fn exec_internal(
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     execution_class: ExecutionClass,
     parent_override: Option<crate::task::ProcessId>,
-    security_identity: Option<&str>,
+    application_identity: Option<crate::task::process::ApplicationIdentity>,
     enforce_path_access: bool,
+    expected_digest: Option<[u8; 32]>,
 ) -> u64 {
     let mut measurement = ExecMeasurement::start();
     let mut process_name = name_override
@@ -639,6 +924,13 @@ fn exec_internal(
         }
     }
     if let Some((data, source)) = load_exec_image(path, execution_class) {
+        if expected_digest.is_some_and(|expected| {
+            let actual: [u8; 32] = Sha256::digest(&data).into();
+            actual != expected
+        }) {
+            crate::warn!("exec: executable changed after authorization '{}'", path);
+            return crate::syscall::types::EACCES;
+        }
         crate::info!(
             "exec: loaded '{}' from {} ({} bytes)",
             path,
@@ -656,7 +948,7 @@ fn exec_internal(
             initial_kernel_authorities,
             requested_credentials,
             requested_privilege,
-            security_identity,
+            application_identity,
             &mut measurement,
         );
         measurement.finish(result)
@@ -870,7 +1162,7 @@ fn exec_with_data(
     initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_credentials: Option<crate::task::ProcessCredentials>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
-    security_identity: Option<&str>,
+    application_identity: Option<crate::task::process::ApplicationIdentity>,
     measurement: &mut ExecMeasurement,
 ) -> u64 {
     crate::debug!("exec: name={}", process_name);
@@ -1055,8 +1347,8 @@ fn exec_with_data(
         const DEFAULT_PROCESS_PRIORITY: u8 = 8;
         let priority = DEFAULT_PROCESS_PRIORITY;
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
-        if let Some(identity) = security_identity {
-            proc.set_security_identity(identity);
+        if let Some(identity) = application_identity {
+            proc.set_application_identity(identity);
         }
         if let Some(credentials) =
             parent_pid.and_then(|pid| crate::task::with_process(pid, |parent| parent.credentials()))
@@ -1262,7 +1554,7 @@ fn read_user_ptr_array(array_ptr: u64, max_entries: usize) -> Vec<String> {
 /// - `argv`: 引数ポインタ配列 (char*[]) — null 終端、0 の場合は [path] を使用
 /// - `envp`: 環境変数ポインタ配列 (char*[]) — null 終端、0 の場合は空
 pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
-    use crate::syscall::types::{EINVAL, ENOENT, EPERM};
+    use crate::syscall::types::{EACCES, EINVAL, ENOENT, EPERM};
 
     let mut measurement = ExecMeasurement::start();
     if path_ptr == 0 {
@@ -1284,6 +1576,23 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     let Some(pid) = crate::syscall::security::current_process_id() else {
         return crate::syscall::types::EACCES;
     };
+    let Some(authorization_thread) = crate::task::current_thread_id() else {
+        return crate::syscall::types::EACCES;
+    };
+    let Some(exec_authorization) = crate::task::with_process_mut(pid, |process| {
+        process.take_exec_authorization(&path_owned, authorization_thread)
+    })
+    .flatten()
+    else {
+        crate::warn!("execve: no matching security decision for '{}'", path_owned);
+        return EACCES;
+    };
+    if exec_authorization.kind != crate::task::process::PendingExecKind::ImageReplace
+        || exec_authorization.execution_class != ExecutionClass::Unprivileged
+    {
+        crate::warn!("execve: authorization kind mismatch for '{}'", path_owned);
+        return EACCES;
+    }
     if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(&path_owned, pid)
     {
         return errno;
@@ -1294,6 +1603,10 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         Some(loaded) => loaded,
         None => return ENOENT,
     };
+    if Sha256::digest(&data_vec).as_slice() != exec_authorization.executable_digest {
+        crate::warn!("execve: executable changed after authorization '{}'", path_owned);
+        return EACCES;
+    }
     
     crate::info!(
         "execve: loaded '{}' from {} ({} bytes)",
@@ -1441,6 +1754,9 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         p.set_stack_bottom(stack_base_vaddr);
         p.set_stack_top(stack_end_vaddr + 4096);
         p.set_exe_path(&path_owned);
+        p.set_capabilities_for_exec(exec_authorization.capabilities);
+        p.set_kernel_authorities_for_exec(crate::capability::KernelAuthoritySet::empty());
+        p.set_application_identity(exec_authorization.identity);
         crate::debug!(
             "[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}",
             p.name(),

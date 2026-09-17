@@ -255,16 +255,19 @@ impl Capability {
     }
 
     pub fn is_delegable(&self) -> bool {
-        matches!(
-            self,
-            Capability::FsReadTmp
-                | Capability::FsWriteTmp
-                | Capability::FsReadRemovable
-                | Capability::FsWriteRemovable
-                | Capability::DisplayRead
-                | Capability::SystemTimeRead
-                | Capability::Dynamic(_)
-        )
+        if let Some(name) = self.builtin_name() {
+            return mnu_abi::capability::metadata(name).is_some_and(|metadata| metadata.delegable);
+        }
+        let Capability::Dynamic(id) = self else {
+            return false;
+        };
+        with_dynamic_registry(|registry| {
+            registry
+                .names
+                .get(*id as usize)
+                .and_then(|name| mnu_abi::capability::metadata(name))
+                .is_some_and(|metadata| metadata.delegable)
+        })
     }
 
     pub fn bootstrap_capabilities() -> &'static [Capability] {

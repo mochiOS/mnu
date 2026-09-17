@@ -408,6 +408,71 @@ pub(crate) struct ProcessCredentials {
     effective_gid: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplicationProvenance {
+    BuiltIn,
+    VerifiedPackage,
+    Development,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationIdentity {
+    package_id: String,
+    developer_id: String,
+    subject_key_id: [u8; 32],
+    provenance: ApplicationProvenance,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingExecSecurity {
+    pub path: String,
+    pub authorized_thread: crate::task::ThreadId,
+    pub executable_digest: [u8; 32],
+    pub capabilities: CapabilitySet,
+    pub kernel_authorities: KernelAuthoritySet,
+    pub identity: ApplicationIdentity,
+    pub kind: PendingExecKind,
+    pub execution_class: mnu_abi::exec::ExecutionClass,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingExecKind {
+    ImageReplace,
+    Spawn,
+}
+
+impl ApplicationIdentity {
+    pub fn new(
+        package_id: String,
+        developer_id: String,
+        subject_key_id: [u8; 32],
+        provenance: ApplicationProvenance,
+    ) -> Self {
+        Self {
+            package_id,
+            developer_id,
+            subject_key_id,
+            provenance,
+        }
+    }
+
+    pub fn package_id(&self) -> &str {
+        &self.package_id
+    }
+
+    pub fn developer_id(&self) -> &str {
+        &self.developer_id
+    }
+
+    pub const fn subject_key_id(&self) -> &[u8; 32] {
+        &self.subject_key_id
+    }
+
+    pub const fn provenance(&self) -> ApplicationProvenance {
+        self.provenance
+    }
+}
+
 impl ProcessCredentials {
     const fn root() -> Self {
         Self {
@@ -477,8 +542,9 @@ impl ProcessCredentials {
 pub struct Process {
     /// プロセスID
     id: ProcessId,
-    /// ユーザー空間が割り当てた不透明なセキュリティID
-    security_identity: Option<String>,
+    /// 検証済みinstall metadataから導出されたapplication identity。
+    application_identity: Option<ApplicationIdentity>,
+    pending_exec_security: Option<PendingExecSecurity>,
     /// サービスID（サービスの場合のみ設定）
     service_id: Option<String>,
     /// プロセス名 (固定長バッファ)
@@ -572,7 +638,8 @@ impl Process {
 
         Self {
             id: ProcessId::new(),
-            security_identity: None,
+            application_identity: None,
+            pending_exec_security: None,
             service_id: None,
             name: name_buf,
             name_len: len,
@@ -619,12 +686,40 @@ impl Process {
 
     /// セキュリティIDを取得
     pub fn security_identity(&self) -> Option<&str> {
-        self.security_identity.as_deref()
+        self.application_identity
+            .as_ref()
+            .map(ApplicationIdentity::package_id)
     }
 
-    /// セキュリティIDを設定する（信頼済み起動経路専用）
-    pub(crate) fn set_security_identity<S: Into<String>>(&mut self, identity: S) {
-        self.security_identity = Some(identity.into());
+    pub fn application_identity(&self) -> Option<&ApplicationIdentity> {
+        self.application_identity.as_ref()
+    }
+
+    /// application identityを設定する（信頼済み起動経路専用）。
+    pub(crate) fn set_application_identity(&mut self, identity: ApplicationIdentity) {
+        self.application_identity = Some(identity);
+    }
+
+    pub(crate) fn authorize_next_exec(&mut self, authorization: PendingExecSecurity) {
+        self.pending_exec_security = Some(authorization);
+    }
+
+    pub(crate) fn take_exec_authorization(
+        &mut self,
+        path: &str,
+        thread: crate::task::ThreadId,
+    ) -> Option<PendingExecSecurity> {
+        if self
+            .pending_exec_security
+            .as_ref()
+            .is_some_and(|authorization| {
+                authorization.path == path && authorization.authorized_thread == thread
+            })
+        {
+            self.pending_exec_security.take()
+        } else {
+            None
+        }
     }
 
     /// サービスIDを取得
@@ -1128,7 +1223,7 @@ impl core::fmt::Debug for Process {
         let mut debug_struct = f.debug_struct("Process");
         debug_struct
             .field("id", &self.id)
-            .field("security_identity", &self.security_identity)
+            .field("application_identity", &self.application_identity)
             .field("service_id", &self.service_id)
             .field("name", &self.name())
             .field("state", &self.state)

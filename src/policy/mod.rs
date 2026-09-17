@@ -101,6 +101,14 @@ pub fn caller_is_service_or_core_process() -> bool {
     caller_is_service_or_core()
 }
 
+/// Core processes are the only user-space callers allowed to perform the
+/// authenticated-boot bootstrap before capability.service exists.
+pub fn caller_is_core_process() -> bool {
+    caller_pid()
+        .and_then(|pid| crate::task::with_process(pid, |process| process.privilege()))
+        == Some(PrivilegeLevel::Core)
+}
+
 /// exec に対して明示された privilege を最終的に決定する
 ///
 /// カーネルは path から Service 権限を推測しない。

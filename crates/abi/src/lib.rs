@@ -3,6 +3,9 @@
 /// ブートローダーからmnuへ渡す起動情報のABIです。
 pub mod boot;
 
+/// Canonical metadata for named capabilities shared by kernel and user space.
+pub mod capability;
+
 /// プロセス作成時に渡すメタデータのABIです。
 pub mod exec;
 
@@ -201,6 +204,8 @@ pub enum SyscallNumber {
     FramebufferTransferLimit = 613,
     CommitFramebuffer = 614,
     DeviceControl = 615,
+    AuthorizeExec = 616,
+    GetThreadSecurityContext = 617,
     CheckGravityExist = 999,
 }
 
@@ -258,6 +263,42 @@ pub struct ExecManifestRequester {
     pub execution_class: u64,
     pub requester_tid: u64,
     pub reserved: u64,
+}
+
+pub const APPLICATION_ID_FIELD_LEN: usize = 128;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadSecurityContext {
+    pub process_id: u64,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+    pub provenance: u8,
+    pub reserved0: [u8; 7],
+    pub subject_key_id: [u8; 32],
+    pub package_id_len: u16,
+    pub developer_id_len: u16,
+    pub reserved1: u32,
+    pub package_id: [u8; APPLICATION_ID_FIELD_LEN],
+    pub developer_id: [u8; APPLICATION_ID_FIELD_LEN],
+}
+
+impl Default for ThreadSecurityContext {
+    fn default() -> Self {
+        Self {
+            process_id: 0,
+            effective_uid: 0,
+            effective_gid: 0,
+            provenance: 0,
+            reserved0: [0; 7],
+            subject_key_id: [0; 32],
+            package_id_len: 0,
+            developer_id_len: 0,
+            reserved1: 0,
+            package_id: [0; APPLICATION_ID_FIELD_LEN],
+            developer_id: [0; APPLICATION_ID_FIELD_LEN],
+        }
+    }
 }
 
 #[cfg(test)]

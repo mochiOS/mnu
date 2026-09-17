@@ -18,6 +18,63 @@ fn caller_has_process_spawn_capability() -> bool {
     ])
 }
 
+pub fn get_thread_security_context(sender_endpoint: u64, output: u64, output_len: u64) -> u64 {
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::CapabilitiesManage,
+        crate::capability::Capability::ProcessInspect,
+    ]) {
+        return EPERM;
+    }
+    if output_len < core::mem::size_of::<mnu_abi::ThreadSecurityContext>() as u64 {
+        return EINVAL;
+    }
+    let Some(thread_id) = crate::syscall::ipc::resolve_sender_thread_id(sender_endpoint) else {
+        return EINVAL;
+    };
+    let Some(pid) = crate::task::thread_to_process_id(thread_id) else {
+        return EINVAL;
+    };
+    let Some(context) = crate::task::with_process(pid, |process| {
+        let identity = process.application_identity()?;
+        let package = identity.package_id().as_bytes();
+        let developer = identity.developer_id().as_bytes();
+        if package.len() > mnu_abi::APPLICATION_ID_FIELD_LEN
+            || developer.len() > mnu_abi::APPLICATION_ID_FIELD_LEN
+        {
+            return None;
+        }
+        let credentials = process.credentials();
+        let mut context = mnu_abi::ThreadSecurityContext::default();
+        context.process_id = pid.as_u64();
+        context.effective_uid = credentials.effective_uid();
+        context.effective_gid = credentials.effective_gid();
+        context.provenance = match identity.provenance() {
+            crate::task::process::ApplicationProvenance::BuiltIn => 1,
+            crate::task::process::ApplicationProvenance::VerifiedPackage => 2,
+            crate::task::process::ApplicationProvenance::Development => 3,
+        };
+        context.subject_key_id = *identity.subject_key_id();
+        context.package_id_len = package.len() as u16;
+        context.developer_id_len = developer.len() as u16;
+        context.package_id[..package.len()].copy_from_slice(package);
+        context.developer_id[..developer.len()].copy_from_slice(developer);
+        Some(context)
+    })
+    .flatten()
+    else {
+        return EINVAL;
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&context as *const mnu_abi::ThreadSecurityContext).cast::<u8>(),
+            core::mem::size_of::<mnu_abi::ThreadSecurityContext>(),
+        )
+    };
+    crate::syscall::copy_to_user(output, bytes)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(|error| error)
+}
+
 /// ユーザー空間の上限アドレス (x86-64 canonical hole 下側)
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 /// Linux互換: 操作がタイムアウトした
@@ -538,7 +595,7 @@ pub fn fork() -> u64 {
             p.stack_top(),
             p.cwd().to_string(),
             p.exe_path().to_string(),
-            p.security_identity().map(ToString::to_string),
+            p.application_identity().cloned(),
             p.resource_limits(),
             p.pgid(),
             p.sid(),
@@ -607,7 +664,7 @@ pub fn fork() -> u64 {
     child_proc.set_cwd(&parent_cwd);
     child_proc.set_exe_path(&parent_exe_path);
     if let Some(identity) = parent_security_identity {
-        child_proc.set_security_identity(identity);
+        child_proc.set_application_identity(identity);
     }
     child_proc.set_resource_limits(parent_limits);
     child_proc.set_pgid(parent_pgid);
