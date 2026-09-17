@@ -63,6 +63,7 @@ fn spawn_ap_idle_thread() -> Result<(task::ThreadId, usize)> {
 
 /// カーネルメイン関数
 fn kernel_main() -> ! {
+	early_serial("kernel: kernel_main entered\n");
 	util::log::set_level(LogLevel::Info);
 	debug!("mnu kernel started");
 	if let Some(handoff) = crate::smp::handoff() {
@@ -107,6 +108,7 @@ fn kernel_main() -> ! {
 		kernel_authorities,
 		crate::task::PrivilegeLevel::Service,
 	);
+	early_serial("kernel: init exec returned\n");
 
 	crate::info!("init pid = {:#x}", init_pid);
 
@@ -175,6 +177,7 @@ pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
 	crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
 	match kinit(boot_info) {
 		Ok(_) => {
+			early_serial("kernel: kinit completed\n");
 		}
 		Err(e) => {
 			handle_kernel_error(e);

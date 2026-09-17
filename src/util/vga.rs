@@ -283,9 +283,6 @@ pub fn init(addr: u64, size: usize, width: usize, height: usize, stride: usize) 
     });
     if let Some(info) = FB_INFO.get() {
         WRITER.call_once(|| Mutex::new(Writer::new(info)));
-        if let Some(writer) = WRITER.get() {
-            writer.lock().clear_screen();
-        }
     }
 }
 
