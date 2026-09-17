@@ -268,7 +268,11 @@ fn parse_requested_exec_grants(
             authorities.insert(authority);
             continue;
         }
-        let cap = if can_intern {
+        // Canonical capabilities are safe to intern even while consuming an
+        // authorization: capability.service has already evaluated their
+        // policy classification, and the ABI registry prevents arbitrary
+        // names from creating kernel capability IDs here.
+        let cap = if can_intern || mnu_abi::capability::metadata(spec.as_str()).is_some() {
             Capability::intern(spec.as_str())
         } else {
             Capability::from_str(spec.as_str())
