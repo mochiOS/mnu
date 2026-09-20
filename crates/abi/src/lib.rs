@@ -206,6 +206,7 @@ pub enum SyscallNumber {
     DeviceControl = 615,
     AuthorizeExec = 616,
     GetThreadSecurityContext = 617,
+    BootSystemSlot = 618,
     CheckGravityExist = 999,
 }
 
@@ -326,6 +327,11 @@ mod credential_spawn_tests {
         assert_eq!(core::mem::align_of::<StorageControlRequest>(), 8);
         assert_eq!(core::mem::size_of::<StorageControlResponse>(), 40);
         assert_eq!(core::mem::align_of::<StorageControlResponse>(), 8);
+    }
+
+    #[test]
+    fn boot_system_slot_syscall_number_is_stable() {
+        assert_eq!(super::SyscallNumber::BootSystemSlot as u64, 618);
     }
 }
 

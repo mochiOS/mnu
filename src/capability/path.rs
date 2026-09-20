@@ -242,6 +242,7 @@ fn parse_rights(value: &str) -> Option<PathRights> {
     let mut bits = 0;
     for right in value.split(',').map(str::trim) {
         bits |= match right {
+            "none" if value.trim() == "none" => 0,
             "read" => PATH_READ,
             "write" => PATH_WRITE,
             "exec" => PATH_EXEC,

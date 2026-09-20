@@ -721,6 +721,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::FramebufferTransferLimit as u64 => framebuffer_transfer_limit(),
         x if x == SyscallNumber::CommitFramebuffer as u64 => commit_framebuffer(arg0, arg1),
         x if x == SyscallNumber::StorageControl as u64 => storage::control(arg0, arg1),
+        x if x == SyscallNumber::BootSystemSlot as u64 => boot_system_slot(),
         x if x == SyscallNumber::DeviceControl as u64 => storage::device_control(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::PerformanceSnapshot as u64 => performance::snapshot(arg0, arg1),
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
@@ -811,6 +812,15 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
     }
 
     result
+}
+
+/// Read-only boot identity. Legacy images report 0; A/B images report 1 or 2.
+fn boot_system_slot() -> u64 {
+    let Some(info) = crate::smp::boot_info() else { return 0; };
+    if (info.feature_flags & crate::BOOT_FEATURE_SYSTEM_SLOT) == 0 {
+        return 0;
+    }
+    info.system_slot as u64
 }
 
 #[cfg(feature = "performance-instrumentation")]

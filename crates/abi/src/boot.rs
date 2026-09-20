@@ -2,7 +2,7 @@ use core::mem::size_of;
 use core::sync::atomic::AtomicU64;
 
 pub const BOOT_ABI_MAGIC: u64 = u64::from_le_bytes(*b"MNUBOOT\0");
-pub const BOOT_ABI_VERSION: u32 = 1;
+pub const BOOT_ABI_VERSION: u32 = 2;
 pub const MAX_CPU_IDS: usize = 64;
 pub const MAX_BOOT_MEMORY_REGIONS: usize = 256;
 
@@ -12,6 +12,11 @@ pub const BOOT_FEATURE_ROOTFS_IMAGE: u64 = 1 << 2;
 pub const BOOT_FEATURE_SMP: u64 = 1 << 3;
 pub const BOOT_FEATURE_ENTROPY: u64 = 1 << 4;
 pub const BOOT_FEATURE_HYPERVISOR_DOMAIN: u64 = 1 << 5;
+pub const BOOT_FEATURE_SYSTEM_SLOT: u64 = 1 << 6;
+pub const BOOT_FEATURE_BOOT_ESP_GUID: u64 = 1 << 7;
+pub const BOOT_SYSTEM_SLOT_LEGACY: u8 = 0;
+pub const BOOT_SYSTEM_SLOT_A: u8 = 1;
+pub const BOOT_SYSTEM_SLOT_B: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootInfoError {
@@ -20,6 +25,8 @@ pub enum BootInfoError {
     InvalidStructSize,
     InvalidMemoryMapEntrySize,
     InvalidCpuCount,
+    InvalidSystemSlot,
+    InvalidBootEspGuid,
 }
 
 #[repr(C)]
@@ -247,7 +254,11 @@ pub struct BootInfo {
     pub smp_trampoline_size: u64,
     pub entropy_seed: [u8; 32],
     pub entropy_seed_valid: u8,
-    pub _reserved3: [u8; 7],
+    pub system_slot: u8,
+    pub _reserved3: [u8; 6],
+    /// Canonical GUID bytes of the EFI system partition used to load this image.
+    /// Only valid when `BOOT_FEATURE_BOOT_ESP_GUID` is set.
+    pub boot_esp_guid: [u8; 16],
 }
 
 impl BootInfo {
@@ -285,7 +296,9 @@ impl BootInfo {
             smp_trampoline_size: 0,
             entropy_seed: [0; 32],
             entropy_seed_valid: 0,
-            _reserved3: [0; 7],
+            system_slot: BOOT_SYSTEM_SLOT_LEGACY,
+            _reserved3: [0; 6],
+            boot_esp_guid: [0; 16],
         }
     }
 
@@ -304,6 +317,22 @@ impl BootInfo {
         }
         if self.cpu_apic_id_count as usize > MAX_CPU_IDS {
             return Err(BootInfoError::InvalidCpuCount);
+        }
+        if (self.feature_flags & BOOT_FEATURE_SYSTEM_SLOT) != 0 {
+            if self.system_slot != BOOT_SYSTEM_SLOT_A && self.system_slot != BOOT_SYSTEM_SLOT_B {
+                return Err(BootInfoError::InvalidSystemSlot);
+            }
+        } else if self.system_slot != BOOT_SYSTEM_SLOT_LEGACY {
+            return Err(BootInfoError::InvalidSystemSlot);
+        }
+        if (self.feature_flags & BOOT_FEATURE_BOOT_ESP_GUID) != 0 {
+            if (self.feature_flags & BOOT_FEATURE_SYSTEM_SLOT) == 0
+                || self.boot_esp_guid == [0; 16]
+            {
+                return Err(BootInfoError::InvalidBootEspGuid);
+            }
+        } else if self.boot_esp_guid != [0; 16] {
+            return Err(BootInfoError::InvalidBootEspGuid);
         }
         Ok(())
     }
@@ -336,6 +365,33 @@ mod tests {
     #[test]
     fn empty_boot_info_is_valid() {
         assert_eq!(BootInfo::empty().validate(), Ok(()));
+    }
+
+    #[test]
+    fn system_slot_requires_feature_and_known_value() {
+        let mut info = BootInfo::empty();
+        info.system_slot = BOOT_SYSTEM_SLOT_A;
+        assert_eq!(info.validate(), Err(BootInfoError::InvalidSystemSlot));
+        info.feature_flags |= BOOT_FEATURE_SYSTEM_SLOT;
+        assert_eq!(info.validate(), Ok(()));
+        info.system_slot = BOOT_SYSTEM_SLOT_B;
+        assert_eq!(info.validate(), Ok(()));
+        info.system_slot = BOOT_SYSTEM_SLOT_LEGACY;
+        assert_eq!(info.validate(), Err(BootInfoError::InvalidSystemSlot));
+    }
+
+    #[test]
+    fn boot_esp_guid_requires_ab_slot_and_explicit_feature() {
+        let mut info = BootInfo::empty();
+        info.boot_esp_guid = [1; 16];
+        assert_eq!(info.validate(), Err(BootInfoError::InvalidBootEspGuid));
+        info.feature_flags |= BOOT_FEATURE_BOOT_ESP_GUID;
+        assert_eq!(info.validate(), Err(BootInfoError::InvalidBootEspGuid));
+        info.system_slot = BOOT_SYSTEM_SLOT_B;
+        info.feature_flags |= BOOT_FEATURE_SYSTEM_SLOT;
+        assert_eq!(info.validate(), Ok(()));
+        info.boot_esp_guid = [0; 16];
+        assert_eq!(info.validate(), Err(BootInfoError::InvalidBootEspGuid));
     }
 
     #[test]

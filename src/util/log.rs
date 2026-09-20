@@ -58,6 +58,14 @@ pub fn log(level: LogLevel, args: core::fmt::Arguments) {
     sprintln!("{} {}", prefix, args);
 }
 
+/// 起動検証に必要な少数のマイルストーンを release ビルドでもシリアルへ出す。
+/// debug ビルドでは通常の info! が同じ内容を出すため重複させない。
+pub fn release_boot_marker(args: core::fmt::Arguments) {
+    if !cfg!(debug_assertions) {
+        crate::util::console::print(format_args!("[BOOT] {}\n", args));
+    }
+}
+
 /// トレースログ
 #[macro_export]
 macro_rules! trace {

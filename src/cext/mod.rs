@@ -20,11 +20,12 @@ use crate::task::ResourceLimits;
 pub mod disk;
 pub mod fs;
 
-const MCX_CEXT_ABI: u16 = 3;
+const MCX_CEXT_ABI: u16 = 4;
 const MCX_LOG_ERROR: u32 = 0;
 const MCX_LOG_WARN: u32 = 1;
 const MCX_LOG_INFO: u32 = 2;
 const MCX_LOG_DEBUG: u32 = 3;
+const MCX_LOG_BOOT: u32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -42,6 +43,7 @@ pub struct McxKernelApi {
     pub log: extern "C" fn(level: u32, ptr: *const u8, len: usize),
     pub register_irq: extern "C" fn(irq: u8, handler: extern "C" fn(u8)) -> i32,
     pub now_seconds: extern "C" fn() -> u32,
+    pub boot_system_slot: extern "C" fn() -> u32,
 }
 
 #[repr(C)]
@@ -176,6 +178,10 @@ extern "C" fn kernel_log(level: u32, ptr: *const u8, len: usize) {
         MCX_LOG_WARN => crate::warn!("cext: {}", msg),
         MCX_LOG_INFO => crate::info!("cext: {}", msg),
         MCX_LOG_DEBUG => crate::debug!("cext: {}", msg),
+        MCX_LOG_BOOT => {
+            crate::info!("cext: {}", msg);
+            crate::util::log::release_boot_marker(format_args!("cext: {}", msg));
+        }
         _ => crate::info!("cext: {}", msg),
     }
 }
@@ -241,6 +247,16 @@ extern "C" fn kernel_now_seconds() -> u32 {
     core::cmp::min(seconds, u32::MAX as u64) as u32
 }
 
+extern "C" fn kernel_boot_system_slot() -> u32 {
+    let Some(info) = crate::smp::boot_info() else {
+        return 0;
+    };
+    if (info.feature_flags & crate::BOOT_FEATURE_SYSTEM_SLOT) == 0 {
+        return 0;
+    }
+    info.system_slot as u32
+}
+
 static KERNEL_API: McxKernelApi = McxKernelApi {
     abi: MCX_CEXT_ABI,
     struct_size: core::mem::size_of::<McxKernelApi>() as u16,
@@ -248,6 +264,7 @@ static KERNEL_API: McxKernelApi = McxKernelApi {
     log: kernel_log,
     register_irq: kernel_register_irq,
     now_seconds: kernel_now_seconds,
+    boot_system_slot: kernel_boot_system_slot,
 };
 
 fn register_disk_provider(init_addr: u64, module_version: u16) -> bool {
@@ -410,9 +427,11 @@ fn register_provider(kind: CextKind, init_addr: u64, version: u16) -> bool {
 
 fn load_bundle_directories() -> bool {
     let Some(entries) = crate::init::fs::initfs_readdir_path("/") else {
+        crate::util::log::release_boot_marker(format_args!("cext: initfs root unavailable"));
         return false;
     };
     let mut found_bundle = false;
+    let mut loaded_bundle = false;
 
     for name in entries {
         if !name.ends_with(".cext") {
@@ -428,10 +447,12 @@ fn load_bundle_directories() -> bool {
         let entry_path_default = alloc::format!("{}/entry", dir_path);
         let Some(manifest_bytes) = crate::init::fs::read_initfs(&manifest_path) else {
             crate::warn!("cext: missing {}", manifest_path);
+            crate::util::log::release_boot_marker(format_args!("cext: missing manifest {}", name));
             continue;
         };
         let Some(manifest) = parse_bundle_manifest(&manifest_bytes) else {
             crate::warn!("cext: invalid manifest {}", manifest_path);
+            crate::util::log::release_boot_marker(format_args!("cext: invalid manifest {}", name));
             continue;
         };
         if manifest.abi != MCX_CEXT_ABI {
@@ -440,6 +461,10 @@ fn load_bundle_directories() -> bool {
                 manifest.abi,
                 manifest.name
             );
+            crate::util::log::release_boot_marker(format_args!(
+                "cext: unsupported abi {} for {} (expected {})",
+                manifest.abi, manifest.name, MCX_CEXT_ABI
+            ));
             continue;
         }
         if manifest.load_stage != "boot" {
@@ -457,6 +482,7 @@ fn load_bundle_directories() -> bool {
         };
         let Some(entry_bytes) = crate::init::fs::read_initfs(&entry_path) else {
             crate::warn!("cext: missing {}", entry_path);
+            crate::util::log::release_boot_marker(format_args!("cext: missing entry {}", name));
             if manifest.required {
                 crate::warn!("cext: required bundle {} is incomplete", manifest.name);
             }
@@ -473,6 +499,7 @@ fn load_bundle_directories() -> bool {
         };
         let Some(meta) = parse_cext(&entry_bytes) else {
             crate::warn!("cext: invalid module package {}", entry_path);
+            crate::util::log::release_boot_marker(format_args!("cext: invalid package {}", name));
             continue;
         };
         if meta.name != manifest.name || meta.module_version != manifest.version {
@@ -487,9 +514,11 @@ fn load_bundle_directories() -> bool {
         }
         let Some(mut module) = load_elf_symbol(&meta.elf, "mnu_module_init") else {
             crate::warn!("cext: mnu_module_init not found in {}", entry_path);
+            crate::util::log::release_boot_marker(format_args!("cext: init symbol missing {}", name));
             continue;
         };
         if register_provider(kind, module.address, meta.module_version) {
+            loaded_bundle = true;
             module.keep_mapped();
             load_cext(&manifest.name, kind, None);
             crate::info!(
@@ -500,9 +529,22 @@ fn load_bundle_directories() -> bool {
                 manifest.provides,
                 manifest.requires
             );
+            if meta.name == "disk" || meta.name == "ext2" {
+                crate::util::log::release_boot_marker(format_args!(
+                    "cext: loaded bundle {}",
+                    meta.name
+                ));
+            }
         } else {
             crate::warn!("cext: module init failed for {}", manifest.name);
+            crate::util::log::release_boot_marker(format_args!(
+                "cext: module init failed {}", manifest.name
+            ));
         }
+    }
+
+    if found_bundle && !loaded_bundle {
+        crate::util::log::release_boot_marker(format_args!("cext: no boot bundles loaded"));
     }
 
     found_bundle

@@ -941,6 +941,17 @@ fn exec_internal(
             source,
             data.len()
         );
+        if path == "/init"
+            || path.starts_with("/system/services/")
+            || path.starts_with("/bin/drivers/")
+            || path.starts_with("/applications/")
+        {
+            crate::util::log::release_boot_marker(format_args!(
+                "exec: loaded '{}' from {}",
+                path,
+                source
+            ));
+        }
         let result = exec_with_data(
             &data,
             &process_name,
@@ -1618,6 +1629,13 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         source,
         data_vec.len()
     );
+    if path_owned == "/bin/mpk" {
+        crate::util::log::release_boot_marker(format_args!(
+            "execve: loaded '{}' from {}",
+            path_owned,
+            source
+        ));
+    }
     let data: &[u8] = &data_vec;
 
     // 新しいページテーブルを作成

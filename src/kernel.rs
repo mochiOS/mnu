@@ -144,6 +144,9 @@ fn kernel_main() -> ! {
 	);
 	crate::performance::mark_boot(crate::performance::BootMilestone::Idle);
 	info!("Kernel initialization complete. Entering idle loop...");
+	crate::util::log::release_boot_marker(format_args!(
+		"Kernel initialization complete. Entering idle loop..."
+	));
 	task::schedule_and_switch();
 
 	loop {
