@@ -721,7 +721,11 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::FramebufferTransferLimit as u64 => framebuffer_transfer_limit(),
         x if x == SyscallNumber::CommitFramebuffer as u64 => commit_framebuffer(arg0, arg1),
         x if x == SyscallNumber::StorageControl as u64 => storage::control(arg0, arg1),
+        x if x == SyscallNumber::BlockRead as u64 => storage::block_read(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::BlockWrite as u64 => storage::block_write(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::BlockFlush as u64 => storage::block_flush(arg0),
         x if x == SyscallNumber::BootSystemSlot as u64 => boot_system_slot(),
+        x if x == SyscallNumber::BootEspGuid as u64 => boot_esp_guid(arg0, arg1),
         x if x == SyscallNumber::DeviceControl as u64 => storage::device_control(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::PerformanceSnapshot as u64 => performance::snapshot(arg0, arg1),
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
@@ -821,6 +825,22 @@ fn boot_system_slot() -> u64 {
         return 0;
     }
     info.system_slot as u64
+}
+
+/// Copies the unique GPT GUID of the ESP that launched mBoot. The value is
+/// unavailable on legacy images and is never guessed from disk ordering.
+fn boot_esp_guid(destination: u64, length: u64) -> u64 {
+    if length != 16 { return EINVAL; }
+    let Some(info) = crate::smp::boot_info() else { return ENOSYS; };
+    if (info.feature_flags & crate::BOOT_FEATURE_BOOT_ESP_GUID) == 0
+        || info.boot_esp_guid == [0; 16]
+    {
+        return ENOSYS;
+    }
+    match copy_to_user(destination, &info.boot_esp_guid) {
+        Ok(()) => SUCCESS,
+        Err(error) => error,
+    }
 }
 
 #[cfg(feature = "performance-instrumentation")]

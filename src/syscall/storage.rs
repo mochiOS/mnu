@@ -1,11 +1,56 @@
 use mnu_abi::{StorageControlRequest, StorageControlResponse, SUCCESS};
 
 use crate::capability::Capability;
+use alloc::vec;
 
 const EACCES: u64 = (-13_i64) as u64;
 const EFAULT: u64 = (-14_i64) as u64;
 const EIO: u64 = (-5_i64) as u64;
 const EINVAL: u64 = (-22_i64) as u64;
+const ENOSYS: u64 = (-38_i64) as u64;
+const MAX_BLOCK_TRANSFER: usize = 256 * 1024;
+const SECTOR_BYTES: usize = 512;
+
+fn block_access_allowed() -> bool {
+    crate::syscall::security::caller_has_any_capability(&[Capability::DeviceStorage])
+}
+
+fn disk_result(result: i32) -> u64 {
+    if result == 0 { SUCCESS } else { (result as i64) as u64 }
+}
+
+pub fn block_read(disk_id: u64, lba: u64, destination: u64, length: u64) -> u64 {
+    if !block_access_allowed() { return EACCES; }
+    let Ok(disk_id) = u32::try_from(disk_id) else { return EINVAL; };
+    let Ok(length) = usize::try_from(length) else { return EINVAL; };
+    if length == 0 || length > MAX_BLOCK_TRANSFER || length % SECTOR_BYTES != 0 {
+        return EINVAL;
+    }
+    let mut bytes = vec![0u8; length];
+    let result = crate::cext::disk::read_sector(disk_id, lba, &mut bytes);
+    if result != 0 { return disk_result(result); }
+    if crate::syscall::copy_to_user(destination, &bytes).is_err() { return EFAULT; }
+    SUCCESS
+}
+
+pub fn block_write(disk_id: u64, lba: u64, source: u64, length: u64) -> u64 {
+    if !block_access_allowed() { return EACCES; }
+    let Ok(disk_id) = u32::try_from(disk_id) else { return EINVAL; };
+    let Ok(length) = usize::try_from(length) else { return EINVAL; };
+    if length == 0 || length > MAX_BLOCK_TRANSFER || length % SECTOR_BYTES != 0 {
+        return EINVAL;
+    }
+    let mut bytes = vec![0u8; length];
+    if crate::syscall::copy_from_user(source, &mut bytes).is_err() { return EFAULT; }
+    disk_result(crate::cext::disk::write_sector(disk_id, lba, &bytes))
+}
+
+pub fn block_flush(disk_id: u64) -> u64 {
+    if !block_access_allowed() { return EACCES; }
+    let Ok(disk_id) = u32::try_from(disk_id) else { return EINVAL; };
+    if !crate::cext::disk::is_loaded() { return ENOSYS; }
+    disk_result(crate::cext::disk::flush(disk_id))
+}
 
 pub fn control(request_ptr: u64, response_ptr: u64) -> u64 {
     control_authorized(request_ptr, response_ptr, "device.storage")

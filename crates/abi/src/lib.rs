@@ -207,6 +207,8 @@ pub enum SyscallNumber {
     AuthorizeExec = 616,
     GetThreadSecurityContext = 617,
     BootSystemSlot = 618,
+    BlockFlush = 619,
+    BootEspGuid = 620,
     CheckGravityExist = 999,
 }
 
