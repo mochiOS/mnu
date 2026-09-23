@@ -54,6 +54,7 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     privileged!("input.pointer.global"), privileged!("input.gamepad"),
     user!("audio.playback"), user!("audio.record"),
     user!("clipboard.read"), user!("clipboard.write"),
+    system!("file-association.read"), user!("file-association.write"),
     user!("notification.send"), privileged!("camera.access"),
     privileged!("microphone.access"), privileged!("location.access"),
     privileged!("bluetooth.access"), privileged!("usb.access"),
