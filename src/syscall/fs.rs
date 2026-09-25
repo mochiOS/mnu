@@ -137,7 +137,16 @@ fn resolve_path_at(pid_raw: u64, dirfd: i64, path_ptr: u64) -> Result<String, u6
     const AT_FDCWD: i64 = -100;
 
     if dirfd == AT_FDCWD {
-        return read_cstring(path_ptr).map(|path| normalize_path(&path));
+        let path = read_cstring(path_ptr)?;
+        if path.starts_with('/') {
+            return Ok(normalize_path(&path));
+        }
+        let cwd = crate::task::with_process(
+            crate::task::ids::ProcessId::from_u64(pid_raw),
+            |process| process.cwd().to_string(),
+        )
+        .ok_or(EACCES)?;
+        return Ok(resolve_relative_to_cwd(&cwd, &path));
     }
 
     let idx = dirfd as usize;
@@ -155,6 +164,14 @@ fn resolve_path_at(pid_raw: u64, dirfd: i64, path_ptr: u64) -> Result<String, u6
         alloc::format!("{}/{}", dir_path.trim_end_matches('/'), path)
     };
     Ok(normalize_path(&full_path))
+}
+
+fn resolve_relative_to_cwd(cwd: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        normalize_path(path)
+    } else {
+        normalize_path(&alloc::format!("{}/{}", cwd.trim_end_matches('/'), path))
+    }
 }
 
 pub(crate) fn ensure_fs_path_readable(path: &str) -> Result<(), u64> {
@@ -2325,8 +2342,8 @@ mod unix_mode_tests {
     use super::{
         O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE,
         UNIX_EXECUTE, access_mode_rights, capability_requirement_satisfied,
-        open_path_required_rights, path_is_in_identity_storage, sticky_directory_allows_delete,
-        unix_mode_allows,
+        open_path_required_rights, path_is_in_identity_storage, resolve_relative_to_cwd,
+        sticky_directory_allows_delete, unix_mode_allows,
     };
     use crate::capability::Capability;
 
@@ -2380,6 +2397,22 @@ mod unix_mode_tests {
             PATH_CREATE
         );
         assert_eq!(open_path_required_rights(O_CREAT, false, true), PATH_READ);
+    }
+
+    #[test]
+    fn relative_at_fdcwd_paths_are_resolved_from_process_cwd() {
+        assert_eq!(
+            resolve_relative_to_cwd("/home/testuser", "hello.txt"),
+            "/home/testuser/hello.txt"
+        );
+        assert_eq!(
+            resolve_relative_to_cwd("/home/testuser/", "Documents/../hello.txt"),
+            "/home/testuser/hello.txt"
+        );
+        assert_eq!(
+            resolve_relative_to_cwd("/home/testuser", "/tmp/hello.txt"),
+            "/tmp/hello.txt"
+        );
     }
 
     #[test]
