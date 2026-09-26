@@ -1,7 +1,8 @@
 use crate::interrupt::spinlock::{SpinLock, SpinLockGuard};
-use alloc::alloc::{alloc, Layout};
+use alloc::alloc::{Layout, alloc};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -255,19 +256,6 @@ pub fn call(
     };
     #[cfg(feature = "performance-instrumentation")]
     let round_trip_start = crate::performance::timestamp();
-    let saved_reply_to = {
-        let mut boxes = lock_mailboxes();
-        let (idx, _) = match crate::task::thread_slot_index_and_generation_by_u64(caller) {
-            Some(v) => v,
-            None => return EINVAL,
-        };
-        if idx >= MAX_THREADS {
-            return EINVAL;
-        }
-        let saved = boxes[idx].reply_to;
-        boxes[idx].reply_to = 0;
-        saved
-    };
     let sent = loop {
         let status = send_call_to_thread_id(dest_thread_id, sender, req_ptr, req_len);
         if status != EAGAIN {
@@ -276,21 +264,9 @@ pub fn call(
         crate::task::yield_now();
     };
     if sent != 0 {
-        let mut boxes = lock_mailboxes();
-        if let Some((idx, _)) = crate::task::thread_slot_index_and_generation_by_u64(caller) {
-            if idx < MAX_THREADS {
-                boxes[idx].reply_to = saved_reply_to;
-            }
-        }
         return sent;
     }
     let result = recv_blocking_reply_for_thread(caller, caller, reply_ptr, reply_len);
-    let mut boxes = lock_mailboxes();
-    if let Some((idx, _)) = crate::task::thread_slot_index_and_generation_by_u64(caller) {
-        if idx < MAX_THREADS {
-            boxes[idx].reply_to = saved_reply_to;
-        }
-    }
     #[cfg(feature = "performance-instrumentation")]
     if (result as i64) >= 0 {
         crate::performance::record_latency(
@@ -319,11 +295,10 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         if idx >= MAX_THREADS {
             return EINVAL;
         }
-        let pending = boxes[idx].reply_to;
-        if pending == 0 || pending != dest_thread_id {
+        if !boxes[idx].has_reply_target(dest_thread_id) {
             return EACCES;
         }
-        pending
+        dest_thread_id
     };
     if target_handle == 0 {
         return EINVAL;
@@ -332,12 +307,13 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         Some(thread_id) => thread_id,
         None => return EINVAL,
     };
-    let status = send_to_thread_id_with_kind(target_thread, caller_handle, buf_ptr, len, true, false);
+    let status =
+        send_to_thread_id_with_kind(target_thread, caller_handle, buf_ptr, len, true, false);
     if status == 0 {
         let mut boxes = lock_mailboxes();
         if let Some((idx, _)) = crate::task::thread_slot_index_and_generation_by_u64(current) {
             if idx < MAX_THREADS {
-                boxes[idx].reply_to = 0;
+                boxes[idx].remove_reply_target(target_handle);
             }
         }
     }
@@ -371,16 +347,7 @@ fn recv_blocking_reply_for_thread(
                 buf_ptr,
                 max_copy,
             ) {
-                Ok(Some(v)) => {
-                    if let Some((caller_idx, _)) =
-                        crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
-                    {
-                        if caller_idx < MAX_THREADS {
-                            boxes[caller_idx].reply_to = v.0;
-                        }
-                    }
-                    Some(v)
-                }
+                Ok(Some(v)) => Some(v),
                 Ok(None) => {
                     boxes[idx].waiter = caller_thread_id;
                     None
@@ -406,13 +373,6 @@ fn recv_blocking_reply_for_thread(
                     if let Ok(Some((from, copy_len))) = second_try {
                         if boxes[idx].waiter == caller_thread_id {
                             boxes[idx].waiter = 0;
-                        }
-                        if let Some((caller_idx, _)) =
-                            crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
-                        {
-                            if caller_idx < MAX_THREADS {
-                                boxes[caller_idx].reply_to = from;
-                            }
                         }
                         return (from << 32) | (copy_len as u64);
                     }
@@ -485,7 +445,10 @@ pub fn send_map_header_to_endpoint(endpoint: IpcEndpoint, map_start: u64, total:
 #[inline]
 fn ipc_mailbox_cap() -> usize {
     // At least one ordinary message and one synchronous reply must fit.
-    crate::config::kernel().ipc.mailbox_cap.clamp(2, MAILBOX_CAP)
+    crate::config::kernel()
+        .ipc
+        .mailbox_cap
+        .clamp(2, MAILBOX_CAP)
 }
 
 #[inline]
@@ -584,7 +547,9 @@ struct Mailbox {
     free_count: usize,
     /// メッセージ待ちでスリープ中のスレッドID (0=なし)
     waiter: u64,
-    reply_to: u64,
+    /// Endpoints whose synchronous calls this thread has received and may
+    /// answer later.
+    reply_targets: Vec<u64>,
 }
 
 impl Mailbox {
@@ -604,7 +569,27 @@ impl Mailbox {
             free,
             free_count: MAILBOX_CAP,
             waiter: 0,
-            reply_to: 0,
+            reply_targets: Vec::new(),
+        }
+    }
+
+    fn add_reply_target(&mut self, endpoint: u64) {
+        if endpoint != 0 && !self.reply_targets.contains(&endpoint) {
+            self.reply_targets.push(endpoint);
+        }
+    }
+
+    fn has_reply_target(&self, endpoint: u64) -> bool {
+        endpoint != 0 && self.reply_targets.contains(&endpoint)
+    }
+
+    fn remove_reply_target(&mut self, endpoint: u64) {
+        if let Some(index) = self
+            .reply_targets
+            .iter()
+            .position(|value| *value == endpoint)
+        {
+            self.reply_targets.swap_remove(index);
         }
     }
 
@@ -1693,7 +1678,7 @@ fn recv_from_thread_nonblocking(
                     crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                 {
                     if caller_idx < MAX_THREADS && receive.expects_reply {
-                        boxes[caller_idx].reply_to = receive.from;
+                        boxes[caller_idx].add_reply_target(receive.from);
                     }
                 }
                 receive
@@ -1748,7 +1733,7 @@ fn recv_blocking_for_thread(
                         crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                     {
                         if caller_idx < MAX_THREADS && receive.expects_reply {
-                            boxes[caller_idx].reply_to = receive.from;
+                            boxes[caller_idx].add_reply_target(receive.from);
                         }
                     }
                     Some(receive)
@@ -1794,7 +1779,7 @@ fn recv_blocking_for_thread(
                             crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                         {
                             if caller_idx < MAX_THREADS && receive.expects_reply {
-                                boxes[caller_idx].reply_to = receive.from;
+                                boxes[caller_idx].add_reply_target(receive.from);
                             }
                         }
                         drop(boxes);
@@ -1985,5 +1970,26 @@ pub fn recv_blocking_from_sender_for_kernel(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Mailbox;
+
+    #[test]
+    fn mailbox_tracks_more_than_one_deferred_reply() {
+        let mut mailbox = Mailbox::new();
+        mailbox.add_reply_target(11);
+        mailbox.add_reply_target(22);
+        mailbox.add_reply_target(11);
+
+        assert!(mailbox.has_reply_target(11));
+        assert!(mailbox.has_reply_target(22));
+        assert_eq!(mailbox.reply_targets.len(), 2);
+
+        mailbox.remove_reply_target(22);
+        assert!(mailbox.has_reply_target(11));
+        assert!(!mailbox.has_reply_target(22));
     }
 }

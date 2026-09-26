@@ -507,7 +507,7 @@ fn exec_manifest_common(
         Err(_) => return EINVAL,
     };
 
-    let extra_args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
+    let extra_args_owned = match read_nul_args_from_user(args_ptr, 4096, 64) {
         Ok(v) => v,
         Err(e) => return e,
     };

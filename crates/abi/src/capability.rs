@@ -47,6 +47,7 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     system!("ipc.client"), system!("ipc.server"),
     system!("process.spawn"), system!("process.inspect"), system!("process.kill"),
     user!("window.create"), user!("window.overlay"),
+    system!("window.modal.control"),
     system!("window.secure-overlay"), privileged!("window.decorate"),
     privileged!("window.capture"), user!("display.read"),
     privileged!("display.capture"), user!("input.keyboard"),
@@ -82,4 +83,17 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
 
 pub fn metadata(name: &str) -> Option<&'static CapabilityMetadata> {
     CAPABILITIES.iter().find(|metadata| metadata.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CapabilityClassification, metadata};
+
+    #[test]
+    fn modal_control_is_system_only() {
+        let capability = metadata("window.modal.control").expect("registered capability");
+        assert_eq!(capability.classification, CapabilityClassification::SystemOnly);
+        assert!(!capability.delegable);
+        assert!(!capability.user_grantable);
+    }
 }

@@ -10,6 +10,7 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::capability::path::{self, PathRights, PATH_CREATE, PATH_LIST, PATH_READ, PATH_WRITE};
 use crate::capability::{
     kernel_authority_implies, parse_kernel_authority_spec, Capability, KernelAuthority,
     KernelCapability,
@@ -208,6 +209,26 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
         {
             return EACCES;
         }
+        if let Some((selected_path, rights)) = parse_scoped_path_grant(cap_spec) {
+            let scoped_path = if selected_path.starts_with('/') {
+                selected_path.to_string()
+            } else {
+                let Some(cwd) = crate::task::with_process(dest_process, |process| {
+                    process.cwd().to_string()
+                }) else {
+                    return EACCES;
+                };
+                if cwd == "/" {
+                    alloc::format!("/{selected_path}")
+                } else {
+                    alloc::format!("{cwd}/{selected_path}")
+                }
+            };
+            return match path::grant_scoped_path(dest_process.as_u64(), &scoped_path, rights) {
+                Ok(()) => SUCCESS,
+                Err(_) => EINVAL,
+            };
+        }
         let cap = match intern_capability_token(cap_spec) {
             Some(cap) => cap,
             None => return EINVAL,
@@ -365,7 +386,11 @@ fn resolve_destination_process(dest: u64) -> Option<crate::task::ProcessId> {
 }
 
 fn read_capability_spec_from_user(cap_ptr: u64, cap_len: u64) -> Result<String, u64> {
-    let max_cap_name_len = crate::config::kernel().capability.max_name_len;
+    const MAX_TRANSFER_SPEC_LEN: usize = 8 * 1024;
+    let max_cap_name_len = crate::config::kernel()
+        .capability
+        .max_name_len
+        .max(MAX_TRANSFER_SPEC_LEN);
     if cap_ptr == 0 || cap_len == 0 {
         return Err(EINVAL);
     }
@@ -380,6 +405,20 @@ fn read_capability_spec_from_user(cap_ptr: u64, cap_len: u64) -> Result<String, 
     }
     let name = core::str::from_utf8(&buf).map_err(|_| EINVAL)?;
     Ok(name.to_string())
+}
+
+fn parse_scoped_path_grant(spec: &str) -> Option<(&str, PathRights)> {
+    let scoped = spec.strip_prefix("fs.scope.")?;
+    let (mode, path) = scoped.split_once('@')?;
+    if path.is_empty() || path.as_bytes().contains(&0) {
+        return None;
+    }
+    let bits = match mode {
+        "read" => PATH_READ | PATH_LIST,
+        "read-write" => PATH_READ | PATH_LIST | PATH_WRITE | PATH_CREATE,
+        _ => return None,
+    };
+    Some((path, PathRights::new(bits)))
 }
 
 fn parse_capability_token(spec: &str) -> Option<CapabilityToken> {
@@ -399,4 +438,19 @@ fn intern_capability_token(spec: &str) -> Option<CapabilityToken> {
 fn read_capability_token_from_user(cap_ptr: u64, cap_len: u64) -> Result<CapabilityToken, u64> {
     let spec = read_capability_spec_from_user(cap_ptr, cap_len)?;
     parse_capability_token(spec.as_str()).ok_or(EINVAL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_path_specs_are_explicit_and_bounded_to_one_path() {
+        let (path, rights) =
+            parse_scoped_path_grant("fs.scope.read-write@/home/alice/note.txt").unwrap();
+        assert_eq!(path, "/home/alice/note.txt");
+        assert!(rights.contains(PATH_READ | PATH_WRITE | PATH_CREATE));
+        assert!(parse_scoped_path_grant("fs.scope.read@/").is_some());
+        assert!(parse_scoped_path_grant("fs.scope.all@/home/alice").is_none());
+    }
 }

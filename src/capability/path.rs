@@ -59,12 +59,67 @@ pub enum PathRegistryError {
 }
 
 static PATH_REGISTRY: Mutex<Option<BTreeMap<String, PathCapability>>> = Mutex::new(None);
+static SCOPED_PATH_GRANTS: Mutex<Option<BTreeMap<(u64, String), PathRights>>> = Mutex::new(None);
 
 fn with_registry<R>(f: impl FnOnce(&mut Option<BTreeMap<String, PathCapability>>) -> R) -> R {
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut registry = PATH_REGISTRY.lock();
         f(&mut registry)
     })
+}
+
+fn with_scoped_grants<R>(
+    f: impl FnOnce(&mut Option<BTreeMap<(u64, String), PathRights>>) -> R,
+) -> R {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut grants = SCOPED_PATH_GRANTS.lock();
+        f(&mut grants)
+    })
+}
+
+/// Grants one process access to exactly one normalized filesystem path.
+///
+/// This is used by trusted file-panel and capability brokers. It deliberately
+/// does not imply access to siblings or descendants.
+pub fn grant_scoped_path(
+    pid: u64,
+    path: &str,
+    rights: PathRights,
+) -> Result<(), PathRegistryError> {
+    let Some(normalized) = normalize_path(path) else {
+        return Err(PathRegistryError::InvalidPath);
+    };
+    if pid == 0 || normalized == "/" || rights.bits == 0 {
+        return Err(PathRegistryError::InvalidPath);
+    }
+    with_scoped_grants(|grants| {
+        let grants = grants.get_or_insert_with(BTreeMap::new);
+        grants
+            .entry((pid, normalized))
+            .and_modify(|current| current.bits |= rights.bits)
+            .or_insert(rights);
+    });
+    Ok(())
+}
+
+pub fn scoped_path_allows(pid: u64, path: &str, needed_rights: u32) -> bool {
+    let Some(normalized) = normalize_path(path) else {
+        return false;
+    };
+    with_scoped_grants(|grants| {
+        grants
+            .as_ref()
+            .and_then(|grants| grants.get(&(pid, normalized)))
+            .is_some_and(|rights| rights.contains(needed_rights))
+    })
+}
+
+pub fn revoke_scoped_paths(pid: u64) {
+    with_scoped_grants(|grants| {
+        if let Some(grants) = grants.as_mut() {
+            grants.retain(|(owner, _), _| *owner != pid);
+        }
+    });
 }
 
 fn normalize_path(path: &str) -> Option<String> {
@@ -334,5 +389,32 @@ pub fn owner_to_string(owner: PathOwner) -> String {
         PathOwner::Service(pid) => alloc::format!("service:{pid:#x}"),
         PathOwner::Application(pid) => alloc::format!("application:{pid:#x}"),
         PathOwner::Any => "any".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod scoped_tests {
+    use super::*;
+
+    #[test]
+    fn scoped_grants_are_exact_and_process_local() {
+        let pid = 0xfeed_u64;
+        revoke_scoped_paths(pid);
+        grant_scoped_path(
+            pid,
+            "/home/alice/Documents/../note.txt",
+            PathRights::new(PATH_READ),
+        )
+        .unwrap();
+        assert!(scoped_path_allows(pid, "/home/alice/note.txt", PATH_READ));
+        assert!(!scoped_path_allows(pid, "/home/alice/other.txt", PATH_READ));
+        assert!(!scoped_path_allows(
+            pid + 1,
+            "/home/alice/note.txt",
+            PATH_READ
+        ));
+        assert!(!scoped_path_allows(pid, "/home/alice/note.txt", PATH_WRITE));
+        revoke_scoped_paths(pid);
+        assert!(!scoped_path_allows(pid, "/home/alice/note.txt", PATH_READ));
     }
 }

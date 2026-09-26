@@ -231,6 +231,9 @@ fn ensure_fs_capability_access_for_process(
     needed_rights: u32,
     pid_raw: u64,
 ) -> Result<(), u64> {
+    if path::scoped_path_allows(pid_raw, path, needed_rights) {
+        return Ok(());
+    }
     if identity_storage_path_allows(path, pid_raw) {
         return Ok(());
     }

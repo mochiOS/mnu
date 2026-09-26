@@ -1492,6 +1492,7 @@ pub fn add_process(process: Process) -> Option<ProcessId> {
 
 /// プロセスを削除
 pub fn remove_process(id: ProcessId) -> Option<Process> {
+    crate::capability::path::revoke_scoped_paths(id.as_u64());
     release_process_mmio_mappings(id);
     release_process_dma_buffers(id);
     PROCESS_TABLE.lock().remove(id)
