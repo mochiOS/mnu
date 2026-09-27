@@ -16,39 +16,67 @@ fn block_access_allowed() -> bool {
 }
 
 fn disk_result(result: i32) -> u64 {
-    if result == 0 { SUCCESS } else { (result as i64) as u64 }
+    if result == 0 {
+        SUCCESS
+    } else {
+        (result as i64) as u64
+    }
 }
 
 pub fn block_read(disk_id: u64, lba: u64, destination: u64, length: u64) -> u64 {
-    if !block_access_allowed() { return EACCES; }
-    let Ok(disk_id) = u32::try_from(disk_id) else { return EINVAL; };
-    let Ok(length) = usize::try_from(length) else { return EINVAL; };
+    if !block_access_allowed() {
+        return EACCES;
+    }
+    let Ok(disk_id) = u32::try_from(disk_id) else {
+        return EINVAL;
+    };
+    let Ok(length) = usize::try_from(length) else {
+        return EINVAL;
+    };
     if length == 0 || length > MAX_BLOCK_TRANSFER || length % SECTOR_BYTES != 0 {
         return EINVAL;
     }
     let mut bytes = vec![0u8; length];
     let result = crate::cext::disk::read_sector(disk_id, lba, &mut bytes);
-    if result != 0 { return disk_result(result); }
-    if crate::syscall::copy_to_user(destination, &bytes).is_err() { return EFAULT; }
+    if result != 0 {
+        return disk_result(result);
+    }
+    if crate::syscall::copy_to_user(destination, &bytes).is_err() {
+        return EFAULT;
+    }
     SUCCESS
 }
 
 pub fn block_write(disk_id: u64, lba: u64, source: u64, length: u64) -> u64 {
-    if !block_access_allowed() { return EACCES; }
-    let Ok(disk_id) = u32::try_from(disk_id) else { return EINVAL; };
-    let Ok(length) = usize::try_from(length) else { return EINVAL; };
+    if !block_access_allowed() {
+        return EACCES;
+    }
+    let Ok(disk_id) = u32::try_from(disk_id) else {
+        return EINVAL;
+    };
+    let Ok(length) = usize::try_from(length) else {
+        return EINVAL;
+    };
     if length == 0 || length > MAX_BLOCK_TRANSFER || length % SECTOR_BYTES != 0 {
         return EINVAL;
     }
     let mut bytes = vec![0u8; length];
-    if crate::syscall::copy_from_user(source, &mut bytes).is_err() { return EFAULT; }
+    if crate::syscall::copy_from_user(source, &mut bytes).is_err() {
+        return EFAULT;
+    }
     disk_result(crate::cext::disk::write_sector(disk_id, lba, &bytes))
 }
 
 pub fn block_flush(disk_id: u64) -> u64 {
-    if !block_access_allowed() { return EACCES; }
-    let Ok(disk_id) = u32::try_from(disk_id) else { return EINVAL; };
-    if !crate::cext::disk::is_loaded() { return ENOSYS; }
+    if !block_access_allowed() {
+        return EACCES;
+    }
+    let Ok(disk_id) = u32::try_from(disk_id) else {
+        return EINVAL;
+    };
+    if !crate::cext::disk::is_loaded() {
+        return ENOSYS;
+    }
     disk_result(crate::cext::disk::flush(disk_id))
 }
 
@@ -56,7 +84,12 @@ pub fn control(request_ptr: u64, response_ptr: u64) -> u64 {
     control_authorized(request_ptr, response_ptr, "device.storage")
 }
 
-pub fn device_control(request_ptr: u64, response_ptr: u64, authority_ptr: u64, authority_len: u64) -> u64 {
+pub fn device_control(
+    request_ptr: u64,
+    response_ptr: u64,
+    authority_ptr: u64,
+    authority_len: u64,
+) -> u64 {
     let mut name = [0u8; 128];
     if authority_len == 0 || authority_len > name.len() as u64 {
         return EINVAL;
@@ -65,12 +98,16 @@ pub fn device_control(request_ptr: u64, response_ptr: u64, authority_ptr: u64, a
     if crate::syscall::copy_from_user(authority_ptr, name).is_err() {
         return EFAULT;
     }
-    let Ok(authority) = core::str::from_utf8(name) else { return EINVAL; };
+    let Ok(authority) = core::str::from_utf8(name) else {
+        return EINVAL;
+    };
     control_authorized(request_ptr, response_ptr, authority)
 }
 
 fn control_authorized(request_ptr: u64, response_ptr: u64, authority: &str) -> u64 {
-    let Some(capability) = Capability::from_str(authority) else { return EACCES; };
+    let Some(capability) = Capability::from_str(authority) else {
+        return EACCES;
+    };
     if !crate::syscall::security::caller_has_any_capability(&[capability]) {
         return EACCES;
     }

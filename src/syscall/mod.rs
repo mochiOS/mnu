@@ -195,8 +195,13 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
     }
 
     if crate::mem::paging::map_physical_range_to_user(
-        pt_phys, virt_addr, phys_addr, size, crate::mem::paging::MappingCache::Uncached,
-    ).is_err()
+        pt_phys,
+        virt_addr,
+        phys_addr,
+        size,
+        crate::mem::paging::MappingCache::Uncached,
+    )
+    .is_err()
     {
         let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(pt_phys, virt_addr, size);
         let _ =
@@ -246,12 +251,11 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
             width: info.width as u32,
             height: info.height as u32,
             stride: info.stride as u32,
-            format: 1
-                | if mediated {
-                    mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_MEDIATED
-                } else {
-                    0
-                },
+            format: 1 | if mediated {
+                mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_MEDIATED
+            } else {
+                0
+            },
         }
     } else if let Some(info) = mediated
         .then(crate::platform::display_info)
@@ -271,12 +275,11 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
             width: info.width,
             height: info.height,
             stride: info.stride,
-            format: 1
-                | if info.shared_surface {
-                    mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_SHARED_SURFACE
-                } else {
-                    0
-                },
+            format: 1 | if info.shared_surface {
+                mnu_abi::hypervisor::FRAMEBUFFER_FORMAT_SHARED_SURFACE
+            } else {
+                0
+            },
         }
     } else {
         return ENXIO;
@@ -408,9 +411,9 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     if virt_addr == 0 || size == 0 || (virt_addr & 0xfff) != 0 || (size & 0xfff) != 0 {
         return EINVAL;
     }
-    let shared_surface = crate::platform::display_info().ok().filter(|info| {
-        info.shared_surface && info.surface_address != 0 && info.surface_size != 0
-    });
+    let shared_surface = crate::platform::display_info()
+        .ok()
+        .filter(|info| info.shared_surface && info.surface_address != 0 && info.surface_size != 0);
     let (fb_base, fb_offset, framebuffer_size, mmio) = if let Some(info) = shared_surface {
         (
             info.surface_address & !0xfff,
@@ -419,7 +422,12 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
             false,
         )
     } else if let Some(info) = crate::util::vga::get_info() {
-        (info.addr & !0xfff, info.addr & 0xfff, info.size as u64, true)
+        (
+            info.addr & !0xfff,
+            info.addr & 0xfff,
+            info.size as u64,
+            true,
+        )
     } else {
         return ENXIO;
     };
@@ -726,7 +734,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::BlockFlush as u64 => storage::block_flush(arg0),
         x if x == SyscallNumber::BootSystemSlot as u64 => boot_system_slot(),
         x if x == SyscallNumber::BootEspGuid as u64 => boot_esp_guid(arg0, arg1),
-        x if x == SyscallNumber::DeviceControl as u64 => storage::device_control(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::DeviceControl as u64 => {
+            storage::device_control(arg0, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::PerformanceSnapshot as u64 => performance::snapshot(arg0, arg1),
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
@@ -820,7 +830,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
 
 /// Read-only boot identity. Legacy images report 0; A/B images report 1 or 2.
 fn boot_system_slot() -> u64 {
-    let Some(info) = crate::smp::boot_info() else { return 0; };
+    let Some(info) = crate::smp::boot_info() else {
+        return 0;
+    };
     if (info.feature_flags & crate::BOOT_FEATURE_SYSTEM_SLOT) == 0 {
         return 0;
     }
@@ -830,8 +842,12 @@ fn boot_system_slot() -> u64 {
 /// Copies the unique GPT GUID of the ESP that launched mBoot. The value is
 /// unavailable on legacy images and is never guessed from disk ordering.
 fn boot_esp_guid(destination: u64, length: u64) -> u64 {
-    if length != 16 { return EINVAL; }
-    let Some(info) = crate::smp::boot_info() else { return ENOSYS; };
+    if length != 16 {
+        return EINVAL;
+    }
+    let Some(info) = crate::smp::boot_info() else {
+        return ENOSYS;
+    };
     if (info.feature_flags & crate::BOOT_FEATURE_BOOT_ESP_GUID) == 0
         || info.boot_esp_guid == [0; 16]
     {

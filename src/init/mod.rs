@@ -14,17 +14,16 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         boot_info.stride as usize,
     );
 
-	// CPU機能の初期化（SSE/FPU有効化）
-	crate::cpu::init();
+    // CPU機能の初期化（SSE/FPU有効化）
+    crate::cpu::init();
 
-	let memory_map = unsafe {
-		core::slice::from_raw_parts(
-			boot_info.memory_map_addr as *const MemoryRegion,
-			boot_info.memory_map_len as usize,
-		)
-	};
+    let memory_map = unsafe {
+        core::slice::from_raw_parts(
+            boot_info.memory_map_addr as *const MemoryRegion,
+            boot_info.memory_map_len as usize,
+        )
+    };
 
-	
     crate::info!("Memory map has {} regions", memory_map.len());
     for (i, region) in memory_map.iter().enumerate() {
         debug!(
@@ -45,19 +44,19 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         }
     }
 
-	// 先にフレームアロケータを初期化
-	crate::info!("kinit: before frame allocator");
-	mem::init_frame_allocator(memory_map)?;
-	crate::performance::mark_boot(crate::performance::BootMilestone::PageAllocatorReady);
+    // 先にフレームアロケータを初期化
+    crate::info!("kinit: before frame allocator");
+    mem::init_frame_allocator(memory_map)?;
+    crate::performance::mark_boot(crate::performance::BootMilestone::PageAllocatorReady);
 
-	// メモリ管理の初期化
-	crate::info!("kinit: before mem init");
-	mem::init(boot_info)?;
-	crate::performance::mark_boot(crate::performance::BootMilestone::EarlyMemoryReady);
+    // メモリ管理の初期化
+    crate::info!("kinit: before mem init");
+    mem::init(boot_info)?;
+    crate::performance::mark_boot(crate::performance::BootMilestone::EarlyMemoryReady);
 
-	crate::info!("kinit: successed memory init");
+    crate::info!("kinit: successed memory init");
 
-	let clock = crate::performance::initialize_clock();
+    let clock = crate::performance::initialize_clock();
     crate::info!(
         "Performance clock: invariant_tsc={} rdtscp={} frequency_khz={} source={:?}",
         clock.invariant_tsc,

@@ -608,9 +608,7 @@ pub fn resolve_copy_on_write(table_phys: u64, address: u64) -> Result<bool> {
             if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(COPY_ON_WRITE) {
                 return true;
             }
-            if entry.addr().as_u64() != old_phys
-                || !flags.contains(COPY_ON_WRITE)
-            {
+            if entry.addr().as_u64() != old_phys || !flags.contains(COPY_ON_WRITE) {
                 return false;
             }
 
@@ -1078,8 +1076,7 @@ pub fn create_user_page_table() -> Result<u64> {
             let new_l2_phys = if kernel_l3_flags.contains(PageTableFlags::HUGE_PAGE) {
                 let new_l2_frame = allocate_zeroed_page_table()?;
                 let new_l2_phys = new_l2_frame.start_address().as_u64();
-                let new_l2 =
-                    unsafe { &mut *((new_l2_phys + phys_off) as *mut PageTable) };
+                let new_l2 = unsafe { &mut *((new_l2_phys + phys_off) as *mut PageTable) };
                 let huge_phys = kernel_l3[0].addr().as_u64();
                 let mut leaf_flags = kernel_l3_flags;
                 leaf_flags.remove(PageTableFlags::USER_ACCESSIBLE);
@@ -1091,19 +1088,13 @@ pub fn create_user_page_table() -> Result<u64> {
                 }
                 new_l2_phys
             } else {
-                clone_kernel_l2_table_without_user_entries(
-                    kernel_l3[0].addr().as_u64(),
-                    phys_off,
-                )?
+                clone_kernel_l2_table_without_user_entries(kernel_l3[0].addr().as_u64(), phys_off)?
             };
             let mut new_l3_flags = kernel_l3_flags | PageTableFlags::USER_ACCESSIBLE;
             new_l3_flags.remove(PageTableFlags::HUGE_PAGE);
             new_l3_flags |= PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
 
-            new_l3[0].set_addr(
-                PhysAddr::new(new_l2_phys),
-                new_l3_flags,
-            );
+            new_l3[0].set_addr(PhysAddr::new(new_l2_phys), new_l3_flags);
         }
     }
 
@@ -1235,10 +1226,7 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
                 crate::kernel::early_serial("paging: descriptor translation missing\n");
                 return Err(Kernel::Memory(Memory::NotMapped));
             };
-            l1e.set_addr(
-                PhysAddr::new(phys),
-                Flags::PRESENT | Flags::NO_EXECUTE,
-            );
+            l1e.set_addr(PhysAddr::new(phys), Flags::PRESENT | Flags::NO_EXECUTE);
         } else {
             let mut flags = l1e.flags();
             flags.remove(Flags::WRITABLE | Flags::USER_ACCESSIBLE);

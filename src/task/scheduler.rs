@@ -402,8 +402,8 @@ fn wake_parent_ipc_waiter(exited_pid: crate::task::ProcessId) {
 /// 指定されたスレッドをTerminated状態にして削除
 pub fn terminate_thread(id: ThreadId) {
     let previous_state = super::thread::replace_thread_state(id, ThreadState::Terminated);
-    let running_elsewhere = Some(id) != current_thread_id()
-        && previous_state == Some(ThreadState::Running);
+    let running_elsewhere =
+        Some(id) != current_thread_id() && previous_state == Some(ThreadState::Running);
 
     if Some(id) == current_thread_id() {
         crate::syscall::process::clear_futex_waiter(id);
@@ -545,104 +545,96 @@ pub fn schedule_and_switch() {
 ///
 /// スケジューラを開始して最初のスレッドにジャンプ
 pub fn start_scheduling() -> ! {
+    // 最初のスレッドを選択
+    if let Some(first_id) = super::thread::peek_next_thread() {
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            // 最初のスレッドを Running 状態に設定
+            set_thread_state(first_id, ThreadState::Running);
 
-	// 最初のスレッドを選択
-	if let Some(first_id) = super::thread::peek_next_thread() {
+            with_thread(first_id, |thread| {
+                crate::info!(
+                    "Starting first thread: {} (id={:?})",
+                    thread.name(),
+                    thread.id()
+                );
+            });
 
-		x86_64::instructions::interrupts::without_interrupts(|| {
+            // 最初のスレッドへ switch_to_thread でジャンプ（戻ってこない）
+            // user/kernel どちらも switch_context 経由で正しく動作する
+            unsafe {
+                if let Some((pid, interactive_score, cpu_burst_score)) =
+                    with_thread(first_id, |thread| {
+                        (
+                            thread.process_id(),
+                            thread.interactive_score(),
+                            thread.cpu_burst_score(),
+                        )
+                    })
+                {
+                    let (process_priority, is_foreground) =
+                        crate::task::with_process(pid, |process| {
+                            (process.priority(), process.is_foreground())
+                        })
+                        .unwrap_or((0, false));
 
-			// 最初のスレッドを Running 状態に設定
-			set_thread_state(first_id, ThreadState::Running);
+                    let first_slice = time_slice_ticks_for_thread(
+                        is_foreground,
+                        process_priority,
+                        interactive_score,
+                        cpu_burst_score,
+                    );
 
-			with_thread(first_id, |thread| {
+                    scheduler().lock().set_time_slice(first_slice);
+                } else {
+                }
 
-				crate::info!(
-					"Starting first thread: {} (id={:?})",
-					thread.name(),
-					thread.id()
-				);
-			});
+                let first_slot = {
+                    let queue = THREAD_QUEUE.lock();
+                    queue.slot_index(first_id)
+                };
 
-			// 最初のスレッドへ switch_to_thread でジャンプ（戻ってこない）
-			// user/kernel どちらも switch_context 経由で正しく動作する
-			unsafe {
-				if let Some((pid, interactive_score, cpu_burst_score)) =
-					with_thread(first_id, |thread| {
-						(
-							thread.process_id(),
-							thread.interactive_score(),
-							thread.cpu_burst_score(),
-						)
-					})
-				{
+                match first_slot {
+                    Some(first_slot) => {
+                        switch_to_thread_with_slots(None, first_id, first_slot);
+                    }
+                    None => {
+                        crate::audit::log(
+                            crate::audit::AuditEventKind::Fault,
+                            "start_scheduling could not resolve first thread slot",
+                        );
 
-					let (process_priority, is_foreground) =
-						crate::task::with_process(pid, |process| {
-							(process.priority(), process.is_foreground())
-						})
-						.unwrap_or((0, false));
+                        x86_64::instructions::interrupts::disable();
 
-					let first_slice = time_slice_ticks_for_thread(
-						is_foreground,
-						process_priority,
-						interactive_score,
-						cpu_burst_score,
-					);
+                        loop {
+                            x86_64::instructions::hlt();
+                        }
+                    }
+                }
+            }
+        });
 
-					scheduler().lock().set_time_slice(first_slice);
-				} else {
-				}
+        crate::audit::log(
+            crate::audit::AuditEventKind::Fault,
+            "start_scheduling switch_to_thread returned unexpectedly",
+        );
 
-				let first_slot = {
-					let queue = THREAD_QUEUE.lock();
-					queue.slot_index(first_id)
-				};
+        x86_64::instructions::interrupts::disable();
 
-				match first_slot {
-					Some(first_slot) => {
+        loop {
+            x86_64::instructions::hlt();
+        }
+    } else {
+        crate::audit::log(
+            crate::audit::AuditEventKind::Fault,
+            "start_scheduling found no threads to schedule",
+        );
 
-						switch_to_thread_with_slots(None, first_id, first_slot);
-					}
-					None => {
+        x86_64::instructions::interrupts::disable();
 
-						crate::audit::log(
-							crate::audit::AuditEventKind::Fault,
-							"start_scheduling could not resolve first thread slot",
-						);
-
-						x86_64::instructions::interrupts::disable();
-
-						loop {
-							x86_64::instructions::hlt();
-						}
-					}
-				}
-			}
-		});
-
-		crate::audit::log(
-			crate::audit::AuditEventKind::Fault,
-			"start_scheduling switch_to_thread returned unexpectedly",
-		);
-
-		x86_64::instructions::interrupts::disable();
-
-		loop {
-			x86_64::instructions::hlt();
-		}
-	} else {
-
-		crate::audit::log(
-			crate::audit::AuditEventKind::Fault,
-			"start_scheduling found no threads to schedule",
-		);
-
-		x86_64::instructions::interrupts::disable();
-
-		loop {
-			x86_64::instructions::hlt();
-		}
-	}
+        loop {
+            x86_64::instructions::hlt();
+        }
+    }
 }
 
 /// 現在のプロセス全体を終了させる。

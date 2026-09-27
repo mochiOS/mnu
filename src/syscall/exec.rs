@@ -15,11 +15,11 @@ mod image;
 use image::{map_elf_image, ElfImageLayout};
 
 use mnu_abi::exec::{
-    APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX,
+    ExecutionClass, APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX,
     APPLICATION_PROVENANCE_PREFIX, APPLICATION_SUBJECT_KEY_ID_PREFIX, ENVIRONMENT_PREFIX,
     EXECUTABLE_DIGEST_PREFIX, EXEC_AUTHORIZATION_CLASS_PREFIX,
     EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE, EXEC_AUTHORIZATION_KIND_PREFIX,
-    EXEC_AUTHORIZATION_KIND_SPAWN, ExecutionClass, SECURITY_IDENTITY_PREFIX,
+    EXEC_AUTHORIZATION_KIND_SPAWN, SECURITY_IDENTITY_PREFIX,
 };
 use sha2::{Digest, Sha256};
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -551,9 +551,7 @@ fn exec_manifest_common(
             }
             identity_provenance = Some(match value {
                 "built-in" => crate::task::process::ApplicationProvenance::BuiltIn,
-                "verified-package" => {
-                    crate::task::process::ApplicationProvenance::VerifiedPackage
-                }
+                "verified-package" => crate::task::process::ApplicationProvenance::VerifiedPackage,
                 "development" => crate::task::process::ApplicationProvenance::Development,
                 _ => return EINVAL,
             });
@@ -642,7 +640,10 @@ fn exec_manifest_common(
         // authenticated boot generation before the policy service exists.
         None
     } else {
-        crate::warn!("exec_manifest: no matching spawn authorization for '{}'", path);
+        crate::warn!(
+            "exec_manifest: no matching spawn authorization for '{}'",
+            path
+        );
         return EACCES;
     };
 
@@ -735,9 +736,9 @@ pub fn authorize_exec_syscall(
         } else if let Some(value) = item.strip_prefix(APPLICATION_PROVENANCE_PREFIX) {
             provenance = match value {
                 "built-in" => Some(crate::task::process::ApplicationProvenance::BuiltIn),
-                "verified-package" => Some(
-                    crate::task::process::ApplicationProvenance::VerifiedPackage,
-                ),
+                "verified-package" => {
+                    Some(crate::task::process::ApplicationProvenance::VerifiedPackage)
+                }
                 "development" => Some(crate::task::process::ApplicationProvenance::Development),
                 _ => None,
             };
@@ -754,9 +755,7 @@ pub fn authorize_exec_syscall(
                 EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE => {
                     Some(crate::task::process::PendingExecKind::ImageReplace)
                 }
-                EXEC_AUTHORIZATION_KIND_SPAWN => {
-                    Some(crate::task::process::PendingExecKind::Spawn)
-                }
+                EXEC_AUTHORIZATION_KIND_SPAWN => Some(crate::task::process::PendingExecKind::Spawn),
                 _ => None,
             };
         } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_CLASS_PREFIX) {
@@ -817,10 +816,7 @@ pub fn authorize_exec_syscall(
             return EINVAL;
         };
         let thread = crate::task::ThreadId::from_u64(requester_tid);
-        let Some(pid) = crate::task::with_thread(
-            thread,
-            |thread| thread.process_id(),
-        ) else {
+        let Some(pid) = crate::task::with_thread(thread, |thread| thread.process_id()) else {
             return EINVAL;
         };
         (thread, pid)
@@ -948,8 +944,7 @@ fn exec_internal(
         {
             crate::util::log::release_boot_marker(format_args!(
                 "exec: loaded '{}' from {}",
-                path,
-                source
+                path, source
             ));
         }
         let result = exec_with_data(
@@ -1597,8 +1592,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     let Some(exec_authorization) = crate::task::with_process_mut(pid, |process| {
         process.take_exec_authorization(&path_owned, authorization_thread)
     })
-    .flatten()
-    else {
+    .flatten() else {
         crate::warn!("execve: no matching security decision for '{}'", path_owned);
         return EACCES;
     };
@@ -1619,10 +1613,13 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         None => return ENOENT,
     };
     if Sha256::digest(&data_vec).as_slice() != exec_authorization.executable_digest {
-        crate::warn!("execve: executable changed after authorization '{}'", path_owned);
+        crate::warn!(
+            "execve: executable changed after authorization '{}'",
+            path_owned
+        );
         return EACCES;
     }
-    
+
     crate::info!(
         "execve: loaded '{}' from {} ({} bytes)",
         path_owned,
@@ -1632,8 +1629,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     if path_owned == "/bin/mpk" {
         crate::util::log::release_boot_marker(format_args!(
             "execve: loaded '{}' from {}",
-            path_owned,
-            source
+            path_owned, source
         ));
     }
     let data: &[u8] = &data_vec;

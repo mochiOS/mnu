@@ -514,7 +514,10 @@ fn load_bundle_directories() -> bool {
         }
         let Some(mut module) = load_elf_symbol(&meta.elf, "mnu_module_init") else {
             crate::warn!("cext: mnu_module_init not found in {}", entry_path);
-            crate::util::log::release_boot_marker(format_args!("cext: init symbol missing {}", name));
+            crate::util::log::release_boot_marker(format_args!(
+                "cext: init symbol missing {}",
+                name
+            ));
             continue;
         };
         if register_provider(kind, module.address, meta.module_version) {
@@ -538,7 +541,8 @@ fn load_bundle_directories() -> bool {
         } else {
             crate::warn!("cext: module init failed for {}", manifest.name);
             crate::util::log::release_boot_marker(format_args!(
-                "cext: module init failed {}", manifest.name
+                "cext: module init failed {}",
+                manifest.name
             ));
         }
     }

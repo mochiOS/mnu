@@ -65,6 +65,7 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     user!("fs.write.tmp"),
     user!("fs.read.removable"),
     user!("fs.write.removable"),
+    system!("fs.read.applications"),
     privileged!("fs.read.all"),
     privileged!("fs.write.all"),
     user!("net.connect"),

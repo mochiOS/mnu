@@ -213,9 +213,9 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
             let scoped_path = if selected_path.starts_with('/') {
                 selected_path.to_string()
             } else {
-                let Some(cwd) = crate::task::with_process(dest_process, |process| {
-                    process.cwd().to_string()
-                }) else {
+                let Some(cwd) =
+                    crate::task::with_process(dest_process, |process| process.cwd().to_string())
+                else {
                     return EACCES;
                 };
                 if cwd == "/" {

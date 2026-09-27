@@ -60,8 +60,7 @@ pub fn get_thread_security_context(sender_endpoint: u64, output: u64, output_len
         context.developer_id[..developer.len()].copy_from_slice(developer);
         Some(context)
     })
-    .flatten()
-    else {
+    .flatten() else {
         return EINVAL;
     };
     let bytes = unsafe {

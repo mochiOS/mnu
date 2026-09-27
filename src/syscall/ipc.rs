@@ -1,5 +1,5 @@
 use crate::interrupt::spinlock::{SpinLock, SpinLockGuard};
-use alloc::alloc::{Layout, alloc};
+use alloc::alloc::{alloc, Layout};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -268,15 +268,14 @@ pub fn call(
     if sent != 0 {
         return sent;
     }
-    let result =
-        recv_blocking_reply_for_thread(
-            caller,
-            caller,
-            dest_endpoint_handle,
-            call_id,
-            reply_ptr,
-            reply_len,
-        );
+    let result = recv_blocking_reply_for_thread(
+        caller,
+        caller,
+        dest_endpoint_handle,
+        call_id,
+        reply_ptr,
+        reply_len,
+    );
     #[cfg(feature = "performance-instrumentation")]
     if (result as i64) >= 0 {
         crate::performance::record_latency(
@@ -620,11 +619,7 @@ impl Mailbox {
     }
 
     fn remove_reply_target(&mut self, target: ReplyTarget) {
-        if let Some(index) = self
-            .reply_targets
-            .iter()
-            .position(|value| *value == target)
-        {
+        if let Some(index) = self.reply_targets.iter().position(|value| *value == target) {
             self.reply_targets.swap_remove(index);
         }
     }

@@ -63,135 +63,129 @@ fn spawn_ap_idle_thread() -> Result<(task::ThreadId, usize)> {
 
 /// カーネルメイン関数
 fn kernel_main() -> ! {
-	early_serial("kernel: kernel_main entered\n");
-	util::log::set_level(LogLevel::Info);
-	debug!("mnu kernel started");
-	if let Some(handoff) = crate::smp::handoff() {
-		let kernel_cr3 = crate::percpu::kernel_cr3();
-		let secondary_entry = secondary_cpu_entry as *const () as usize as u64;
-		let ap_count = handoff.ap_count.load(Ordering::Acquire);
-		handoff.kernel_cr3.store(kernel_cr3, Ordering::Release);
-		handoff
-			.kernel_secondary_entry
-			.store(secondary_entry, Ordering::Release);
-		handoff.ready.store(1, Ordering::Release);
-		info!(
-			"SMP handoff released secondary CPUs: kernel_cr3={:#x} ap_count={}",
-			kernel_cr3, ap_count
-		);
-	} else {
-	}
-	crate::smp::start_secondary_cpus();
-	let mut caps = crate::capability::CapabilitySet::empty();
-	for cap in crate::capability::Capability::bootstrap_capabilities() {
-		if matches!(
-			cap,
-			crate::capability::Capability::DmaAllocate
-				| crate::capability::Capability::MemoryPhysMap
-				| crate::capability::Capability::MemoryPhysTranslate
-				| crate::capability::Capability::Unsandboxed
-		) {
-			continue;
-		}
+    early_serial("kernel: kernel_main entered\n");
+    util::log::set_level(LogLevel::Info);
+    debug!("mnu kernel started");
+    if let Some(handoff) = crate::smp::handoff() {
+        let kernel_cr3 = crate::percpu::kernel_cr3();
+        let secondary_entry = secondary_cpu_entry as *const () as usize as u64;
+        let ap_count = handoff.ap_count.load(Ordering::Acquire);
+        handoff.kernel_cr3.store(kernel_cr3, Ordering::Release);
+        handoff
+            .kernel_secondary_entry
+            .store(secondary_entry, Ordering::Release);
+        handoff.ready.store(1, Ordering::Release);
+        info!(
+            "SMP handoff released secondary CPUs: kernel_cr3={:#x} ap_count={}",
+            kernel_cr3, ap_count
+        );
+    } else {
+    }
+    crate::smp::start_secondary_cpus();
+    let mut caps = crate::capability::CapabilitySet::empty();
+    for cap in crate::capability::Capability::bootstrap_capabilities() {
+        if matches!(
+            cap,
+            crate::capability::Capability::DmaAllocate
+                | crate::capability::Capability::MemoryPhysMap
+                | crate::capability::Capability::MemoryPhysTranslate
+                | crate::capability::Capability::Unsandboxed
+        ) {
+            continue;
+        }
 
-		caps.insert(*cap);
-	}
-	let kernel_authorities = crate::capability::KernelAuthoritySet::empty();
+        caps.insert(*cap);
+    }
+    let kernel_authorities = crate::capability::KernelAuthoritySet::empty();
 
-	// 起動後の構成はカーネルではなく init が決める。
-	info!("Starting init");
-	let boot_launch = crate::policy::init_launch();
-	let init_pid = crate::syscall::exec::exec_kernel_with_name_caps_and_authorities(
-		boot_launch.exec_path,
-		boot_launch.process_name,
-		caps.clone(),
-		kernel_authorities,
-		crate::task::PrivilegeLevel::Service,
-	);
-	early_serial("kernel: init exec returned\n");
+    // 起動後の構成はカーネルではなく init が決める。
+    info!("Starting init");
+    let boot_launch = crate::policy::init_launch();
+    let init_pid = crate::syscall::exec::exec_kernel_with_name_caps_and_authorities(
+        boot_launch.exec_path,
+        boot_launch.process_name,
+        caps.clone(),
+        kernel_authorities,
+        crate::task::PrivilegeLevel::Service,
+    );
+    early_serial("kernel: init exec returned\n");
 
-	crate::info!("init pid = {:#x}", init_pid);
+    crate::info!("init pid = {:#x}", init_pid);
 
-	if init_pid != 0
-		&& task::with_process(task::ProcessId::from_u64(init_pid), |_| ()).is_some()
-	{
-		crate::policy::register_init_pid(init_pid);
-		if let Some(capabilities) =
-			task::with_process(task::ProcessId::from_u64(init_pid), |proc| {
-				let spawn = proc
-					.capabilities()
-					.contains(crate::capability::Capability::ProcessSpawn);
-				let inspect = proc
-					.capabilities()
-					.contains(crate::capability::Capability::ProcessInspect);
+    if init_pid != 0 && task::with_process(task::ProcessId::from_u64(init_pid), |_| ()).is_some() {
+        crate::policy::register_init_pid(init_pid);
+        if let Some(capabilities) =
+            task::with_process(task::ProcessId::from_u64(init_pid), |proc| {
+                let spawn = proc
+                    .capabilities()
+                    .contains(crate::capability::Capability::ProcessSpawn);
+                let inspect = proc
+                    .capabilities()
+                    .contains(crate::capability::Capability::ProcessInspect);
 
-				(spawn, inspect)
-			})
-		{
+                (spawn, inspect)
+            })
+        {
+            crate::info!(
+                "init caps: process.spawn={} process.inspect={}",
+                capabilities.0,
+                capabilities.1
+            );
+        }
+    } else {
+        crate::warn!("Failed to start init (ret={:#x})", init_pid);
+    }
+    crate::performance::mark_boot(crate::performance::BootMilestone::SystemServicesStarted);
+    crate::performance::mark_boot(crate::performance::BootMilestone::Idle);
+    info!("Kernel initialization complete. Entering idle loop...");
+    crate::util::log::release_boot_marker(format_args!(
+        "Kernel initialization complete. Entering idle loop..."
+    ));
+    task::schedule_and_switch();
 
-			crate::info!(
-				"init caps: process.spawn={} process.inspect={}",
-				capabilities.0,
-				capabilities.1
-			);
-		}
-	} else {
-
-		crate::warn!("Failed to start init (ret={:#x})", init_pid);
-	}
-	crate::performance::mark_boot(
-		crate::performance::BootMilestone::SystemServicesStarted,
-	);
-	crate::performance::mark_boot(crate::performance::BootMilestone::Idle);
-	info!("Kernel initialization complete. Entering idle loop...");
-	crate::util::log::release_boot_marker(format_args!(
-		"Kernel initialization complete. Entering idle loop..."
-	));
-	task::schedule_and_switch();
-
-	loop {
-		x86_64::instructions::hlt();
-	}
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 /// カーネルエントリポイント（kernel binary から呼ばれる）
 pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
-	early_serial("kernel: start\n");
-	crate::performance::mark_boot(crate::performance::BootMilestone::MnuEntry);
-	crate::util::console::init();
-	if let Err(error) = boot_info.validate() {
-		crate::error!("Boot ABI validation failed: {:?}", error);
-		halt_forever();
-	}
-	crate::percpu::configure_boot_cpu(boot_info);
-	match crate::boot_memory::preparation_status() {
-		Some(crate::boot_memory::BootMemoryPreparation::Succeeded { reclaimed_bytes }) => {
-			crate::info!("Reclaimed {} bootloader bytes", reclaimed_bytes)
-		}
-		Some(crate::boot_memory::BootMemoryPreparation::Failed) => {
-			crate::warn!("Bootloader memory reclamation was skipped")
-		}
-		None => {}
-	}
-	unsafe {
-		crate::init::fs::set_image(boot_info.initfs_addr, boot_info.initfs_size as usize);
-		crate::init::fs::set_rootfs(boot_info.rootfs_addr, boot_info.rootfs_size as usize);
-	}
-	crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
-	match kinit(boot_info) {
-		Ok(_) => {
-			early_serial("kernel: kinit completed\n");
-		}
-		Err(e) => {
-			handle_kernel_error(e);
-			halt_forever();
-		}
-	}
-	create_kernel_proc().unwrap_or_else(|e| {
-		handle_kernel_error(e);
-		halt_forever();
-	});
-	task::start_scheduling();
+    early_serial("kernel: start\n");
+    crate::performance::mark_boot(crate::performance::BootMilestone::MnuEntry);
+    crate::util::console::init();
+    if let Err(error) = boot_info.validate() {
+        crate::error!("Boot ABI validation failed: {:?}", error);
+        halt_forever();
+    }
+    crate::percpu::configure_boot_cpu(boot_info);
+    match crate::boot_memory::preparation_status() {
+        Some(crate::boot_memory::BootMemoryPreparation::Succeeded { reclaimed_bytes }) => {
+            crate::info!("Reclaimed {} bootloader bytes", reclaimed_bytes)
+        }
+        Some(crate::boot_memory::BootMemoryPreparation::Failed) => {
+            crate::warn!("Bootloader memory reclamation was skipped")
+        }
+        None => {}
+    }
+    unsafe {
+        crate::init::fs::set_image(boot_info.initfs_addr, boot_info.initfs_size as usize);
+        crate::init::fs::set_rootfs(boot_info.rootfs_addr, boot_info.rootfs_size as usize);
+    }
+    crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
+    match kinit(boot_info) {
+        Ok(_) => {
+            early_serial("kernel: kinit completed\n");
+        }
+        Err(e) => {
+            handle_kernel_error(e);
+            halt_forever();
+        }
+    }
+    create_kernel_proc().unwrap_or_else(|e| {
+        handle_kernel_error(e);
+        halt_forever();
+    });
+    task::start_scheduling();
 }
 
 #[unsafe(no_mangle)]
@@ -280,31 +274,31 @@ fn create_kernel_proc() -> Result<()> {
 }
 
 pub fn early_serial(text: &str) {
-	for byte in text.bytes() {
-		unsafe {
-			let mut status: u8;
+    for byte in text.bytes() {
+        unsafe {
+            let mut status: u8;
 
-			loop {
-				core::arch::asm!(
-					"in al, dx",
-					in("dx") 0x3fdu16,
-					out("al") status,
-					options(nomem, nostack, preserves_flags),
-				);
+            loop {
+                core::arch::asm!(
+                    "in al, dx",
+                    in("dx") 0x3fdu16,
+                    out("al") status,
+                    options(nomem, nostack, preserves_flags),
+                );
 
-				if status & 0x20 != 0 {
-					break;
-				}
-			}
+                if status & 0x20 != 0 {
+                    break;
+                }
+            }
 
-			core::arch::asm!(
-				"out dx, al",
-				in("dx") 0x3f8u16,
-				in("al") byte,
-				options(nomem, nostack, preserves_flags),
-			);
-		}
-	}
+            core::arch::asm!(
+                "out dx, al",
+                in("dx") 0x3f8u16,
+                in("al") byte,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+    }
 }
 
 /// システムを無限ループで停止
