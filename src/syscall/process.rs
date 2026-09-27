@@ -351,10 +351,18 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         out_buf[16..24].copy_from_slice(&state_num.to_ne_bytes());
         let parent = proc.parent_id().map_or(0, |pid| pid.as_u64());
         out_buf[24..32].copy_from_slice(&parent.to_ne_bytes());
-        // name at offset 32, max 64 bytes
-        let name = proc.name();
+        // Application processes expose their signed package identity instead of the
+        // generic bundle entry filename (normally `entry.elf`). Inspectors can use
+        // this stable identifier to resolve the user-facing name and icon from the
+        // installed application manifest. Non-application processes keep their
+        // kernel process name.
+        let name = proc
+            .application_identity()
+            .map(|identity| identity.package_id())
+            .unwrap_or_else(|| proc.name());
+        // name at offset 32; the fixed 88-byte ABI leaves 56 bytes for UTF-8.
         let name_bytes = name.as_bytes();
-        let copy_len = core::cmp::min(64, name_bytes.len());
+        let copy_len = core::cmp::min(RECORD_SIZE - 32, name_bytes.len());
         out_buf[32..32 + copy_len].copy_from_slice(&name_bytes[..copy_len]);
         records.push(out_buf);
     });
