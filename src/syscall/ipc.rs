@@ -266,7 +266,8 @@ pub fn call(
     if sent != 0 {
         return sent;
     }
-    let result = recv_blocking_reply_for_thread(caller, caller, reply_ptr, reply_len);
+    let result =
+        recv_blocking_reply_for_thread(caller, caller, dest_endpoint_handle, reply_ptr, reply_len);
     #[cfg(feature = "performance-instrumentation")]
     if (result as i64) >= 0 {
         crate::performance::record_latency(
@@ -323,6 +324,7 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
 fn recv_blocking_reply_for_thread(
     receiver_thread_id: u64,
     caller_thread_id: u64,
+    expected_sender: u64,
     buf_ptr: u64,
     max_len: u64,
 ) -> u64 {
@@ -341,6 +343,7 @@ fn recv_blocking_reply_for_thread(
         let recv = {
             let mut boxes = lock_mailboxes();
             match boxes[idx].pop_reply_to_user(
+                expected_sender,
                 receiver_thread_id,
                 idx as u16,
                 receiver_generation,
@@ -364,6 +367,7 @@ fn recv_blocking_reply_for_thread(
                 {
                     let mut boxes = lock_mailboxes();
                     let second_try = boxes[idx].pop_reply_to_user(
+                        expected_sender,
                         receiver_thread_id,
                         idx as u16,
                         receiver_generation,
@@ -834,6 +838,7 @@ impl Mailbox {
 
     fn pop_reply_to_user(
         &mut self,
+        expected_sender: u64,
         receiver: u64,
         receiver_slot: u16,
         receiver_generation: u64,
@@ -853,7 +858,8 @@ impl Mailbox {
                 self.quarantine("ipc mailbox queue points to an empty slot");
                 return Ok(None);
             };
-            if msg.to != receiver
+            if msg.from != expected_sender
+                || msg.to != receiver
                 || msg.to_slot != receiver_slot
                 || msg.to_generation != receiver_generation
                 || !msg.is_reply
@@ -1991,5 +1997,25 @@ mod tests {
         mailbox.remove_reply_target(22);
         assert!(mailbox.has_reply_target(11));
         assert!(!mailbox.has_reply_target(22));
+    }
+
+    #[test]
+    fn synchronous_call_only_consumes_its_servers_reply() {
+        let mut mailbox = Mailbox::new();
+        mailbox
+            .push_message(10, 20, 1, 2, &[], true, false)
+            .unwrap();
+        mailbox
+            .push_message(11, 20, 1, 2, &[], true, false)
+            .unwrap();
+
+        assert_eq!(
+            mailbox.pop_reply_to_user(11, 20, 1, 2, 0, 0),
+            Ok(Some((11, 0)))
+        );
+        assert_eq!(
+            mailbox.pop_reply_to_user(10, 20, 1, 2, 0, 0),
+            Ok(Some((10, 0)))
+        );
     }
 }
