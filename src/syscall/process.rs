@@ -319,7 +319,7 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         return EPERM;
     }
 
-    const RECORD_SIZE: usize = 88;
+    const RECORD_SIZE: usize = 112;
     if buf_ptr == 0 {
         return 0;
     }
@@ -328,6 +328,20 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
     if max_entries == 0 {
         return 0;
     }
+
+    let mut thread_metrics: Vec<(crate::task::ProcessId, u64, u64)> = Vec::new();
+    crate::task::for_each_thread(|thread| {
+        let process_id = thread.process_id();
+        if let Some((_, count, ticks)) = thread_metrics
+            .iter_mut()
+            .find(|(candidate, _, _)| *candidate == process_id)
+        {
+            *count = count.saturating_add(1);
+            *ticks = ticks.saturating_add(thread.cpu_ticks());
+        } else {
+            thread_metrics.push((process_id, 1, thread.cpu_ticks()));
+        }
+    });
 
     let mut records: Vec<[u8; RECORD_SIZE]> = Vec::new();
     crate::task::for_each_process(|proc| {
@@ -350,6 +364,14 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         out_buf[16..24].copy_from_slice(&state_num.to_ne_bytes());
         let parent = proc.parent_id().map_or(0, |pid| pid.as_u64());
         out_buf[24..32].copy_from_slice(&parent.to_ne_bytes());
+        let (thread_count, cpu_ticks) = thread_metrics
+            .iter()
+            .find(|(process_id, _, _)| *process_id == proc.id())
+            .map(|(_, count, ticks)| (*count, *ticks))
+            .unwrap_or((0, 0));
+        out_buf[32..40].copy_from_slice(&cpu_ticks.to_ne_bytes());
+        out_buf[40..48].copy_from_slice(&proc.mapped_memory_bytes().to_ne_bytes());
+        out_buf[48..56].copy_from_slice(&thread_count.to_ne_bytes());
         // Application processes expose their signed package identity instead of the
         // generic bundle entry filename (normally `entry.elf`). Inspectors can use
         // this stable identifier to resolve the user-facing name and icon from the
@@ -359,10 +381,10 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
             .application_identity()
             .map(|identity| identity.package_id())
             .unwrap_or_else(|| proc.name());
-        // name at offset 32; the fixed 88-byte ABI leaves 56 bytes for UTF-8.
+        // name at offset 56; the fixed 112-byte ABI leaves 56 bytes for UTF-8.
         let name_bytes = name.as_bytes();
-        let copy_len = core::cmp::min(RECORD_SIZE - 32, name_bytes.len());
-        out_buf[32..32 + copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        let copy_len = core::cmp::min(RECORD_SIZE - 56, name_bytes.len());
+        out_buf[56..56 + copy_len].copy_from_slice(&name_bytes[..copy_len]);
         records.push(out_buf);
     });
 

@@ -148,10 +148,12 @@ pub fn scheduler_tick() -> bool {
     );
     crate::task::reclaim_current_cpu_kernel_stack();
     if let Some(slot) = current_thread_slot() {
+        let _ = with_thread_at_slot_mut(slot, |thread| thread.note_cpu_tick());
         if with_thread_at_slot(slot, |t| t.in_syscall()).unwrap_or(false) {
             return false;
         }
     } else if let Some(tid) = current_thread_id() {
+        let _ = with_thread_mut(tid, |thread| thread.note_cpu_tick());
         if with_thread(tid, |t| t.in_syscall()).unwrap_or(false) {
             return false;
         }

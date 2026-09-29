@@ -814,7 +814,7 @@ fn plugkit_ipc_self_test() -> bool {
     let mut proc_buf = [0u8; 2048];
     let count = list_processes(&mut proc_buf);
     if count > 0 {
-        let record_size = 88usize;
+        let record_size = 112usize;
         let max_records = core::cmp::min(count as usize, proc_buf.len() / record_size);
         for idx in 0..max_records {
             let start = idx * record_size;
@@ -1047,7 +1047,7 @@ fn process_record_matches_name(record: &[u8], expected_name: &[u8]) -> bool {
         record[8], record[9], record[10], record[11], record[12], record[13], record[14],
         record[15],
     ]);
-    let name = &record[32..88];
+    let name = &record[56..112];
 
     if pid == 0 || tid == 0 || expected_name.len() > name.len() {
         return false;
@@ -1073,7 +1073,7 @@ fn find_process_state_by_name(expected_name: &[u8]) -> Option<u64> {
     if count == 0 {
         return None;
     }
-    let record_size = 88usize;
+    let record_size = 112usize;
     let max_records = core::cmp::min(count as usize, proc_buf.len() / record_size);
     for idx in 0..max_records {
         let start = idx * record_size;
@@ -1092,7 +1092,7 @@ pub fn test_syscall_list_processes_includes_init() -> bool {
         return false;
     }
 
-    let record_size = 88usize;
+    let record_size = 112usize;
     let max_records = core::cmp::min(count as usize, buf.len() / record_size);
     for idx in 0..max_records {
         let start = idx * record_size;
@@ -1112,7 +1112,7 @@ pub fn test_syscall_list_processes_contains_at_least_one_valid_record() -> bool 
         return false;
     }
 
-    let record_size = 88usize;
+    let record_size = 112usize;
     let max_records = core::cmp::min(count as usize, buf.len() / record_size);
     if max_records == 0 {
         return false;

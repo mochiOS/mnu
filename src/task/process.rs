@@ -894,6 +894,24 @@ impl Process {
     pub fn stack_top(&self) -> u64 {
         self.stack_top
     }
+
+    /// System Monitor向けの、カーネルが追跡しているユーザー空間の総量。
+    /// 共有領域も各プロセスに一度ずつ数えるため、物理RSSではなくmapped sizeである。
+    pub fn mapped_memory_bytes(&self) -> u64 {
+        let heap = self.heap_end.saturating_sub(self.heap_start);
+        let stack = self.stack_top.saturating_sub(self.stack_bottom);
+        let mmap = self
+            .mmap_regions
+            .iter()
+            .fold(0u64, |total, region| total.saturating_add(region.len()));
+        let dma = self
+            .dma_buffers
+            .iter()
+            .fold(0u64, |total, buffer| total.saturating_add(buffer.len()));
+        heap.saturating_add(stack)
+            .saturating_add(mmap)
+            .saturating_add(dma)
+    }
     pub fn set_stack_bottom(&mut self, addr: u64) {
         self.stack_bottom = addr;
     }

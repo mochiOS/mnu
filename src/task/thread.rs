@@ -262,6 +262,8 @@ pub struct Thread {
     interactive_score: u8,
     /// 直近の量子使い切りの傾向
     cpu_burst_score: u8,
+    /// このスレッドが実行状態だったタイマーティックの累計。
+    cpu_ticks: u64,
     #[cfg(feature = "performance-instrumentation")]
     /// SleepingまたはBlockedからReadyになった時刻
     wakeup_started_cycles: u64,
@@ -731,6 +733,7 @@ impl Thread {
             fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
+            cpu_ticks: 0,
             #[cfg(feature = "performance-instrumentation")]
             wakeup_started_cycles: 0,
         }
@@ -852,6 +855,7 @@ impl Thread {
             fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
+            cpu_ticks: 0,
             #[cfg(feature = "performance-instrumentation")]
             wakeup_started_cycles: 0,
         }
@@ -954,6 +958,7 @@ impl Thread {
             fast_ipc: IpcFastState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
+            cpu_ticks: 0,
             #[cfg(feature = "performance-instrumentation")]
             wakeup_started_cycles: 0,
         }
@@ -967,6 +972,14 @@ impl Thread {
     /// システムコールコンテキスト中かどうか
     pub fn in_syscall(&self) -> bool {
         self.in_syscall
+    }
+
+    pub fn cpu_ticks(&self) -> u64 {
+        self.cpu_ticks
+    }
+
+    pub fn note_cpu_tick(&mut self) {
+        self.cpu_ticks = self.cpu_ticks.saturating_add(1);
     }
 
     pub fn set_in_syscall(&mut self, in_syscall: bool) {
