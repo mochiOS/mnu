@@ -377,9 +377,16 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         // this stable identifier to resolve the user-facing name and icon from the
         // installed application manifest. Non-application processes keep their
         // kernel process name.
+        let executable_name = proc
+            .exe_path()
+            .rsplit('/')
+            .next()
+            .filter(|name| name.ends_with(".service") || name.ends_with(".driver"));
         let name = proc
             .application_identity()
             .map(|identity| identity.package_id())
+            .or_else(|| proc.service_id())
+            .or(executable_name)
             .unwrap_or_else(|| proc.name());
         // name at offset 56; the fixed 112-byte ABI leaves 56 bytes for UTF-8.
         let name_bytes = name.as_bytes();
