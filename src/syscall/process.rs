@@ -4,6 +4,7 @@ use super::types::{EAGAIN, ECHILD, EFAULT, EINVAL, EIO, ENOMEM, ENOSYS, EPERM, S
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
 use alloc::string::ToString;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 fn caller_has_process_inspect_capability() -> bool {
@@ -150,28 +151,6 @@ fn writeback_shared_mmap_region(
     };
     if sync_start < region.start() || sync_end > region_end {
         return EINVAL;
-    }
-
-    let backing_base = sync_start - region.start();
-    let mut offset = 0usize;
-
-    while offset < data.len() {
-        let chunk_len = core::cmp::min(MEMORY_SYNC_CHUNK_BYTES, data.len() - offset);
-        let write_off = match backing_base.checked_add(offset as u64) {
-            Some(v) => v,
-            None => return EINVAL,
-        };
-        let backing = region.backing_mut().file_data_mut();
-        let end = match (write_off as usize).checked_add(chunk_len) {
-            Some(v) => v,
-            None => return EINVAL,
-        };
-        if end > backing.len() {
-            backing.resize(end, 0);
-        }
-        backing[write_off as usize..end].copy_from_slice(&data[offset..offset + chunk_len]);
-
-        offset += chunk_len;
     }
 
     let _ = region.take_dirty_pages();
@@ -846,7 +825,7 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool, is_execute: bool)
         page_addr,
         is_write
     );
-    let result = crate::task::with_process_mut(pid, |process| {
+    let resident = crate::task::with_process_mut(pid, |process| {
         let pt_phys = match process.page_table() {
             Some(p) => p,
             None => return Err(EINVAL),
@@ -877,11 +856,6 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool, is_execute: bool)
             crate::debug!("[MMAP_FAULT] instruction fault on non-executable mapping");
             return Err(EPERM);
         }
-        let page_off = match page_addr.checked_sub(region.start()) {
-            Some(v) => v as usize,
-            None => return Err(EINVAL),
-        };
-
         if crate::mem::paging::is_user_range_mapped_in_table(pt_phys, page_addr, 1) {
             if !is_write {
                 crate::debug!("[MMAP_FAULT] page already mapped {:#x}", page_addr);
@@ -897,24 +871,76 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool, is_execute: bool)
             }
             region.mark_dirty_page((page_addr - region.start()) / 4096);
             crate::debug!("[MMAP_FAULT] upgraded dirty page {:#x}", page_addr);
+            return Ok(true);
+        }
+        Ok(false)
+    });
+    match resident {
+        Some(Ok(true)) => return true,
+        Some(Ok(false)) => {}
+        _ => return false,
+    }
+
+    let plan = crate::task::with_process(pid, |process| {
+        let pt_phys = process.page_table().ok_or(EINVAL)?;
+        let region = process.find_mmap_region(fault_addr).ok_or(EINVAL)?;
+        if !region.allows_read_at(fault_addr)
+            || (is_write && !region.allows_write_at(fault_addr))
+            || (is_execute && !region.allows_execute_at(fault_addr))
+        {
+            return Err(EPERM);
+        }
+        let page_offset = page_addr.checked_sub(region.start()).ok_or(EINVAL)?;
+        let pager = match region.backing().file_object() {
+            Some(object) => {
+                let file_offset = region
+                    .backing()
+                    .file_offset()
+                    .checked_add(page_offset)
+                    .ok_or(EINVAL)?;
+                Some((object.clone(), file_offset / 4096))
+            }
+            None => None,
+        };
+        Ok((
+            pt_phys,
+            region.start(),
+            region.allows_execute_at(fault_addr),
+            pager,
+        ))
+    });
+    let Some(Ok((pt_phys, region_start, executable, pager))) = plan else {
+        return false;
+    };
+
+    let page = match pager {
+        Some((object, page_index)) => match object.page(page_index) {
+            Ok(page) => page,
+            Err(_) => return false,
+        },
+        None => Arc::new([0u8; crate::mem::vm_object::PAGE_BYTES]),
+    };
+
+    let result = crate::task::with_process_mut(pid, |process| {
+        let region = process.find_mmap_region_mut(fault_addr).ok_or(EINVAL)?;
+        if region.start() != region_start
+            || !region.allows_read_at(fault_addr)
+            || (is_write && !region.allows_write_at(fault_addr))
+            || (is_execute && !region.allows_execute_at(fault_addr))
+        {
+            return Err(EPERM);
+        }
+        if crate::mem::paging::is_user_range_mapped_in_table(pt_phys, page_addr, 1) {
             return Ok(());
         }
-
-        let file_data = region.backing().file_data();
-        let copy_len = core::cmp::min(4096usize, file_data.len().saturating_sub(page_off));
-        let src = if copy_len > 0 {
-            &file_data[page_off..page_off + copy_len]
-        } else {
-            &[]
-        };
         if crate::mem::paging::map_and_copy_segment_to(
             pt_phys,
             page_addr,
-            copy_len as u64,
+            crate::mem::vm_object::PAGE_BYTES as u64,
             4096,
-            src,
+            page.as_slice(),
             is_write && region.allows_write_at(fault_addr),
-            region.allows_execute_at(fault_addr),
+            executable,
         )
         .is_err()
         {
@@ -1004,33 +1030,15 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64, file_offset:
         return EINVAL;
     } else {
         let idx = fd as usize;
-        let path = match crate::task::with_process(pid, |process| {
+        let vnode = match crate::task::with_process(pid, |process| {
             process.fd_table().get(idx).and_then(|fh| {
-                fh.open
-                    .lock()
-                    .vnode
-                    .as_ref()
-                    .map(|vnode| vnode.path().to_string())
+                fh.open.lock().vnode.as_ref().cloned()
             })
         }) {
-            Some(Some(path)) => path,
+            Some(Some(vnode)) if !vnode.is_directory() => vnode,
             _ => return EINVAL,
         };
-        let Some((_, file_size, _, _)) = crate::syscall::fs::metadata_rootfs_first(&path) else {
-            return ENOMEM;
-        };
-        let read_len = core::cmp::min(size, file_size.saturating_sub(file_offset));
-        let Ok(read_len) = usize::try_from(read_len) else {
-            return ENOMEM;
-        };
-        let mut data = alloc::vec![0; read_len];
-        if read_len != 0 {
-            match crate::syscall::fs::read_file_range_rootfs_first(&path, file_offset, &mut data) {
-                Some(read) => data.truncate(read),
-                None => return ENOMEM,
-            }
-        }
-        Some((path, file_offset, data))
+        Some((Arc::new(crate::mem::vm_object::VmObject::file(vnode)), file_offset))
     };
 
     let result = crate::task::with_process_mut(pid, |process| {
@@ -1113,7 +1121,7 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64, file_offset:
                 return Err(ENOMEM);
             }
         } else {
-            let (path, file_offset, data) = match file_backing {
+            let (object, file_offset) = match file_backing {
                 Some(backing) => backing,
                 None => return Err(EINVAL),
             };
@@ -1122,9 +1130,8 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64, file_offset:
                 size,
                 prot,
                 flags,
-                path,
+                object,
                 file_offset,
-                data,
                 writable,
                 shared,
             );
@@ -1226,7 +1233,7 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
     if let Some(mut region) = backing_region {
         if region.is_shared() {
             let region_len = region.len();
-            let path = region.backing().file_path().to_string();
+            let object = region.backing().file_object().cloned();
             let file_offset = region.backing().file_offset();
             let dirty_pages = region.take_dirty_pages();
             for page_index in dirty_pages {
@@ -1238,20 +1245,10 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
                 let copy_len = core::cmp::min(4096u64, region_len - page_off) as usize;
                 let mut page_buf = [0u8; 4096];
                 if crate::syscall::copy_from_user(page_addr, &mut page_buf[..copy_len]).is_ok() {
-                    let backing = region.backing_mut().file_data_mut();
-                    let end = (page_off as usize).saturating_add(copy_len);
-                    if end > backing.len() {
-                        backing.resize(end, 0);
-                    }
-                    backing[page_off as usize..end].copy_from_slice(&page_buf[..copy_len]);
-                    if !path.is_empty() {
-                        if let Some(write_offset) = file_offset.checked_add(page_off) {
-                            let _ = crate::cext::fs::write_all(
-                                &path,
-                                write_offset,
-                                &page_buf[..copy_len],
-                            );
-                        }
+                    if let (Some(object), Some(write_offset)) =
+                        (object.as_ref(), file_offset.checked_add(page_off))
+                    {
+                        let _ = object.write_at(write_offset, &page_buf[..copy_len]);
                     }
                 }
             }
@@ -1509,13 +1506,13 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
         offset += chunk_len;
     }
 
-    let (backing_path, file_offset) =
-        match crate::task::with_process_mut(crate::task::ids::ProcessId::from_u64(pid), |process| {
-            let Some(region) = process.find_mmap_region_mut(region_start) else {
+    let (backing_object, file_offset) =
+        match crate::task::with_process(crate::task::ids::ProcessId::from_u64(pid), |process| {
+            let Some(region) = process.find_mmap_region(region_start) else {
                 return Err(EINVAL);
             };
             Ok((
-                region.backing().file_path().to_string(),
+                region.backing().file_object().cloned(),
                 region.backing().file_offset(),
             ))
         }) {
@@ -1524,7 +1521,7 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
             None => return ENOMEM,
         };
 
-    if !backing_path.is_empty() {
+    if let Some(object) = backing_object {
         let mut written = 0usize;
         while written < copied.len() {
             let chunk_len = core::cmp::min(MEMORY_SYNC_CHUNK_BYTES, copied.len() - written);
@@ -1535,11 +1532,7 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
                 Some(v) => v,
                 None => return EINVAL,
             };
-            match crate::cext::fs::write_all(
-                &backing_path,
-                write_off,
-                &copied[written..written + chunk_len],
-            ) {
+            match object.write_at(write_off, &copied[written..written + chunk_len]) {
                 Ok(n) if n == chunk_len => {}
                 _ => return EIO,
             }

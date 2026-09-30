@@ -796,6 +796,7 @@ fn open_userspace_for_pid(
             let _ = vfs::userspace::close(mount.mount_id.0, open_id);
             return errno;
         }
+        crate::mem::vm_object::invalidate_inode(mount.mount_id, InodeId(node.node_id));
     }
 
     let cloexec = (flags & O_CLOEXEC) != 0;
@@ -1708,6 +1709,10 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
             match result {
                 Ok(0) => return written as u64,
                 Ok(wrote_chunk) => {
+                    crate::mem::vm_object::invalidate_inode(
+                        vnode.inode.mount_id,
+                        vnode.inode.inode_id,
+                    );
                     let end = match start_pos.checked_add(written + wrote_chunk) {
                         Some(value) => value,
                         None => return if written == 0 { EFBIG } else { written as u64 },
@@ -1919,7 +1924,13 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
         let result = vfs::userspace::truncate(mount.mount_id.0, open_id, len);
         let close_result = vfs::userspace::close(mount.mount_id.0, open_id);
         return match result.and(close_result) {
-            Ok(()) => SUCCESS,
+            Ok(()) => {
+                crate::mem::vm_object::invalidate_inode(
+                    mount.mount_id,
+                    InodeId(node.node_id),
+                );
+                SUCCESS
+            }
             Err(errno) => errno,
         };
     }
@@ -1935,6 +1946,11 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
     if rc != 0 {
         return errno_from_cext(rc);
     }
+    let mount_id = vfs::resolve(&path)
+        .map(|mount| mount.mount_id)
+        .unwrap_or(MountId(1));
+    let vnode = Vnode::legacy_path_on(mount_id, path, VnodeKind::Regular);
+    crate::mem::vm_object::invalidate_inode(vnode.inode.mount_id, vnode.inode.inode_id);
     SUCCESS
 }
 
@@ -2054,6 +2070,10 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
                     return Err(errno_from_cext(rc));
                 }
             }
+            crate::mem::vm_object::invalidate_inode(
+                vnode.inode.mount_id,
+                vnode.inode.inode_id,
+            );
         } else {
             let mut data = open.data.to_vec();
             data.resize(new_len, 0);

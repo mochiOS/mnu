@@ -71,6 +71,22 @@ impl VmObject {
     pub fn invalidate(&self) {
         invalidate_inode(self.vnode.inode.mount_id, self.vnode.inode.inode_id);
     }
+
+    pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
+        let written = self.vnode.write_at(offset, input)?;
+        self.invalidate();
+        Ok(written)
+    }
+}
+
+impl core::fmt::Debug for VmObject {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("VmObject")
+            .field("mount_id", &self.vnode.inode.mount_id)
+            .field("inode_id", &self.vnode.inode.inode_id)
+            .finish()
+    }
 }
 
 fn cached_page(key: PageKey) -> Option<Arc<[u8; PAGE_BYTES]>> {

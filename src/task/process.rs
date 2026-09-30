@@ -48,9 +48,8 @@ pub enum MmapBacking {
         shared: bool,
     },
     File {
-        path: String,
+        object: Arc<crate::mem::vm_object::VmObject>,
         offset: u64,
-        data: Arc<alloc::vec::Vec<u8>>,
         writable: bool,
         shared: bool,
     },
@@ -164,9 +163,8 @@ impl MmapRegion {
         len: u64,
         prot: u64,
         flags: u64,
-        path: String,
+        object: Arc<crate::mem::vm_object::VmObject>,
         offset: u64,
-        data: alloc::vec::Vec<u8>,
         writable: bool,
         shared: bool,
     ) -> Self {
@@ -177,9 +175,8 @@ impl MmapRegion {
             protection_ranges: alloc::vec::Vec::new(),
             flags,
             backing: MmapBacking::File {
-                path,
+                object,
                 offset,
-                data: Arc::new(data),
                 writable,
                 shared,
             },
@@ -366,10 +363,10 @@ impl MmapRegion {
 }
 
 impl MmapBacking {
-    pub fn file_path(&self) -> &str {
+    pub fn file_object(&self) -> Option<&Arc<crate::mem::vm_object::VmObject>> {
         match self {
-            MmapBacking::Anonymous { .. } => "",
-            MmapBacking::File { path, .. } => path.as_str(),
+            MmapBacking::Anonymous { .. } => None,
+            MmapBacking::File { object, .. } => Some(object),
         }
     }
 
@@ -377,20 +374,6 @@ impl MmapBacking {
         match self {
             MmapBacking::Anonymous { .. } => 0,
             MmapBacking::File { offset, .. } => *offset,
-        }
-    }
-
-    pub fn file_data(&self) -> &[u8] {
-        match self {
-            MmapBacking::Anonymous { data, .. } => data.as_slice(),
-            MmapBacking::File { data, .. } => data.as_slice(),
-        }
-    }
-
-    pub fn file_data_mut(&mut self) -> &mut alloc::vec::Vec<u8> {
-        match self {
-            MmapBacking::Anonymous { data, .. } => data,
-            MmapBacking::File { data, .. } => Arc::make_mut(data),
         }
     }
 

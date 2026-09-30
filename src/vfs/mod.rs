@@ -148,6 +148,18 @@ impl Vnode {
         }
         crate::cext::fs::read_range(self.path(), offset, output).ok_or(crate::syscall::EIO)
     }
+
+    pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
+        if let Some((_, open_id)) = self.userspace_handle_ids() {
+            return userspace::write(self.inode.mount_id.0, open_id, offset, input);
+        }
+        if let Some(handle) = self.cext_handle_id() {
+            return crate::cext::fs::write_handle(handle, offset, input)
+                .map_err(|_| crate::syscall::EIO);
+        }
+        crate::cext::fs::write_all(self.path(), offset, input)
+            .map_err(|_| crate::syscall::EIO)
+    }
 }
 
 impl Drop for Vnode {
