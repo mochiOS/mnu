@@ -1341,22 +1341,18 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         return ENOSPC;
     }
 
-    let (mut start_pos, fs_path, open_flags) = {
+    let (mut start_pos, vnode, open_flags) = {
         let open = open_file.lock();
-        (
-            open.pos,
-            open.vnode.as_ref().map(|vnode| vnode.path().to_string()),
-            open.open_flags,
-        )
+        (open.pos, open.vnode.clone(), open.open_flags)
     };
-    if let Some(path) = fs_path.as_deref() {
-        crate::performance::record_vfs_path_clone(path.len());
-    }
     if (open_flags & O_APPEND) != 0 {
-        let Some(path) = fs_path.as_deref() else {
+        let Some(vnode) = vnode.as_ref() else {
             return EINVAL;
         };
-        start_pos = match crate::cext::fs::file_metadata(path)
+        start_pos = match vnode
+            .cext_handle_id()
+            .and_then(crate::cext::fs::handle_metadata)
+            .or_else(|| crate::cext::fs::file_metadata(vnode.path()))
             .and_then(|(_, size, _, _)| usize::try_from(size).ok())
         {
             Some(size) => size,
@@ -1375,13 +1371,18 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
             return errno;
         }
 
-        if let Some(path) = fs_path.as_deref() {
+        if let Some(vnode) = vnode.as_ref() {
             crate::performance::record_vfs_write_range();
             let write_offset = match start_pos.checked_add(written) {
                 Some(value) => value as u64,
                 None => return if written == 0 { EFBIG } else { written as u64 },
             };
-            match crate::cext::fs::write_all(path, write_offset, &tmp[..chunk_len]) {
+            let result = if let Some(handle) = vnode.cext_handle_id() {
+                crate::cext::fs::write_handle(handle, write_offset, &tmp[..chunk_len])
+            } else {
+                crate::cext::fs::write_all(vnode.path(), write_offset, &tmp[..chunk_len])
+            };
+            match result {
                 Ok(0) => return written as u64,
                 Ok(wrote_chunk) => {
                     let end = match start_pos.checked_add(written + wrote_chunk) {

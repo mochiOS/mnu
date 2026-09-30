@@ -204,6 +204,30 @@ pub fn handle_metadata(handle: u64) -> Option<(u16, u64, u32, u32)> {
     (rc == 0).then_some((mode, size, uid, gid))
 }
 
+pub fn write_handle(handle: u64, offset: u64, data: &[u8]) -> Result<usize, i32> {
+    let ops = ops_ptr();
+    if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
+        return Err(-38);
+    }
+    let mut written = 0usize;
+    let rc = unsafe {
+        ((*ops).write_handle)(
+            handle,
+            offset,
+            McxBuffer {
+                ptr: data.as_ptr() as *mut u8,
+                len: data.len(),
+            },
+            &mut written,
+        )
+    };
+    if rc == 0 && written <= data.len() {
+        Ok(written)
+    } else {
+        Err(if rc == 0 { -5 } else { rc })
+    }
+}
+
 pub fn write_all(path: &str, offset: u64, data: &[u8]) -> Result<usize, i32> {
     let ops = ops_ptr();
     if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
