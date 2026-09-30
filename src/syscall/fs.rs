@@ -558,6 +558,11 @@ pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64, u32, u32)> 
     if let Some((mode, size)) = crate::init::fs::initfs_file_metadata(path) {
         return Some((mode, size, 0, 0));
     }
+    if let Some(mount) = userspace_mount(path) {
+        return vfs::userspace::lookup(mount.mount_id.0, &mount.path)
+            .ok()
+            .map(|node| (node.mode as u16, node.size, node.uid, node.gid));
+    }
     crate::cext::fs::file_metadata(path)
         .or_else(|| crate::init::fs::file_metadata(path).map(|(mode, size)| (mode, size, 0, 0)))
 }
@@ -1025,7 +1030,7 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
             let metadata = if let Some(vnode) = open.vnode.as_ref() {
                 if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
                     let node = vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)?;
-                    Some((node.mode as u16, node.size, 0, 0))
+                    Some((node.mode as u16, node.size, node.uid, node.gid))
                 } else {
                     vnode
                         .cext_handle_id()
@@ -1089,7 +1094,7 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
     if let Some(mount) = userspace_mount(&resolved) {
         return match vfs::userspace::lookup(mount.mount_id.0, &mount.path) {
             Ok(node) => {
-                write_stat_buf(stat_ptr, node.mode, node.size, 0, 0);
+                write_stat_buf(stat_ptr, node.mode, node.size, node.uid, node.gid);
                 SUCCESS
             }
             Err(errno) => errno,

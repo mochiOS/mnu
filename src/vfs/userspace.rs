@@ -18,6 +18,8 @@ pub struct NodeInfo {
     pub size: u64,
     pub mode: u32,
     pub kind: u32,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 pub struct DirectoryBatch {
@@ -33,9 +35,9 @@ pub fn mount(mount_id: u64) -> Result<NodeInfo, u64> {
             ..protocol::Header::default()
         },
         &[],
-        protocol::HEADER_LEN,
+        protocol::HEADER_LEN + protocol::METADATA_LEN,
     )?;
-    Ok(node_info(response.header))
+    node_info(response.header, response.payload())
 }
 
 pub fn lookup(mount_id: u64, path: &str) -> Result<NodeInfo, u64> {
@@ -50,9 +52,9 @@ pub fn lookup(mount_id: u64, path: &str) -> Result<NodeInfo, u64> {
             ..protocol::Header::default()
         },
         path.as_bytes(),
-        protocol::HEADER_LEN,
+        protocol::HEADER_LEN + protocol::METADATA_LEN,
     )?;
-    Ok(node_info(response.header))
+    node_info(response.header, response.payload())
 }
 
 pub fn open(mount_id: u64, node_id: u64, flags: u32) -> Result<u64, u64> {
@@ -133,9 +135,9 @@ pub fn stat(mount_id: u64, node_id: u64, open_id: u64) -> Result<NodeInfo, u64> 
             ..protocol::Header::default()
         },
         &[],
-        protocol::HEADER_LEN,
+        protocol::HEADER_LEN + protocol::METADATA_LEN,
     )?;
-    Ok(node_info(response.header))
+    node_info(response.header, response.payload())
 }
 
 pub fn create(mount_id: u64, path: &str, mode: u32, kind: u32) -> Result<NodeInfo, u64> {
@@ -152,9 +154,9 @@ pub fn create(mount_id: u64, path: &str, mode: u32, kind: u32) -> Result<NodeInf
             ..protocol::Header::default()
         },
         path.as_bytes(),
-        protocol::HEADER_LEN,
+        protocol::HEADER_LEN + protocol::METADATA_LEN,
     )?;
-    Ok(node_info(response.header))
+    node_info(response.header, response.payload())
 }
 
 pub fn unlink(mount_id: u64, path: &str, kind: u32) -> Result<(), u64> {
@@ -315,13 +317,16 @@ fn call(
     })
 }
 
-fn node_info(header: protocol::Header) -> NodeInfo {
-    NodeInfo {
+fn node_info(header: protocol::Header, payload: &[u8]) -> Result<NodeInfo, u64> {
+    let metadata = protocol::decode_metadata(payload).map_err(|_| EIO)?;
+    Ok(NodeInfo {
         node_id: header.node_id,
         size: header.offset,
         mode: header.mode,
         kind: header.flags,
-    }
+        uid: metadata.uid,
+        gid: metadata.gid,
+    })
 }
 
 fn service_endpoint() -> Option<u64> {
