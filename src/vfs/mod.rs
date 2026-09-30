@@ -41,6 +41,7 @@ pub struct Inode {
 /// callers already consume a `Vnode` and do not need another FD model change.
 pub enum VnodeBacking {
     LegacyPath(String),
+    CextHandle { path: String, handle: u64 },
 }
 
 /// A resolved filesystem object kept alive independently of a descriptor number.
@@ -65,14 +66,41 @@ impl Vnode {
         }
     }
 
+    pub fn cext_handle(mount_id: MountId, path: String, handle: u64, kind: VnodeKind) -> Self {
+        Self {
+            inode: Arc::new(Inode {
+                mount_id,
+                inode_id: InodeId(legacy_inode_id(&path)),
+                kind,
+            }),
+            backing: VnodeBacking::CextHandle { path, handle },
+        }
+    }
+
     pub fn path(&self) -> &str {
         match &self.backing {
             VnodeBacking::LegacyPath(path) => path,
+            VnodeBacking::CextHandle { path, .. } => path,
         }
     }
 
     pub fn is_directory(&self) -> bool {
         self.inode.kind == VnodeKind::Directory
+    }
+
+    pub fn cext_handle_id(&self) -> Option<u64> {
+        match &self.backing {
+            VnodeBacking::LegacyPath(_) => None,
+            VnodeBacking::CextHandle { handle, .. } => Some(*handle),
+        }
+    }
+}
+
+impl Drop for Vnode {
+    fn drop(&mut self) {
+        if let VnodeBacking::CextHandle { handle, .. } = &self.backing {
+            let _ = crate::cext::fs::close_handle(*handle);
+        }
     }
 }
 

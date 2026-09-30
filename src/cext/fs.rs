@@ -147,6 +147,63 @@ pub fn read_range(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
     (rc == 0 && read <= buf.len()).then_some(read)
 }
 
+pub fn open_handle(path: &str) -> Result<u64, i32> {
+    let ops = ops_ptr();
+    if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
+        return Err(-38);
+    }
+    let mut handle = 0u64;
+    let rc = unsafe { ((*ops).open_handle)(path_arg(path), &mut handle) };
+    if rc == 0 { Ok(handle) } else { Err(rc) }
+}
+
+pub fn close_handle(handle: u64) -> i32 {
+    let ops = ops_ptr();
+    if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
+        return -38;
+    }
+    unsafe { ((*ops).close_handle)(handle) }
+}
+
+pub fn read_handle(handle: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+    let ops = ops_ptr();
+    if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
+        return Err(-38);
+    }
+    let mut read = 0usize;
+    let rc = unsafe {
+        ((*ops).read_handle)(
+            handle,
+            offset,
+            McxBuffer {
+                ptr: buf.as_mut_ptr(),
+                len: buf.len(),
+            },
+            &mut read,
+        )
+    };
+    if rc == 0 && read <= buf.len() {
+        Ok(read)
+    } else {
+        Err(if rc == 0 { -5 } else { rc })
+    }
+}
+
+pub fn handle_metadata(handle: u64) -> Option<(u16, u64, u32, u32)> {
+    let ops = ops_ptr();
+    if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
+        return None;
+    }
+    let mut mode = 0u16;
+    let mut size = 0u64;
+    let mut uid = 0u32;
+    let mut gid = 0u32;
+    let rc = unsafe {
+        ((*ops).stat_handle)(handle, &mut mode, &mut size, &mut uid, &mut gid)
+    };
+    (rc == 0).then_some((mode, size, uid, gid))
+}
+
 pub fn write_all(path: &str, offset: u64, data: &[u8]) -> Result<usize, i32> {
     let ops = ops_ptr();
     if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {

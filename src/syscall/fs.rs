@@ -11,7 +11,7 @@ use crate::capability::Capability;
 use crate::task::fd_table::{
     FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
 };
-use crate::vfs::{self, Vnode, VnodeKind};
+use crate::vfs::{self, MountId, Vnode, VnodeKind};
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -711,33 +711,26 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
     } else {
         FileHandleCap::from_open_flags(flags).union(FileHandleCap::CLOSE)
     };
+    let kind = if is_dir {
+        VnodeKind::Directory
+    } else {
+        VnodeKind::Regular
+    };
+    let mount_id = vfs::resolve(path)
+        .map(|mount| mount.mount_id)
+        .unwrap_or(MountId(1));
+    let vnode = if crate::init::fs::initfs_file_metadata(path).is_none() {
+        crate::cext::fs::open_handle(path)
+            .map(|handle| Vnode::cext_handle(mount_id, path.to_string(), handle, kind))
+            .unwrap_or_else(|_| Vnode::legacy_path_on(mount_id, path.to_string(), kind))
+    } else {
+        Vnode::legacy_path_on(mount_id, path.to_string(), kind)
+    };
     let handle = alloc::boxed::Box::new(FileHandle::new(
         OpenFile {
             data: alloc::boxed::Box::new([]),
             pos: 0,
-            vnode: Some(Arc::new(vfs::resolve(path).map_or_else(
-                || {
-                    Vnode::legacy_path(
-                        path.to_string(),
-                        if is_dir {
-                            VnodeKind::Directory
-                        } else {
-                            VnodeKind::Regular
-                        },
-                    )
-                },
-                |mount| {
-                    Vnode::legacy_path_on(
-                        mount.mount_id,
-                        path.to_string(),
-                        if is_dir {
-                            VnodeKind::Directory
-                        } else {
-                            VnodeKind::Regular
-                        },
-                    )
-                },
-            ))),
+            vnode: Some(Arc::new(vnode)),
             is_remote: false,
             fd_remote: 0,
             pipe_id: None,
@@ -816,8 +809,12 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
         let file_len = open
             .vnode
             .as_ref()
-            .map(|vnode| vnode.path())
-            .and_then(metadata_rootfs_first)
+            .and_then(|vnode| {
+                vnode
+                    .cext_handle_id()
+                    .and_then(crate::cext::fs::handle_metadata)
+                    .or_else(|| metadata_rootfs_first(vnode.path()))
+            })
             .map(|(_, size, _, _)| size as usize)
             .unwrap_or(open.data.len());
         let new_pos = match whence {
@@ -905,8 +902,12 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
             let metadata = open
                 .vnode
                 .as_ref()
-                .map(|vnode| vnode.path())
-                .and_then(metadata_rootfs_first);
+                .and_then(|vnode| {
+                    vnode
+                        .cext_handle_id()
+                        .and_then(crate::cext::fs::handle_metadata)
+                        .or_else(|| metadata_rootfs_first(vnode.path()))
+                });
             let size = metadata
                 .map(|(_, size, _, _)| size)
                 .unwrap_or(open.data.len() as u64);
@@ -1197,20 +1198,26 @@ fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     while written < to_copy {
         let chunk_len = core::cmp::min(READ_IO_CHUNK_BYTES, to_copy - written);
         let read_len = {
-            let (path, pos) = {
+            let (vnode, pos) = {
                 let open = open_file.lock();
-                (
-                    open.vnode.as_ref().map(|vnode| vnode.path().to_string()),
-                    open.pos,
-                )
+                (open.vnode.clone(), open.pos)
             };
-            if let Some(path) = path.as_deref() {
-                crate::performance::record_vfs_path_clone(path.len());
-                let read =
-                    match read_file_range_rootfs_first(path, pos as u64, &mut tmp[..chunk_len]) {
+            if let Some(vnode) = vnode {
+                let read = if let Some(handle) = vnode.cext_handle_id() {
+                    match crate::cext::fs::read_handle(handle, pos as u64, &mut tmp[..chunk_len]) {
+                        Ok(read) => read,
+                        Err(_) => return EIO,
+                    }
+                } else {
+                    match read_file_range_rootfs_first(
+                        vnode.path(),
+                        pos as u64,
+                        &mut tmp[..chunk_len],
+                    ) {
                         Some(read) => read,
                         None => return EIO,
-                    };
+                    }
+                };
                 let mut open = open_file.lock();
                 if open.pos != pos {
                     continue;

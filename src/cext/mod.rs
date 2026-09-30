@@ -83,6 +83,17 @@ pub struct McxFsOps {
     pub chown: extern "C" fn(path: McxPath, uid: u32, gid: u32) -> i32,
     pub readdir: extern "C" fn(path: McxPath, buf: McxBuffer, out_len: *mut usize) -> i32,
     pub sync: extern "C" fn() -> i32,
+    pub open_handle: extern "C" fn(path: McxPath, out_handle: *mut u64) -> i32,
+    pub close_handle: extern "C" fn(handle: u64) -> i32,
+    pub read_handle:
+        extern "C" fn(handle: u64, offset: u64, buf: McxBuffer, out_read: *mut usize) -> i32,
+    pub stat_handle: extern "C" fn(
+        handle: u64,
+        out_mode: *mut u16,
+        out_size: *mut u64,
+        out_uid: *mut u32,
+        out_gid: *mut u32,
+    ) -> i32,
 }
 
 /// cext の種類
