@@ -635,6 +635,7 @@ const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 const O_NONBLOCK: u64 = 0x4000;
 const USERSPACE_DATA_ROUTING: bool = false;
+const EXDEV: u64 = (-18i64) as u64;
 
 fn errno_from_cext(rc: i32) -> u64 {
     match rc {
@@ -2227,6 +2228,33 @@ pub fn renameat(old_dirfd: i64, old_path_ptr: u64, new_dirfd: i64, new_path_ptr:
     };
     if let Err(errno) = ensure_fs_path_access(&old_path, PATH_DELETE) {
         return errno;
+    }
+    let old_mount = userspace_mount(&old_path);
+    let new_mount = userspace_mount(&new_path);
+    if old_mount.is_some() != new_mount.is_some() {
+        return EXDEV;
+    }
+    if let (Some(old_mount), Some(new_mount)) = (old_mount, new_mount) {
+        if old_mount.filesystem_id != new_mount.filesystem_id {
+            return EXDEV;
+        }
+        if let Err(errno) = vfs::userspace::lookup(old_mount.mount_id.0, &old_mount.path) {
+            return errno;
+        }
+        let new_exists = match vfs::userspace::lookup(new_mount.mount_id.0, &new_mount.path) {
+            Ok(_) => true,
+            Err(errno) if errno == ENOENT => false,
+            Err(errno) => return errno,
+        };
+        let new_rights = if new_exists { PATH_DELETE } else { PATH_CREATE };
+        if let Err(errno) = ensure_fs_path_access(&new_path, new_rights) {
+            return errno;
+        }
+        return match vfs::userspace::rename(old_mount.mount_id.0, &old_mount.path, &new_mount.path)
+        {
+            Ok(()) => SUCCESS,
+            Err(errno) => errno,
+        };
     }
     let new_rights = if metadata_rootfs_first(&new_path).is_some() {
         PATH_DELETE
