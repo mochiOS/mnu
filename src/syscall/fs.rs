@@ -2479,6 +2479,26 @@ pub fn readlinkat(dirfd: i64, path_ptr: u64, buf_ptr: u64, buf_len: u64) -> u64 
         Some(p) => crate::task::ids::ProcessId::from_u64(p),
         None => return EBADF,
     };
+    if let Some(mount) = userspace_mount(&path) {
+        if let Err(errno) = ensure_fs_path_access(&path, PATH_READ) {
+            return errno;
+        }
+        let node = match vfs::userspace::lookup(mount.mount_id.0, &mount.path) {
+            Ok(node) => node,
+            Err(errno) => return errno,
+        };
+        if node.kind != mochios_filesystem_protocol::NODE_TYPE_SYMLINK {
+            return EINVAL;
+        }
+        let target = match vfs::userspace::read_link(mount.mount_id.0, node.node_id) {
+            Ok(target) => target,
+            Err(errno) => return errno,
+        };
+        let copy_len = core::cmp::min(target.len(), buf_len as usize);
+        return crate::syscall::copy_to_user(buf_ptr, &target[..copy_len])
+            .map(|_| copy_len as u64)
+            .unwrap_or_else(|errno| errno);
+    }
     let target = if path == "/proc/self/exe" {
         match crate::task::with_process(pid, |p| {
             let exe = p.exe_path();
