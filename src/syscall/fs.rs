@@ -9,7 +9,7 @@ use crate::capability::path::{
 };
 use crate::capability::Capability;
 use crate::task::fd_table::{
-    FdTable, FileHandle, FileHandleCap, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
+    FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
 };
 use alloc::string::String;
 use alloc::string::ToString;
@@ -50,17 +50,6 @@ fn alloc_pipe_state() -> Option<usize> {
         }
     }
     None
-}
-
-pub fn clone_pipe_endpoint_from_kernel(pipe_id: usize, write_end: bool) {
-    let mut table = PIPE_TABLE.lock();
-    if let Some(Some(pipe)) = table.get_mut(pipe_id) {
-        if write_end {
-            pipe.writers = pipe.writers.saturating_add(1);
-        } else {
-            pipe.readers = pipe.readers.saturating_add(1);
-        }
-    }
 }
 
 pub fn close_pipe_endpoint_from_kernel(pipe_id: usize, write_end: bool) {
@@ -105,6 +94,16 @@ where
 {
     let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
     crate::task::with_process_mut(pid, |p| f(p.fd_table_mut()))
+}
+
+fn open_file(
+    pid_raw: u64,
+    fd: usize,
+) -> Option<alloc::sync::Arc<crate::interrupt::spinlock::SpinLock<OpenFile>>> {
+    with_fd_table(pid_raw, |table| {
+        table.get(fd).map(|handle| handle.open.clone())
+    })
+    .flatten()
 }
 
 fn file_handle_cap(pid_raw: u64, fd: u64) -> Result<FileHandleCap, u64> {
@@ -153,10 +152,9 @@ fn resolve_path_at(pid_raw: u64, dirfd: i64, path_ptr: u64) -> Result<String, u6
     if idx >= PROCESS_MAX_FDS {
         return Err(EBADF);
     }
-    let dir_path = match with_fd_table(pid_raw, |t| t.get(idx).and_then(|fh| fh.dir_path.clone())) {
-        Some(Some(p)) => p,
-        _ => return Err(EBADF),
-    };
+    let dir_path = open_file(pid_raw, idx)
+        .and_then(|open_file| open_file.lock().dir_path.clone())
+        .ok_or(EBADF)?;
     let path = read_cstring(path_ptr)?;
     let full_path = if path.starts_with('/') {
         path
@@ -692,26 +690,28 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
     }
 
     let cloexec = (flags & O_CLOEXEC) != 0;
-    let handle = alloc::boxed::Box::new(FileHandle {
-        data: alloc::boxed::Box::new([]),
-        pos: 0,
-        fs_path: if is_dir { None } else { Some(path.to_string()) },
-        dir_path: if is_dir { Some(path.to_string()) } else { None },
-        is_remote: false,
-        fd_remote: 0,
-        remote_refs: None,
-        pipe_id: None,
-        pipe_write: false,
-        open_flags: flags,
-        cap: if is_dir {
-            FileHandleCap::READDIR
-                .union(FileHandleCap::STAT)
-                .union(FileHandleCap::SEEK)
-                .union(FileHandleCap::CLOSE)
-        } else {
-            FileHandleCap::from_open_flags(flags).union(FileHandleCap::CLOSE)
+    let cap = if is_dir {
+        FileHandleCap::READDIR
+            .union(FileHandleCap::STAT)
+            .union(FileHandleCap::SEEK)
+            .union(FileHandleCap::CLOSE)
+    } else {
+        FileHandleCap::from_open_flags(flags).union(FileHandleCap::CLOSE)
+    };
+    let handle = alloc::boxed::Box::new(FileHandle::new(
+        OpenFile {
+            data: alloc::boxed::Box::new([]),
+            pos: 0,
+            fs_path: if is_dir { None } else { Some(path.to_string()) },
+            dir_path: if is_dir { Some(path.to_string()) } else { None },
+            is_remote: false,
+            fd_remote: 0,
+            pipe_id: None,
+            pipe_write: false,
+            open_flags: flags,
         },
-    });
+        cap,
+    ));
 
     match with_fd_table_mut(owner_pid, |t| t.alloc(handle, cloexec)) {
         Some(Some(fd)) => fd as u64,
@@ -774,17 +774,20 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
         return EBADF;
     }
 
-    match with_fd_table_mut(pid, |t| {
-        let fh = t.get_mut(idx).ok_or(EBADF)?;
-        let file_len = fh
+    let Some(open_file) = open_file(pid, idx) else {
+        return EBADF;
+    };
+    let result = (|| {
+        let mut open = open_file.lock();
+        let file_len = open
             .fs_path
             .as_deref()
             .and_then(metadata_rootfs_first)
             .map(|(_, size, _, _)| size as usize)
-            .unwrap_or(fh.data.len());
+            .unwrap_or(open.data.len());
         let new_pos = match whence {
             0 => offset,
-            1 => fh.pos as i64 + offset,
+            1 => open.pos as i64 + offset,
             2 => file_len as i64 + offset,
             _ => return Err(EINVAL),
         };
@@ -792,12 +795,12 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
             return Err(EINVAL);
         }
         let new_pos = usize::try_from(new_pos).map_err(|_| EINVAL)?;
-        fh.pos = new_pos;
-        Ok(fh.pos as u64)
-    }) {
-        Some(Ok(pos)) => pos,
-        Some(Err(e)) => e,
-        None => EBADF,
+        open.pos = new_pos;
+        Ok(open.pos as u64)
+    })();
+    match result {
+        Ok(pos) => pos,
+        Err(e) => e,
     }
 }
 
@@ -863,17 +866,18 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
     // FileHandle からメタデータを取得する
     let file_info = with_fd_table(pid, |t| {
         t.get(idx).map(|fh| {
-            let metadata = fh
+            let open = fh.open.lock();
+            let metadata = open
                 .dir_path
                 .as_deref()
-                .or(fh.fs_path.as_deref())
+                .or(open.fs_path.as_deref())
                 .and_then(metadata_rootfs_first);
             let size = metadata
                 .map(|(_, size, _, _)| size)
-                .unwrap_or(fh.data.len() as u64);
+                .unwrap_or(open.data.len() as u64);
             let mode = metadata.map_or_else(
                 || {
-                    if fh.dir_path.is_some() {
+                    if open.dir_path.is_some() {
                         0x4000u32 | 0o755
                     } else {
                         0x8000u32 | 0o644
@@ -1003,9 +1007,10 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         return EBADF;
     }
 
-    let dir_path = match with_fd_table(pid, |t| t.get(idx).and_then(|fh| fh.dir_path.clone())) {
-        Some(Some(p)) => p,
-        _ => return EBADF,
+    let Some(dir_path) =
+        open_file(pid, idx).and_then(|open_file| open_file.lock().dir_path.clone())
+    else {
+        return EBADF;
     };
 
     if let Err(errno) = ensure_fs_path_access(&dir_path, PATH_LIST) {
@@ -1126,11 +1131,13 @@ fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    let (pipe_id, open_flags) =
-        match with_fd_table(pid, |t| t.get(idx).map(|fh| (fh.pipe_id, fh.open_flags))) {
-            Some(Some(info)) => info,
-            Some(None) | None => return EBADF,
-        };
+    let Some(open_file) = open_file(pid, idx) else {
+        return EBADF;
+    };
+    let (pipe_id, open_flags) = {
+        let open = open_file.lock();
+        (open.pipe_id, open.open_flags)
+    };
     if let Some(pipe_id) = pipe_id {
         return read_pipe(pipe_id, open_flags, buf_ptr, len);
     }
@@ -1146,14 +1153,9 @@ fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     while written < to_copy {
         let chunk_len = core::cmp::min(READ_IO_CHUNK_BYTES, to_copy - written);
         let read_len = {
-            let (path, pos) = match with_fd_table(pid, |t| {
-                t.get(idx)
-                    .map(|fh| (fh.fs_path.clone(), fh.pos))
-                    .ok_or(EBADF)
-            }) {
-                Some(Ok(v)) => v,
-                Some(Err(errno)) => return errno,
-                None => return EBADF,
+            let (path, pos) = {
+                let open = open_file.lock();
+                (open.fs_path.clone(), open.pos)
             };
             if let Some(path) = path.as_deref() {
                 crate::performance::record_vfs_path_clone(path.len());
@@ -1162,31 +1164,25 @@ fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
                         Some(read) => read,
                         None => return EIO,
                     };
-                let advanced = with_fd_table_mut(pid, |t| {
-                    let fh = t.get_mut(idx).ok_or(EBADF)?;
-                    fh.pos = fh.pos.checked_add(read).ok_or(EINVAL)?;
-                    Ok(())
-                });
-                match advanced {
-                    Some(Ok(())) => read,
-                    Some(Err(errno)) => return errno,
-                    None => return EBADF,
+                let mut open = open_file.lock();
+                if open.pos != pos {
+                    continue;
                 }
+                open.pos = match open.pos.checked_add(read) {
+                    Some(position) => position,
+                    None => return EINVAL,
+                };
+                read
             } else {
-                match with_fd_table_mut(pid, |t| {
-                    let fh = t.get_mut(idx)?;
-                    let avail = fh.data.len().saturating_sub(fh.pos);
-                    let take = core::cmp::min(avail, chunk_len);
-                    if take == 0 {
-                        return Some(0usize);
-                    }
-                    tmp[..take].copy_from_slice(&fh.data[fh.pos..fh.pos + take]);
-                    fh.pos += take;
-                    Some(take)
-                }) {
-                    Some(Some(v)) => v,
-                    _ => return EBADF,
+                let mut open = open_file.lock();
+                let avail = open.data.len().saturating_sub(open.pos);
+                let take = core::cmp::min(avail, chunk_len);
+                if take == 0 {
+                    return written as u64;
                 }
+                tmp[..take].copy_from_slice(&open.data[open.pos..open.pos + take]);
+                open.pos += take;
+                take
             }
         };
         if read_len == 0 {
@@ -1273,10 +1269,12 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    let pipe_id = match with_fd_table(pid, |t| t.get(idx).and_then(|fh| fh.pipe_id)) {
-        Some(Some(id)) => Some(id),
-        Some(None) => None,
-        None => return EBADF,
+    let Some(open_file) = open_file(pid, idx) else {
+        return EBADF;
+    };
+    let pipe_id = {
+        let open = open_file.lock();
+        open.pipe_id
     };
     if let Some(pipe_id) = pipe_id {
         return write_pipe(pipe_id, buf_ptr, len);
@@ -1289,12 +1287,9 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         return ENOSPC;
     }
 
-    let (mut start_pos, fs_path, open_flags) = match with_fd_table(pid, |t| {
-        t.get(idx)
-            .map(|fh| (fh.pos, fh.fs_path.clone(), fh.open_flags))
-    }) {
-        Some(Some(info)) => info,
-        _ => return EBADF,
+    let (mut start_pos, fs_path, open_flags) = {
+        let open = open_file.lock();
+        (open.pos, open.fs_path.clone(), open.open_flags)
     };
     if let Some(path) = fs_path.as_deref() {
         crate::performance::record_vfs_path_clone(path.len());
@@ -1335,13 +1330,11 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
                         Some(value) => value,
                         None => return if written == 0 { EFBIG } else { written as u64 },
                     };
-                    let updated = with_fd_table_mut(pid, |t| {
-                        let fh = t.get_mut(idx).ok_or(EBADF)?;
-                        fh.pos = end;
-                        Ok::<(), u64>(())
-                    });
-                    if !matches!(updated, Some(Ok(()))) {
-                        return if written == 0 { EBADF } else { written as u64 };
+                    {
+                        let mut open = open_file.lock();
+                        if (open.open_flags & O_APPEND) != 0 || open.pos == start_pos + written {
+                            open.pos = end;
+                        }
                     }
                     written += wrote_chunk;
                     if wrote_chunk != chunk_len {
@@ -1359,22 +1352,21 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
             }
         }
 
-        let wrote = with_fd_table_mut(pid, |t| {
-            let fh = t.get_mut(idx).ok_or(EBADF)?;
+        let wrote = (|| {
+            let mut open = open_file.lock();
             let end = start_pos.checked_add(written + chunk_len).ok_or(EINVAL)?;
-            let mut data = fh.data.to_vec();
+            let mut data = open.data.to_vec();
             if end > data.len() {
                 data.resize(end, 0);
             }
             data[start_pos + written..end].copy_from_slice(&tmp[..chunk_len]);
-            fh.data = data.into_boxed_slice();
-            fh.pos = end;
-            Ok(())
-        });
+            open.data = data.into_boxed_slice();
+            open.pos = end;
+            Ok::<(), u64>(())
+        })();
         match wrote {
-            Some(Ok(())) => {}
-            Some(Err(errno)) => return errno,
-            None => return EBADF,
+            Ok(()) => {}
+            Err(errno) => return errno,
         }
 
         written += chunk_len;
@@ -1455,20 +1447,17 @@ pub fn fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
                 _ => EBADF,
             }
         }
-        F_GETFL => match with_fd_table(pid, |t| t.get(idx).map(|fh| fh.open_flags)) {
-            Some(Some(v)) => v,
-            _ => EBADF,
+        F_GETFL => match open_file(pid, idx) {
+            Some(open_file) => open_file.lock().open_flags,
+            None => EBADF,
         },
         F_SETFL => {
-            match with_fd_table_mut(pid, |t| {
-                let fh = t.get_mut(idx).ok_or(EBADF)?;
-                fh.open_flags = (fh.open_flags & O_ACCMODE) | (arg & !O_ACCMODE);
-                Ok::<(), u64>(())
-            }) {
-                Some(Ok(())) => SUCCESS,
-                Some(Err(errno)) => errno,
-                None => EBADF,
-            }
+            let Some(open_file) = open_file(pid, idx) else {
+                return EBADF;
+            };
+            let mut open = open_file.lock();
+            open.open_flags = (open.open_flags & O_ACCMODE) | (arg & !O_ACCMODE);
+            SUCCESS
         }
         F_GETLK => SUCCESS,
         F_SETLK | F_SETLKW => SUCCESS,
@@ -1492,8 +1481,8 @@ pub fn fsync(fd: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    match with_fd_table(pid, |t| t.get(idx).map(|fh| fh.fs_path.is_some())) {
-        Some(Some(true)) => {
+    match open_file(pid, idx).map(|open_file| open_file.lock().fs_path.is_some()) {
+        Some(true) => {
             let rc = crate::cext::fs::sync();
             if rc == 0 {
                 SUCCESS
@@ -1501,7 +1490,7 @@ pub fn fsync(fd: u64) -> u64 {
                 errno_from_cext(rc)
             }
         }
-        Some(Some(false)) => SUCCESS,
+        Some(false) => SUCCESS,
         _ => EBADF,
     }
 }
@@ -1629,30 +1618,32 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
         Ok(v) => v,
         Err(_) => return EINVAL,
     };
-    let res = with_fd_table_mut(pid, |t| {
-        let fh = t.get_mut(idx).ok_or(EBADF)?;
-        if fh.dir_path.is_some() {
+    let Some(open_file) = open_file(pid, idx) else {
+        return EBADF;
+    };
+    let res = (|| {
+        let mut open = open_file.lock();
+        if open.dir_path.is_some() {
             return Err(EISDIR);
         }
-        if let Some(path) = fh.fs_path.as_deref() {
+        if let Some(path) = open.fs_path.as_deref() {
             let rc = crate::cext::fs::truncate(path, len);
             if rc != 0 {
                 return Err(errno_from_cext(rc));
             }
         } else {
-            let mut data = fh.data.to_vec();
+            let mut data = open.data.to_vec();
             data.resize(new_len, 0);
-            fh.data = data.into_boxed_slice();
+            open.data = data.into_boxed_slice();
         }
-        if fh.pos > new_len {
-            fh.pos = new_len;
+        if open.pos > new_len {
+            open.pos = new_len;
         }
-        Ok(())
-    });
+        Ok::<(), u64>(())
+    })();
     match res {
-        Some(Ok(())) => SUCCESS,
-        Some(Err(errno)) => errno,
-        None => EBADF,
+        Ok(()) => SUCCESS,
+        Err(errno) => errno,
     }
 }
 
@@ -1733,24 +1724,7 @@ pub fn dup(fd: u64) -> u64 {
 
     // 既存エントリをクローンして新しい FD を割り当てる
     let cloned = with_fd_table(pid, |t| {
-        t.get(idx).map(|fh| {
-            if let Some(pipe_id) = fh.pipe_id {
-                clone_pipe_endpoint_from_kernel(pipe_id, fh.pipe_write);
-            }
-            alloc::boxed::Box::new(FileHandle {
-                data: fh.data.clone(),
-                pos: fh.pos,
-                fs_path: fh.fs_path.clone(),
-                dir_path: fh.dir_path.clone(),
-                is_remote: false,
-                fd_remote: 0,
-                remote_refs: None,
-                pipe_id: fh.pipe_id,
-                pipe_write: fh.pipe_write,
-                open_flags: fh.open_flags,
-                cap: fh.cap,
-            })
-        })
+        t.get(idx).map(|fh| alloc::boxed::Box::new(fh.duplicate()))
     });
     let new_handle = match cloned {
         Some(Some(h)) => h,
@@ -1797,24 +1771,8 @@ pub fn dup2(old_fd: u64, new_fd: u64) -> u64 {
         return EBADF;
     }
     let new_handle = match with_fd_table(pid, |t| {
-        t.get(old_idx).map(|fh| {
-            if let Some(pipe_id) = fh.pipe_id {
-                clone_pipe_endpoint_from_kernel(pipe_id, fh.pipe_write);
-            }
-            alloc::boxed::Box::new(FileHandle {
-                data: fh.data.clone(),
-                pos: fh.pos,
-                fs_path: fh.fs_path.clone(),
-                dir_path: fh.dir_path.clone(),
-                is_remote: false,
-                fd_remote: 0,
-                remote_refs: None,
-                pipe_id: fh.pipe_id,
-                pipe_write: fh.pipe_write,
-                open_flags: fh.open_flags,
-                cap: fh.cap,
-            })
-        })
+        t.get(old_idx)
+            .map(|fh| alloc::boxed::Box::new(fh.duplicate()))
     }) {
         Some(Some(h)) => h,
         _ => return EBADF,
@@ -1956,9 +1914,10 @@ pub fn openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    let dir_path = match with_fd_table(pid, |t| t.get(idx).and_then(|fh| fh.dir_path.clone())) {
-        Some(Some(p)) => p,
-        _ => return EBADF,
+    let Some(dir_path) =
+        open_file(pid, idx).and_then(|open_file| open_file.lock().dir_path.clone())
+    else {
+        return EBADF;
     };
 
     // path を dir_path に対して解決する
@@ -2009,9 +1968,10 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    let dir_path = match with_fd_table(pid, |t| t.get(idx).and_then(|fh| fh.dir_path.clone())) {
-        Some(Some(p)) => p,
-        _ => return EBADF,
+    let Some(dir_path) =
+        open_file(pid, idx).and_then(|open_file| open_file.lock().dir_path.clone())
+    else {
+        return EBADF;
     };
     let path = match read_cstring(path_ptr) {
         Ok(s) => s,
@@ -2203,11 +2163,16 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         None => return EBADF,
     };
 
-    let (dir_path, start_pos) =
-        match with_fd_table(pid, |t| t.get(idx).map(|fh| (fh.dir_path.clone(), fh.pos))) {
-            Some(Some((Some(p), pos))) => (p, pos),
-            _ => return EBADF,
+    let Some(open_file) = open_file(pid, idx) else {
+        return EBADF;
+    };
+    let (dir_path, start_pos) = {
+        let open = open_file.lock();
+        let Some(path) = open.dir_path.clone() else {
+            return EBADF;
         };
+        (path, open.pos)
+    };
 
     if let Err(errno) = ensure_fs_path_access(&dir_path, PATH_LIST) {
         return errno;
@@ -2275,11 +2240,7 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     }
 
     // FD の pos を更新する
-    with_fd_table_mut(pid, |t| {
-        if let Some(fh) = t.get_mut(idx) {
-            fh.pos = new_pos;
-        }
-    });
+    open_file.lock().pos = new_pos;
 
     written as u64
 }

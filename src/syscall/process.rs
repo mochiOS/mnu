@@ -1013,7 +1013,7 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
             process
                 .fd_table()
                 .get(idx)
-                .and_then(|fh| fh.fs_path.clone())
+                .and_then(|fh| fh.open.lock().fs_path.clone())
         }) {
             Some(Some(path)) => path,
             _ => return EINVAL,

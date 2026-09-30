@@ -4,7 +4,8 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::interrupt::spinlock::SpinLock;
 
 /// stdin / stdout / stderr の予約 FD 番号
 pub const FD_BASE: usize = 3;
@@ -83,8 +84,11 @@ impl FileHandleCap {
     }
 }
 
-/// オープンファイルの状態を保持するハンドル
-pub struct FileHandle {
+/// `open(2)` が生成する open file description。
+///
+/// `dup(2)` と `fork(2)` はこのオブジェクトを共有するため、ファイル位置と
+/// status flags は複製後も同じ状態を参照する。
+pub struct OpenFile {
     /// ファイル内容（initfs からロード済み、パイプの場合は空）
     pub data: Box<[u8]>,
     /// 現在の読み取り/書き込み位置（パイプの場合はエントリインデックス兼用）
@@ -97,81 +101,80 @@ pub struct FileHandle {
     pub is_remote: bool,
     /// リモートバックエンド側のファイルディスクリプタ（is_remote=true のとき有効）
     pub fd_remote: u64,
-    /// is_remote=true の場合の参照カウント（close時の二重クローズ防止）
-    pub remote_refs: Option<Arc<AtomicUsize>>,
     /// Some(id) であればパイプ fd（グローバル PIPE_TABLE のインデックス）
     pub pipe_id: Option<usize>,
     /// パイプの書き込み端の場合 true
     pub pipe_write: bool,
     /// open()/openat() のファイル状態フラグ（F_GETFL/F_SETFL 用）
     pub open_flags: u64,
+}
+
+impl OpenFile {
+    fn new_pipe(pipe_id: usize, pipe_write: bool, open_flags: u64) -> Self {
+        Self {
+            data: Box::new([]),
+            pos: 0,
+            fs_path: None,
+            dir_path: None,
+            is_remote: false,
+            fd_remote: 0,
+            pipe_id: Some(pipe_id),
+            pipe_write,
+            open_flags,
+        }
+    }
+}
+
+impl Drop for OpenFile {
+    fn drop(&mut self) {
+        if let Some(pipe_id) = self.pipe_id {
+            crate::syscall::fs::close_pipe_endpoint_from_kernel(pipe_id, self.pipe_write);
+        }
+        if self.is_remote {
+            crate::syscall::fs::close_remote_fd_from_kernel(self.fd_remote);
+        }
+    }
+}
+
+/// プロセスの FD table が保持する descriptor。
+///
+/// descriptor 固有の capability と、共有される open file description を分離する。
+pub struct FileHandle {
+    pub open: Arc<SpinLock<OpenFile>>,
     /// この FD に許可された操作
     pub cap: FileHandleCap,
 }
 
 impl FileHandle {
-    pub fn new_pipe_read(pipe_id: usize) -> Self {
+    pub fn new(open: OpenFile, cap: FileHandleCap) -> Self {
         Self {
-            data: Box::new([]),
-            pos: 0,
-            fs_path: None,
-            dir_path: None,
-            is_remote: false,
-            fd_remote: 0,
-            remote_refs: None,
-            pipe_id: Some(pipe_id),
-            pipe_write: false,
-            open_flags: 0,
-            cap: FileHandleCap::READ
+            open: Arc::new(SpinLock::new(open)),
+            cap,
+        }
+    }
+
+    pub fn duplicate(&self) -> Self {
+        Self {
+            open: self.open.clone(),
+            cap: self.cap,
+        }
+    }
+
+    pub fn new_pipe_read(pipe_id: usize) -> Self {
+        Self::new(
+            OpenFile::new_pipe(pipe_id, false, 0),
+            FileHandleCap::READ
                 .union(FileHandleCap::SEEK)
                 .union(FileHandleCap::STAT)
                 .union(FileHandleCap::CLOSE),
-        }
+        )
     }
 
     pub fn new_pipe_write(pipe_id: usize) -> Self {
-        Self {
-            data: Box::new([]),
-            pos: 0,
-            fs_path: None,
-            dir_path: None,
-            is_remote: false,
-            fd_remote: 0,
-            remote_refs: None,
-            pipe_id: Some(pipe_id),
-            pipe_write: true,
-            open_flags: 1,
-            cap: FileHandleCap::WRITE.union(FileHandleCap::CLOSE),
-        }
-    }
-
-    #[inline]
-    pub fn clone_remote_refs(&self) -> Option<Arc<AtomicUsize>> {
-        if !self.is_remote {
-            return None;
-        }
-        self.remote_refs.as_ref().map(|refs| {
-            refs.fetch_add(1, Ordering::AcqRel);
-            refs.clone()
-        })
-    }
-}
-
-impl Drop for FileHandle {
-    fn drop(&mut self) {
-        if let Some(pipe_id) = self.pipe_id {
-            crate::syscall::fs::close_pipe_endpoint_from_kernel(pipe_id, self.pipe_write);
-        }
-        if !self.is_remote {
-            return;
-        }
-        if let Some(refs) = self.remote_refs.as_ref() {
-            if refs.fetch_sub(1, Ordering::AcqRel) == 1 {
-                crate::syscall::fs::close_remote_fd_from_kernel(self.fd_remote);
-            }
-        } else {
-            crate::syscall::fs::close_remote_fd_from_kernel(self.fd_remote);
-        }
+        Self::new(
+            OpenFile::new_pipe(pipe_id, true, 1),
+            FileHandleCap::WRITE.union(FileHandleCap::CLOSE),
+        )
     }
 }
 
@@ -264,29 +267,14 @@ impl FdTable {
 
     /// fork 用: 全エントリを複製して新しい FdTable を返す。
     ///
-    /// 親子は独立したファイル位置を持つ（簡易コピーセマンティクス）。
+    /// POSIX と同様、親子は同じ open file description とファイル位置を共有する。
     pub fn clone_for_fork(&self) -> Box<FdTable> {
         let mut new_table = FdTable::new_boxed();
         for i in 0..PROCESS_MAX_FDS {
             let Some(fh) = self.entries[i].as_deref() else {
                 continue;
             };
-            if let Some(pipe_id) = fh.pipe_id {
-                crate::syscall::fs::clone_pipe_endpoint_from_kernel(pipe_id, fh.pipe_write);
-            }
-            let new_fh = Box::new(FileHandle {
-                data: fh.data.clone(),
-                pos: fh.pos,
-                fs_path: fh.fs_path.clone(),
-                dir_path: fh.dir_path.clone(),
-                is_remote: fh.is_remote,
-                fd_remote: fh.fd_remote,
-                remote_refs: fh.clone_remote_refs(),
-                pipe_id: fh.pipe_id,
-                pipe_write: fh.pipe_write,
-                open_flags: fh.open_flags,
-                cap: fh.cap,
-            });
+            let new_fh = Box::new(fh.duplicate());
             new_table.entries[i] = Some(new_fh);
             new_table.flags[i] = self.flags[i];
         }

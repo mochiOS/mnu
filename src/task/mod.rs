@@ -12,7 +12,7 @@ pub mod thread;
 pub mod usermode;
 
 pub use context::{switch_context, switch_to_thread, Context};
-pub use fd_table::{FdTable, FileHandle, FileHandleCap, FD_BASE, PROCESS_MAX_FDS};
+pub use fd_table::{FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, PROCESS_MAX_FDS};
 pub use ids::{PrivilegeLevel, ProcessId, ProcessState, SchedulingClass, ThreadId, ThreadState};
 pub(crate) use process::ProcessCredentials;
 pub use process::{
