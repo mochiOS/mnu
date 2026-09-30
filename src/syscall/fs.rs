@@ -195,11 +195,11 @@ pub fn filesystem_mount(
 fn resolve_path_at(pid_raw: u64, dirfd: i64, path_ptr: u64) -> Result<String, u64> {
     const AT_FDCWD: i64 = -100;
 
+    let path = read_cstring(path_ptr)?;
+    if path.starts_with('/') {
+        return Ok(normalize_path(&path));
+    }
     if dirfd == AT_FDCWD {
-        let path = read_cstring(path_ptr)?;
-        if path.starts_with('/') {
-            return Ok(normalize_path(&path));
-        }
         let cwd =
             crate::task::with_process(crate::task::ids::ProcessId::from_u64(pid_raw), |process| {
                 process.cwd().to_string()
@@ -222,12 +222,7 @@ fn resolve_path_at(pid_raw: u64, dirfd: i64, path_ptr: u64) -> Result<String, u6
                 .map(|vnode| vnode.path().to_string())
         })
         .ok_or(EBADF)?;
-    let path = read_cstring(path_ptr)?;
-    let full_path = if path.starts_with('/') {
-        path
-    } else {
-        alloc::format!("{}/{}", dir_path.trim_end_matches('/'), path)
-    };
+    let full_path = alloc::format!("{}/{}", dir_path.trim_end_matches('/'), path);
     Ok(normalize_path(&full_path))
 }
 
