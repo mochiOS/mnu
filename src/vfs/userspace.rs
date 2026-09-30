@@ -138,6 +138,33 @@ pub fn stat(mount_id: u64, node_id: u64, open_id: u64) -> Result<NodeInfo, u64> 
     node_info(response.header, response.payload())
 }
 
+pub fn set_attr(
+    mount_id: u64,
+    path: &str,
+    flags: u32,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+) -> Result<NodeInfo, u64> {
+    if path.is_empty() || path.len() > protocol::MAX_PATH_LEN {
+        return Err(EINVAL);
+    }
+    let response = call(
+        protocol::Header {
+            opcode: protocol::OP_SETATTR,
+            mount_id,
+            offset: u64::from(uid) | (u64::from(gid) << 32),
+            length: path.len() as u32,
+            flags,
+            mode,
+            ..protocol::Header::default()
+        },
+        path.as_bytes(),
+        protocol::HEADER_LEN + protocol::METADATA_LEN,
+    )?;
+    node_info(response.header, response.payload())
+}
+
 pub fn create(mount_id: u64, path: &str, mode: u32, kind: u32) -> Result<NodeInfo, u64> {
     if path.is_empty() || path.len() > protocol::MAX_PATH_LEN {
         return Err(EINVAL);

@@ -1971,9 +1971,6 @@ pub fn chmod(path_ptr: u64, mode: u64) -> u64 {
     if let Err(errno) = ensure_unix_traversal(&path) {
         return errno;
     }
-    if userspace_mount(&path).is_some() {
-        return ENOSYS;
-    }
     let Some((_, _, owner, _)) = metadata_rootfs_first(&path) else {
         return ENOENT;
     };
@@ -1982,6 +1979,19 @@ pub fn chmod(path_ptr: u64, mode: u64) -> u64 {
     };
     if uid != 0 && uid != owner {
         return EACCES;
+    }
+    if let Some(mount) = userspace_mount(&path) {
+        return match vfs::userspace::set_attr(
+            mount.mount_id.0,
+            &mount.path,
+            mochios_filesystem_protocol::SETATTR_MODE,
+            mode as u32,
+            0,
+            0,
+        ) {
+            Ok(_) => SUCCESS,
+            Err(errno) => errno,
+        };
     }
     let rc = crate::cext::fs::chmod(&path, mode as u32);
     if rc == 0 {
@@ -2005,9 +2015,6 @@ pub fn chown(path_ptr: u64, uid: u64, gid: u64) -> u64 {
     if let Err(errno) = ensure_fs_path_access(&path, PATH_WRITE) {
         return errno;
     }
-    if userspace_mount(&path).is_some() {
-        return ENOSYS;
-    }
     let Some((effective_uid, _)) = current_effective_ids() else {
         return EACCES;
     };
@@ -2016,6 +2023,20 @@ pub fn chown(path_ptr: u64, uid: u64, gid: u64) -> u64 {
     }
     if metadata_rootfs_first(&path).is_none() {
         return ENOENT;
+    }
+    if let Some(mount) = userspace_mount(&path) {
+        return match vfs::userspace::set_attr(
+            mount.mount_id.0,
+            &mount.path,
+            mochios_filesystem_protocol::SETATTR_UID
+                | mochios_filesystem_protocol::SETATTR_GID,
+            0,
+            uid as u32,
+            gid as u32,
+        ) {
+            Ok(_) => SUCCESS,
+            Err(errno) => errno,
+        };
     }
     let rc = crate::cext::fs::chown(&path, uid as u32, gid as u32);
     if rc == 0 {
