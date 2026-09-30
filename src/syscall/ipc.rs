@@ -923,6 +923,50 @@ impl Mailbox {
         Ok(None)
     }
 
+    fn pop_reply_copy(
+        &mut self,
+        expected_sender: u64,
+        expected_call_id: u64,
+        receiver: u64,
+        receiver_slot: u16,
+        receiver_generation: u64,
+        output: &mut [u8],
+    ) -> Option<(u64, usize)> {
+        if self.count == 0 {
+            return None;
+        }
+        let original = self.count;
+        for _ in 0..original {
+            let slot_idx = self.dequeue_slot()?;
+            let Some(msg) = self.slots.get(slot_idx).and_then(Option::as_deref) else {
+                self.quarantine("ipc mailbox queue points to an empty slot");
+                return None;
+            };
+            if msg.from != expected_sender
+                || msg.call_id != expected_call_id
+                || msg.to != receiver
+                || msg.to_slot != receiver_slot
+                || msg.to_generation != receiver_generation
+                || !msg.is_reply
+            {
+                if self.enqueue_slot(slot_idx).is_err() {
+                    let _ = self.free_slot(slot_idx);
+                    return None;
+                }
+                continue;
+            }
+            let copy_len = core::cmp::min(msg.len, output.len());
+            output[..copy_len].copy_from_slice(&msg.data[..copy_len]);
+            let from = msg.from;
+            if !self.free_slot(slot_idx) {
+                return None;
+            }
+            record_ipc_copy(copy_len);
+            return Some((from, copy_len));
+        }
+        None
+    }
+
     /// メッセージを積んだ後、待機中スレッドがいれば返して登録を消す
     fn take_waiter(&mut self) -> u64 {
         let w = self.waiter;
@@ -1071,6 +1115,85 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
             false
         }
     })
+}
+
+/// Performs a synchronous IPC call without copying through userspace buffers.
+pub fn call_from_kernel(
+    dest_endpoint_handle: u64,
+    request: &[u8],
+    reply: &mut [u8],
+) -> Result<usize, u64> {
+    if request.len() > ipc_max_msg_size() || reply.len() > ipc_max_msg_size() {
+        return Err(EINVAL);
+    }
+    let dest_record = endpoint_record_from_handle(dest_endpoint_handle).ok_or(EINVAL)?;
+    if !dest_record.rights.contains(EndpointRights::RECV) {
+        return Err(EACCES);
+    }
+    let caller = crate::task::current_thread_id().ok_or(EINVAL)?.as_u64();
+    let sender = ensure_endpoint_for_thread(caller).ok_or(EINVAL)?;
+    let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
+    let (dest_slot, dest_generation) =
+        crate::task::thread_slot_index_and_generation_by_u64(dest_record.thread_id)
+            .ok_or(EINVAL)?;
+    loop {
+        let mut mailboxes = lock_mailboxes();
+        let mailbox = mailboxes.get_mut(dest_slot).ok_or(EINVAL)?;
+        match mailbox.push_message(
+            sender,
+            dest_record.thread_id,
+            dest_slot as u16,
+            dest_generation,
+            request,
+            false,
+            true,
+            call_id,
+        ) {
+            Ok(()) => {
+                let waiter = mailbox.take_waiter();
+                drop(mailboxes);
+                if waiter != 0 {
+                    crate::task::wake_ipc_waiter(crate::task::ThreadId::from_u64(waiter));
+                }
+                break;
+            }
+            Err(()) => {
+                drop(mailboxes);
+                crate::task::yield_now();
+            }
+        }
+    }
+    let (caller_slot, caller_generation) =
+        crate::task::thread_slot_index_and_generation_by_u64(caller).ok_or(EINVAL)?;
+    loop {
+        let received = {
+            let mut mailboxes = lock_mailboxes();
+            let mailbox = mailboxes.get_mut(caller_slot).ok_or(EINVAL)?;
+            let received = mailbox.pop_reply_copy(
+                dest_endpoint_handle,
+                call_id,
+                caller,
+                caller_slot as u16,
+                caller_generation,
+                reply,
+            );
+            if received.is_none() {
+                mailbox.waiter = caller;
+            }
+            received
+        };
+        if let Some((_, length)) = received {
+            return Ok(length);
+        }
+        if crate::task::sleep_thread_unless_woken(crate::task::ThreadId::from_u64(caller)) {
+            crate::task::yield_now();
+        } else {
+            let mut mailboxes = lock_mailboxes();
+            if mailboxes[caller_slot].waiter == caller {
+                mailboxes[caller_slot].waiter = 0;
+            }
+        }
+    }
 }
 
 /// Kernel -> recipient: send a message that carries explicit physical page frame addresses.
