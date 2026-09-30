@@ -174,6 +174,33 @@ pub fn unlink(mount_id: u64, path: &str) -> Result<(), u64> {
     Ok(())
 }
 
+pub fn rename(mount_id: u64, old_path: &str, new_path: &str) -> Result<(), u64> {
+    let total = old_path.len().checked_add(new_path.len()).ok_or(EINVAL)?;
+    if old_path.is_empty()
+        || new_path.is_empty()
+        || old_path.len() > protocol::MAX_PATH_LEN
+        || new_path.len() > protocol::MAX_PATH_LEN
+        || total > protocol::MAX_IO_LEN
+    {
+        return Err(EINVAL);
+    }
+    let mut payload = Vec::with_capacity(total);
+    payload.extend_from_slice(old_path.as_bytes());
+    payload.extend_from_slice(new_path.as_bytes());
+    call(
+        protocol::Header {
+            opcode: protocol::OP_RENAME,
+            mount_id,
+            offset: old_path.len() as u64,
+            length: total as u32,
+            ..protocol::Header::default()
+        },
+        &payload,
+        protocol::HEADER_LEN,
+    )?;
+    Ok(())
+}
+
 pub fn truncate(mount_id: u64, open_id: u64, size: u64) -> Result<(), u64> {
     call(
         protocol::Header {
