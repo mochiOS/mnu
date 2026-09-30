@@ -64,6 +64,7 @@ pub enum SyscallNumber {
     Chmod = 90,
     Chown = 92,
     Unlink = 87,
+    Symlink = 88,
     Readlink = 89,
     // Native mnu file syscalls
     FileOpen = 560,

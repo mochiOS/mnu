@@ -1246,6 +1246,36 @@ pub fn rmdir(path_ptr: u64) -> u64 {
     SUCCESS
 }
 
+/// Creates a symbolic link. The target is stored verbatim; only the link path
+/// is resolved against the caller's current directory and mount namespace.
+pub fn symlink(target_ptr: u64, link_path_ptr: u64) -> u64 {
+    if target_ptr == 0 || link_path_ptr == 0 {
+        return EINVAL;
+    }
+    let pid = match current_process_id_raw() {
+        Some(pid) => pid,
+        None => return EBADF,
+    };
+    let target = match read_cstring(target_ptr) {
+        Ok(target) => target,
+        Err(errno) => return errno,
+    };
+    let link_path = match read_cstring(link_path_ptr) {
+        Ok(path) => resolve_path(pid, &path),
+        Err(errno) => return errno,
+    };
+    if let Err(errno) = ensure_fs_path_access(&link_path, PATH_CREATE) {
+        return errno;
+    }
+    let Some(mount) = userspace_mount(&link_path) else {
+        return ENOSYS;
+    };
+    match vfs::userspace::symlink(mount.mount_id.0, &target, &mount.path) {
+        Ok(_) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
 /// Readdirシステムコール
 pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     if buf_ptr == 0 || buf_len == 0 {

@@ -202,6 +202,33 @@ pub fn unlink(mount_id: u64, path: &str, kind: u32) -> Result<(), u64> {
     Ok(())
 }
 
+pub fn symlink(mount_id: u64, target: &str, link_path: &str) -> Result<NodeInfo, u64> {
+    let total = target.len().checked_add(link_path.len()).ok_or(EINVAL)?;
+    if target.is_empty()
+        || link_path.is_empty()
+        || target.len() > protocol::MAX_PATH_LEN
+        || link_path.len() > protocol::MAX_PATH_LEN
+        || total > protocol::MAX_IO_LEN
+    {
+        return Err(EINVAL);
+    }
+    let mut payload = Vec::with_capacity(total);
+    payload.extend_from_slice(target.as_bytes());
+    payload.extend_from_slice(link_path.as_bytes());
+    let response = call(
+        protocol::Header {
+            opcode: protocol::OP_SYMLINK,
+            mount_id,
+            offset: target.len() as u64,
+            length: total as u32,
+            ..protocol::Header::default()
+        },
+        &payload,
+        protocol::HEADER_LEN + protocol::METADATA_LEN,
+    )?;
+    node_info(response.header, response.payload())
+}
+
 pub fn rename(mount_id: u64, old_path: &str, new_path: &str) -> Result<(), u64> {
     let total = old_path.len().checked_add(new_path.len()).ok_or(EINVAL)?;
     if old_path.is_empty()
