@@ -18,6 +18,9 @@ pub struct MountId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FilesystemId(pub u64);
 
+pub const ROOT_FILESYSTEM_ID: FilesystemId = FilesystemId(1);
+pub const DATA_FILESYSTEM_ID: FilesystemId = FilesystemId(2);
+
 /// Identifies an inode inside a mounted filesystem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct InodeId(pub u64);
@@ -174,10 +177,25 @@ pub fn init() {
     if mounts.is_empty() {
         mounts.push(Mount {
             id: MountId(1),
-            filesystem_id: FilesystemId(1),
+            filesystem_id: ROOT_FILESYSTEM_ID,
             target: "/".to_string(),
             source: "/".to_string(),
         });
+        for path in [
+            "/bin",
+            "/applications",
+            "/libraries",
+            "/home",
+            "/var",
+            "/tmp",
+        ] {
+            mounts.push(Mount {
+                id: MountId(NEXT_MOUNT_ID.fetch_add(1, Ordering::Relaxed)),
+                filesystem_id: DATA_FILESYSTEM_ID,
+                target: path.to_string(),
+                source: path.to_string(),
+            });
+        }
     }
 }
 
