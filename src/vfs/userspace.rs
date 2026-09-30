@@ -157,6 +157,23 @@ pub fn create(mount_id: u64, path: &str, mode: u32, kind: u32) -> Result<NodeInf
     Ok(node_info(response.header))
 }
 
+pub fn unlink(mount_id: u64, path: &str) -> Result<(), u64> {
+    if path.is_empty() || path.len() > protocol::MAX_PATH_LEN {
+        return Err(EINVAL);
+    }
+    call(
+        protocol::Header {
+            opcode: protocol::OP_UNLINK,
+            mount_id,
+            length: path.len() as u32,
+            ..protocol::Header::default()
+        },
+        path.as_bytes(),
+        protocol::HEADER_LEN,
+    )?;
+    Ok(())
+}
+
 pub fn truncate(mount_id: u64, open_id: u64, size: u64) -> Result<(), u64> {
     call(
         protocol::Header {
