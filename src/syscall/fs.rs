@@ -634,7 +634,7 @@ const O_EXCL: u64 = 0o200;
 const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 const O_NONBLOCK: u64 = 0x4000;
-const USERSPACE_DATA_ROUTING: bool = false;
+const USERSPACE_DATA_ROUTING: bool = true;
 const EXDEV: u64 = (-18i64) as u64;
 
 fn errno_from_cext(rc: i32) -> u64 {
