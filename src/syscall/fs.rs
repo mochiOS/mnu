@@ -1159,6 +1159,9 @@ pub fn rmdir(path_ptr: u64) -> u64 {
     if let Err(errno) = ensure_fs_path_access(&resolved, PATH_DELETE) {
         return errno;
     }
+    if userspace_mount(&resolved).is_some() {
+        return ENOSYS;
+    }
     match metadata_rootfs_first(&resolved) {
         Some((mode, _, _, _)) if mode_is_directory(mode) => {}
         Some(_) => return ENOTDIR,
@@ -2146,6 +2149,12 @@ pub fn unlink(path_ptr: u64) -> u64 {
     if let Err(errno) = ensure_fs_path_access(&resolved, PATH_DELETE) {
         return errno;
     }
+    if let Some(mount) = userspace_mount(&resolved) {
+        return match vfs::userspace::unlink(mount.mount_id.0, &mount.path) {
+            Ok(()) => SUCCESS,
+            Err(errno) => errno,
+        };
+    }
     match metadata_rootfs_first(&resolved) {
         Some((mode, _, _, _)) if mode_is_directory(mode) => return EISDIR,
         Some(_) => {}
@@ -2175,6 +2184,15 @@ pub fn unlinkat(dirfd: i64, path_ptr: u64, flags: u64) -> u64 {
         return errno;
     }
     let remove_directory = (flags & AT_REMOVEDIR) != 0;
+    if let Some(mount) = userspace_mount(&resolved) {
+        if remove_directory {
+            return ENOSYS;
+        }
+        return match vfs::userspace::unlink(mount.mount_id.0, &mount.path) {
+            Ok(()) => SUCCESS,
+            Err(errno) => errno,
+        };
+    }
     match metadata_rootfs_first(&resolved) {
         Some((mode, _, _, _)) if mode_is_directory(mode) != remove_directory => {
             return if remove_directory { ENOTDIR } else { EISDIR };
