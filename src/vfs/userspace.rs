@@ -20,6 +20,11 @@ pub struct NodeInfo {
     pub kind: u32,
 }
 
+pub struct DirectoryBatch {
+    pub bytes: Vec<u8>,
+    pub next_offset: u64,
+}
+
 pub fn mount(mount_id: u64) -> Result<NodeInfo, u64> {
     let response = call(
         protocol::Header {
@@ -179,6 +184,33 @@ pub fn read_link(mount_id: u64, node_id: u64) -> Result<Vec<u8>, u64> {
         protocol::MAX_MESSAGE_LEN,
     )?;
     Ok(response.payload().to_vec())
+}
+
+pub fn read_dir(
+    mount_id: u64,
+    node_id: u64,
+    offset: u64,
+    max_length: usize,
+) -> Result<DirectoryBatch, u64> {
+    if max_length > protocol::MAX_IO_LEN {
+        return Err(EINVAL);
+    }
+    let response = call(
+        protocol::Header {
+            opcode: protocol::OP_READDIR,
+            mount_id,
+            node_id,
+            offset,
+            flags: max_length as u32,
+            ..protocol::Header::default()
+        },
+        &[],
+        protocol::HEADER_LEN + max_length,
+    )?;
+    Ok(DirectoryBatch {
+        bytes: response.payload().to_vec(),
+        next_offset: response.header.offset,
+    })
 }
 
 pub fn sync(mount_id: u64) -> Result<(), u64> {
