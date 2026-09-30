@@ -269,7 +269,7 @@ fn parse_requested_exec_grants(
             continue;
         }
         // Canonical capabilities are safe to intern even while consuming an
-        // authorization: capability.service has already evaluated their
+        // authorization: the policy authority has already evaluated their
         // policy classification, and the ABI registry prevents arbitrary
         // names from creating kernel capability IDs here.
         let cap = if can_intern || mnu_abi::capability::metadata(spec.as_str()).is_some() {
@@ -636,8 +636,8 @@ fn exec_manifest_common(
         }
         Some(authorization.executable_digest)
     } else if crate::policy::caller_is_bootstrap_init_process() {
-        // core.service launches logger and capability.service from the
-        // authenticated boot generation before the policy service exists.
+        // The bootstrap process launches the initial policy services from the
+        // authenticated boot generation before the policy authority exists.
         None
     } else {
         crate::warn!(
@@ -937,16 +937,6 @@ fn exec_internal(
             source,
             data.len()
         );
-        if path == "/init"
-            || path.starts_with("/system/services/")
-            || path.starts_with("/bin/drivers/")
-            || path.starts_with("/applications/")
-        {
-            crate::util::log::release_boot_marker(format_args!(
-                "exec: loaded '{}' from {}",
-                path, source
-            ));
-        }
         let result = exec_with_data(
             &data,
             &process_name,
@@ -1626,12 +1616,6 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         source,
         data_vec.len()
     );
-    if path_owned == "/bin/mpk" {
-        crate::util::log::release_boot_marker(format_args!(
-            "execve: loaded '{}' from {}",
-            path_owned, source
-        ));
-    }
     let data: &[u8] = &data_vec;
 
     // 新しいページテーブルを作成

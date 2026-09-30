@@ -105,7 +105,7 @@ pub fn caller_is_service_or_core_process() -> bool {
 ///
 /// init runs in user mode with `Service` privilege, so checking for
 /// `PrivilegeLevel::Core` here would reject the authenticated bootstrap of
-/// logger.service and capability.service. Binding the exception to the PID
+/// the first policy services. Binding the exception to the PID
 /// registered by the kernel keeps it unavailable to every other service.
 pub fn caller_is_bootstrap_init_process() -> bool {
     let init_pid_raw = init_pid();

@@ -555,8 +555,6 @@ pub struct Process {
     /// 検証済みinstall metadataから導出されたapplication identity。
     application_identity: Option<ApplicationIdentity>,
     pending_exec_security: Option<PendingExecSecurity>,
-    /// サービスID（サービスの場合のみ設定）
-    service_id: Option<String>,
     /// プロセス名 (固定長バッファ)
     name: [u8; 32],
     /// 有効な名前の長さ
@@ -650,7 +648,6 @@ impl Process {
             id: ProcessId::new(),
             application_identity: None,
             pending_exec_security: None,
-            service_id: None,
             name: name_buf,
             name_len: len,
             state: ProcessState::Running,
@@ -733,10 +730,6 @@ impl Process {
     }
 
     /// サービスIDを取得
-    pub fn service_id(&self) -> Option<&str> {
-        self.service_id.as_deref()
-    }
-
     /// capability 集合を取得（読み取り専用）
     pub fn capabilities(&self) -> &CapabilitySet {
         &self.capabilities
@@ -1252,7 +1245,6 @@ impl core::fmt::Debug for Process {
         debug_struct
             .field("id", &self.id)
             .field("application_identity", &self.application_identity)
-            .field("service_id", &self.service_id)
             .field("name", &self.name())
             .field("state", &self.state)
             .field("privilege", &self.privilege)
