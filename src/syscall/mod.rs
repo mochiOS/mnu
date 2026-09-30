@@ -659,7 +659,15 @@ pub fn last_syscall_snapshot() -> (u64, [u64; 5]) {
 }
 
 /// システムコールのディスパッチ
-pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
+pub fn dispatch(
+    num: u64,
+    arg0: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+) -> u64 {
     record_syscall(num, arg0, arg1, arg2, arg3, arg4);
     #[cfg(feature = "performance-instrumentation")]
     let _allocation_scope =
@@ -718,9 +726,13 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
             task::yield_now();
             SUCCESS
         }
-        x if x == SyscallNumber::MemoryAlloc as u64 => process::mmap(0, arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::MemoryAlloc as u64 => {
+            process::mmap(0, arg0, arg1, arg2, arg3, 0)
+        }
         x if x == SyscallNumber::MemoryFree as u64 => process::munmap(arg0, arg1),
-        x if x == SyscallNumber::MemoryMap as u64 => process::mmap(arg0, arg1, arg2, arg3, arg4),
+        x if x == SyscallNumber::MemoryMap as u64 => {
+            process::mmap(arg0, arg1, arg2, arg3, arg4, arg5)
+        }
         x if x == SyscallNumber::GetFramebufferInfo as u64 => get_framebuffer_info(arg0),
         x if x == SyscallNumber::MapFramebuffer as u64 => map_framebuffer(arg0, arg1),
         x if x == SyscallNumber::PresentFramebuffer as u64 => {
@@ -1111,6 +1123,7 @@ extern "sysv64" fn syscall_interrupt_handler_rust(kstack: *mut u64) -> u64 {
         unsafe { kstack.add(12).read() }, // saved rdx = arg2
         unsafe { kstack.add(5).read() },  // saved r10 = arg3
         unsafe { kstack.add(7).read() },  // saved r8  = arg4
+        unsafe { kstack.add(6).read() },  // saved r9  = arg5
     );
 
     if let Some(slot) = current_slot {
@@ -1141,6 +1154,7 @@ extern "C" fn syscall_handler_rust(
     arg2: u64,
     arg3: u64,
     arg4: u64,
+    arg5: u64,
 ) -> u64 {
     crate::percpu::install_current_cpu_gs_base();
 
@@ -1156,7 +1170,7 @@ extern "C" fn syscall_handler_rust(
         crate::task::with_thread_mut(tid, |t| t.set_in_syscall(true));
     }
 
-    let ret = dispatch(num, arg0, arg1, arg2, arg3, arg4);
+    let ret = dispatch(num, arg0, arg1, arg2, arg3, arg4, arg5);
 
     if let Some(slot) = current_slot {
         crate::task::with_thread_at_slot_mut(slot, |t| t.set_in_syscall(false));
@@ -1184,6 +1198,7 @@ pub extern "sysv64" fn syscall_dispatch_sysv(
     arg2: u64,
     arg3: u64,
     arg4: u64,
+    arg5: u64,
 ) -> u64 {
-    syscall_handler_rust(num, arg0, arg1, arg2, arg3, arg4)
+    syscall_handler_rust(num, arg0, arg1, arg2, arg3, arg4, arg5)
 }

@@ -287,7 +287,7 @@ pub unsafe extern "C" fn syscall_entry() {
         // syscall return 用の per-CPU scratch を使っているので、
         // 安定するまで IRQ/preempt を入れない。
 
-        // dispatch(num, arg0, arg1, arg2, arg3, arg4)
+        // dispatch(num, arg0, arg1, arg2, arg3, arg4, arg5)
         // align slot なし:
         // [rsp+120]=num
         // [rsp+112]=arg0
@@ -301,7 +301,13 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov rcx, [rsp + 96]",
         "mov r8,  [rsp + 88]",
         "mov r9,  [rsp + 80]",
+        // The seventh System V argument is passed on the stack. Reserve an
+        // aligned pair of slots so the saved syscall frame stays untouched.
+        "mov rax, [rsp + 72]",
+        "sub rsp, 16",
+        "mov [rsp], rax",
         "call {dispatch}",
+        "add rsp, 16",
 
         "cli",
 

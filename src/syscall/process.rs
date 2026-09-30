@@ -952,11 +952,12 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool, is_execute: bool)
 /// - `length`: マップするサイズ
 /// - `prot`: 保護フラグ (PROT_READ|PROT_WRITE = 3)
 /// - `flags`: マップフラグ (MAP_ANONYMOUS=0x20, MAP_PRIVATE=0x2)
-/// - `_fd`: ファイルディスクリプタ (-1 = 匿名)
+/// - `fd`: ファイルディスクリプタ (-1 = 匿名)
+/// - `file_offset`: ページ境界に揃ったファイルoffset
 ///
 /// # 戻り値
 /// マップされた仮想アドレス、またはエラーコード
-pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
+pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64, file_offset: u64) -> u64 {
     use super::types::{EINVAL, ENOMEM};
 
     if length == 0 {
@@ -975,6 +976,9 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
     // MAP_ANONYMOUS (0x20) は従来通りサポートする。
     const MAP_ANONYMOUS: u64 = 0x20;
     let anonymous = flags & MAP_ANONYMOUS != 0;
+    if !anonymous && file_offset & 4095 != 0 {
+        return EINVAL;
+    }
 
     let current_tid = match current_thread_id() {
         Some(tid) => tid,
@@ -1021,13 +1025,21 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
             Some(Some(path)) => path,
             _ => return EINVAL,
         };
-        let data = match crate::cext::fs::read_all(&path)
-            .or_else(|| crate::init::fs::read_rootfs(&path))
-        {
-            Some(data) => data,
-            None => return ENOMEM,
+        let Some((_, file_size, _, _)) = crate::syscall::fs::metadata_rootfs_first(&path) else {
+            return ENOMEM;
         };
-        Some((path, data))
+        let read_len = core::cmp::min(size, file_size.saturating_sub(file_offset));
+        let Ok(read_len) = usize::try_from(read_len) else {
+            return ENOMEM;
+        };
+        let mut data = alloc::vec![0; read_len];
+        if read_len != 0 {
+            match crate::syscall::fs::read_file_range_rootfs_first(&path, file_offset, &mut data) {
+                Some(read) => data.truncate(read),
+                None => return ENOMEM,
+            }
+        }
+        Some((path, file_offset, data))
     };
 
     let result = crate::task::with_process_mut(pid, |process| {
@@ -1110,12 +1122,20 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
                 return Err(ENOMEM);
             }
         } else {
-            let (path, data) = match file_backing {
+            let (path, file_offset, data) = match file_backing {
                 Some(backing) => backing,
                 None => return Err(EINVAL),
             };
             let region = crate::task::MmapRegion::file_backed(
-                map_start, size, prot, flags, path, data, writable, shared,
+                map_start,
+                size,
+                prot,
+                flags,
+                path,
+                file_offset,
+                data,
+                writable,
+                shared,
             );
             if !process.add_mmap_region(region) {
                 return Err(EINVAL);
@@ -1216,6 +1236,7 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
         if region.is_shared() {
             let region_len = region.len();
             let path = region.backing().file_path().to_string();
+            let file_offset = region.backing().file_offset();
             let dirty_pages = region.take_dirty_pages();
             for page_index in dirty_pages {
                 let page_off = page_index.saturating_mul(4096);
@@ -1233,7 +1254,13 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
                     }
                     backing[page_off as usize..end].copy_from_slice(&page_buf[..copy_len]);
                     if !path.is_empty() {
-                        let _ = crate::cext::fs::write_all(&path, page_off, &page_buf[..copy_len]);
+                        if let Some(write_offset) = file_offset.checked_add(page_off) {
+                            let _ = crate::cext::fs::write_all(
+                                &path,
+                                write_offset,
+                                &page_buf[..copy_len],
+                            );
+                        }
                     }
                 }
             }
@@ -1491,12 +1518,15 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
         offset += chunk_len;
     }
 
-    let backing_path =
+    let (backing_path, file_offset) =
         match crate::task::with_process_mut(crate::task::ids::ProcessId::from_u64(pid), |process| {
             let Some(region) = process.find_mmap_region_mut(region_start) else {
                 return Err(EINVAL);
             };
-            Ok(region.backing().file_path().to_string())
+            Ok((
+                region.backing().file_path().to_string(),
+                region.backing().file_offset(),
+            ))
         }) {
             Some(Ok(path)) => path,
             Some(Err(e)) => return e,
@@ -1507,7 +1537,10 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
         let mut written = 0usize;
         while written < copied.len() {
             let chunk_len = core::cmp::min(MEMORY_SYNC_CHUNK_BYTES, copied.len() - written);
-            let write_off = match (written as u64).checked_add(sync_start - region_start) {
+            let write_off = match file_offset
+                .checked_add(sync_start - region_start)
+                .and_then(|offset| offset.checked_add(written as u64))
+            {
                 Some(v) => v,
                 None => return EINVAL,
             };

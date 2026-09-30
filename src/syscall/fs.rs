@@ -568,7 +568,11 @@ pub(crate) fn readdir_rootfs_first(path: &str) -> Option<Vec<String>> {
 }
 
 #[inline]
-fn read_file_range_rootfs_first(path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
+pub(crate) fn read_file_range_rootfs_first(
+    path: &str,
+    offset: u64,
+    buf: &mut [u8],
+) -> Option<usize> {
     crate::performance::record_vfs_read_range();
     if let Some(read) = crate::init::fs::read_range_initfs(path, offset, buf) {
         return Some(read);

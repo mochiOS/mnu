@@ -49,6 +49,7 @@ pub enum MmapBacking {
     },
     File {
         path: String,
+        offset: u64,
         data: Arc<alloc::vec::Vec<u8>>,
         writable: bool,
         shared: bool,
@@ -164,6 +165,7 @@ impl MmapRegion {
         prot: u64,
         flags: u64,
         path: String,
+        offset: u64,
         data: alloc::vec::Vec<u8>,
         writable: bool,
         shared: bool,
@@ -176,6 +178,7 @@ impl MmapRegion {
             flags,
             backing: MmapBacking::File {
                 path,
+                offset,
                 data: Arc::new(data),
                 writable,
                 shared,
@@ -367,6 +370,13 @@ impl MmapBacking {
         match self {
             MmapBacking::Anonymous { .. } => "",
             MmapBacking::File { path, .. } => path.as_str(),
+        }
+    }
+
+    pub fn file_offset(&self) -> u64 {
+        match self {
+            MmapBacking::Anonymous { .. } => 0,
+            MmapBacking::File { offset, .. } => *offset,
         }
     }
 
