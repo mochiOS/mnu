@@ -1120,6 +1120,17 @@ pub fn mkdir(path_ptr: u64, mode: u64) -> u64 {
     if let Err(errno) = ensure_fs_path_access(&resolved, PATH_CREATE) {
         return errno;
     }
+    if let Some(mount) = userspace_mount(&resolved) {
+        return match vfs::userspace::create(
+            mount.mount_id.0,
+            &mount.path,
+            (mode as u32) & 0o777,
+            mochios_filesystem_protocol::NODE_TYPE_DIRECTORY,
+        ) {
+            Ok(_) => SUCCESS,
+            Err(errno) => errno,
+        };
+    }
     const S_IFDIR: u32 = 0x4000;
     let Some((uid, gid)) = current_effective_ids() else {
         return EACCES;
