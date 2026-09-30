@@ -19,7 +19,6 @@ pub struct MountId(pub u64);
 pub struct FilesystemId(pub u64);
 
 pub const ROOT_FILESYSTEM_ID: FilesystemId = FilesystemId(1);
-pub const DATA_FILESYSTEM_ID: FilesystemId = FilesystemId(2);
 
 /// Identifies an inode inside a mounted filesystem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -178,8 +177,17 @@ pub struct ResolvedMount {
     pub path: String,
 }
 
+#[derive(Clone, Copy)]
+struct UserspaceFilesystem {
+    id: FilesystemId,
+    endpoint: u64,
+    owner_pid: u64,
+}
+
 static NEXT_MOUNT_ID: AtomicU64 = AtomicU64::new(2);
+static NEXT_FILESYSTEM_ID: AtomicU64 = AtomicU64::new(2);
 static MOUNTS: SpinLock<Vec<Mount>> = SpinLock::new(Vec::new());
+static USERSPACE_FILESYSTEMS: SpinLock<Vec<UserspaceFilesystem>> = SpinLock::new(Vec::new());
 
 /// Installs the compatibility root mount used during the userspace-filesystem
 /// transition. Additional filesystems can be mounted at more specific paths.
@@ -192,22 +200,41 @@ pub fn init() {
             target: "/".to_string(),
             source: "/".to_string(),
         });
-        for path in [
-            "/bin",
-            "/applications",
-            "/libraries",
-            "/home",
-            "/var",
-            "/tmp",
-        ] {
-            mounts.push(Mount {
-                id: MountId(NEXT_MOUNT_ID.fetch_add(1, Ordering::Relaxed)),
-                filesystem_id: DATA_FILESYSTEM_ID,
-                target: path.to_string(),
-                source: path.to_string(),
-            });
-        }
     }
+}
+
+pub fn register_userspace_filesystem(endpoint: u64, owner_pid: u64) -> FilesystemId {
+    let id = FilesystemId(NEXT_FILESYSTEM_ID.fetch_add(1, Ordering::Relaxed));
+    USERSPACE_FILESYSTEMS.lock().push(UserspaceFilesystem {
+        id,
+        endpoint,
+        owner_pid,
+    });
+    id
+}
+
+pub fn userspace_endpoint(id: MountId) -> Option<u64> {
+    let filesystem_id = MOUNTS
+        .lock()
+        .iter()
+        .find(|mount| mount.id == id)?
+        .filesystem_id;
+    USERSPACE_FILESYSTEMS
+        .lock()
+        .iter()
+        .find(|filesystem| filesystem.id == filesystem_id)
+        .map(|filesystem| filesystem.endpoint)
+}
+
+pub fn is_userspace_mount(id: MountId) -> bool {
+    userspace_endpoint(id).is_some()
+}
+
+pub fn filesystem_owned_by(id: FilesystemId, owner_pid: u64) -> bool {
+    USERSPACE_FILESYSTEMS
+        .lock()
+        .iter()
+        .any(|filesystem| filesystem.id == id && filesystem.owner_pid == owner_pid)
 }
 
 pub fn mount(target: &str, filesystem_id: FilesystemId) -> Result<MountId, ()> {
@@ -215,6 +242,14 @@ pub fn mount(target: &str, filesystem_id: FilesystemId) -> Result<MountId, ()> {
 }
 
 pub fn mount_from(target: &str, filesystem_id: FilesystemId, source: &str) -> Result<MountId, ()> {
+    if filesystem_id != ROOT_FILESYSTEM_ID
+        && !USERSPACE_FILESYSTEMS
+            .lock()
+            .iter()
+            .any(|filesystem| filesystem.id == filesystem_id)
+    {
+        return Err(());
+    }
     let target = normalize_mount_path(target);
     let source = normalize_mount_path(source);
     let mut mounts = MOUNTS.lock();

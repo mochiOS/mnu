@@ -744,6 +744,12 @@ pub fn dispatch(
         x if x == SyscallNumber::BlockRead as u64 => storage::block_read(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::BlockWrite as u64 => storage::block_write(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::BlockFlush as u64 => storage::block_flush(arg0),
+        x if x == mochios_filesystem_protocol::SYS_FILESYSTEM_REGISTER => {
+            fs::filesystem_register(arg0)
+        }
+        x if x == mochios_filesystem_protocol::SYS_FILESYSTEM_MOUNT => {
+            fs::filesystem_mount(arg0, arg1, arg2, arg3, arg4)
+        }
         x if x == SyscallNumber::BootSystemSlot as u64 => boot_system_slot(),
         x if x == SyscallNumber::BootEspGuid as u64 => boot_esp_guid(arg0, arg1),
         x if x == SyscallNumber::DeviceControl as u64 => {

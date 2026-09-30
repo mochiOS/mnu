@@ -8,8 +8,6 @@ use mochios_filesystem_protocol as protocol;
 
 use crate::syscall::{EINVAL, EIO, ENXIO};
 
-const SERVICE_NAME: &str = "filesystem.service";
-
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,7 +293,8 @@ fn call(
     let request_id = header.request_id;
     let mut request = vec![0u8; protocol::HEADER_LEN + payload.len()];
     let request_len = protocol::encode(header, payload, &mut request).map_err(|_| EINVAL)?;
-    let endpoint = service_endpoint().ok_or(ENXIO)?;
+    let endpoint = crate::vfs::userspace_endpoint(crate::vfs::MountId(header.mount_id))
+        .ok_or(ENXIO)?;
     let mut reply = vec![0u8; reply_capacity.max(protocol::HEADER_LEN)];
     let reply_len =
         crate::syscall::ipc::call_from_kernel(endpoint, &request[..request_len], &mut reply)?;
@@ -327,18 +326,4 @@ fn node_info(header: protocol::Header, payload: &[u8]) -> Result<NodeInfo, u64> 
         uid: metadata.uid,
         gid: metadata.gid,
     })
-}
-
-fn service_endpoint() -> Option<u64> {
-    let process_id = crate::task::find_process_id_by_name(SERVICE_NAME)?;
-    let mut thread_id = None;
-    crate::task::for_each_thread(|thread| {
-        if thread_id.is_none()
-            && thread.process_id() == process_id
-            && thread.state() != crate::task::ThreadState::Terminated
-        {
-            thread_id = Some(thread.id().as_u64());
-        }
-    });
-    thread_id.and_then(crate::syscall::ipc::ensure_endpoint_handle_for_thread)
 }

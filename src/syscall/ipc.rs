@@ -157,6 +157,14 @@ pub fn endpoint_owner_process(handle: u64) -> u64 {
         .unwrap_or(EINVAL)
 }
 
+pub fn endpoint_is_owned_by(handle: u64, process_id: crate::task::ProcessId) -> bool {
+    let Some(record) = endpoint_record_from_handle(handle) else {
+        return false;
+    };
+    crate::task::thread_to_process_id(record.thread_id) == Some(process_id)
+        && record.rights.contains(EndpointRights::RECV)
+}
+
 fn endpoint_rights_for_thread(thread_id: u64) -> EndpointRights {
     let Some(pid) = crate::task::thread_to_process_id(thread_id) else {
         return EndpointRights::empty();
