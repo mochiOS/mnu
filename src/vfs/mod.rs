@@ -8,6 +8,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interrupt::spinlock::SpinLock;
 
+pub mod userspace;
+
 /// Identifies a mounted filesystem instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MountId(pub u64);

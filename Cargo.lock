@@ -107,6 +107,7 @@ dependencies = [
  "mnu-csprng",
  "mnu-metrics",
  "mnu-time-core",
+ "mochios-filesystem-protocol",
  "sha2",
  "spin",
  "x86_64",
@@ -131,6 +132,10 @@ version = "0.1.0"
 
 [[package]]
 name = "mnu-time-core"
+version = "0.1.0"
+
+[[package]]
+name = "mochios-filesystem-protocol"
 version = "0.1.0"
 
 [[package]]

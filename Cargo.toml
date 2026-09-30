@@ -43,6 +43,7 @@ x86_64 = "0.15"
 [dependencies]
 mnu-abi = { path = "crates/abi" }
 mnu-metrics = { path = "crates/metrics" }
+mochios-filesystem-protocol = { path = "../user/crates/filesystem-protocol" }
 
 [features]
 default = ["kernel-bin"]
