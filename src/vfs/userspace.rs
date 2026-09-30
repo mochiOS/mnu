@@ -157,7 +157,7 @@ pub fn create(mount_id: u64, path: &str, mode: u32, kind: u32) -> Result<NodeInf
     Ok(node_info(response.header))
 }
 
-pub fn unlink(mount_id: u64, path: &str) -> Result<(), u64> {
+pub fn unlink(mount_id: u64, path: &str, kind: u32) -> Result<(), u64> {
     if path.is_empty() || path.len() > protocol::MAX_PATH_LEN {
         return Err(EINVAL);
     }
@@ -166,6 +166,7 @@ pub fn unlink(mount_id: u64, path: &str) -> Result<(), u64> {
             opcode: protocol::OP_UNLINK,
             mount_id,
             length: path.len() as u32,
+            flags: kind,
             ..protocol::Header::default()
         },
         path.as_bytes(),

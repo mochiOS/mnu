@@ -1160,8 +1160,15 @@ pub fn rmdir(path_ptr: u64) -> u64 {
     if let Err(errno) = ensure_fs_path_access(&resolved, PATH_DELETE) {
         return errno;
     }
-    if userspace_mount(&resolved).is_some() {
-        return ENOSYS;
+    if let Some(mount) = userspace_mount(&resolved) {
+        return match vfs::userspace::unlink(
+            mount.mount_id.0,
+            &mount.path,
+            mochios_filesystem_protocol::NODE_TYPE_DIRECTORY,
+        ) {
+            Ok(()) => SUCCESS,
+            Err(errno) => errno,
+        };
     }
     match metadata_rootfs_first(&resolved) {
         Some((mode, _, _, _)) if mode_is_directory(mode) => {}
@@ -2151,7 +2158,11 @@ pub fn unlink(path_ptr: u64) -> u64 {
         return errno;
     }
     if let Some(mount) = userspace_mount(&resolved) {
-        return match vfs::userspace::unlink(mount.mount_id.0, &mount.path) {
+        return match vfs::userspace::unlink(
+            mount.mount_id.0,
+            &mount.path,
+            mochios_filesystem_protocol::NODE_TYPE_REGULAR,
+        ) {
             Ok(()) => SUCCESS,
             Err(errno) => errno,
         };
@@ -2186,10 +2197,12 @@ pub fn unlinkat(dirfd: i64, path_ptr: u64, flags: u64) -> u64 {
     }
     let remove_directory = (flags & AT_REMOVEDIR) != 0;
     if let Some(mount) = userspace_mount(&resolved) {
-        if remove_directory {
-            return ENOSYS;
-        }
-        return match vfs::userspace::unlink(mount.mount_id.0, &mount.path) {
+        let kind = if remove_directory {
+            mochios_filesystem_protocol::NODE_TYPE_DIRECTORY
+        } else {
+            mochios_filesystem_protocol::NODE_TYPE_REGULAR
+        };
+        return match vfs::userspace::unlink(mount.mount_id.0, &mount.path, kind) {
             Ok(()) => SUCCESS,
             Err(errno) => errno,
         };
