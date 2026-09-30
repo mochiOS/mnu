@@ -1183,20 +1183,85 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         return EBADF;
     }
 
-    let Some(dir_path) = open_file(pid, idx).and_then(|open_file| {
-        open_file
-            .lock()
-            .vnode
-            .as_ref()
-            .filter(|vnode| vnode.is_directory())
-            .map(|vnode| vnode.path().to_string())
-    }) else {
+    let Some(open_file) = open_file(pid, idx) else {
         return EBADF;
     };
+    let mut open = open_file.lock();
+    let Some(vnode) = open
+        .vnode
+        .as_ref()
+        .filter(|vnode| vnode.is_directory())
+        .cloned()
+    else {
+        return EBADF;
+    };
+    let dir_path = vnode.path().to_string();
 
     if let Err(errno) = ensure_fs_path_access(&dir_path, PATH_LIST) {
         return errno;
     }
+
+    if let Some((node_id, _)) = vnode.userspace_handle_ids() {
+        let max_output = usize::try_from(buf_len)
+            .unwrap_or(usize::MAX)
+            .min(mochios_filesystem_protocol::MAX_IO_LEN);
+        let mut output = Vec::new();
+        let mut cursor = open.pos as u64;
+        while output.len() < max_output {
+            let batch = match vfs::userspace::read_dir(
+                vnode.inode.mount_id.0,
+                node_id,
+                cursor,
+                mochios_filesystem_protocol::DIRENT_HEADER_LEN
+                    + mochios_filesystem_protocol::MAX_NAME_LEN,
+            ) {
+                Ok(batch) => batch,
+                Err(errno) => return errno,
+            };
+            if batch.bytes.is_empty() {
+                break;
+            }
+            let mut input = batch.bytes.as_slice();
+            let mut consumed_any = false;
+            while !input.is_empty() {
+                let (entry, name, consumed) =
+                    match mochios_filesystem_protocol::decode_dir_entry(input) {
+                        Ok(entry) => entry,
+                        Err(_) => return EIO,
+                    };
+                let record_len = (19usize + name.len() + 1).next_multiple_of(8);
+                if output.len().saturating_add(record_len) > max_output {
+                    break;
+                }
+                let start = output.len();
+                output.resize(start + record_len, 0);
+                output[start..start + 8].copy_from_slice(&entry.node_id.to_ne_bytes());
+                let next_cursor = cursor.saturating_add(1);
+                output[start + 8..start + 16].copy_from_slice(&next_cursor.to_ne_bytes());
+                output[start + 16..start + 18].copy_from_slice(&(record_len as u16).to_ne_bytes());
+                output[start + 18] = protocol_kind_to_dirent(entry.kind);
+                output[start + 19..start + 19 + name.len()].copy_from_slice(name);
+                cursor = next_cursor;
+                consumed_any = true;
+                input = &input[consumed..];
+            }
+            if !consumed_any {
+                if output.is_empty() {
+                    return EINVAL;
+                }
+                break;
+            }
+            if !input.is_empty() {
+                break;
+            }
+        }
+        if crate::syscall::copy_to_user(buf_ptr, &output).is_err() {
+            return EFAULT;
+        }
+        open.pos = cursor as usize;
+        return output.len() as u64;
+    }
+    drop(open);
 
     let names = match readdir_rootfs_first(&dir_path) {
         Some(n) => n,
@@ -1209,6 +1274,15 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         return EFAULT;
     }
     to_copy as u64
+}
+
+fn protocol_kind_to_dirent(kind: u32) -> u8 {
+    match kind {
+        mochios_filesystem_protocol::NODE_TYPE_DIRECTORY => 4,
+        mochios_filesystem_protocol::NODE_TYPE_REGULAR => 8,
+        mochios_filesystem_protocol::NODE_TYPE_SYMLINK => 10,
+        _ => 0,
+    }
 }
 
 /// Chdirシステムコール
