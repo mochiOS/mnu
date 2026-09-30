@@ -1,11 +1,11 @@
 //! プロセスごとのファイルディスクリプタテーブル
 
 use alloc::boxed::Box;
-use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::interrupt::spinlock::SpinLock;
+use crate::vfs::Vnode;
 
 /// stdin / stdout / stderr の予約 FD 番号
 pub const FD_BASE: usize = 3;
@@ -93,10 +93,8 @@ pub struct OpenFile {
     pub data: Box<[u8]>,
     /// 現在の読み取り/書き込み位置（パイプの場合はエントリインデックス兼用）
     pub pos: usize,
-    /// 実ファイルのパス（通常の永続ファイルにのみ設定）
-    pub fs_path: Option<String>,
-    /// Some(path) であればディレクトリ fd
-    pub dir_path: Option<String>,
+    /// 解決済みfilesystem object。pipeや匿名一時ファイルではNone。
+    pub vnode: Option<Arc<Vnode>>,
     /// true の場合、データはリモート FD バックエンドで管理される（fd_remote 値を参照）
     pub is_remote: bool,
     /// リモートバックエンド側のファイルディスクリプタ（is_remote=true のとき有効）
@@ -114,8 +112,7 @@ impl OpenFile {
         Self {
             data: Box::new([]),
             pos: 0,
-            fs_path: None,
-            dir_path: None,
+            vnode: None,
             is_remote: false,
             fd_remote: 0,
             pipe_id: Some(pipe_id),

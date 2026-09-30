@@ -67,6 +67,10 @@ pub mod panic;
 pub mod task;
 
 #[cfg(not(test))]
+/// Filesystem object model and mount namespace.
+pub mod vfs;
+
+#[cfg(not(test))]
 /// システムコール
 pub mod syscall;
 

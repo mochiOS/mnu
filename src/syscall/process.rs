@@ -1010,10 +1010,13 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64) -> u64 {
     } else {
         let idx = fd as usize;
         let path = match crate::task::with_process(pid, |process| {
-            process
-                .fd_table()
-                .get(idx)
-                .and_then(|fh| fh.open.lock().fs_path.clone())
+            process.fd_table().get(idx).and_then(|fh| {
+                fh.open
+                    .lock()
+                    .vnode
+                    .as_ref()
+                    .map(|vnode| vnode.path().to_string())
+            })
         }) {
             Some(Some(path)) => path,
             _ => return EINVAL,

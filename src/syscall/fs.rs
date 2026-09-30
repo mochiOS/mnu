@@ -11,8 +11,10 @@ use crate::capability::Capability;
 use crate::task::fd_table::{
     FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
 };
+use crate::vfs::{Vnode, VnodeKind};
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 const MAX_IO_BYTES: usize = 128 * 1024 * 1024;
@@ -153,7 +155,14 @@ fn resolve_path_at(pid_raw: u64, dirfd: i64, path_ptr: u64) -> Result<String, u6
         return Err(EBADF);
     }
     let dir_path = open_file(pid_raw, idx)
-        .and_then(|open_file| open_file.lock().dir_path.clone())
+        .and_then(|open_file| {
+            open_file
+                .lock()
+                .vnode
+                .as_ref()
+                .filter(|vnode| vnode.is_directory())
+                .map(|vnode| vnode.path().to_string())
+        })
         .ok_or(EBADF)?;
     let path = read_cstring(path_ptr)?;
     let full_path = if path.starts_with('/') {
@@ -702,8 +711,14 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
         OpenFile {
             data: alloc::boxed::Box::new([]),
             pos: 0,
-            fs_path: if is_dir { None } else { Some(path.to_string()) },
-            dir_path: if is_dir { Some(path.to_string()) } else { None },
+            vnode: Some(Arc::new(Vnode::legacy_path(
+                path.to_string(),
+                if is_dir {
+                    VnodeKind::Directory
+                } else {
+                    VnodeKind::Regular
+                },
+            ))),
             is_remote: false,
             fd_remote: 0,
             pipe_id: None,
@@ -780,8 +795,9 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
     let result = (|| {
         let mut open = open_file.lock();
         let file_len = open
-            .fs_path
-            .as_deref()
+            .vnode
+            .as_ref()
+            .map(|vnode| vnode.path())
             .and_then(metadata_rootfs_first)
             .map(|(_, size, _, _)| size as usize)
             .unwrap_or(open.data.len());
@@ -868,16 +884,20 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
         t.get(idx).map(|fh| {
             let open = fh.open.lock();
             let metadata = open
-                .dir_path
-                .as_deref()
-                .or(open.fs_path.as_deref())
+                .vnode
+                .as_ref()
+                .map(|vnode| vnode.path())
                 .and_then(metadata_rootfs_first);
             let size = metadata
                 .map(|(_, size, _, _)| size)
                 .unwrap_or(open.data.len() as u64);
             let mode = metadata.map_or_else(
                 || {
-                    if open.dir_path.is_some() {
+                    if open
+                        .vnode
+                        .as_ref()
+                        .is_some_and(|vnode| vnode.is_directory())
+                    {
                         0x4000u32 | 0o755
                     } else {
                         0x8000u32 | 0o644
@@ -1007,9 +1027,14 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         return EBADF;
     }
 
-    let Some(dir_path) =
-        open_file(pid, idx).and_then(|open_file| open_file.lock().dir_path.clone())
-    else {
+    let Some(dir_path) = open_file(pid, idx).and_then(|open_file| {
+        open_file
+            .lock()
+            .vnode
+            .as_ref()
+            .filter(|vnode| vnode.is_directory())
+            .map(|vnode| vnode.path().to_string())
+    }) else {
         return EBADF;
     };
 
@@ -1155,7 +1180,10 @@ fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         let read_len = {
             let (path, pos) = {
                 let open = open_file.lock();
-                (open.fs_path.clone(), open.pos)
+                (
+                    open.vnode.as_ref().map(|vnode| vnode.path().to_string()),
+                    open.pos,
+                )
             };
             if let Some(path) = path.as_deref() {
                 crate::performance::record_vfs_path_clone(path.len());
@@ -1289,7 +1317,11 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
 
     let (mut start_pos, fs_path, open_flags) = {
         let open = open_file.lock();
-        (open.pos, open.fs_path.clone(), open.open_flags)
+        (
+            open.pos,
+            open.vnode.as_ref().map(|vnode| vnode.path().to_string()),
+            open.open_flags,
+        )
     };
     if let Some(path) = fs_path.as_deref() {
         crate::performance::record_vfs_path_clone(path.len());
@@ -1481,7 +1513,13 @@ pub fn fsync(fd: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    match open_file(pid, idx).map(|open_file| open_file.lock().fs_path.is_some()) {
+    match open_file(pid, idx).map(|open_file| {
+        open_file
+            .lock()
+            .vnode
+            .as_ref()
+            .is_some_and(|vnode| !vnode.is_directory())
+    }) {
         Some(true) => {
             let rc = crate::cext::fs::sync();
             if rc == 0 {
@@ -1623,10 +1661,14 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
     };
     let res = (|| {
         let mut open = open_file.lock();
-        if open.dir_path.is_some() {
+        if open
+            .vnode
+            .as_ref()
+            .is_some_and(|vnode| vnode.is_directory())
+        {
             return Err(EISDIR);
         }
-        if let Some(path) = open.fs_path.as_deref() {
+        if let Some(path) = open.vnode.as_ref().map(|vnode| vnode.path()) {
             let rc = crate::cext::fs::truncate(path, len);
             if rc != 0 {
                 return Err(errno_from_cext(rc));
@@ -1914,9 +1956,14 @@ pub fn openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    let Some(dir_path) =
-        open_file(pid, idx).and_then(|open_file| open_file.lock().dir_path.clone())
-    else {
+    let Some(dir_path) = open_file(pid, idx).and_then(|open_file| {
+        open_file
+            .lock()
+            .vnode
+            .as_ref()
+            .filter(|vnode| vnode.is_directory())
+            .map(|vnode| vnode.path().to_string())
+    }) else {
         return EBADF;
     };
 
@@ -1968,9 +2015,14 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    let Some(dir_path) =
-        open_file(pid, idx).and_then(|open_file| open_file.lock().dir_path.clone())
-    else {
+    let Some(dir_path) = open_file(pid, idx).and_then(|open_file| {
+        open_file
+            .lock()
+            .vnode
+            .as_ref()
+            .filter(|vnode| vnode.is_directory())
+            .map(|vnode| vnode.path().to_string())
+    }) else {
         return EBADF;
     };
     let path = match read_cstring(path_ptr) {
@@ -2168,7 +2220,12 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     };
     let (dir_path, start_pos) = {
         let open = open_file.lock();
-        let Some(path) = open.dir_path.clone() else {
+        let Some(path) = open
+            .vnode
+            .as_ref()
+            .filter(|vnode| vnode.is_directory())
+            .map(|vnode| vnode.path().to_string())
+        else {
             return EBADF;
         };
         (path, open.pos)
