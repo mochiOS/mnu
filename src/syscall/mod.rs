@@ -774,6 +774,10 @@ pub fn dispatch(
         x if x == SyscallNumber::Chmod as u64 => fs::chmod(arg0, arg1),
         x if x == SyscallNumber::Chown as u64 => fs::chown(arg0, arg1, arg2),
         x if x == SyscallNumber::Symlink as u64 => fs::symlink(arg0, arg1),
+        x if x == SyscallNumber::Readlink as u64 => fs::readlink(arg0, arg1, arg2),
+        x if x == SyscallNumber::Readlinkat as u64 => {
+            fs::readlinkat(arg0 as i64, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::Ftruncate as u64 => fs::ftruncate(arg0, arg1),
         x if x == SyscallNumber::Rmdir as u64 => fs::rmdir(arg0),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),

@@ -2634,32 +2634,28 @@ pub fn statfs(path_ptr: u64, buf_ptr: u64) -> u64 {
         .unwrap_or_else(|e| e)
 }
 
-/// readlinkat システムコール（最小実装）
-///
-/// `/proc/self/exe` と `/proc/self/cwd` のみをサポートする。
-pub fn readlinkat(dirfd: i64, path_ptr: u64, buf_ptr: u64, buf_len: u64) -> u64 {
+pub fn readlink(path_ptr: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     const AT_FDCWD: i64 = -100;
+    readlinkat(AT_FDCWD, path_ptr, buf_ptr, buf_len)
+}
+
+/// Reads a symbolic-link target without following the final component.
+pub fn readlinkat(dirfd: i64, path_ptr: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     if path_ptr == 0 || buf_ptr == 0 || buf_len == 0 {
         return EINVAL;
     }
     if !crate::syscall::validate_user_ptr(buf_ptr, buf_len) {
         return EFAULT;
     }
-    let raw = match read_cstring(path_ptr) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let path = if raw.starts_with('/') || dirfd == AT_FDCWD {
-        normalize_path(&raw)
-    } else {
-        // 最小実装: dirfd 相対は未対応
-        return EBADF;
-    };
-
-    let pid = match current_process_id_raw() {
-        Some(p) => crate::task::ids::ProcessId::from_u64(p),
+    let pid_raw = match current_process_id_raw() {
+        Some(pid) => pid,
         None => return EBADF,
     };
+    let path = match resolve_path_at(pid_raw, dirfd, path_ptr) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
     if let Some(mount) = userspace_mount(&path) {
         if let Err(errno) = ensure_fs_path_access(&path, PATH_READ) {
             return errno;
