@@ -11,7 +11,7 @@ use crate::capability::Capability;
 use crate::task::fd_table::{
     FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
 };
-use crate::vfs::{self, MountId, Vnode, VnodeKind};
+use crate::vfs::{self, InodeId, MountId, Vnode, VnodeKind, DATA_FILESYSTEM_ID};
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -626,7 +626,6 @@ fn resolve_path(pid_raw: u64, path: &str) -> String {
 }
 
 const O_ACCMODE: u64 = 0o3;
-#[cfg(test)]
 const O_WRONLY: u64 = 0o1;
 #[cfg(test)]
 const O_RDWR: u64 = 0o2;
@@ -635,6 +634,7 @@ const O_EXCL: u64 = 0o200;
 const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 const O_NONBLOCK: u64 = 0x4000;
+const USERSPACE_DATA_ROUTING: bool = false;
 
 fn errno_from_cext(rc: i32) -> u64 {
     match rc {
@@ -654,7 +654,125 @@ fn errno_from_cext(rc: i32) -> u64 {
     }
 }
 
+fn userspace_mount(path: &str) -> Option<vfs::ResolvedMount> {
+    if !USERSPACE_DATA_ROUTING {
+        return None;
+    }
+    vfs::resolve(path).filter(|mount| mount.filesystem_id == DATA_FILESYSTEM_ID)
+}
+
+fn vnode_kind_from_protocol(kind: u32) -> VnodeKind {
+    match kind {
+        mochios_filesystem_protocol::NODE_TYPE_DIRECTORY => VnodeKind::Directory,
+        mochios_filesystem_protocol::NODE_TYPE_SYMLINK => VnodeKind::Symlink,
+        mochios_filesystem_protocol::NODE_TYPE_REGULAR => VnodeKind::Regular,
+        _ => VnodeKind::Other,
+    }
+}
+
+fn open_userspace_for_pid(
+    owner_pid: u64,
+    path: &str,
+    flags: u64,
+    mode: u64,
+    mount: vfs::ResolvedMount,
+) -> u64 {
+    let mut node = match vfs::userspace::lookup(mount.mount_id.0, &mount.path) {
+        Ok(node) => Some(node),
+        Err(errno) if errno == ENOENT => None,
+        Err(errno) => return errno,
+    };
+    let existed_before = node.is_some();
+    let is_dir =
+        node.is_some_and(|node| node.kind == mochios_filesystem_protocol::NODE_TYPE_DIRECTORY);
+    let acc = flags & O_ACCMODE;
+    if is_dir && acc != 0 {
+        return EISDIR;
+    }
+    if let Err(errno) = ensure_fs_path_access(
+        path,
+        open_path_required_rights(flags, is_dir, existed_before),
+    ) {
+        return errno;
+    }
+    if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 && existed_before {
+        return EEXIST;
+    }
+    if node.is_none() {
+        if (flags & O_CREAT) == 0 {
+            return ENOENT;
+        }
+        node = match vfs::userspace::create(
+            mount.mount_id.0,
+            &mount.path,
+            (mode & 0o777) as u32,
+            mochios_filesystem_protocol::NODE_TYPE_REGULAR,
+        ) {
+            Ok(node) => Some(node),
+            Err(errno) => return errno,
+        };
+    }
+    let Some(node) = node else {
+        return EIO;
+    };
+    let kind = vnode_kind_from_protocol(node.kind);
+    let open_id = if kind == VnodeKind::Directory {
+        0
+    } else {
+        match u32::try_from(flags)
+            .map_err(|_| EINVAL)
+            .and_then(|flags| vfs::userspace::open(mount.mount_id.0, node.node_id, flags))
+        {
+            Ok(open_id) => open_id,
+            Err(errno) => return errno,
+        }
+    };
+    if (flags & O_TRUNC) != 0 && kind == VnodeKind::Regular {
+        if let Err(errno) = vfs::userspace::truncate(mount.mount_id.0, open_id, 0) {
+            let _ = vfs::userspace::close(mount.mount_id.0, open_id);
+            return errno;
+        }
+    }
+
+    let cloexec = (flags & O_CLOEXEC) != 0;
+    let cap = if kind == VnodeKind::Directory {
+        FileHandleCap::READDIR
+            .union(FileHandleCap::STAT)
+            .union(FileHandleCap::SEEK)
+            .union(FileHandleCap::CLOSE)
+    } else {
+        FileHandleCap::from_open_flags(flags).union(FileHandleCap::CLOSE)
+    };
+    let vnode = Vnode::userspace_handle(
+        mount.mount_id,
+        InodeId(node.node_id),
+        path.to_string(),
+        open_id,
+        kind,
+    );
+    let handle = alloc::boxed::Box::new(FileHandle::new(
+        OpenFile {
+            data: alloc::boxed::Box::new([]),
+            pos: 0,
+            vnode: Some(Arc::new(vnode)),
+            is_remote: false,
+            fd_remote: 0,
+            pipe_id: None,
+            pipe_write: false,
+            open_flags: flags,
+        },
+        cap,
+    ));
+    match with_fd_table_mut(owner_pid, |table| table.alloc(handle, cloexec)) {
+        Some(Some(fd)) => fd as u64,
+        _ => ENOSYS,
+    }
+}
+
 fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u64 {
+    if let Some(mount) = userspace_mount(path) {
+        return open_userspace_for_pid(owner_pid, path, flags, mode, mount);
+    }
     let mut metadata = metadata_rootfs_first(path);
     let mut is_dir = metadata
         .map(|(mode, _, _, _)| mode_is_directory(mode))
@@ -806,17 +924,21 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
     };
     let result = (|| {
         let mut open = open_file.lock();
-        let file_len = open
-            .vnode
-            .as_ref()
-            .and_then(|vnode| {
+        let file_len = if let Some(vnode) = open.vnode.as_ref() {
+            if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
+                let node = vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)?;
+                usize::try_from(node.size).map_err(|_| EOVERFLOW)?
+            } else {
                 vnode
                     .cext_handle_id()
                     .and_then(crate::cext::fs::handle_metadata)
                     .or_else(|| metadata_rootfs_first(vnode.path()))
-            })
-            .map(|(_, size, _, _)| size as usize)
-            .unwrap_or(open.data.len());
+                    .map(|(_, size, _, _)| size as usize)
+                    .unwrap_or(open.data.len())
+            }
+        } else {
+            open.data.len()
+        };
         let new_pos = match whence {
             0 => offset,
             1 => open.pos as i64 + offset,
@@ -899,15 +1021,19 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
     let file_info = with_fd_table(pid, |t| {
         t.get(idx).map(|fh| {
             let open = fh.open.lock();
-            let metadata = open
-                .vnode
-                .as_ref()
-                .and_then(|vnode| {
+            let metadata = if let Some(vnode) = open.vnode.as_ref() {
+                if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
+                    let node = vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)?;
+                    Some((node.mode as u16, node.size, 0, 0))
+                } else {
                     vnode
                         .cext_handle_id()
                         .and_then(crate::cext::fs::handle_metadata)
                         .or_else(|| metadata_rootfs_first(vnode.path()))
-                });
+                }
+            } else {
+                None
+            };
             let size = metadata
                 .map(|(_, size, _, _)| size)
                 .unwrap_or(open.data.len() as u64);
@@ -926,11 +1052,12 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
                 |(mode, _, _, _)| mode_for_stat(mode),
             );
             let (uid, gid) = metadata.map_or((0, 0), |(_, _, uid, gid)| (uid, gid));
-            (size, mode, uid, gid)
+            Ok::<_, u64>((size, mode, uid, gid))
         })
     });
     let (size, mode, uid, gid) = match file_info {
-        Some(Some(v)) => v,
+        Some(Some(Ok(v))) => v,
+        Some(Some(Err(errno))) => return errno,
         _ => return EBADF,
     };
     write_stat_buf(stat_ptr, mode, size, uid, gid);
@@ -957,6 +1084,15 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
     let resolved = resolve_path(owner_pid, &path);
     if let Err(errno) = ensure_fs_path_access(&resolved, PATH_READ) {
         return errno;
+    }
+    if let Some(mount) = userspace_mount(&resolved) {
+        return match vfs::userspace::lookup(mount.mount_id.0, &mount.path) {
+            Ok(node) => {
+                write_stat_buf(stat_ptr, node.mode, node.size, 0, 0);
+                SUCCESS
+            }
+            Err(errno) => errno,
+        };
     }
     match metadata_rootfs_first(&resolved) {
         Some((mode, size, uid, gid)) => {
@@ -1196,14 +1332,25 @@ fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     crate::performance::record_vfs_temporary_buffer(tmp.len());
 
     while written < to_copy {
-        let chunk_len = core::cmp::min(READ_IO_CHUNK_BYTES, to_copy - written);
+        let chunk_len = core::cmp::min(READ_IO_CHUNK_BYTES, to_copy - written)
+            .min(mochios_filesystem_protocol::MAX_IO_LEN);
         let read_len = {
             let (vnode, pos) = {
                 let open = open_file.lock();
                 (open.vnode.clone(), open.pos)
             };
             if let Some(vnode) = vnode {
-                let read = if let Some(handle) = vnode.cext_handle_id() {
+                let read = if let Some((_, open_id)) = vnode.userspace_handle_ids() {
+                    match vfs::userspace::read(
+                        vnode.inode.mount_id.0,
+                        open_id,
+                        pos as u64,
+                        &mut tmp[..chunk_len],
+                    ) {
+                        Ok(read) => read,
+                        Err(errno) => return errno,
+                    }
+                } else if let Some(handle) = vnode.cext_handle_id() {
                     match crate::cext::fs::read_handle(handle, pos as u64, &mut tmp[..chunk_len]) {
                         Ok(read) => read,
                         Err(_) => return EIO,
@@ -1349,12 +1496,18 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         let Some(vnode) = vnode.as_ref() else {
             return EINVAL;
         };
-        start_pos = match vnode
-            .cext_handle_id()
-            .and_then(crate::cext::fs::handle_metadata)
-            .or_else(|| crate::cext::fs::file_metadata(vnode.path()))
-            .and_then(|(_, size, _, _)| usize::try_from(size).ok())
-        {
+        let size = if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
+            vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)
+                .ok()
+                .map(|node| node.size)
+        } else {
+            vnode
+                .cext_handle_id()
+                .and_then(crate::cext::fs::handle_metadata)
+                .or_else(|| crate::cext::fs::file_metadata(vnode.path()))
+                .map(|(_, size, _, _)| size)
+        };
+        start_pos = match size.and_then(|size| usize::try_from(size).ok()) {
             Some(size) => size,
             None => return EIO,
         };
@@ -1364,7 +1517,8 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     crate::performance::record_vfs_temporary_buffer(tmp.len());
 
     while written < len_usize {
-        let chunk_len = core::cmp::min(WRITE_IO_CHUNK_BYTES, len_usize - written);
+        let chunk_len = core::cmp::min(WRITE_IO_CHUNK_BYTES, len_usize - written)
+            .min(mochios_filesystem_protocol::MAX_IO_LEN);
         if let Err(errno) =
             crate::syscall::copy_from_user(buf_ptr + written as u64, &mut tmp[..chunk_len])
         {
@@ -1377,11 +1531,21 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
                 Some(value) => value as u64,
                 None => return if written == 0 { EFBIG } else { written as u64 },
             };
-            let result = if let Some(handle) = vnode.cext_handle_id() {
-                crate::cext::fs::write_handle(handle, write_offset, &tmp[..chunk_len])
-            } else {
-                crate::cext::fs::write_all(vnode.path(), write_offset, &tmp[..chunk_len])
-            };
+            let result: Result<usize, u64> =
+                if let Some((_, open_id)) = vnode.userspace_handle_ids() {
+                    vfs::userspace::write(
+                        vnode.inode.mount_id.0,
+                        open_id,
+                        write_offset,
+                        &tmp[..chunk_len],
+                    )
+                } else if let Some(handle) = vnode.cext_handle_id() {
+                    crate::cext::fs::write_handle(handle, write_offset, &tmp[..chunk_len])
+                        .map_err(errno_from_cext)
+                } else {
+                    crate::cext::fs::write_all(vnode.path(), write_offset, &tmp[..chunk_len])
+                        .map_err(errno_from_cext)
+                };
             match result {
                 Ok(0) => return written as u64,
                 Ok(wrote_chunk) => {
@@ -1401,12 +1565,8 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
                     }
                     continue;
                 }
-                Err(rc) => {
-                    return if written == 0 {
-                        errno_from_cext(rc)
-                    } else {
-                        written as u64
-                    };
+                Err(errno) => {
+                    return if written == 0 { errno } else { written as u64 };
                 }
             }
         }
@@ -1540,23 +1700,25 @@ pub fn fsync(fd: u64) -> u64 {
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-    match open_file(pid, idx).map(|open_file| {
-        open_file
-            .lock()
-            .vnode
-            .as_ref()
-            .is_some_and(|vnode| !vnode.is_directory())
-    }) {
-        Some(true) => {
-            let rc = crate::cext::fs::sync();
-            if rc == 0 {
-                SUCCESS
-            } else {
-                errno_from_cext(rc)
-            }
+    let Some(vnode) = open_file(pid, idx).and_then(|open_file| open_file.lock().vnode.clone())
+    else {
+        return EBADF;
+    };
+    if vnode.is_directory() {
+        return SUCCESS;
+    }
+    if vnode.userspace_handle_ids().is_some() {
+        match vfs::userspace::sync(vnode.inode.mount_id.0) {
+            Ok(()) => SUCCESS,
+            Err(errno) => errno,
         }
-        Some(false) => SUCCESS,
-        _ => EBADF,
+    } else {
+        let rc = crate::cext::fs::sync();
+        if rc == 0 {
+            SUCCESS
+        } else {
+            errno_from_cext(rc)
+        }
     }
 }
 
@@ -1582,6 +1744,25 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
     let path = resolve_path(pid, &path);
     if let Err(errno) = ensure_fs_path_access(&path, PATH_WRITE) {
         return errno;
+    }
+    if let Some(mount) = userspace_mount(&path) {
+        let node = match vfs::userspace::lookup(mount.mount_id.0, &mount.path) {
+            Ok(node) => node,
+            Err(errno) => return errno,
+        };
+        if node.kind == mochios_filesystem_protocol::NODE_TYPE_DIRECTORY {
+            return EISDIR;
+        }
+        let open_id = match vfs::userspace::open(mount.mount_id.0, node.node_id, O_WRONLY as u32) {
+            Ok(open_id) => open_id,
+            Err(errno) => return errno,
+        };
+        let result = vfs::userspace::truncate(mount.mount_id.0, open_id, len);
+        let close_result = vfs::userspace::close(mount.mount_id.0, open_id);
+        return match result.and(close_result) {
+            Ok(()) => SUCCESS,
+            Err(errno) => errno,
+        };
     }
     match metadata_rootfs_first(&path) {
         Some((mode, _, _, _)) if mode_is_directory(mode) => return EISDIR,
@@ -1696,13 +1877,17 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
             return Err(EISDIR);
         }
         if let Some(vnode) = open.vnode.as_ref() {
-            let rc = if let Some(handle) = vnode.cext_handle_id() {
-                crate::cext::fs::truncate_handle(handle, len)
+            if let Some((_, open_id)) = vnode.userspace_handle_ids() {
+                vfs::userspace::truncate(vnode.inode.mount_id.0, open_id, len)?;
             } else {
-                crate::cext::fs::truncate(vnode.path(), len)
-            };
-            if rc != 0 {
-                return Err(errno_from_cext(rc));
+                let rc = if let Some(handle) = vnode.cext_handle_id() {
+                    crate::cext::fs::truncate_handle(handle, len)
+                } else {
+                    crate::cext::fs::truncate(vnode.path(), len)
+                };
+                if rc != 0 {
+                    return Err(errno_from_cext(rc));
+                }
             }
         } else {
             let mut data = open.data.to_vec();
