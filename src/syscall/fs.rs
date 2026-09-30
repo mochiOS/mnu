@@ -1892,6 +1892,9 @@ pub fn chmod(path_ptr: u64, mode: u64) -> u64 {
     if let Err(errno) = ensure_unix_traversal(&path) {
         return errno;
     }
+    if userspace_mount(&path).is_some() {
+        return ENOSYS;
+    }
     let Some((_, _, owner, _)) = metadata_rootfs_first(&path) else {
         return ENOENT;
     };
@@ -1922,6 +1925,9 @@ pub fn chown(path_ptr: u64, uid: u64, gid: u64) -> u64 {
     };
     if let Err(errno) = ensure_fs_path_access(&path, PATH_WRITE) {
         return errno;
+    }
+    if userspace_mount(&path).is_some() {
+        return ENOSYS;
     }
     let Some((effective_uid, _)) = current_effective_ids() else {
         return EACCES;
