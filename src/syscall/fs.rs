@@ -11,7 +11,7 @@ use crate::capability::Capability;
 use crate::task::fd_table::{
     FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
 };
-use crate::vfs::{Vnode, VnodeKind};
+use crate::vfs::{self, Vnode, VnodeKind};
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -711,12 +711,27 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
         OpenFile {
             data: alloc::boxed::Box::new([]),
             pos: 0,
-            vnode: Some(Arc::new(Vnode::legacy_path(
-                path.to_string(),
-                if is_dir {
-                    VnodeKind::Directory
-                } else {
-                    VnodeKind::Regular
+            vnode: Some(Arc::new(vfs::resolve(path).map_or_else(
+                || {
+                    Vnode::legacy_path(
+                        path.to_string(),
+                        if is_dir {
+                            VnodeKind::Directory
+                        } else {
+                            VnodeKind::Regular
+                        },
+                    )
+                },
+                |mount| {
+                    Vnode::legacy_path_on(
+                        mount.mount_id,
+                        path.to_string(),
+                        if is_dir {
+                            VnodeKind::Directory
+                        } else {
+                            VnodeKind::Regular
+                        },
+                    )
                 },
             ))),
             is_remote: false,
