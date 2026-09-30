@@ -39,6 +39,14 @@ pub fn mount(mount_id: u64) -> Result<NodeInfo, u64> {
 }
 
 pub fn lookup(mount_id: u64, path: &str) -> Result<NodeInfo, u64> {
+    lookup_with_flags(mount_id, path, 0)
+}
+
+pub fn lookup_following(mount_id: u64, path: &str) -> Result<NodeInfo, u64> {
+    lookup_with_flags(mount_id, path, protocol::LOOKUP_FOLLOW_SYMLINKS)
+}
+
+fn lookup_with_flags(mount_id: u64, path: &str, flags: u32) -> Result<NodeInfo, u64> {
     if path.is_empty() || path.len() > protocol::MAX_PATH_LEN {
         return Err(EINVAL);
     }
@@ -47,6 +55,7 @@ pub fn lookup(mount_id: u64, path: &str) -> Result<NodeInfo, u64> {
             opcode: protocol::OP_LOOKUP,
             mount_id,
             length: path.len() as u32,
+            flags,
             ..protocol::Header::default()
         },
         path.as_bytes(),

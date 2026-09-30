@@ -1147,11 +1147,20 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
         Err(e) => return e,
     };
     let resolved = resolve_path(owner_pid, &path);
+    stat_resolved(&resolved, stat_ptr, true)
+}
+
+fn stat_resolved(resolved: &str, stat_ptr: u64, follow_final_symlink: bool) -> u64 {
     if let Err(errno) = ensure_fs_path_access(&resolved, PATH_READ) {
         return errno;
     }
     if let Some(mount) = userspace_mount(&resolved) {
-        return match vfs::userspace::lookup(mount.mount_id.0, &mount.path) {
+        let lookup = if follow_final_symlink {
+            vfs::userspace::lookup_following
+        } else {
+            vfs::userspace::lookup
+        };
+        return match lookup(mount.mount_id.0, &mount.path) {
             Ok(node) => {
                 write_stat_buf(stat_ptr, node.mode, node.size, node.uid, node.gid);
                 SUCCESS
@@ -2494,64 +2503,36 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
         return EINVAL;
     }
 
-    // AT_EMPTY_PATH: path が空の場合は dirfd 自体を fstat する
-    if (flags & AT_EMPTY_PATH) != 0 {
-        if dirfd == AT_FDCWD {
-            return stat(path_ptr, stat_ptr);
-        }
-        return fstat(dirfd as u64, stat_ptr);
+    if path_ptr == 0 || stat_ptr == 0 {
+        return EFAULT;
+    }
+    const STAT_SIZE: u64 = 144;
+    if !crate::syscall::validate_user_ptr(stat_ptr, STAT_SIZE) {
+        return EFAULT;
     }
 
-    if dirfd == AT_FDCWD {
-        return stat(path_ptr, stat_ptr);
-    }
-
-    // dirfd 相対パスを解決して stat
     let pid = match current_process_id_raw() {
         Some(p) => p,
         None => return EBADF,
     };
-    let idx = dirfd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
-    let Some(dir_path) = open_file(pid, idx).and_then(|open_file| {
-        open_file
-            .lock()
-            .vnode
-            .as_ref()
-            .filter(|vnode| vnode.is_directory())
-            .map(|vnode| vnode.path().to_string())
-    }) else {
-        return EBADF;
-    };
-    let path = match read_cstring(path_ptr) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let full = if path.starts_with('/') {
-        normalize_path(&path)
-    } else {
-        normalize_path(&alloc::format!(
-            "{}/{}",
-            dir_path.trim_end_matches('/'),
-            path
-        ))
-    };
-    if let Err(errno) = ensure_fs_path_access(&full, PATH_READ) {
-        return errno;
-    }
-    match metadata_rootfs_first(&full) {
-        Some((mode, size, uid, gid)) => {
-            const STAT_SIZE: u64 = 144;
-            if !crate::syscall::validate_user_ptr(stat_ptr, STAT_SIZE) {
-                return EFAULT;
+    if (flags & AT_EMPTY_PATH) != 0 {
+        let path = match read_cstring(path_ptr) {
+            Ok(path) => path,
+            Err(errno) => return errno,
+        };
+        if path.is_empty() {
+            if dirfd != AT_FDCWD {
+                return fstat(dirfd as u64, stat_ptr);
             }
-            write_stat_buf(stat_ptr, mode_for_stat(mode), size, uid, gid);
-            SUCCESS
+            let cwd = resolve_path(pid, ".");
+            return stat_resolved(&cwd, stat_ptr, flags & AT_SYMLINK_NOFOLLOW == 0);
         }
-        None => ENOENT,
     }
+    let resolved = match resolve_path_at(pid, dirfd, path_ptr) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    stat_resolved(&resolved, stat_ptr, flags & AT_SYMLINK_NOFOLLOW == 0)
 }
 
 /// Faccessat システムコール
