@@ -96,6 +96,7 @@ pub struct McxFsOps {
     ) -> i32,
     pub write_handle:
         extern "C" fn(handle: u64, offset: u64, buf: McxBuffer, out_written: *mut usize) -> i32,
+    pub truncate_handle: extern "C" fn(handle: u64, len: u64) -> i32,
 }
 
 /// cext の種類

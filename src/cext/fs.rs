@@ -228,6 +228,14 @@ pub fn write_handle(handle: u64, offset: u64, data: &[u8]) -> Result<usize, i32>
     }
 }
 
+pub fn truncate_handle(handle: u64, len: u64) -> i32 {
+    let ops = ops_ptr();
+    if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
+        return -38;
+    }
+    unsafe { ((*ops).truncate_handle)(handle, len) }
+}
+
 pub fn write_all(path: &str, offset: u64, data: &[u8]) -> Result<usize, i32> {
     let ops = ops_ptr();
     if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {

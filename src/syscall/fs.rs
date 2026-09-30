@@ -1695,8 +1695,12 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
         {
             return Err(EISDIR);
         }
-        if let Some(path) = open.vnode.as_ref().map(|vnode| vnode.path()) {
-            let rc = crate::cext::fs::truncate(path, len);
+        if let Some(vnode) = open.vnode.as_ref() {
+            let rc = if let Some(handle) = vnode.cext_handle_id() {
+                crate::cext::fs::truncate_handle(handle, len)
+            } else {
+                crate::cext::fs::truncate(vnode.path(), len)
+            };
             if rc != 0 {
                 return Err(errno_from_cext(rc));
             }
