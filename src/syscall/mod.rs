@@ -730,6 +730,11 @@ pub fn dispatch(
             process::mmap(0, arg0, arg1, arg2, arg3, 0)
         }
         x if x == SyscallNumber::MemoryFree as u64 => process::munmap(arg0, arg1),
+        x if x == SyscallNumber::Mmap as u64 => {
+            process::mmap(arg0, arg1, arg2, arg3, arg4, arg5)
+        }
+        x if x == SyscallNumber::Mprotect as u64 => pgroup::mprotect(arg0, arg1, arg2),
+        x if x == SyscallNumber::Munmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryMap as u64 => {
             process::mmap(arg0, arg1, arg2, arg3, arg4, arg5)
         }
@@ -767,17 +772,35 @@ pub fn dispatch(
         x if x == SyscallNumber::Fcntl as u64 => fs::fcntl(arg0, arg1, arg2),
         x if x == SyscallNumber::Read as u64 => fs::read(arg0, arg1, arg2),
         x if x == SyscallNumber::Open as u64 => fs::open(arg0, arg1),
+        x if x == SyscallNumber::Openat as u64 => fs::openat(arg0 as i64, arg1, arg2, arg3),
+        x if x == SyscallNumber::Stat as u64 => fs::stat(arg0, arg1),
+        x if x == SyscallNumber::Fstat as u64 => fs::fstat(arg0, arg1),
+        x if x == SyscallNumber::Lstat as u64 => fs::lstat(arg0, arg1),
+        x if x == SyscallNumber::Newfstatat as u64 => {
+            fs::newfstatat(arg0 as i64, arg1, arg2, arg3)
+        }
+        x if x == SyscallNumber::Access as u64 => fs::faccessat(-100, arg0, arg1, 0),
+        x if x == SyscallNumber::Faccessat as u64 => {
+            fs::faccessat(arg0 as i64, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::Lseek as u64 => fs::seek(arg0, arg1 as i64, arg2),
         x if x == SyscallNumber::Fsync as u64 => fs::fsync(arg0),
         x if x == SyscallNumber::Fdatasync as u64 => fs::fdatasync(arg0),
         x if x == SyscallNumber::Truncate as u64 => fs::truncate(arg0, arg1),
         x if x == SyscallNumber::Chmod as u64 => fs::chmod(arg0, arg1),
         x if x == SyscallNumber::Chown as u64 => fs::chown(arg0, arg1, arg2),
+        x if x == SyscallNumber::Unlink as u64 => fs::unlink(arg0),
+        x if x == SyscallNumber::Unlinkat as u64 => fs::unlinkat(arg0 as i64, arg1, arg2),
+        x if x == SyscallNumber::Renameat as u64 => {
+            fs::renameat(arg0 as i64, arg1, arg2 as i64, arg3)
+        }
         x if x == SyscallNumber::Symlink as u64 => fs::symlink(arg0, arg1),
         x if x == SyscallNumber::Readlink as u64 => fs::readlink(arg0, arg1, arg2),
         x if x == SyscallNumber::Readlinkat as u64 => {
             fs::readlinkat(arg0 as i64, arg1, arg2, arg3)
         }
+        x if x == SyscallNumber::Statfs as u64 => fs::statfs(arg0, arg1),
+        x if x == SyscallNumber::Getdents64 as u64 => fs::getdents64(arg0, arg1, arg2),
         x if x == SyscallNumber::Ftruncate as u64 => fs::ftruncate(arg0, arg1),
         x if x == SyscallNumber::Rmdir as u64 => fs::rmdir(arg0),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),

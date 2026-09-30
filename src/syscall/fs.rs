@@ -1150,6 +1150,12 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
     stat_resolved(&resolved, stat_ptr, true)
 }
 
+pub fn lstat(path_ptr: u64, stat_ptr: u64) -> u64 {
+    const AT_FDCWD: i64 = -100;
+    const AT_SYMLINK_NOFOLLOW: u64 = 2;
+    newfstatat(AT_FDCWD, path_ptr, stat_ptr, AT_SYMLINK_NOFOLLOW)
+}
+
 fn stat_resolved(resolved: &str, stat_ptr: u64, follow_final_symlink: bool) -> u64 {
     if let Err(errno) = ensure_fs_path_access(&resolved, PATH_READ) {
         return errno;
