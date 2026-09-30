@@ -11,6 +11,7 @@ pub mod gdt;
 pub mod paging;
 pub mod tss;
 pub(crate) mod user;
+pub mod vm_object;
 
 /// メモリの初期化
 ///

@@ -138,6 +138,17 @@ impl Vnode {
             VnodeBacking::LegacyPath(_) | VnodeBacking::CextHandle { .. } => None,
         }
     }
+
+    pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
+        if let Some((_, open_id)) = self.userspace_handle_ids() {
+            return userspace::read(self.inode.mount_id.0, open_id, offset, output);
+        }
+        if let Some(handle) = self.cext_handle_id() {
+            return crate::cext::fs::read_handle(handle, offset, output)
+                .map_err(|_| crate::syscall::EIO);
+        }
+        crate::cext::fs::read_range(self.path(), offset, output).ok_or(crate::syscall::EIO)
+    }
 }
 
 impl Drop for Vnode {
