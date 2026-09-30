@@ -155,6 +155,7 @@ pub struct Mount {
     pub id: MountId,
     pub filesystem_id: FilesystemId,
     pub target: String,
+    pub source: String,
 }
 
 pub struct ResolvedMount {
@@ -175,12 +176,18 @@ pub fn init() {
             id: MountId(1),
             filesystem_id: FilesystemId(1),
             target: "/".to_string(),
+            source: "/".to_string(),
         });
     }
 }
 
 pub fn mount(target: &str, filesystem_id: FilesystemId) -> Result<MountId, ()> {
+    mount_from(target, filesystem_id, "/")
+}
+
+pub fn mount_from(target: &str, filesystem_id: FilesystemId, source: &str) -> Result<MountId, ()> {
     let target = normalize_mount_path(target);
+    let source = normalize_mount_path(source);
     let mut mounts = MOUNTS.lock();
     if mounts.iter().any(|mount| mount.target == target) {
         return Err(());
@@ -190,6 +197,7 @@ pub fn mount(target: &str, filesystem_id: FilesystemId) -> Result<MountId, ()> {
         id,
         filesystem_id,
         target,
+        source,
     });
     Ok(id)
 }
@@ -213,18 +221,20 @@ pub fn resolve(path: &str) -> Option<ResolvedMount> {
         .iter()
         .filter(|mount| mount_matches(&mount.target, path))
         .max_by_key(|mount| mount.target.len())?;
-    let relative = if mount.target == "/" {
-        path.to_string()
-    } else {
-        path.strip_prefix(&mount.target).unwrap_or(path).to_string()
-    };
+    let relative = path.strip_prefix(&mount.target).unwrap_or(path);
+    let relative = relative.trim_start_matches('/');
+    let mut source_path = mount.source.trim_end_matches('/').to_string();
+    if !relative.is_empty() {
+        source_path.push('/');
+        source_path.push_str(relative);
+    }
     Some(ResolvedMount {
         mount_id: mount.id,
         filesystem_id: mount.filesystem_id,
-        path: if relative.is_empty() {
+        path: if source_path.is_empty() {
             "/".to_string()
         } else {
-            relative
+            source_path
         },
     })
 }
