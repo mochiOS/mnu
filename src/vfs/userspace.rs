@@ -133,6 +133,25 @@ pub fn stat(mount_id: u64, node_id: u64, open_id: u64) -> Result<NodeInfo, u64> 
     Ok(node_info(response.header))
 }
 
+pub fn create(mount_id: u64, path: &str, mode: u32, kind: u32) -> Result<NodeInfo, u64> {
+    if path.is_empty() || path.len() > protocol::MAX_PATH_LEN {
+        return Err(EINVAL);
+    }
+    let response = call(
+        protocol::Header {
+            opcode: protocol::OP_CREATE,
+            mount_id,
+            length: path.len() as u32,
+            flags: kind,
+            mode,
+            ..protocol::Header::default()
+        },
+        path.as_bytes(),
+        protocol::HEADER_LEN,
+    )?;
+    Ok(node_info(response.header))
+}
+
 pub fn truncate(mount_id: u64, open_id: u64, size: u64) -> Result<(), u64> {
     call(
         protocol::Header {
