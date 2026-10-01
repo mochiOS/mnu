@@ -88,6 +88,23 @@ impl FrameReferenceTable {
         }
     }
 
+    pub(super) fn has_multiple_owners(&self, phys: u64) -> bool {
+        if self.slots.is_empty() {
+            return false;
+        }
+        let mut index = Self::hash(phys) & (self.slots.len() - 1);
+        loop {
+            let slot = &self.slots[index];
+            match slot.refs {
+                EMPTY => return false,
+                DELETED => {}
+                _ if slot.phys == phys => return true,
+                _ => {}
+            }
+            index = (index + 1) & (self.slots.len() - 1);
+        }
+    }
+
     fn ensure_insert_capacity(&mut self) -> Result<()> {
         if self.slots.is_empty() {
             return self.rehash(INITIAL_CAPACITY);

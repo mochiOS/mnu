@@ -565,10 +565,14 @@ fn retain_shared_user_frame(phys: u64) -> Result<()> {
     SHARED_USER_FRAMES.lock().retain(phys)
 }
 
-fn release_user_frame(phys: u64) {
+pub(crate) fn release_user_frame(phys: u64) {
     if SHARED_USER_FRAMES.lock().release(phys) {
         deallocate_4k_frame_by_phys(phys);
     }
+}
+
+pub(crate) fn user_frame_has_multiple_owners(phys: u64) -> bool {
+    SHARED_USER_FRAMES.lock().has_multiple_owners(phys)
 }
 
 fn flush_page_if_active(table_phys: u64, page_addr: u64) {
@@ -2357,6 +2361,58 @@ pub fn map_physical_range_to_user(
     }
 
     Ok(())
+}
+
+/// Maps one cache-owned RAM frame into a user page table and records the
+/// mapping as an additional owner of that frame.
+pub fn map_shared_frame_to_user(
+    table_phys: u64,
+    virt_addr: u64,
+    frame_phys: u64,
+    writable: bool,
+    executable: bool,
+) -> Result<()> {
+    use crate::result::{Kernel, Memory};
+    use x86_64::structures::paging::PageTableFlags as Flags;
+
+    if virt_addr & 0xfff != 0 || frame_phys & 0xfff != 0 || writable && executable {
+        return Err(Kernel::Memory(Memory::InvalidAddress));
+    }
+    let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+    let _smap_guard = crate::cpu::SmapSmepGuard::new();
+    let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
+    let mut page_table = unsafe { OffsetPageTable::new(l4, VirtAddr::new(phys_off)) };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_addr));
+    let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(frame_phys));
+    let mut flags = Flags::PRESENT | Flags::USER_ACCESSIBLE;
+    if writable {
+        flags |= Flags::WRITABLE;
+    }
+    if !executable {
+        flags |= Flags::NO_EXECUTE;
+    }
+
+    retain_shared_user_frame(frame_phys)?;
+    let map_result = {
+        let mut allocator_guard = frame::lock_allocator();
+        let Some(allocator) = allocator_guard.as_mut() else {
+            drop(allocator_guard);
+            release_user_frame(frame_phys);
+            return Err(Kernel::Memory(Memory::OutOfMemory));
+        };
+        unsafe { page_table.map_to(page, frame, flags, allocator) }
+    };
+    match map_result {
+        Ok(flush) => {
+            flush.ignore();
+            flush_page_if_active(table_phys, virt_addr);
+            Ok(())
+        }
+        Err(_) => {
+            release_user_frame(frame_phys);
+            Err(Kernel::Memory(Memory::InvalidAddress))
+        }
+    }
 }
 
 /// CR3を指定した物理アドレスのページテーブルに切り替える
