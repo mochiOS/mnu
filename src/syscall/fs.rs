@@ -1540,30 +1540,10 @@ fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
                 (open.vnode.clone(), open.pos)
             };
             if let Some(vnode) = vnode {
-                let read = if let Some((_, open_id)) = vnode.userspace_handle_ids() {
-                    match vfs::userspace::read(
-                        vnode.inode.mount_id.0,
-                        open_id,
-                        pos as u64,
-                        &mut tmp[..chunk_len],
-                    ) {
-                        Ok(read) => read,
-                        Err(errno) => return errno,
-                    }
-                } else if let Some(handle) = vnode.cext_handle_id() {
-                    match crate::cext::fs::read_handle(handle, pos as u64, &mut tmp[..chunk_len]) {
-                        Ok(read) => read,
-                        Err(_) => return EIO,
-                    }
-                } else {
-                    match read_file_range_rootfs_first(
-                        vnode.path(),
-                        pos as u64,
-                        &mut tmp[..chunk_len],
-                    ) {
-                        Some(read) => read,
-                        None => return EIO,
-                    }
+                let object = crate::mem::vm_object::VmObject::file(vnode);
+                let read = match object.read_at(pos as u64, &mut tmp[..chunk_len]) {
+                    Ok(read) => read,
+                    Err(errno) => return errno,
                 };
                 let mut open = open_file.lock();
                 if open.pos != pos {
@@ -1731,28 +1711,11 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
                 Some(value) => value as u64,
                 None => return if written == 0 { EFBIG } else { written as u64 },
             };
-            let result: Result<usize, u64> =
-                if let Some((_, open_id)) = vnode.userspace_handle_ids() {
-                    vfs::userspace::write(
-                        vnode.inode.mount_id.0,
-                        open_id,
-                        write_offset,
-                        &tmp[..chunk_len],
-                    )
-                } else if let Some(handle) = vnode.cext_handle_id() {
-                    crate::cext::fs::write_handle(handle, write_offset, &tmp[..chunk_len])
-                        .map_err(errno_from_cext)
-                } else {
-                    crate::cext::fs::write_all(vnode.path(), write_offset, &tmp[..chunk_len])
-                        .map_err(errno_from_cext)
-                };
+            let object = crate::mem::vm_object::VmObject::file(vnode.clone());
+            let result = object.write_at(write_offset, &tmp[..chunk_len]);
             match result {
                 Ok(0) => return written as u64,
                 Ok(wrote_chunk) => {
-                    crate::mem::vm_object::invalidate_inode(
-                        vnode.inode.mount_id,
-                        vnode.inode.inode_id,
-                    );
                     let end = match start_pos.checked_add(written + wrote_chunk) {
                         Some(value) => value,
                         None => return if written == 0 { EFBIG } else { written as u64 },

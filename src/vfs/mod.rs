@@ -144,9 +144,10 @@ impl Vnode {
         }
         if let Some(handle) = self.cext_handle_id() {
             return crate::cext::fs::read_handle(handle, offset, output)
-                .map_err(|_| crate::syscall::EIO);
+                .map_err(cext_errno);
         }
-        crate::cext::fs::read_range(self.path(), offset, output).ok_or(crate::syscall::EIO)
+        crate::syscall::fs::read_file_range_rootfs_first(self.path(), offset, output)
+            .ok_or(crate::syscall::EIO)
     }
 
     pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
@@ -155,10 +156,18 @@ impl Vnode {
         }
         if let Some(handle) = self.cext_handle_id() {
             return crate::cext::fs::write_handle(handle, offset, input)
-                .map_err(|_| crate::syscall::EIO);
+                .map_err(cext_errno);
         }
         crate::cext::fs::write_all(self.path(), offset, input)
-            .map_err(|_| crate::syscall::EIO)
+            .map_err(cext_errno)
+    }
+}
+
+fn cext_errno(error: i32) -> u64 {
+    if error < 0 {
+        u64::from(error.unsigned_abs())
+    } else {
+        crate::syscall::EIO
     }
 }
 

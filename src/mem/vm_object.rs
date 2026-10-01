@@ -20,6 +20,7 @@ struct PageKey {
 struct CachedPage {
     key: PageKey,
     bytes: Arc<[u8; PAGE_BYTES]>,
+    valid_len: usize,
     last_used: u64,
 }
 
@@ -41,26 +42,33 @@ impl VmObject {
     }
 
     pub fn page(&self, page_index: u64) -> Result<Arc<[u8; PAGE_BYTES]>, u64> {
+        self.page_with_len(page_index).map(|(bytes, _)| bytes)
+    }
+
+    fn page_with_len(
+        &self,
+        page_index: u64,
+    ) -> Result<(Arc<[u8; PAGE_BYTES]>, usize), u64> {
         let key = PageKey {
             mount_id: self.vnode.inode.mount_id,
             inode_id: self.vnode.inode.inode_id,
             page_index,
         };
-        if let Some(bytes) = cached_page(key) {
-            return Ok(bytes);
+        if let Some(page) = cached_page(key) {
+            return Ok(page);
         }
 
         let offset = page_index
             .checked_mul(PAGE_BYTES as u64)
             .ok_or(crate::syscall::EINVAL)?;
         let mut page = [0u8; PAGE_BYTES];
-        let _ = self.vnode.read_at(offset, &mut page)?;
+        let valid_len = self.vnode.read_at(offset, &mut page)?;
         let bytes = Arc::new(page);
 
         let mut cache = PAGE_CACHE.lock();
         if let Some(existing) = cache.iter_mut().find(|entry| entry.key == key) {
             existing.last_used = next_cache_access();
-            return Ok(existing.bytes.clone());
+            return Ok((existing.bytes.clone(), existing.valid_len));
         }
         if cache.len() == MAX_CACHED_PAGES {
             let lru = cache
@@ -74,18 +82,50 @@ impl VmObject {
         cache.push(CachedPage {
             key,
             bytes: bytes.clone(),
+            valid_len,
             last_used: next_cache_access(),
         });
-        Ok(bytes)
+        Ok((bytes, valid_len))
     }
 
     pub fn invalidate(&self) {
         invalidate_inode(self.vnode.inode.mount_id, self.vnode.inode.inode_id);
     }
 
+    pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
+        let mut copied = 0usize;
+        while copied < output.len() {
+            let current = offset
+                .checked_add(copied as u64)
+                .ok_or(crate::syscall::EINVAL)?;
+            let page_index = current / PAGE_BYTES as u64;
+            let page_offset = (current % PAGE_BYTES as u64) as usize;
+            let (page, valid_len) = self.page_with_len(page_index)?;
+            if page_offset >= valid_len {
+                break;
+            }
+            let count = core::cmp::min(
+                output.len() - copied,
+                core::cmp::min(PAGE_BYTES - page_offset, valid_len - page_offset),
+            );
+            output[copied..copied + count]
+                .copy_from_slice(&page[page_offset..page_offset + count]);
+            copied += count;
+            if valid_len < PAGE_BYTES {
+                break;
+            }
+        }
+        Ok(copied)
+    }
+
     pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
         let written = self.vnode.write_at(offset, input)?;
-        self.invalidate();
+        update_cached_range(
+            self.vnode.inode.mount_id,
+            self.vnode.inode.inode_id,
+            offset,
+            &input[..written],
+        );
         Ok(written)
     }
 }
@@ -100,11 +140,11 @@ impl core::fmt::Debug for VmObject {
     }
 }
 
-fn cached_page(key: PageKey) -> Option<Arc<[u8; PAGE_BYTES]>> {
+fn cached_page(key: PageKey) -> Option<(Arc<[u8; PAGE_BYTES]>, usize)> {
     let mut cache = PAGE_CACHE.lock();
     let entry = cache.iter_mut().find(|entry| entry.key == key)?;
     entry.last_used = next_cache_access();
-    Some(entry.bytes.clone())
+    Some((entry.bytes.clone(), entry.valid_len))
 }
 
 fn next_cache_access() -> u64 {
@@ -115,6 +155,34 @@ pub fn invalidate_inode(mount_id: MountId, inode_id: InodeId) {
     PAGE_CACHE
         .lock()
         .retain(|entry| entry.key.mount_id != mount_id || entry.key.inode_id != inode_id);
+}
+
+fn update_cached_range(mount_id: MountId, inode_id: InodeId, offset: u64, input: &[u8]) {
+    if input.is_empty() {
+        return;
+    }
+    let end = offset.saturating_add(input.len() as u64);
+    let mut cache = PAGE_CACHE.lock();
+    for entry in cache.iter_mut().filter(|entry| {
+        entry.key.mount_id == mount_id && entry.key.inode_id == inode_id
+    }) {
+        let page_start = entry.key.page_index.saturating_mul(PAGE_BYTES as u64);
+        let page_end = page_start.saturating_add(PAGE_BYTES as u64);
+        let copy_start = core::cmp::max(offset, page_start);
+        let copy_end = core::cmp::min(end, page_end);
+        if copy_start >= copy_end {
+            continue;
+        }
+        let input_start = (copy_start - offset) as usize;
+        let page_offset = (copy_start - page_start) as usize;
+        let count = (copy_end - copy_start) as usize;
+        let mut bytes = *entry.bytes;
+        bytes[page_offset..page_offset + count]
+            .copy_from_slice(&input[input_start..input_start + count]);
+        entry.bytes = Arc::new(bytes);
+        entry.valid_len = core::cmp::max(entry.valid_len, page_offset + count);
+        entry.last_used = next_cache_access();
+    }
 }
 
 pub fn invalidate_range(mount_id: MountId, inode_id: InodeId, offset: u64, length: u64) {
