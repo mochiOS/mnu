@@ -2,6 +2,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interrupt::spinlock::SpinLock;
 use crate::vfs::{InodeId, MountId, Vnode};
@@ -19,9 +20,11 @@ struct PageKey {
 struct CachedPage {
     key: PageKey,
     bytes: Arc<[u8; PAGE_BYTES]>,
+    last_used: u64,
 }
 
 static PAGE_CACHE: SpinLock<Vec<CachedPage>> = SpinLock::new(Vec::new());
+static PAGE_CACHE_CLOCK: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct VmObject {
@@ -55,15 +58,23 @@ impl VmObject {
         let bytes = Arc::new(page);
 
         let mut cache = PAGE_CACHE.lock();
-        if let Some(existing) = cache.iter().find(|entry| entry.key == key) {
+        if let Some(existing) = cache.iter_mut().find(|entry| entry.key == key) {
+            existing.last_used = next_cache_access();
             return Ok(existing.bytes.clone());
         }
         if cache.len() == MAX_CACHED_PAGES {
-            cache.remove(0);
+            let lru = cache
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, _)| index)
+                .unwrap_or(0);
+            cache.swap_remove(lru);
         }
         cache.push(CachedPage {
             key,
             bytes: bytes.clone(),
+            last_used: next_cache_access(),
         });
         Ok(bytes)
     }
@@ -90,15 +101,41 @@ impl core::fmt::Debug for VmObject {
 }
 
 fn cached_page(key: PageKey) -> Option<Arc<[u8; PAGE_BYTES]>> {
-    PAGE_CACHE
-        .lock()
-        .iter()
-        .find(|entry| entry.key == key)
-        .map(|entry| entry.bytes.clone())
+    let mut cache = PAGE_CACHE.lock();
+    let entry = cache.iter_mut().find(|entry| entry.key == key)?;
+    entry.last_used = next_cache_access();
+    Some(entry.bytes.clone())
+}
+
+fn next_cache_access() -> u64 {
+    PAGE_CACHE_CLOCK.fetch_add(1, Ordering::Relaxed)
 }
 
 pub fn invalidate_inode(mount_id: MountId, inode_id: InodeId) {
     PAGE_CACHE
         .lock()
         .retain(|entry| entry.key.mount_id != mount_id || entry.key.inode_id != inode_id);
+}
+
+pub fn invalidate_range(mount_id: MountId, inode_id: InodeId, offset: u64, length: u64) {
+    if length == 0 {
+        return;
+    }
+    let first_page = offset / PAGE_BYTES as u64;
+    let last_page = offset.saturating_add(length - 1) / PAGE_BYTES as u64;
+    PAGE_CACHE.lock().retain(|entry| {
+        entry.key.mount_id != mount_id
+            || entry.key.inode_id != inode_id
+            || entry.key.page_index < first_page
+            || entry.key.page_index > last_page
+    });
+}
+
+pub fn truncate_inode(mount_id: MountId, inode_id: InodeId, length: u64) {
+    let first_invalid_page = length / PAGE_BYTES as u64;
+    PAGE_CACHE.lock().retain(|entry| {
+        entry.key.mount_id != mount_id
+            || entry.key.inode_id != inode_id
+            || entry.key.page_index < first_invalid_page
+    });
 }
