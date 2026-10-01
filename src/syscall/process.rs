@@ -863,6 +863,17 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool, is_execute: bool)
                 crate::debug!("[MMAP_FAULT] page already mapped {:#x}", page_addr);
                 return Err(EINVAL);
             }
+            if region.is_shared() {
+                if let Some(object) = region.backing().file_object() {
+                    let page_offset = page_addr.checked_sub(region.start()).ok_or(EINVAL)?;
+                    let file_offset = region
+                        .backing()
+                        .file_offset()
+                        .checked_add(page_offset)
+                        .ok_or(EINVAL)?;
+                    object.mark_page_dirty(file_offset / 4096)?;
+                }
+            }
             if crate::mem::paging::protect_range_in_table(
                 pt_phys, page_addr, 4096, true, true, false,
             )
@@ -904,23 +915,26 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool, is_execute: bool)
             }
             None => None,
         };
+        let shared_file = region.is_shared() && pager.is_some();
         Ok((
             pt_phys,
             region.start(),
             region.allows_execute_at(fault_addr),
+            shared_file,
             pager,
         ))
     });
-    let Some(Ok((pt_phys, region_start, executable, pager))) = plan else {
+    let Some(Ok((pt_phys, region_start, executable, shared_file, pager))) = plan else {
         return false;
     };
 
-    let page = match pager {
-        Some((object, page_index)) => match object.page(page_index) {
-            Ok(page) => page,
+    let page = match pager.as_ref() {
+        Some((object, page_index)) if !shared_file => match object.page(*page_index) {
+            Ok(page) => Some(page),
             Err(_) => return false,
         },
-        None => Arc::new([0u8; crate::mem::vm_object::PAGE_BYTES]),
+        Some(_) => None,
+        None => Some(Arc::new([0u8; crate::mem::vm_object::PAGE_BYTES])),
     };
 
     let result = crate::task::with_process_mut(pid, |process| {
@@ -935,22 +949,40 @@ pub fn handle_user_mmap_fault(fault_addr: u64, is_write: bool, is_execute: bool)
         if crate::mem::paging::is_user_range_mapped_in_table(pt_phys, page_addr, 1) {
             return Ok(());
         }
-        if crate::mem::paging::map_and_copy_segment_to(
-            pt_phys,
-            page_addr,
-            crate::mem::vm_object::PAGE_BYTES as u64,
-            4096,
-            page.as_slice(),
-            is_write && region.allows_write_at(fault_addr),
-            executable,
-        )
-        .is_err()
-        {
-            crate::debug!(
-                "[MMAP_FAULT] map_and_copy_segment_to failed for {:#x}",
-                page_addr
-            );
-            return Err(ENOMEM);
+        if shared_file {
+            let Some((object, page_index)) = pager.as_ref() else {
+                return Err(EINVAL);
+            };
+            object.map_shared_page(pt_phys, page_addr, *page_index, false, executable)?;
+            if is_write {
+                object.mark_page_dirty(*page_index)?;
+                if crate::mem::paging::protect_user_page_if_mapped(
+                    pt_phys, page_addr, true, true, executable,
+                )
+                .is_err()
+                {
+                    return Err(ENOMEM);
+                }
+            }
+        } else {
+            let page = page.as_ref().ok_or(EINVAL)?;
+            if crate::mem::paging::map_and_copy_segment_to(
+                pt_phys,
+                page_addr,
+                crate::mem::vm_object::PAGE_BYTES as u64,
+                4096,
+                page.as_slice(),
+                is_write && region.allows_write_at(fault_addr),
+                executable,
+            )
+            .is_err()
+            {
+                crate::debug!(
+                    "[MMAP_FAULT] map_and_copy_segment_to failed for {:#x}",
+                    page_addr
+                );
+                return Err(ENOMEM);
+            }
         }
         if is_write {
             region.mark_dirty_page((page_addr - region.start()) / 4096);
@@ -1234,6 +1266,7 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
 
     if let Some(mut region) = backing_region {
         let mut writeback_error = None;
+        let mut flush_plan = None;
         if region.is_shared() {
             let region_len = region.len();
             let object = region.backing().file_object().cloned();
@@ -1261,14 +1294,10 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
                     writeback_error = Some(EFAULT);
                 }
             }
-            if writeback_error.is_none() {
-                if let Some(object) = object.as_ref() {
-                    if file_offset.checked_add(region_len).is_none() {
-                        writeback_error = Some(EINVAL);
-                    } else if let Err(errno) = object.flush_range(file_offset, region_len) {
-                        writeback_error = Some(errno);
-                    }
-                }
+            if file_offset.checked_add(region_len).is_none() {
+                writeback_error = Some(EINVAL);
+            } else if let Some(object) = object {
+                flush_plan = Some((object, file_offset, region_len));
             }
         }
 
@@ -1276,6 +1305,13 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
             crate::mem::paging::unmap_range_in_table(pt_phys, unmap_start, unmap_len);
         if let Some(errno) = writeback_error {
             return errno;
+        }
+        if unmap_result.is_ok() {
+            if let Some((object, file_offset, region_len)) = flush_plan {
+                if let Err(errno) = object.flush_range(file_offset, region_len) {
+                    return errno;
+                }
+            }
         }
         return match unmap_result {
             Ok(()) => SUCCESS,

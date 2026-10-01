@@ -321,7 +321,12 @@ impl VmObject {
                 .iter_mut()
                 .find(|entry| entry.key == key && entry.version == version)
             {
-                entry.dirty_range = None;
+                if !entry
+                    .frame_phys
+                    .is_some_and(crate::mem::paging::user_frame_has_multiple_owners)
+                {
+                    entry.dirty_range = None;
+                }
                 entry.last_used = next_cache_access();
             }
         }

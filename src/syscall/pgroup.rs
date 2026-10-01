@@ -202,6 +202,7 @@ fn memory_range_is_mapped(
 
 #[inline(never)]
 fn protect_memory_pages(
+    process: &crate::task::Process,
     table_phys: u64,
     start: u64,
     end: u64,
@@ -211,8 +212,19 @@ fn protect_memory_pages(
 ) -> Result<(), u64> {
     let mut page = start;
     while page < end {
+        let page_writable = writable
+            && !process.find_mmap_region(page).is_some_and(|region| {
+                let page_index = (page - region.start()) / 4096;
+                region.is_shared()
+                    && region.backing().file_object().is_some()
+                    && !region.dirty_pages().contains(&page_index)
+            });
         crate::mem::paging::protect_user_page_if_mapped(
-            table_phys, page, present, writable, executable,
+            table_phys,
+            page,
+            present,
+            page_writable,
+            executable,
         )
         .map_err(memory_protection_error)?;
         page += 4096;
@@ -294,7 +306,15 @@ pub fn mprotect(addr: u64, len: u64, prot: u64) -> u64 {
         if !memory_range_is_mapped(process, table_phys, start, end) {
             return Err(EFAULT);
         }
-        protect_memory_pages(table_phys, start, end, present, writable, executable)?;
+        protect_memory_pages(
+            process,
+            table_phys,
+            start,
+            end,
+            present,
+            writable,
+            executable,
+        )?;
         if !record_mmap_protection(process, start, end, prot) {
             return Err(EFAULT);
         }
