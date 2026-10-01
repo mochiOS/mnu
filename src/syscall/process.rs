@@ -134,26 +134,28 @@ const MEMORY_SYNC_CHUNK_BYTES: usize = 4096;
 fn writeback_shared_mmap_region(
     region: &mut crate::task::MmapRegion,
     sync_start: u64,
-    data: &[u8],
+    sync_len: u64,
 ) -> u64 {
-    if data.is_empty() {
+    if sync_len == 0 {
         return SUCCESS;
     }
-    if !region.is_shared() || !region.allows_write_range(sync_start, data.len() as u64) {
+    if !region.is_shared() || !region.allows_write_range(sync_start, sync_len) {
         return EINVAL;
     }
 
     let Some(region_end) = region.end() else {
         return EINVAL;
     };
-    let Some(sync_end) = sync_start.checked_add(data.len() as u64) else {
+    let Some(sync_end) = sync_start.checked_add(sync_len) else {
         return EINVAL;
     };
     if sync_start < region.start() || sync_end > region_end {
         return EINVAL;
     }
 
-    let _ = region.take_dirty_pages();
+    let first_page = (sync_start - region.start()) / 4096;
+    let page_count = sync_len.div_ceil(4096);
+    region.clear_dirty_pages(first_page, page_count);
     SUCCESS
 }
 
@@ -1231,6 +1233,7 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
     .flatten();
 
     if let Some(mut region) = backing_region {
+        let mut writeback_error = None;
         if region.is_shared() {
             let region_len = region.len();
             let object = region.backing().file_object().cloned();
@@ -1248,11 +1251,36 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
                     if let (Some(object), Some(write_offset)) =
                         (object.as_ref(), file_offset.checked_add(page_off))
                     {
-                        let _ = object.write_at(write_offset, &page_buf[..copy_len]);
+                        match object.stage_write_at(write_offset, &page_buf[..copy_len]) {
+                            Ok(staged) if staged == copy_len => {}
+                            Ok(_) => writeback_error = Some(EIO),
+                            Err(errno) => writeback_error = Some(errno),
+                        }
+                    }
+                } else {
+                    writeback_error = Some(EFAULT);
+                }
+            }
+            if writeback_error.is_none() {
+                if let Some(object) = object.as_ref() {
+                    if file_offset.checked_add(region_len).is_none() {
+                        writeback_error = Some(EINVAL);
+                    } else if let Err(errno) = object.flush_range(file_offset, region_len) {
+                        writeback_error = Some(errno);
                     }
                 }
             }
         }
+
+        let unmap_result =
+            crate::mem::paging::unmap_range_in_table(pt_phys, unmap_start, unmap_len);
+        if let Some(errno) = writeback_error {
+            return errno;
+        }
+        return match unmap_result {
+            Ok(()) => SUCCESS,
+            Err(_) => EINVAL,
+        };
     }
 
     match crate::mem::paging::unmap_range_in_table(pt_phys, unmap_start, unmap_len) {
@@ -1446,7 +1474,7 @@ fn rollback_shared_pages(
 /// 共有マッピングの内容を backing に同期する。
 pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
     let _ = flags;
-    if addr == 0 || length == 0 {
+    if addr == 0 || length == 0 || addr & 4095 != 0 {
         return EINVAL;
     }
     let sync_len = match page_align_up(length) {
@@ -1460,7 +1488,7 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
         return EFAULT;
     }
 
-    let sync_start = addr & !4095;
+    let sync_start = addr;
     let pid = match crate::syscall::security::current_process_id() {
         Some(p) => p.as_u64(),
         None => return ENOSYS,
@@ -1522,21 +1550,28 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
         };
 
     if let Some(object) = backing_object {
-        let mut written = 0usize;
-        while written < copied.len() {
-            let chunk_len = core::cmp::min(MEMORY_SYNC_CHUNK_BYTES, copied.len() - written);
+        let mut staged = 0usize;
+        while staged < copied.len() {
+            let chunk_len = core::cmp::min(MEMORY_SYNC_CHUNK_BYTES, copied.len() - staged);
             let write_off = match file_offset
                 .checked_add(sync_start - region_start)
-                .and_then(|offset| offset.checked_add(written as u64))
+                .and_then(|offset| offset.checked_add(staged as u64))
             {
                 Some(v) => v,
                 None => return EINVAL,
             };
-            match object.write_at(write_off, &copied[written..written + chunk_len]) {
+            match object.stage_write_at(write_off, &copied[staged..staged + chunk_len]) {
                 Ok(n) if n == chunk_len => {}
                 _ => return EIO,
             }
-            written += chunk_len;
+            staged += chunk_len;
+        }
+        let flush_offset = match file_offset.checked_add(sync_start - region_start) {
+            Some(offset) => offset,
+            None => return EINVAL,
+        };
+        if let Err(errno) = object.flush_range(flush_offset, sync_len) {
+            return errno;
         }
     }
 
@@ -1545,7 +1580,7 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
             let Some(region) = process.find_mmap_region_mut(region_start) else {
                 return Err(EINVAL);
             };
-            Ok(writeback_shared_mmap_region(region, sync_start, &copied))
+            Ok(writeback_shared_mmap_region(region, sync_start, sync_len))
         });
 
     match result {

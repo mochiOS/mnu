@@ -262,6 +262,12 @@ impl MmapRegion {
         core::mem::take(&mut self.dirty_pages)
     }
 
+    pub fn clear_dirty_pages(&mut self, first_page: u64, page_count: u64) {
+        let end_page = first_page.saturating_add(page_count);
+        self.dirty_pages
+            .retain(|page| *page < first_page || *page >= end_page);
+    }
+
     pub fn dirty_pages(&self) -> &[u64] {
         &self.dirty_pages
     }
