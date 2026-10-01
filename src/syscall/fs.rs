@@ -791,7 +791,7 @@ fn open_userspace_for_pid(
             let _ = vfs::userspace::close(mount.mount_id.0, open_id);
             return errno;
         }
-        crate::mem::vm_object::invalidate_inode(mount.mount_id, InodeId(node.node_id));
+        crate::mem::vm_object::truncate_inode(mount.mount_id, InodeId(node.node_id), 0);
     }
 
     let cloexec = (flags & O_CLOEXEC) != 0;
@@ -904,6 +904,9 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
     } else {
         Vnode::legacy_path_on(mount_id, path.to_string(), kind)
     };
+    if (flags & O_TRUNC) != 0 && kind == VnodeKind::Regular {
+        crate::mem::vm_object::truncate_inode(vnode.inode.mount_id, vnode.inode.inode_id, 0);
+    }
     let handle = alloc::boxed::Box::new(FileHandle::new(
         OpenFile {
             data: alloc::boxed::Box::new([]),
@@ -1928,9 +1931,10 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
         let close_result = vfs::userspace::close(mount.mount_id.0, open_id);
         return match result.and(close_result) {
             Ok(()) => {
-                crate::mem::vm_object::invalidate_inode(
+                crate::mem::vm_object::truncate_inode(
                     mount.mount_id,
                     InodeId(node.node_id),
+                    len,
                 );
                 SUCCESS
             }
@@ -1953,7 +1957,7 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
         .map(|mount| mount.mount_id)
         .unwrap_or(MountId(1));
     let vnode = Vnode::legacy_path_on(mount_id, path, VnodeKind::Regular);
-    crate::mem::vm_object::invalidate_inode(vnode.inode.mount_id, vnode.inode.inode_id);
+    crate::mem::vm_object::truncate_inode(vnode.inode.mount_id, vnode.inode.inode_id, len);
     SUCCESS
 }
 
@@ -2094,9 +2098,10 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
                     return Err(errno_from_cext(rc));
                 }
             }
-            crate::mem::vm_object::invalidate_inode(
+            crate::mem::vm_object::truncate_inode(
                 vnode.inode.mount_id,
                 vnode.inode.inode_id,
+                len,
             );
         } else {
             let mut data = open.data.to_vec();
