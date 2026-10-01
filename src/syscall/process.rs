@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{EAGAIN, ECHILD, EFAULT, EINVAL, EIO, ENOMEM, ENOSYS, EPERM, SUCCESS};
+use super::types::{EAGAIN, ECHILD, EFAULT, EINVAL, ENOMEM, ENOSYS, EPERM, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
 use alloc::string::ToString;
@@ -128,8 +128,6 @@ fn is_user_range(addr: u64, len: u64) -> bool {
     };
     addr <= USER_SPACE_END && end <= USER_SPACE_END
 }
-
-const MEMORY_SYNC_CHUNK_BYTES: usize = 4096;
 
 fn writeback_shared_mmap_region(
     region: &mut crate::task::MmapRegion,
@@ -1271,29 +1269,7 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
             let region_len = region.len();
             let object = region.backing().file_object().cloned();
             let file_offset = region.backing().file_offset();
-            let dirty_pages = region.take_dirty_pages();
-            for page_index in dirty_pages {
-                let page_off = page_index.saturating_mul(4096);
-                if page_off >= region_len {
-                    continue;
-                }
-                let page_addr = unmap_start + page_off;
-                let copy_len = core::cmp::min(4096u64, region_len - page_off) as usize;
-                let mut page_buf = [0u8; 4096];
-                if crate::syscall::copy_from_user(page_addr, &mut page_buf[..copy_len]).is_ok() {
-                    if let (Some(object), Some(write_offset)) =
-                        (object.as_ref(), file_offset.checked_add(page_off))
-                    {
-                        match object.stage_write_at(write_offset, &page_buf[..copy_len]) {
-                            Ok(staged) if staged == copy_len => {}
-                            Ok(_) => writeback_error = Some(EIO),
-                            Err(errno) => writeback_error = Some(errno),
-                        }
-                    }
-                } else {
-                    writeback_error = Some(EFAULT);
-                }
-            }
+            let _ = region.take_dirty_pages();
             if file_offset.checked_add(region_len).is_none() {
                 writeback_error = Some(EINVAL);
             } else if let Some(object) = object {
@@ -1303,10 +1279,10 @@ pub fn munmap(addr: u64, length: u64) -> u64 {
 
         let unmap_result =
             crate::mem::paging::unmap_range_in_table(pt_phys, unmap_start, unmap_len);
-        if let Some(errno) = writeback_error {
-            return errno;
-        }
         if unmap_result.is_ok() {
+            if let Some(errno) = writeback_error {
+                return errno;
+            }
             if let Some((object, file_offset, region_len)) = flush_plan {
                 if let Err(errno) = object.flush_range(file_offset, region_len) {
                     return errno;
@@ -1520,10 +1496,6 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
     if !is_user_range(addr, sync_len) {
         return EINVAL;
     }
-    if !super::validate_user_ptr(addr, sync_len) {
-        return EFAULT;
-    }
-
     let sync_start = addr;
     let pid = match crate::syscall::security::current_process_id() {
         Some(p) => p.as_u64(),
@@ -1556,20 +1528,6 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
             None => return ENOMEM,
         };
 
-    let mut copied = alloc::vec![0u8; sync_len as usize];
-    let mut offset = 0usize;
-    while offset < copied.len() {
-        let chunk_len = core::cmp::min(MEMORY_SYNC_CHUNK_BYTES, copied.len() - offset);
-        let user_addr = match addr.checked_add(offset as u64) {
-            Some(v) => v,
-            None => return EINVAL,
-        };
-        if super::copy_from_user(user_addr, &mut copied[offset..offset + chunk_len]).is_err() {
-            return EFAULT;
-        }
-        offset += chunk_len;
-    }
-
     let (backing_object, file_offset) =
         match crate::task::with_process(crate::task::ids::ProcessId::from_u64(pid), |process| {
             let Some(region) = process.find_mmap_region(region_start) else {
@@ -1586,22 +1544,6 @@ pub fn memory_sync(addr: u64, length: u64, flags: u64) -> u64 {
         };
 
     if let Some(object) = backing_object {
-        let mut staged = 0usize;
-        while staged < copied.len() {
-            let chunk_len = core::cmp::min(MEMORY_SYNC_CHUNK_BYTES, copied.len() - staged);
-            let write_off = match file_offset
-                .checked_add(sync_start - region_start)
-                .and_then(|offset| offset.checked_add(staged as u64))
-            {
-                Some(v) => v,
-                None => return EINVAL,
-            };
-            match object.stage_write_at(write_off, &copied[staged..staged + chunk_len]) {
-                Ok(n) if n == chunk_len => {}
-                _ => return EIO,
-            }
-            staged += chunk_len;
-        }
         let flush_offset = match file_offset.checked_add(sync_start - region_start) {
             Some(offset) => offset,
             None => return EINVAL,

@@ -207,8 +207,9 @@ impl VmObject {
             .iter_mut()
             .find(|entry| entry.key == key && entry.frame_phys.is_some())
             .ok_or(crate::syscall::EIO)?;
-        entry.valid_len = PAGE_BYTES;
-        entry.dirty_range = Some((0, PAGE_BYTES));
+        if entry.valid_len != 0 {
+            entry.dirty_range = Some((0, entry.valid_len));
+        }
         entry.version = entry.version.wrapping_add(1);
         entry.last_used = next_cache_access();
         Ok(())
@@ -497,7 +498,7 @@ pub fn truncate_inode(mount_id: MountId, inode_id: InodeId, length: u64) {
         entry.bytes = Arc::new(bytes);
         let _ = copy_to_frame(frame_phys, valid_len, &bytes[valid_len..]);
         entry.valid_len = valid_len;
-        entry.dirty_range = None;
+        entry.dirty_range = (valid_len != 0).then_some((0, valid_len));
         entry.version = entry.version.wrapping_add(1);
         entry.last_used = next_cache_access();
         true
