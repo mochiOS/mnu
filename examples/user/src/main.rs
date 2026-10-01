@@ -240,6 +240,8 @@ fn run_memory_tests() -> bool {
         return false;
     }
 
+    mapped[17] ^= 0x5a;
+    expected[17] = mapped[17];
     let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
     let _ = user::file_close(fd);
     let fd = user::file_open(path, 0);
