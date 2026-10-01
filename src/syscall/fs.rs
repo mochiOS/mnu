@@ -1877,6 +1877,9 @@ pub fn fsync(fd: u64) -> u64 {
     if vnode.is_directory() {
         return SUCCESS;
     }
+    if let Err(errno) = crate::mem::vm_object::VmObject::file(vnode.clone()).flush() {
+        return errno;
+    }
     if vnode.userspace_handle_ids().is_some() {
         match vfs::userspace::sync(vnode.inode.mount_id.0) {
             Ok(()) => SUCCESS,
