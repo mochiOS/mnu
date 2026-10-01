@@ -207,6 +207,32 @@ fn run_memory_tests() -> bool {
         expected[i] = v;
     }
 
+    let peer_ptr = user::memory_map(0, PAGE_SIZE, 1, 0x1, fd);
+    if peer_ptr == 0 || is_error(peer_ptr) {
+        let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
+        let _ = user::file_close(fd);
+        write_literal(1, b"memory: shared peer mmap failed\n");
+        return false;
+    }
+    let peer = unsafe { core::slice::from_raw_parts(peer_ptr as *const u8, PAGE_SIZE as usize) };
+    if peer != expected {
+        let _ = user::memory_unmap(peer_ptr, PAGE_SIZE);
+        let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
+        let _ = user::file_close(fd);
+        write_literal(1, b"memory: shared mappings diverged\n");
+        return false;
+    }
+    let immediate_read = user::file_read(fd, &mut read_back);
+    if immediate_read != payload_len as u64 || read_back != expected {
+        let _ = user::memory_unmap(peer_ptr, PAGE_SIZE);
+        let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
+        let _ = user::file_close(fd);
+        write_literal(1, b"memory: mapped write not visible to read\n");
+        return false;
+    }
+    let _ = user::file_seek(fd, 0, 0);
+    let _ = user::memory_unmap(peer_ptr, PAGE_SIZE);
+
     if !expect_success(user::memory_sync(file_ptr, PAGE_SIZE, 0)) {
         let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
         let _ = user::file_close(fd);
