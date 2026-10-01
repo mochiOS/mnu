@@ -165,7 +165,7 @@ impl Vnode {
 
 fn cext_errno(error: i32) -> u64 {
     if error < 0 {
-        u64::from(error.unsigned_abs())
+        (error as i64) as u64
     } else {
         crate::syscall::EIO
     }
