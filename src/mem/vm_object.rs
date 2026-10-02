@@ -873,6 +873,13 @@ fn read_lower_until(vnode: &Vnode, offset: u64, output: &mut [u8]) -> LowerReadO
 
             Ok(read) if read <= request_len => {
                 bytes_read += read;
+                if read < request_len {
+                    return LowerReadOutcome {
+                        bytes_read,
+                        eof: true,
+                        error: None,
+                    };
+                }
             }
 
             Ok(_) => {
