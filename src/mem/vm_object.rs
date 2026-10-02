@@ -106,234 +106,33 @@ impl VmObject {
     }
 
     pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
-        if output.is_empty() {
-            return Ok(0);
-        }
-
-        let output_len = u64::try_from(output.len()).map_err(|_| crate::syscall::EINVAL)?;
-
-        offset
-            .checked_add(output_len)
-            .ok_or(crate::syscall::EINVAL)?;
-
-        let lower_limit = self.vnode.read_io_limit();
-        let batch_limit = if lower_limit >= PAGE_BYTES {
-            core::cmp::min(MAX_READ_BATCH_BYTES, lower_limit)
-        } else {
-            PAGE_BYTES
-        };
-
-        let max_batch_pages = core::cmp::max(1, batch_limit / PAGE_BYTES);
-
         let mut copied = 0usize;
 
         while copied < output.len() {
-            let copied_u64 = u64::try_from(copied).map_err(|_| crate::syscall::EINVAL)?;
-
             let current = offset
-                .checked_add(copied_u64)
+                .checked_add(copied as u64)
                 .ok_or(crate::syscall::EINVAL)?;
 
             let page_index = current / PAGE_BYTES as u64;
             let page_offset = (current % PAGE_BYTES as u64) as usize;
 
-            let key = PageKey {
-                mount_id: self.vnode.inode.mount_id,
-                inode_id: self.vnode.inode.inode_id,
-                page_index,
-            };
+            let (page, valid_len) = self.page_with_len(page_index)?;
 
-            if let Some((page, valid_len)) = cached_page(key)? {
-                if page_offset >= valid_len {
-                    break;
-                }
-
-                let count = core::cmp::min(
-                    output.len() - copied,
-                    core::cmp::min(PAGE_BYTES - page_offset, valid_len - page_offset),
-                );
-
-                output[copied..copied + count]
-                    .copy_from_slice(&page[page_offset..page_offset + count]);
-
-                copied += count;
-
-                if valid_len < PAGE_BYTES {
-                    break;
-                }
-
-                continue;
+            if page_offset >= valid_len {
+                break;
             }
 
-            let remaining = output.len() - copied;
-
-            let covered_bytes = page_offset
-                .checked_add(remaining)
-                .ok_or(crate::syscall::EINVAL)?;
-
-            let pages_needed = covered_bytes
-                .checked_add(PAGE_BYTES - 1)
-                .ok_or(crate::syscall::EINVAL)?
-                / PAGE_BYTES;
-
-            let wanted_pages = core::cmp::min(pages_needed, max_batch_pages);
-
-            let batch_pages = contiguous_uncached_pages(
-                self.vnode.inode.mount_id,
-                self.vnode.inode.inode_id,
-                page_index,
-                wanted_pages,
+            let count = core::cmp::min(
+                output.len() - copied,
+                core::cmp::min(PAGE_BYTES - page_offset, valid_len - page_offset),
             );
 
-            if batch_pages == 0 {
-                continue;
-            }
+            output[copied..copied + count].copy_from_slice(&page[page_offset..page_offset + count]);
 
-            let batch_len = batch_pages
-                .checked_mul(PAGE_BYTES)
-                .ok_or(crate::syscall::EINVAL)?;
+            copied += count;
 
-            let batch_offset = page_index
-                .checked_mul(PAGE_BYTES as u64)
-                .ok_or(crate::syscall::EINVAL)?;
-
-            let epoch = cache_mutation_epoch();
-
-            let mut batch = alloc::vec![0u8; batch_len];
-
-            let outcome = read_lower_until(&self.vnode, batch_offset, &mut batch);
-
-            let copied_before_batch = copied;
-            let mut stopped_on_short_page = false;
-
-            for page_number in 0..batch_pages {
-                let raw_start = page_number
-                    .checked_mul(PAGE_BYTES)
-                    .ok_or(crate::syscall::EINVAL)?;
-
-                let raw_available = outcome.bytes_read.saturating_sub(raw_start).min(PAGE_BYTES);
-
-                let page_number_u64 =
-                    u64::try_from(page_number).map_err(|_| crate::syscall::EINVAL)?;
-
-                let current_page_index = page_index
-                    .checked_add(page_number_u64)
-                    .ok_or(crate::syscall::EINVAL)?;
-
-                let current_key = PageKey {
-                    mount_id: self.vnode.inode.mount_id,
-                    inode_id: self.vnode.inode.inode_id,
-                    page_index: current_page_index,
-                };
-
-                let raw_end = raw_start
-                    .checked_add(raw_available)
-                    .ok_or(crate::syscall::EINVAL)?;
-
-                let eof_page = outcome.eof && raw_end == outcome.bytes_read;
-
-                let cacheable = raw_available == PAGE_BYTES || eof_page;
-
-                let cached = cache_or_snapshot_page(
-                    current_key,
-                    &batch[raw_start..raw_end],
-                    raw_available,
-                    cacheable.then_some(epoch),
-                )?;
-
-                let page_start = current_page_index
-                    .checked_mul(PAGE_BYTES as u64)
-                    .ok_or(crate::syscall::EINVAL)?;
-
-                let current_copied = u64::try_from(copied).map_err(|_| crate::syscall::EINVAL)?;
-
-                let request_position = offset
-                    .checked_add(current_copied)
-                    .ok_or(crate::syscall::EINVAL)?;
-
-                let page_end = page_start
-                    .checked_add(PAGE_BYTES as u64)
-                    .ok_or(crate::syscall::EINVAL)?;
-
-                if request_position >= page_end {
-                    continue;
-                }
-
-                if request_position < page_start {
-                    return Err(crate::syscall::EIO);
-                }
-
-                let offset_in_page = usize::try_from(request_position - page_start)
-                    .map_err(|_| crate::syscall::EINVAL)?;
-
-                let valid_len = cached
-                    .as_ref()
-                    .map(|(_, valid_len)| *valid_len)
-                    .unwrap_or(raw_available);
-
-                if offset_in_page >= valid_len {
-                    stopped_on_short_page = true;
-                    break;
-                }
-
-                let count = core::cmp::min(
-                    output.len() - copied,
-                    core::cmp::min(PAGE_BYTES - offset_in_page, valid_len - offset_in_page),
-                );
-
-                if let Some((page, _)) = cached {
-                    output[copied..copied + count]
-                        .copy_from_slice(&page[offset_in_page..offset_in_page + count]);
-                } else {
-                    let source_start = raw_start
-                        .checked_add(offset_in_page)
-                        .ok_or(crate::syscall::EINVAL)?;
-
-                    let source_end = source_start
-                        .checked_add(count)
-                        .ok_or(crate::syscall::EINVAL)?;
-
-                    output[copied..copied + count]
-                        .copy_from_slice(&batch[source_start..source_end]);
-                }
-
-                copied += count;
-
-                if copied == output.len() {
-                    return Ok(copied);
-                }
-
-                if valid_len < PAGE_BYTES {
-                    stopped_on_short_page = true;
-                    break;
-                }
-            }
-
-            if stopped_on_short_page {
-                if copied != 0 {
-                    return Ok(copied);
-                }
-
-                if let Some(errno) = outcome.error {
-                    return Err(errno);
-                }
-
-                return Ok(0);
-            }
-
-            if let Some(errno) = outcome.error {
-                if copied != 0 {
-                    return Ok(copied);
-                }
-                return Err(errno);
-            }
-
-            if outcome.eof {
-                return Ok(copied);
-            }
-
-            if copied == copied_before_batch {
-                return Err(crate::syscall::EIO);
+            if valid_len < PAGE_BYTES {
+                break;
             }
         }
 
