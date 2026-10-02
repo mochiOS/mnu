@@ -1415,19 +1415,39 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         open.pos = cursor as usize;
         return output.len() as u64;
     }
-    drop(open);
-
     let names = match readdir_rootfs_first(&dir_path) {
         Some(n) => n,
         None => return EINVAL,
     };
-    let joined = names.join("\n");
-    let bytes = joined.as_bytes();
-    let to_copy = core::cmp::min(bytes.len(), buf_len as usize);
-    if crate::syscall::copy_to_user(buf_ptr, &bytes[..to_copy]).is_err() {
+
+    let max_output = usize::try_from(buf_len).unwrap_or(usize::MAX);
+    let mut output = Vec::new();
+    let mut cursor = open.pos;
+    while cursor < names.len() {
+        let name = names[cursor].as_bytes();
+        let record_len = (19usize + name.len() + 1).next_multiple_of(8);
+        if output.len().saturating_add(record_len) > max_output {
+            if output.is_empty() {
+                return EINVAL;
+            }
+            break;
+        }
+
+        let start = output.len();
+        output.resize(start + record_len, 0);
+        output[start..start + 8].copy_from_slice(&((cursor + 1) as u64).to_ne_bytes());
+        output[start + 8..start + 16].copy_from_slice(&((cursor + 1) as u64).to_ne_bytes());
+        output[start + 16..start + 18].copy_from_slice(&(record_len as u16).to_ne_bytes());
+        output[start + 18] = 0;
+        output[start + 19..start + 19 + name.len()].copy_from_slice(name);
+        cursor += 1;
+    }
+
+    if crate::syscall::copy_to_user(buf_ptr, &output).is_err() {
         return EFAULT;
     }
-    to_copy as u64
+    open.pos = cursor;
+    output.len() as u64
 }
 
 fn protocol_kind_to_dirent(kind: u32) -> u8 {
