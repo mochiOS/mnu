@@ -1080,49 +1080,46 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
         return EBADF;
     }
 
-    // FileHandle からメタデータを取得する
-    let file_info = with_fd_table(pid, |t| {
-        t.get(idx).map(|fh| {
-            let open = fh.open.lock();
-            let metadata = if let Some(vnode) = open.vnode.as_ref() {
-                if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
-                    let node = vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)?;
-                    Some((node.mode as u16, node.size, node.uid, node.gid))
-                } else {
-                    vnode
-                        .cext_handle_id()
-                        .and_then(crate::cext::fs::handle_metadata)
-                        .or_else(|| metadata_rootfs_first(vnode.path()))
-                }
-            } else {
-                None
-            };
-            let size = metadata
-                .map(|(_, size, _, _)| size)
-                .unwrap_or(open.data.len() as u64);
-            let mode = metadata.map_or_else(
-                || {
-                    if open
-                        .vnode
-                        .as_ref()
-                        .is_some_and(|vnode| vnode.is_directory())
-                    {
-                        0x4000u32 | 0o755
-                    } else {
-                        0x8000u32 | 0o644
-                    }
-                },
-                |(mode, _, _, _)| mode_for_stat(mode),
-            );
-            let (uid, gid) = metadata.map_or((0, 0), |(_, _, uid, gid)| (uid, gid));
-            Ok::<_, u64>((size, mode, uid, gid))
-        })
-    });
-    let (size, mode, uid, gid) = match file_info {
-        Some(Some(Ok(v))) => v,
-        Some(Some(Err(errno))) => return errno,
-        _ => return EBADF,
+    // Do not hold the process-wide FD table lock across a userspace filesystem
+    // IPC. The filesystem service may need to perform an unrelated FD operation
+    // before it can reply, which would otherwise deadlock the entire VFS.
+    let Some(open_file) = open_file(pid, idx) else {
+        return EBADF;
     };
+    let (vnode, fallback_size) = {
+        let open = open_file.lock();
+        (open.vnode.clone(), open.data.len() as u64)
+    };
+    let metadata = if let Some(vnode) = vnode.as_ref() {
+        if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
+            let node = match vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id) {
+                Ok(node) => node,
+                Err(errno) => return errno,
+            };
+            Some((node.mode as u16, node.size, node.uid, node.gid))
+        } else {
+            vnode
+                .cext_handle_id()
+                .and_then(crate::cext::fs::handle_metadata)
+                .or_else(|| metadata_rootfs_first(vnode.path()))
+        }
+    } else {
+        None
+    };
+    let size = metadata
+        .map(|(_, size, _, _)| size)
+        .unwrap_or(fallback_size);
+    let mode = metadata.map_or_else(
+        || {
+            if vnode.as_ref().is_some_and(|vnode| vnode.is_directory()) {
+                0x4000u32 | 0o755
+            } else {
+                0x8000u32 | 0o644
+            }
+        },
+        |(mode, _, _, _)| mode_for_stat(mode),
+    );
+    let (uid, gid) = metadata.map_or((0, 0), |(_, _, uid, gid)| (uid, gid));
     write_stat_buf(stat_ptr, mode, size, uid, gid);
     SUCCESS
 }
