@@ -114,6 +114,7 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     privileged!("system.time.set"),
     user!("system.info.read"),
     user!("system.logs.read"),
+    privileged!("package.inspect"),
     privileged!("package.install"),
     privileged!("package.remove"),
     privileged!("package.update"),
@@ -177,5 +178,16 @@ mod tests {
         );
         assert!(register.delegable);
         assert!(register.user_grantable);
+    }
+
+    #[test]
+    fn package_inspection_is_privileged() {
+        let capability = metadata("package.inspect").expect("registered capability");
+        assert_eq!(
+            capability.classification,
+            CapabilityClassification::Privileged
+        );
+        assert!(!capability.delegable);
+        assert!(!capability.user_grantable);
     }
 }
