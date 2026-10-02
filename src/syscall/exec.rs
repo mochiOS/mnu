@@ -507,6 +507,8 @@ fn exec_manifest_common(
         Err(_) => return EINVAL,
     };
 
+    crate::info!("exec: launching: {}", path);
+
     let extra_args_owned = match read_nul_args_from_user(args_ptr, 4096, 64) {
         Ok(v) => v,
         Err(e) => return e,
@@ -866,6 +868,8 @@ pub fn exec_kernel_with_name_caps_and_authorities(
     initial_kernel_authorities: KernelAuthoritySet,
     requested_privilege: crate::task::PrivilegeLevel,
 ) -> u64 {
+    crate::info!("exec: kernel: launching: {} name={}", path, name);
+
     let execution_class = match requested_privilege {
         crate::task::PrivilegeLevel::Core | crate::task::PrivilegeLevel::Service => {
             ExecutionClass::Privileged
@@ -1464,6 +1468,13 @@ fn exec_with_data(
             let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
             return crate::syscall::types::EINVAL;
         }
+
+        crate::info!(
+            "exec: started: {} pid={:?} entry={:#x}",
+            exec_path,
+            pid,
+            entry
+        );
         // report scheduling state
         crate::debug!(
             "exec: scheduler_enabled={} thread_count={}",
@@ -1573,6 +1584,9 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
             return EINVAL;
         }
     };
+
+    crate::info!("execve: launching: {}", path_owned);
+
     let Some(pid) = crate::syscall::security::current_process_id() else {
         return crate::syscall::types::EACCES;
     };
