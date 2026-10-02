@@ -279,7 +279,10 @@ pub fn mount_from(target: &str, filesystem_id: FilesystemId, source: &str) -> Re
     let target = normalize_mount_path(target);
     let source = normalize_mount_path(source);
     let mut mounts = MOUNTS.lock();
-    if mounts.iter().any(|mount| mount.target == target) {
+    // Root filesystems may be stacked during userspace root handoff.  The
+    // newest root mount wins while the compatibility root remains available
+    // through any more-specific mount created before the handoff.
+    if target != "/" && mounts.iter().any(|mount| mount.target == target) {
         return Err(());
     }
     let id = MountId(NEXT_MOUNT_ID.fetch_add(1, Ordering::Relaxed));
@@ -310,7 +313,7 @@ pub fn resolve(path: &str) -> Option<ResolvedMount> {
     let mount = mounts
         .iter()
         .filter(|mount| mount_matches(&mount.target, path))
-        .max_by_key(|mount| mount.target.len())?;
+        .max_by_key(|mount| (mount.target.len(), mount.id.0))?;
     let relative = path.strip_prefix(&mount.target).unwrap_or(path);
     let relative = relative.trim_start_matches('/');
     let mut source_path = mount.source.trim_end_matches('/').to_string();

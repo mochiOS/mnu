@@ -176,7 +176,9 @@ pub fn filesystem_mount(
         return EACCES;
     };
     let filesystem_id = FilesystemId(filesystem_id);
-    if !vfs::filesystem_owned_by(filesystem_id, process_id.as_u64()) {
+    if filesystem_id != vfs::ROOT_FILESYSTEM_ID
+        && !vfs::filesystem_owned_by(filesystem_id, process_id.as_u64())
+    {
         return EACCES;
     }
     let target = match read_mount_path(target_ptr, target_len) {
