@@ -2,6 +2,8 @@ use alloc::string::String;
 use core::convert::TryFrom;
 use spin::Once;
 
+pub const IPC_MESSAGE_CAPACITY: usize = 8 * 1024;
+
 #[derive(Clone, Copy)]
 pub struct SchedulerConfig {
     pub default_time_slice_ms: u64,
@@ -147,7 +149,7 @@ impl Default for KernelConfig {
             },
             ipc: IpcConfig {
                 mailbox_cap: 64,
-                max_msg_size: 4160,
+                max_msg_size: IPC_MESSAGE_CAPACITY,
                 max_external_pages: 262_144,
             },
             fs: FsConfig {

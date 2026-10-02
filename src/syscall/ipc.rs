@@ -11,7 +11,7 @@ use super::{EACCES, EAGAIN, EFAULT, EINVAL};
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
 const MESSAGE_CACHE_CAP: usize = MAILBOX_CAP;
-const MAX_MSG_SIZE: usize = 4160; // Filesystem header (64) + one page (4096)
+const MAX_MSG_SIZE: usize = crate::config::IPC_MESSAGE_CAPACITY;
 const MAX_EXT_PAGES: usize = 262_144;
 const MAX_INLINE_EXT_PAGES: usize = 16;
 
