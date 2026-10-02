@@ -605,6 +605,21 @@ fn mode_for_stat(mode: u16) -> u32 {
     out
 }
 
+fn userspace_mode(mode: u32, kind: u32) -> u16 {
+    const FILE_TYPE_MASK: u32 = 0xF000;
+    const REGULAR_FILE: u32 = 0x8000;
+    const DIRECTORY: u32 = 0x4000;
+    const SYMBOLIC_LINK: u32 = 0xA000;
+
+    let file_type = match kind {
+        mochios_filesystem_protocol::NODE_TYPE_REGULAR => REGULAR_FILE,
+        mochios_filesystem_protocol::NODE_TYPE_DIRECTORY => DIRECTORY,
+        mochios_filesystem_protocol::NODE_TYPE_SYMLINK => SYMBOLIC_LINK,
+        _ => mode & FILE_TYPE_MASK,
+    };
+    ((mode & !FILE_TYPE_MASK) | file_type) as u16
+}
+
 #[derive(Clone, Copy)]
 struct FileMetadata {
     mode: u16,
@@ -617,7 +632,7 @@ fn vnode_metadata(vnode: &Vnode) -> Result<Option<FileMetadata>, u64> {
     if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
         let node = vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)?;
         return Ok(Some(FileMetadata {
-            mode: node.mode as u16,
+            mode: userspace_mode(node.mode, node.kind),
             size: node.size,
             uid: node.uid,
             gid: node.gid,
@@ -648,7 +663,14 @@ pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64, u32, u32)> 
     if let Some(mount) = userspace_mount(path) {
         return vfs::userspace::lookup(mount.mount_id.0, &mount.path)
             .ok()
-            .map(|node| (node.mode as u16, node.size, node.uid, node.gid));
+            .map(|node| {
+                (
+                    userspace_mode(node.mode, node.kind),
+                    node.size,
+                    node.uid,
+                    node.gid,
+                )
+            });
     }
     crate::cext::fs::file_metadata(path)
         .or_else(|| crate::init::fs::file_metadata(path).map(|(mode, size)| (mode, size, 0, 0)))
@@ -1193,7 +1215,13 @@ fn stat_resolved(resolved: &str, stat_ptr: u64, follow_final_symlink: bool) -> u
         };
         return match lookup(mount.mount_id.0, &mount.path) {
             Ok(node) => {
-                write_stat_buf(stat_ptr, node.mode, node.size, node.uid, node.gid);
+                write_stat_buf(
+                    stat_ptr,
+                    mode_for_stat(userspace_mode(node.mode, node.kind)),
+                    node.size,
+                    node.uid,
+                    node.gid,
+                );
                 SUCCESS
             }
             Err(errno) => errno,
@@ -2927,8 +2955,8 @@ mod unix_mode_tests {
     use super::{
         access_mode_rights, capability_requirement_satisfied, open_path_required_rights,
         path_is_in_identity_storage, resolve_relative_to_cwd, sticky_directory_allows_delete,
-        unix_mode_allows, O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ,
-        PATH_WRITE, UNIX_EXECUTE,
+        unix_mode_allows, userspace_mode, O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC,
+        PATH_LIST, PATH_READ, PATH_WRITE, UNIX_EXECUTE,
     };
     use crate::capability::Capability;
 
@@ -2969,6 +2997,22 @@ mod unix_mode_tests {
             2000,
             UNIX_EXECUTE
         ));
+    }
+
+    #[test]
+    fn userspace_node_kind_restores_posix_file_type() {
+        assert_eq!(
+            userspace_mode(0o775, mochios_filesystem_protocol::NODE_TYPE_DIRECTORY),
+            0x4000 | 0o775
+        );
+        assert_eq!(
+            userspace_mode(0o644, mochios_filesystem_protocol::NODE_TYPE_REGULAR),
+            0x8000 | 0o644
+        );
+        assert_eq!(
+            userspace_mode(0o777, mochios_filesystem_protocol::NODE_TYPE_SYMLINK),
+            0xA000 | 0o777
+        );
     }
 
     #[test]
