@@ -159,9 +159,9 @@ impl Vnode {
         crate::cext::fs::write_all(self.path(), offset, input).map_err(cext_errno)
     }
 
-    pub fn read_to_limit(&self) -> usize {
+    pub fn read_io_limit(&self) -> usize {
         if self.userspace_handle_ids().is_none() {
-            mochios_filesystem_protocol::MAX_TO_LEN
+            mochios_filesystem_protocol::MAX_IO_LEN
         } else {
             usize::MAX
         }

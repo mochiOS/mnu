@@ -968,3 +968,39 @@ fn cache_mutation_epoch() -> u64 {
 fn bump_cache_mutation_epoch() {
     PAGE_CACHE_MUTATION_EPOCH.fetch_add(1, Ordering::AcqRel);
 }
+
+fn contiguous_uncached_pages(
+    mount_id: MountId,
+    inode_id: InodeId,
+    first_page: u64,
+    max_pages: usize,
+) -> usize {
+    let cache = PAGE_CACHE.lock();
+    let mut count = 0usize;
+
+    while count < max_pages {
+        let delta = match u64::try_from(count) {
+            Ok(value) => value,
+            Err(_) => break,
+        };
+
+        let page_index = match first_page.checked_add(delta) {
+            Some(value) => value,
+            None => break,
+        };
+
+        let key = PageKey {
+            mount_id,
+            inode_id,
+            page_index,
+        };
+
+        if cache.iter().any(|entry| entry.key == key) {
+            break;
+        }
+
+        count += 1;
+    }
+
+    count
+}
