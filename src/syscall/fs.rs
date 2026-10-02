@@ -23,6 +23,7 @@ const WRITE_IO_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_PIPES: usize = 64;
 const PIPE_BUFFER_CAP: usize = 64 * 1024;
 const UNIX_EXECUTE: u32 = 1 << 31;
+const LINUX_STAT_SIZE: usize = 144;
 
 fn transferred_io_bytes(result: u64) -> u64 {
     (result <= MAX_IO_BYTES as u64)
@@ -602,6 +603,37 @@ fn mode_for_stat(mode: u16) -> u32 {
     out
 }
 
+#[derive(Clone, Copy)]
+struct FileMetadata {
+    mode: u16,
+    size: u64,
+    uid: u32,
+    gid: u32,
+}
+
+fn vnode_metadata(vnode: &Vnode) -> Result<Option<FileMetadata>, u64> {
+    if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
+        let node = vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)?;
+        return Ok(Some(FileMetadata {
+            mode: node.mode as u16,
+            size: node.size,
+            uid: node.uid,
+            gid: node.gid,
+        }));
+    }
+
+    Ok(vnode
+        .cext_handle_id()
+        .and_then(crate::cext::fs::handle_metadata)
+        .or_else(|| metadata_rootfs_first(vnode.path()))
+        .map(|(mode, size, uid, gid)| FileMetadata {
+            mode,
+            size,
+            uid,
+            gid,
+        }))
+}
+
 #[inline]
 pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64, u32, u32)> {
     crate::performance::record_vfs_metadata_query();
@@ -1037,9 +1069,8 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
 ///   64: st_blocks  (i64)  — 512 バイト単位
 ///   72-143: timespec × 3 + unused (ゼロ)
 fn write_stat_buf(stat_ptr: u64, mode: u32, size: u64, uid: u32, gid: u32) {
-    const STAT_SIZE: usize = 144;
     let blocks = size.div_ceil(512);
-    let mut buf = [0u8; STAT_SIZE];
+    let mut buf = [0u8; LINUX_STAT_SIZE];
     buf[0..8].copy_from_slice(&1u64.to_ne_bytes());
     buf[8..16].copy_from_slice(&1u64.to_ne_bytes());
     buf[16..24].copy_from_slice(&1u64.to_ne_bytes());
@@ -1057,8 +1088,7 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
     if stat_ptr == 0 {
         return EFAULT;
     }
-    const STAT_SIZE: u64 = 144;
-    if !crate::syscall::validate_user_ptr(stat_ptr, STAT_SIZE) {
+    if !crate::syscall::validate_user_ptr(stat_ptr, LINUX_STAT_SIZE as u64) {
         return EFAULT;
     }
 
@@ -1090,37 +1120,27 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
         let open = open_file.lock();
         (open.vnode.clone(), open.data.len() as u64)
     };
-    let metadata = if let Some(vnode) = vnode.as_ref() {
-        if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
-            let node = match vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id) {
-                Ok(node) => node,
-                Err(errno) => return errno,
-            };
-            Some((node.mode as u16, node.size, node.uid, node.gid))
-        } else {
-            vnode
-                .cext_handle_id()
-                .and_then(crate::cext::fs::handle_metadata)
-                .or_else(|| metadata_rootfs_first(vnode.path()))
-        }
-    } else {
-        None
-    };
-    let size = metadata
-        .map(|(_, size, _, _)| size)
-        .unwrap_or(fallback_size);
-    let mode = metadata.map_or_else(
-        || {
-            if vnode.as_ref().is_some_and(|vnode| vnode.is_directory()) {
-                0x4000u32 | 0o755
+    let metadata = match vnode.as_deref().map_or(Ok(None), vnode_metadata) {
+        Ok(Some(metadata)) => metadata,
+        Ok(None) => FileMetadata {
+            mode: if vnode.as_deref().is_some_and(Vnode::is_directory) {
+                0x4000 | 0o755
             } else {
-                0x8000u32 | 0o644
-            }
+                0x8000 | 0o644
+            },
+            size: fallback_size,
+            uid: 0,
+            gid: 0,
         },
-        |(mode, _, _, _)| mode_for_stat(mode),
+        Err(errno) => return errno,
+    };
+    write_stat_buf(
+        stat_ptr,
+        mode_for_stat(metadata.mode),
+        metadata.size,
+        metadata.uid,
+        metadata.gid,
     );
-    let (uid, gid) = metadata.map_or((0, 0), |(_, _, uid, gid)| (uid, gid));
-    write_stat_buf(stat_ptr, mode, size, uid, gid);
     SUCCESS
 }
 
@@ -1129,8 +1149,7 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
     if path_ptr == 0 || stat_ptr == 0 {
         return EINVAL;
     }
-    const STAT_SIZE: u64 = 144;
-    if !crate::syscall::validate_user_ptr(stat_ptr, STAT_SIZE) {
+    if !crate::syscall::validate_user_ptr(stat_ptr, LINUX_STAT_SIZE as u64) {
         return EFAULT;
     }
     let owner_pid = match current_process_id_raw() {
@@ -2524,8 +2543,7 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
     if path_ptr == 0 || stat_ptr == 0 {
         return EFAULT;
     }
-    const STAT_SIZE: u64 = 144;
-    if !crate::syscall::validate_user_ptr(stat_ptr, STAT_SIZE) {
+    if !crate::syscall::validate_user_ptr(stat_ptr, LINUX_STAT_SIZE as u64) {
         return EFAULT;
     }
 
