@@ -25,18 +25,20 @@ pub struct FileHandleCap(u32);
 
 impl FileHandleCap {
     pub const NONE: Self = Self(0);
-    pub const READ: Self = Self(1 << 0);
-    pub const WRITE: Self = Self(1 << 1);
-    pub const SEEK: Self = Self(1 << 2);
-    pub const STAT: Self = Self(1 << 3);
-    pub const CLOSE: Self = Self(1 << 4);
-    pub const READDIR: Self = Self(1 << 5);
-    pub const CREATE: Self = Self(1 << 6);
-    pub const REMOVE: Self = Self(1 << 7);
-    pub const RENAME: Self = Self(1 << 8);
-    pub const SYNC: Self = Self(1 << 9);
-    pub const TRUNCATE: Self = Self(1 << 10);
-    pub const ALL: Self = Self((1 << 11) - 1);
+    pub const READ: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_READ);
+    pub const WRITE: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_WRITE);
+    pub const SEEK: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_SEEK);
+    pub const STAT: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_STAT);
+    // Bit 4 used to represent CLOSE. Closing only discards a descriptor owned
+    // by the current process, so it is intentionally not a resource right.
+    pub const READDIR: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_READDIR);
+    pub const CREATE: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_CREATE);
+    pub const REMOVE: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_REMOVE);
+    pub const RENAME: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_RENAME);
+    pub const SYNC: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_SYNC);
+    pub const TRUNCATE: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_TRUNCATE);
+    pub const TRANSFER: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_TRANSFER);
+    pub const ALL: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_ALL);
 
     #[inline]
     pub const fn bits(self) -> u32 {
@@ -53,11 +55,19 @@ impl FileHandleCap {
         Self(self.0 | other.0)
     }
 
+    pub const fn from_bits(bits: u32) -> Option<Self> {
+        if bits != 0 && (bits & !Self::ALL.0) == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+
     pub fn from_open_flags(flags: u64) -> Self {
-        let mut cap = Self::CLOSE
-            .union(Self::STAT)
+        let mut cap = Self::STAT
             .union(Self::SEEK)
-            .union(Self::SYNC);
+            .union(Self::SYNC)
+            .union(Self::TRANSFER);
         let acc = flags & 0o3;
         if acc == 0o0 {
             cap = cap.union(Self::READ);
@@ -157,20 +167,31 @@ impl FileHandle {
         }
     }
 
+    /// Duplicates this handle with a subset of its rights for IPC transfer.
+    pub fn duplicate_restricted(&self, requested: FileHandleCap) -> Option<Self> {
+        if !self.cap.contains(FileHandleCap::TRANSFER) || !self.cap.contains(requested) {
+            return None;
+        }
+        Some(Self {
+            open: self.open.clone(),
+            cap: requested,
+        })
+    }
+
     pub fn new_pipe_read(pipe_id: usize) -> Self {
         Self::new(
             OpenFile::new_pipe(pipe_id, false, 0),
             FileHandleCap::READ
                 .union(FileHandleCap::SEEK)
                 .union(FileHandleCap::STAT)
-                .union(FileHandleCap::CLOSE),
+                .union(FileHandleCap::TRANSFER),
         )
     }
 
     pub fn new_pipe_write(pipe_id: usize) -> Self {
         Self::new(
             OpenFile::new_pipe(pipe_id, true, 1),
-            FileHandleCap::WRITE.union(FileHandleCap::CLOSE),
+            FileHandleCap::WRITE.union(FileHandleCap::TRANSFER),
         )
     }
 }
@@ -305,5 +326,30 @@ impl FdTable {
 impl Drop for FdTable {
     fn drop(&mut self) {
         self.close_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileHandle, FileHandleCap};
+
+    #[test]
+    fn transferred_rights_must_be_a_subset() {
+        let source = FileHandle::new_pipe_read(usize::MAX);
+        let restricted = source
+            .duplicate_restricted(FileHandleCap::READ.union(FileHandleCap::STAT))
+            .expect("read-only subset should transfer");
+        assert!(restricted.cap.contains(FileHandleCap::READ));
+        assert!(!restricted.cap.contains(FileHandleCap::TRANSFER));
+        assert!(source.duplicate_restricted(FileHandleCap::WRITE).is_none());
+        assert!(restricted
+            .duplicate_restricted(FileHandleCap::READ)
+            .is_none());
+    }
+
+    #[test]
+    fn close_is_not_a_file_handle_right() {
+        assert_eq!(FileHandleCap::ALL.bits() & (1 << 4), 0);
+        assert!(FileHandleCap::from_bits(1 << 4).is_none());
     }
 }

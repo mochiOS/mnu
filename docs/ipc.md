@@ -90,6 +90,25 @@ fast path では、次のように振る舞います。
 
 slow path は mailbox を使う既存経路です。
 
+## FileHandle添付
+
+`ipc_send_handles`は、通常のメッセージに最大4個のFileHandleを添付します。
+送信側は自プロセスのFDと委譲するrightsを明示し、カーネルは次を強制します。
+
+- 添付元は送信プロセス自身のFDであること
+- 元Handleが`TRANSFER`を持つこと
+- `requested_rights`が元Handleのrightsの部分集合であること
+- 受信側がhandle-awareな`ipc_recv_handles`で明示的に受け取ること
+
+Handleは送信時にメッセージへ複製されるため、送信後に元FDを閉じても配送まで保持されます。
+受信時には受信プロセスのFD tableへ`FD_CLOEXEC`付きで追加され、受信結果へ新しいFD番号とrightsが書き戻されます。
+
+`CLOSE`はrightsではありません。closeは自プロセスが所有するdescriptor参照の破棄であり、
+資源に対する操作ではないためです。再委譲を許可する場合だけ`TRANSFER`を含めます。
+
+従来のreceive APIは添付付きメッセージを消費せず`EMSGSIZE`を返します。
+これにより、受信側が知らないままHandleがインストールされたり失われたりすることを防ぎます。
+
 これは正しい挙動を優先する経路であり、fast path のような超低遅延は狙っていません。
 
 ## reply / wait の推奨パターン

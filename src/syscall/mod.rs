@@ -659,15 +659,7 @@ pub fn last_syscall_snapshot() -> (u64, [u64; 5]) {
 }
 
 /// システムコールのディスパッチ
-pub fn dispatch(
-    num: u64,
-    arg0: u64,
-    arg1: u64,
-    arg2: u64,
-    arg3: u64,
-    arg4: u64,
-    arg5: u64,
-) -> u64 {
+pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
     record_syscall(num, arg0, arg1, arg2, arg3, arg4);
     #[cfg(feature = "performance-instrumentation")]
     let _allocation_scope =
@@ -726,13 +718,9 @@ pub fn dispatch(
             task::yield_now();
             SUCCESS
         }
-        x if x == SyscallNumber::MemoryAlloc as u64 => {
-            process::mmap(0, arg0, arg1, arg2, arg3, 0)
-        }
+        x if x == SyscallNumber::MemoryAlloc as u64 => process::mmap(0, arg0, arg1, arg2, arg3, 0),
         x if x == SyscallNumber::MemoryFree as u64 => process::munmap(arg0, arg1),
-        x if x == SyscallNumber::Mmap as u64 => {
-            process::mmap(arg0, arg1, arg2, arg3, arg4, arg5)
-        }
+        x if x == SyscallNumber::Mmap as u64 => process::mmap(arg0, arg1, arg2, arg3, arg4, arg5),
         x if x == SyscallNumber::Mprotect as u64 => pgroup::mprotect(arg0, arg1, arg2),
         x if x == SyscallNumber::Munmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryMap as u64 => {
@@ -776,13 +764,9 @@ pub fn dispatch(
         x if x == SyscallNumber::Stat as u64 => fs::stat(arg0, arg1),
         x if x == SyscallNumber::Fstat as u64 => fs::fstat(arg0, arg1),
         x if x == SyscallNumber::Lstat as u64 => fs::lstat(arg0, arg1),
-        x if x == SyscallNumber::Newfstatat as u64 => {
-            fs::newfstatat(arg0 as i64, arg1, arg2, arg3)
-        }
+        x if x == SyscallNumber::Newfstatat as u64 => fs::newfstatat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Access as u64 => fs::faccessat(-100, arg0, arg1, 0),
-        x if x == SyscallNumber::Faccessat as u64 => {
-            fs::faccessat(arg0 as i64, arg1, arg2, arg3)
-        }
+        x if x == SyscallNumber::Faccessat as u64 => fs::faccessat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Lseek as u64 => fs::seek(arg0, arg1 as i64, arg2),
         x if x == SyscallNumber::Fsync as u64 => fs::fsync(arg0),
         x if x == SyscallNumber::Fdatasync as u64 => fs::fdatasync(arg0),
@@ -796,9 +780,7 @@ pub fn dispatch(
         }
         x if x == SyscallNumber::Symlink as u64 => fs::symlink(arg0, arg1),
         x if x == SyscallNumber::Readlink as u64 => fs::readlink(arg0, arg1, arg2),
-        x if x == SyscallNumber::Readlinkat as u64 => {
-            fs::readlinkat(arg0 as i64, arg1, arg2, arg3)
-        }
+        x if x == SyscallNumber::Readlinkat as u64 => fs::readlinkat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Statfs as u64 => fs::statfs(arg0, arg1),
         x if x == SyscallNumber::Getdents64 as u64 => fs::getdents64(arg0, arg1, arg2),
         x if x == SyscallNumber::Ftruncate as u64 => fs::ftruncate(arg0, arg1),
@@ -810,12 +792,14 @@ pub fn dispatch(
         }
         x if x == SyscallNumber::IpcCreate as u64 => ipc::create(arg0, arg1),
         x if x == SyscallNumber::IpcSend as u64 => ipc::send(arg0, arg1, arg2),
+        x if x == SyscallNumber::IpcSendHandles as u64 => ipc::send_handles(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::IpcSendPages as u64 => ipc::send_pages(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::IpcRecv as u64 => ipc::recv(arg0, arg1),
         x if x == SyscallNumber::IpcRecvWait as u64 => ipc::recv_blocking(arg0, arg1),
         x if x == SyscallNumber::IpcCall as u64 => ipc::call(arg0, arg1, arg2, arg3, arg4),
         x if x == SyscallNumber::IpcReply as u64 => ipc::reply(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcWait as u64 => ipc::wait(arg0, arg1, arg2),
+        x if x == SyscallNumber::IpcRecvHandles as u64 => ipc::recv_handles(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::IpcEndpointAlive as u64 => ipc::endpoint_alive(arg0),
         x if x == SyscallNumber::IpcEndpointOwner as u64 => ipc::endpoint_owner_process(arg0),
         x if x == SyscallNumber::CapClone as u64 => capability::clone_capability(arg0, arg1),
@@ -933,6 +917,8 @@ fn is_ipc_syscall(num: u64) -> bool {
         || num == SyscallNumber::IpcRecv as u64
         || num == SyscallNumber::IpcRecvWait as u64
         || num == SyscallNumber::IpcSendPages as u64
+        || num == SyscallNumber::IpcSendHandles as u64
+        || num == SyscallNumber::IpcRecvHandles as u64
         || num == SyscallNumber::IpcEndpointAlive as u64
         || num == SyscallNumber::IpcEndpointOwner as u64
         || num == SyscallNumber::IpcCreate as u64

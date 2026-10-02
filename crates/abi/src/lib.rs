@@ -210,7 +210,56 @@ pub enum SyscallNumber {
     BootSystemSlot = 618,
     BlockFlush = 619,
     BootEspGuid = 620,
+    IpcSendHandles = 621,
+    IpcRecvHandles = 622,
     CheckGravityExist = 999,
+}
+
+/// Maximum number of file handles carried by one IPC message.
+pub const IPC_MAX_FILE_HANDLES: usize = 4;
+
+pub const FILE_HANDLE_RIGHT_READ: u32 = 1 << 0;
+pub const FILE_HANDLE_RIGHT_WRITE: u32 = 1 << 1;
+pub const FILE_HANDLE_RIGHT_SEEK: u32 = 1 << 2;
+pub const FILE_HANDLE_RIGHT_STAT: u32 = 1 << 3;
+pub const FILE_HANDLE_RIGHT_READDIR: u32 = 1 << 5;
+pub const FILE_HANDLE_RIGHT_CREATE: u32 = 1 << 6;
+pub const FILE_HANDLE_RIGHT_REMOVE: u32 = 1 << 7;
+pub const FILE_HANDLE_RIGHT_RENAME: u32 = 1 << 8;
+pub const FILE_HANDLE_RIGHT_SYNC: u32 = 1 << 9;
+pub const FILE_HANDLE_RIGHT_TRUNCATE: u32 = 1 << 10;
+/// Allows the receiving process to attach the handle to another IPC message.
+pub const FILE_HANDLE_RIGHT_TRANSFER: u32 = 1 << 11;
+pub const FILE_HANDLE_RIGHT_ALL: u32 = FILE_HANDLE_RIGHT_READ
+    | FILE_HANDLE_RIGHT_WRITE
+    | FILE_HANDLE_RIGHT_SEEK
+    | FILE_HANDLE_RIGHT_STAT
+    | FILE_HANDLE_RIGHT_READDIR
+    | FILE_HANDLE_RIGHT_CREATE
+    | FILE_HANDLE_RIGHT_REMOVE
+    | FILE_HANDLE_RIGHT_RENAME
+    | FILE_HANDLE_RIGHT_SYNC
+    | FILE_HANDLE_RIGHT_TRUNCATE
+    | FILE_HANDLE_RIGHT_TRANSFER;
+
+/// One file descriptor and the rights requested for an IPC transfer.
+///
+/// On send, `fd` belongs to the sender. On receive, it is replaced with the
+/// descriptor installed in the receiver.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IpcFileHandle {
+    pub fd: i32,
+    pub rights: u32,
+}
+
+/// Fixed-size file-handle attachment buffer used by IPC syscalls.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IpcFileHandles {
+    pub count: u32,
+    pub reserved: u32,
+    pub handles: [IpcFileHandle; IPC_MAX_FILE_HANDLES],
 }
 
 /// `StorageControl` が受け取る、プラットフォーム固有ストレージ操作の固定長要求です。
@@ -336,6 +385,15 @@ mod credential_spawn_tests {
     fn boot_system_slot_syscall_number_is_stable() {
         assert_eq!(super::SyscallNumber::BootSystemSlot as u64, 618);
     }
+
+    #[test]
+    fn ipc_file_handle_abi_is_stable() {
+        assert_eq!(super::SyscallNumber::IpcSendHandles as u64, 621);
+        assert_eq!(super::SyscallNumber::IpcRecvHandles as u64, 622);
+        assert_eq!(core::mem::size_of::<super::IpcFileHandle>(), 8);
+        assert_eq!(core::mem::size_of::<super::IpcFileHandles>(), 40);
+        assert_eq!(super::FILE_HANDLE_RIGHT_ALL & (1 << 4), 0);
+    }
 }
 
 #[repr(C)]
@@ -399,5 +457,7 @@ pub const ENOSYS: u64 = (-38i64) as u64;
 pub const ENODATA: u64 = (-61i64) as u64;
 /// 値が表現可能な範囲を超える
 pub const EOVERFLOW: u64 = (-75i64) as u64;
+/// Message cannot be received by the selected IPC receive operation.
+pub const EMSGSIZE: u64 = (-90i64) as u64;
 /// 操作がサポートされていない
 pub const ENOTSUP: u64 = (-95i64) as u64;

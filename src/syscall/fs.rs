@@ -855,9 +855,9 @@ fn open_userspace_for_pid(
         FileHandleCap::READDIR
             .union(FileHandleCap::STAT)
             .union(FileHandleCap::SEEK)
-            .union(FileHandleCap::CLOSE)
+            .union(FileHandleCap::TRANSFER)
     } else {
-        FileHandleCap::from_open_flags(flags).union(FileHandleCap::CLOSE)
+        FileHandleCap::from_open_flags(flags)
     };
     let vnode = Vnode::userspace_handle(
         mount.mount_id,
@@ -941,9 +941,9 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
         FileHandleCap::READDIR
             .union(FileHandleCap::STAT)
             .union(FileHandleCap::SEEK)
-            .union(FileHandleCap::CLOSE)
+            .union(FileHandleCap::TRANSFER)
     } else {
-        FileHandleCap::from_open_flags(flags).union(FileHandleCap::CLOSE)
+        FileHandleCap::from_open_flags(flags)
     };
     let kind = if is_dir {
         VnodeKind::Directory
@@ -1008,9 +1008,6 @@ pub fn close(fd: u64) -> u64 {
         Some(p) => p,
         None => return EBADF,
     };
-    if let Err(errno) = require_cap(pid, fd, FileHandleCap::CLOSE) {
-        return errno;
-    }
     let idx = fd as usize;
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
