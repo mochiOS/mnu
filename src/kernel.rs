@@ -27,8 +27,9 @@ fn kernel_process_id() -> Option<task::ProcessId> {
 fn ap_idle_loop() -> ! {
     crate::smp::mark_current_ap_boot_stack_released();
     loop {
-        task::schedule_and_switch();
-        x86_64::instructions::hlt();
+        if !task::schedule_and_switch() {
+            x86_64::instructions::hlt();
+        }
     }
 }
 
@@ -110,6 +111,13 @@ fn kernel_main() -> ! {
     );
     early_serial("kernel: init exec returned\n");
 
+    crate::util::log::release_boot_marker(format_args!(
+        "init launch result={:#x} threads={} ready={}",
+        init_pid,
+        task::thread_count(),
+        task::count_threads_by_state(task::ThreadState::Ready),
+    ));
+
     crate::info!("init pid = {:#x}", init_pid);
 
     if init_pid != 0 && task::with_process(task::ProcessId::from_u64(init_pid), |_| ()).is_some() {
@@ -141,10 +149,10 @@ fn kernel_main() -> ! {
     crate::util::log::release_boot_marker(format_args!(
         "Kernel initialization complete. Entering idle loop..."
     ));
-    task::schedule_and_switch();
-
     loop {
-        x86_64::instructions::hlt();
+        if !task::schedule_and_switch() {
+            x86_64::instructions::hlt();
+        }
     }
 }
 

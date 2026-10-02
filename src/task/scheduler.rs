@@ -518,13 +518,13 @@ pub fn exit_current_task(exit_code: u64) -> ! {
 /// スケジューリングしてコンテキストスイッチを実行
 ///
 /// タイマー割り込みハンドラから呼び出される
-pub fn schedule_and_switch() {
+pub fn schedule_and_switch() -> bool {
     #[cfg(feature = "performance-instrumentation")]
     let _allocation_scope = crate::performance::AllocationScope::enter(
         crate::performance::AllocationSubsystem::Scheduler,
     );
     if !is_scheduler_enabled() {
-        return;
+        return false;
     }
 
     x86_64::instructions::interrupts::without_interrupts(|| {
@@ -537,9 +537,11 @@ pub fn schedule_and_switch() {
                 unsafe {
                     switch_to_thread_with_slots(current, next_id, next_slot);
                 }
+                return true;
             }
         }
-    });
+        false
+    })
 }
 
 /// 最初のスレッドを起動
