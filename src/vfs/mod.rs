@@ -160,10 +160,10 @@ impl Vnode {
     }
 
     pub fn read_io_limit(&self) -> usize {
-        if self.userspace_handle_ids().is_none() {
-            mochios_filesystem_protocol::MAX_IO_LEN
+        if self.userspace_handle_ids().is_some() {
+            crate::mem::vm_object::PAGE_BYTES
         } else {
-            usize::MAX
+            mochios_filesystem_protocol::MAX_IO_LEN
         }
     }
 }
