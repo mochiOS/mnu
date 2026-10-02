@@ -1017,39 +1017,48 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
     let Some(open_file) = open_file(pid, idx) else {
         return EBADF;
     };
-    let result = (|| {
-        let mut open = open_file.lock();
-        let file_len = if let Some(vnode) = open.vnode.as_ref() {
-            if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
-                let node = vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)?;
-                usize::try_from(node.size).map_err(|_| EOVERFLOW)?
-            } else {
-                vnode
-                    .cext_handle_id()
-                    .and_then(crate::cext::fs::handle_metadata)
-                    .or_else(|| metadata_rootfs_first(vnode.path()))
-                    .map(|(_, size, _, _)| size as usize)
-                    .unwrap_or(open.data.len())
-            }
-        } else {
-            open.data.len()
+    if whence > 2 {
+        return EINVAL;
+    }
+
+    let end_position = if whence == 2 {
+        let (vnode, fallback_size) = {
+            let open = open_file.lock();
+            (open.vnode.clone(), open.data.len() as u64)
         };
-        let new_pos = match whence {
-            0 => offset,
-            1 => open.pos as i64 + offset,
-            2 => file_len as i64 + offset,
-            _ => return Err(EINVAL),
+        let size = match vnode.as_deref().map_or(Ok(None), vnode_metadata) {
+            Ok(Some(metadata)) => metadata.size,
+            Ok(None) => fallback_size,
+            Err(errno) => return errno,
         };
-        if new_pos < 0 {
-            return Err(EINVAL);
+        match i64::try_from(size) {
+            Ok(size) => Some(size),
+            Err(_) => return EOVERFLOW,
         }
-        let new_pos = usize::try_from(new_pos).map_err(|_| EINVAL)?;
-        open.pos = new_pos;
-        Ok(open.pos as u64)
-    })();
-    match result {
-        Ok(pos) => pos,
-        Err(e) => e,
+    } else {
+        None
+    };
+
+    let mut open = open_file.lock();
+    let base = match whence {
+        0 => 0,
+        1 => match i64::try_from(open.pos) {
+            Ok(position) => position,
+            Err(_) => return EOVERFLOW,
+        },
+        2 => end_position.unwrap_or(0),
+        _ => return EINVAL,
+    };
+    let Some(new_position) = base.checked_add(offset) else {
+        return EOVERFLOW;
+    };
+    let Ok(new_position) = usize::try_from(new_position) else {
+        return EINVAL;
+    };
+    open.pos = new_position;
+    match u64::try_from(new_position) {
+        Ok(position) => position,
+        Err(_) => EOVERFLOW,
     }
 }
 
