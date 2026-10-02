@@ -1495,33 +1495,43 @@ fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if buf_ptr == 0 {
         return EFAULT;
     }
+
     if len == 0 {
         return 0;
     }
+
     if !crate::syscall::validate_user_ptr(buf_ptr, len) {
         return EFAULT;
     }
+
     if fd < FD_BASE as u64 {
         return EBADF;
     }
+
     let pid = match current_process_id_raw() {
         Some(p) => p,
         None => return EBADF,
     };
+
     if let Err(errno) = require_cap(pid, fd, FileHandleCap::READ) {
         return errno;
     }
+
     let idx = fd as usize;
+
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
+
     let Some(open_file) = open_file(pid, idx) else {
         return EBADF;
     };
+
     let (pipe_id, open_flags) = {
         let open = open_file.lock();
         (open.pipe_id, open.open_flags)
     };
+
     if let Some(pipe_id) = pipe_id {
         return read_pipe(pipe_id, open_flags, buf_ptr, len);
     }
@@ -1530,51 +1540,99 @@ fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         Ok(v) => v.min(MAX_IO_BYTES),
         Err(_) => MAX_IO_BYTES,
     };
+
     let mut written = 0usize;
+
     let mut tmp = alloc::vec![0u8; core::cmp::min(READ_IO_CHUNK_BYTES, to_copy)];
+
     crate::performance::record_vfs_temporary_buffer(tmp.len());
 
     while written < to_copy {
         let chunk_len = core::cmp::min(READ_IO_CHUNK_BYTES, to_copy - written)
             .min(mochios_filesystem_protocol::MAX_IO_LEN);
+
         let read_len = {
             let (vnode, pos) = {
                 let open = open_file.lock();
                 (open.vnode.clone(), open.pos)
             };
+
             if let Some(vnode) = vnode {
                 let object = crate::mem::vm_object::VmObject::file(vnode);
-                let read = match object.read_at(pos as u64, &mut tmp[..chunk_len]) {
-                    Ok(read) => read,
-                    Err(errno) => return errno,
+
+                let pos_u64 = match u64::try_from(pos) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return if written != 0 { written as u64 } else { EINVAL };
+                    }
                 };
+
+                let read = match object.read_at(pos_u64, &mut tmp[..chunk_len]) {
+                    Ok(read) => read,
+
+                    Err(errno) => {
+                        return if written != 0 { written as u64 } else { errno };
+                    }
+                };
+
                 let mut open = open_file.lock();
+
                 if open.pos != pos {
                     continue;
                 }
+
                 open.pos = match open.pos.checked_add(read) {
                     Some(position) => position,
-                    None => return EINVAL,
+
+                    None => {
+                        return if written != 0 { written as u64 } else { EINVAL };
+                    }
                 };
+
                 read
             } else {
                 let mut open = open_file.lock();
+
                 let avail = open.data.len().saturating_sub(open.pos);
+
                 let take = core::cmp::min(avail, chunk_len);
+
                 if take == 0 {
                     return written as u64;
                 }
+
                 tmp[..take].copy_from_slice(&open.data[open.pos..open.pos + take]);
+
                 open.pos += take;
+
                 take
             }
         };
+
         if read_len == 0 {
             break;
         }
-        if crate::syscall::copy_to_user(buf_ptr + written as u64, &tmp[..read_len]).is_err() {
-            return EFAULT;
+
+        let written_u64 = match u64::try_from(written) {
+            Ok(value) => value,
+
+            Err(_) => {
+                return if written != 0 { written as u64 } else { EINVAL };
+            }
+        };
+
+        let destination = match buf_ptr.checked_add(written_u64) {
+            Some(value) => value,
+
+            None => {
+                return if written != 0 { written as u64 } else { EFAULT };
+            }
+        };
+
+        if crate::syscall::copy_to_user(destination, &tmp[..read_len]).is_err() {
+            return if written != 0 { written as u64 } else { EFAULT };
         }
+
         written += read_len;
     }
 
@@ -1934,11 +1992,7 @@ pub fn truncate(path_ptr: u64, len: u64) -> u64 {
         let close_result = vfs::userspace::close(mount.mount_id.0, open_id);
         return match result.and(close_result) {
             Ok(()) => {
-                crate::mem::vm_object::truncate_inode(
-                    mount.mount_id,
-                    InodeId(node.node_id),
-                    len,
-                );
+                crate::mem::vm_object::truncate_inode(mount.mount_id, InodeId(node.node_id), len);
                 SUCCESS
             }
             Err(errno) => errno,
@@ -2038,8 +2092,7 @@ pub fn chown(path_ptr: u64, uid: u64, gid: u64) -> u64 {
         return match vfs::userspace::set_attr(
             mount.mount_id.0,
             &mount.path,
-            mochios_filesystem_protocol::SETATTR_UID
-                | mochios_filesystem_protocol::SETATTR_GID,
+            mochios_filesystem_protocol::SETATTR_UID | mochios_filesystem_protocol::SETATTR_GID,
             0,
             uid as u32,
             gid as u32,
@@ -2101,11 +2154,7 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
                     return Err(errno_from_cext(rc));
                 }
             }
-            crate::mem::vm_object::truncate_inode(
-                vnode.inode.mount_id,
-                vnode.inode.inode_id,
-                len,
-            );
+            crate::mem::vm_object::truncate_inode(vnode.inode.mount_id, vnode.inode.inode_id, len);
         } else {
             let mut data = open.data.to_vec();
             data.resize(new_len, 0);

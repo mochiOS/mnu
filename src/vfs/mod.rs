@@ -143,8 +143,7 @@ impl Vnode {
             return userspace::read(self.inode.mount_id.0, open_id, offset, output);
         }
         if let Some(handle) = self.cext_handle_id() {
-            return crate::cext::fs::read_handle(handle, offset, output)
-                .map_err(cext_errno);
+            return crate::cext::fs::read_handle(handle, offset, output).map_err(cext_errno);
         }
         crate::syscall::fs::read_file_range_rootfs_first(self.path(), offset, output)
             .ok_or(crate::syscall::EIO)
@@ -155,11 +154,17 @@ impl Vnode {
             return userspace::write(self.inode.mount_id.0, open_id, offset, input);
         }
         if let Some(handle) = self.cext_handle_id() {
-            return crate::cext::fs::write_handle(handle, offset, input)
-                .map_err(cext_errno);
+            return crate::cext::fs::write_handle(handle, offset, input).map_err(cext_errno);
         }
-        crate::cext::fs::write_all(self.path(), offset, input)
-            .map_err(cext_errno)
+        crate::cext::fs::write_all(self.path(), offset, input).map_err(cext_errno)
+    }
+
+    pub fn read_to_limit(&self) -> usize {
+        if self.userspace_handle_ids().is_none() {
+            mochios_filesystem_protocol::MAX_TO_LEN
+        } else {
+            usize::MAX
+        }
     }
 }
 
