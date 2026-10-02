@@ -941,6 +941,12 @@ fn exec_internal(
             source,
             data.len()
         );
+        crate::util::log::release_boot_marker(format_args!(
+            "exec: loaded '{}' from {} ({} bytes)",
+            path,
+            source,
+            data.len()
+        ));
         let result = exec_with_data(
             &data,
             &process_name,
