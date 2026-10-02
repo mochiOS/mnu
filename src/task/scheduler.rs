@@ -1,5 +1,4 @@
 use crate::interrupt::spinlock::SpinLock;
-use core::sync::atomic::Ordering;
 use spin::Once;
 
 use super::context::switch_to_thread_with_slots;
