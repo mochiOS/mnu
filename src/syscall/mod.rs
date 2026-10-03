@@ -5,6 +5,7 @@ pub mod dma;
 pub mod event;
 pub mod exec;
 pub mod fs;
+pub mod handle;
 pub mod io;
 pub mod ipc;
 pub mod performance;
@@ -752,6 +753,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::FilesystemMount as u64 => {
             fs::filesystem_mount(arg0, arg1, arg2, arg3, arg4)
         }
+        x if x == SyscallNumber::HandleClose as u64 => handle::close(arg0),
+        x if x == SyscallNumber::HandleDuplicate as u64 => handle::duplicate(arg0, arg1),
+        x if x == SyscallNumber::LaunchHandleGet as u64 => handle::launch_get(arg0),
         x if x == SyscallNumber::BootSystemSlot as u64 => boot_system_slot(),
         x if x == SyscallNumber::BootEspGuid as u64 => boot_esp_guid(arg0, arg1),
         x if x == SyscallNumber::DeviceControl as u64 => {
