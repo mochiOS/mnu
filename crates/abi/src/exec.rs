@@ -3,6 +3,13 @@
 /// Marks an environment entry in the NUL-separated process creation metadata.
 pub const ENVIRONMENT_PREFIX: &str = "__MNU_EXEC_ENV=";
 
+/// Adds a rights-restricted process-local handle to a child's LaunchContext.
+///
+/// The value is `key:source_handle:rights`, with unsigned decimal fields. The
+/// kernel treats `key` as opaque and does not expose this metadata in argv or
+/// envp. The source handle must carry TRANSFER and all requested rights.
+pub const INHERITED_HANDLE_PREFIX: &str = "__MNU_EXEC_INHERIT_HANDLE=";
+
 /// Assigns an opaque security identity to a new process.
 ///
 /// mnu uses this identity only for generic isolation mechanisms. The user space

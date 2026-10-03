@@ -215,7 +215,58 @@ pub enum SyscallNumber {
     IpcCallHandles = 623,
     FilesystemRegister = 624,
     FilesystemMount = 625,
+    HandleClose = 626,
+    HandleDuplicate = 627,
+    LaunchHandleGet = 628,
+    IpcCreateHandle = 629,
+    IpcSendObjectHandles = 630,
+    IpcRecvObjectHandles = 631,
+    IpcCallObjectHandles = 632,
+    IpcReplyObjectHandles = 633,
     CheckGravityExist = 999,
+}
+
+/// Maximum number of generic kernel object handles carried by one IPC message.
+pub const IPC_MAX_OBJECT_HANDLES: usize = 4;
+
+pub const HANDLE_RIGHT_READ: u64 = 1 << 0;
+pub const HANDLE_RIGHT_WRITE: u64 = 1 << 1;
+pub const HANDLE_RIGHT_SEND: u64 = 1 << 2;
+pub const HANDLE_RIGHT_RECEIVE: u64 = 1 << 3;
+pub const HANDLE_RIGHT_WAIT: u64 = 1 << 4;
+pub const HANDLE_RIGHT_SIGNAL: u64 = 1 << 5;
+pub const HANDLE_RIGHT_MAP: u64 = 1 << 6;
+pub const HANDLE_RIGHT_DUPLICATE: u64 = 1 << 62;
+pub const HANDLE_RIGHT_TRANSFER: u64 = 1 << 63;
+pub const HANDLE_RIGHT_ALL: u64 = HANDLE_RIGHT_READ
+    | HANDLE_RIGHT_WRITE
+    | HANDLE_RIGHT_SEND
+    | HANDLE_RIGHT_RECEIVE
+    | HANDLE_RIGHT_WAIT
+    | HANDLE_RIGHT_SIGNAL
+    | HANDLE_RIGHT_MAP
+    | HANDLE_RIGHT_DUPLICATE
+    | HANDLE_RIGHT_TRANSFER;
+
+/// One process-local object handle and the rights requested for transfer.
+///
+/// The receiver gets a different process-local handle number. `rights` must be
+/// a subset of the sender's rights and the source must include TRANSFER.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IpcObjectHandle {
+    pub handle: u32,
+    pub reserved: u32,
+    pub rights: u64,
+}
+
+/// Fixed-size generic object-handle attachment buffer used by IPC syscalls.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IpcObjectHandles {
+    pub count: u32,
+    pub reserved: u32,
+    pub handles: [IpcObjectHandle; IPC_MAX_OBJECT_HANDLES],
 }
 
 /// Maximum number of file handles carried by one IPC message.
@@ -287,6 +338,57 @@ pub struct StorageControlResponse {
     pub status: u32,
     pub device_id: u32,
     pub values: [u64; 4],
+}
+
+#[cfg(test)]
+mod object_handle_tests {
+    use super::*;
+
+    #[test]
+    fn object_handle_wire_layout_is_fixed() {
+        assert_eq!(core::mem::size_of::<IpcObjectHandle>(), 16);
+        assert_eq!(core::mem::size_of::<IpcObjectHandles>(), 72);
+        assert_eq!(core::mem::align_of::<IpcObjectHandles>(), 8);
+    }
+
+    #[test]
+    fn object_handle_rights_are_disjoint_and_complete() {
+        let rights = [
+            HANDLE_RIGHT_READ,
+            HANDLE_RIGHT_WRITE,
+            HANDLE_RIGHT_SEND,
+            HANDLE_RIGHT_RECEIVE,
+            HANDLE_RIGHT_WAIT,
+            HANDLE_RIGHT_SIGNAL,
+            HANDLE_RIGHT_MAP,
+            HANDLE_RIGHT_DUPLICATE,
+            HANDLE_RIGHT_TRANSFER,
+        ];
+        let mut combined = 0;
+        for right in rights {
+            assert_eq!(combined & right, 0);
+            combined |= right;
+        }
+        assert_eq!(combined, HANDLE_RIGHT_ALL);
+    }
+
+    #[test]
+    fn native_handle_syscalls_do_not_overlap_filesystem_registration() {
+        let numbers = [
+            SyscallNumber::HandleClose as u64,
+            SyscallNumber::HandleDuplicate as u64,
+            SyscallNumber::LaunchHandleGet as u64,
+            SyscallNumber::IpcCreateHandle as u64,
+            SyscallNumber::IpcSendObjectHandles as u64,
+            SyscallNumber::IpcRecvObjectHandles as u64,
+            SyscallNumber::IpcCallObjectHandles as u64,
+            SyscallNumber::IpcReplyObjectHandles as u64,
+        ];
+        assert!(numbers.iter().all(|number| *number > 625));
+        for (index, number) in numbers.iter().enumerate() {
+            assert!(!numbers[..index].contains(number));
+        }
+    }
 }
 
 /// Opaque platform device messages; the selected capability scopes operations.
