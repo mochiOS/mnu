@@ -11,6 +11,7 @@ use crate::result::{Kernel, Process as ProcessError, Result};
 use super::fd_table::FdTable;
 use super::handle_table::ObjectHandleTable;
 use super::ids::{PrivilegeLevel, ProcessId, ProcessState};
+use super::launch_context::LaunchContext;
 use super::signal::SignalState;
 
 /// プロセス単位の resource limit
@@ -603,6 +604,8 @@ pub struct Process {
     fd_table: alloc::boxed::Box<FdTable>,
     /// Process-local references to kernel mechanism objects.
     object_handles: alloc::boxed::Box<ObjectHandleTable>,
+    /// Opaque inherited-handle names supplied by the trusted launch path.
+    launch_context: alloc::boxed::Box<LaunchContext>,
     /// file-backed mmap の VMA テーブル
     mmap_regions: alloc::vec::Vec<MmapRegion>,
     /// 借用 MMIO マッピング
@@ -672,6 +675,7 @@ impl Process {
             signal_state: alloc::boxed::Box::new(SignalState::new()),
             fd_table: FdTable::new_boxed(),
             object_handles: ObjectHandleTable::new_boxed(),
+            launch_context: LaunchContext::new_boxed(),
             mmap_regions: alloc::vec::Vec::new(),
             mmio_mappings: Vec::new(),
             dma_buffers: Vec::new(),
@@ -1210,6 +1214,18 @@ impl Process {
 
     pub fn set_object_handles(&mut self, table: alloc::boxed::Box<ObjectHandleTable>) {
         self.object_handles = table;
+    }
+
+    pub fn launch_context(&self) -> &LaunchContext {
+        &self.launch_context
+    }
+
+    pub fn launch_context_mut(&mut self) -> &mut LaunchContext {
+        &mut self.launch_context
+    }
+
+    pub fn set_launch_context(&mut self, context: alloc::boxed::Box<LaunchContext>) {
+        self.launch_context = context;
     }
 
     /// プロセスグループ ID を取得（0 は自身の PID を意味する）

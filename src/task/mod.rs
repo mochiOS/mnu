@@ -6,6 +6,7 @@ pub mod context;
 pub mod fd_table;
 pub mod handle_table;
 pub mod ids;
+pub mod launch_context;
 pub mod process;
 pub mod scheduler;
 pub mod signal;
@@ -19,6 +20,7 @@ pub use handle_table::{
     PROCESS_MAX_OBJECT_HANDLES,
 };
 pub use ids::{PrivilegeLevel, ProcessId, ProcessState, SchedulingClass, ThreadId, ThreadState};
+pub use launch_context::{LaunchContext, PROCESS_MAX_INHERITED_HANDLES};
 pub(crate) use process::ProcessCredentials;
 pub use process::{
     add_process, find_process_id_by_name, for_each_process, has_child_process, mark_process_exited,
