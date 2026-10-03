@@ -9,6 +9,7 @@ use crate::capability::{CapabilitySet, KernelAuthority, KernelAuthoritySet, Kern
 use crate::result::{Kernel, Process as ProcessError, Result};
 
 use super::fd_table::FdTable;
+use super::handle_table::ObjectHandleTable;
 use super::ids::{PrivilegeLevel, ProcessId, ProcessState};
 use super::signal::SignalState;
 
@@ -600,6 +601,8 @@ pub struct Process {
     signal_state: alloc::boxed::Box<SignalState>,
     /// プロセスごとのファイルディスクリプタテーブル — ヒープに置いてスタック消費を抑える
     fd_table: alloc::boxed::Box<FdTable>,
+    /// Process-local references to kernel mechanism objects.
+    object_handles: alloc::boxed::Box<ObjectHandleTable>,
     /// file-backed mmap の VMA テーブル
     mmap_regions: alloc::vec::Vec<MmapRegion>,
     /// 借用 MMIO マッピング
@@ -668,6 +671,7 @@ impl Process {
             sid: 0,
             signal_state: alloc::boxed::Box::new(SignalState::new()),
             fd_table: FdTable::new_boxed(),
+            object_handles: ObjectHandleTable::new_boxed(),
             mmap_regions: alloc::vec::Vec::new(),
             mmio_mappings: Vec::new(),
             dma_buffers: Vec::new(),
@@ -1190,6 +1194,22 @@ impl Process {
     /// FD テーブルを差し替える（fork の子プロセス初期化で使用）
     pub fn set_fd_table(&mut self, table: alloc::boxed::Box<FdTable>) {
         self.fd_table = table;
+    }
+
+    pub fn object_handles(&self) -> &ObjectHandleTable {
+        &self.object_handles
+    }
+
+    pub fn object_handles_mut(&mut self) -> &mut ObjectHandleTable {
+        &mut self.object_handles
+    }
+
+    pub fn clone_object_handles(&self) -> alloc::boxed::Box<ObjectHandleTable> {
+        alloc::boxed::Box::new((*self.object_handles).clone())
+    }
+
+    pub fn set_object_handles(&mut self, table: alloc::boxed::Box<ObjectHandleTable>) {
+        self.object_handles = table;
     }
 
     /// プロセスグループ ID を取得（0 は自身の PID を意味する）

@@ -4,6 +4,7 @@
 
 pub mod context;
 pub mod fd_table;
+pub mod handle_table;
 pub mod ids;
 pub mod process;
 pub mod scheduler;
@@ -13,6 +14,10 @@ pub mod usermode;
 
 pub use context::{switch_context, switch_to_thread, Context};
 pub use fd_table::{FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, PROCESS_MAX_FDS};
+pub use handle_table::{
+    HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ObjectHandleTable,
+    PROCESS_MAX_OBJECT_HANDLES,
+};
 pub use ids::{PrivilegeLevel, ProcessId, ProcessState, SchedulingClass, ThreadId, ThreadState};
 pub(crate) use process::ProcessCredentials;
 pub use process::{
