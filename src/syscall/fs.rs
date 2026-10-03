@@ -4,12 +4,12 @@ use super::types::{
     EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS,
     ENOTDIR, EOVERFLOW, EPIPE, EROFS, ESRCH, SUCCESS,
 };
-use crate::capability::path::{
-    self, PathOwner, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE,
-};
 use crate::capability::Capability;
+use crate::capability::path::{
+    self, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner,
+};
 use crate::task::fd_table::{
-    FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS,
+    FD_BASE, FdTable, FileHandle, FileHandleCap, O_CLOEXEC, OpenFile, PROCESS_MAX_FDS,
 };
 use crate::vfs::{self, FilesystemId, InodeId, MountId, Vnode, VnodeKind};
 use alloc::string::String;
@@ -817,11 +817,16 @@ fn open_userspace_for_pid(
         if (flags & O_CREAT) == 0 {
             return ENOENT;
         }
+        let Some((uid, gid)) = current_effective_ids() else {
+            return EACCES;
+        };
         node = match vfs::userspace::create(
             mount.mount_id.0,
             &mount.path,
             (mode & 0o777) as u32,
             mochios_filesystem_protocol::NODE_TYPE_REGULAR,
+            uid,
+            gid,
         ) {
             Ok(node) => Some(node),
             Err(errno) => return errno,
@@ -1251,11 +1256,16 @@ pub fn mkdir(path_ptr: u64, mode: u64) -> u64 {
         return errno;
     }
     if let Some(mount) = userspace_mount(&resolved) {
+        let Some((uid, gid)) = current_effective_ids() else {
+            return EACCES;
+        };
         return match vfs::userspace::create(
             mount.mount_id.0,
             &mount.path,
             (mode as u32) & 0o777,
             mochios_filesystem_protocol::NODE_TYPE_DIRECTORY,
+            uid,
+            gid,
         ) {
             Ok(_) => SUCCESS,
             Err(errno) => errno,
@@ -1335,7 +1345,10 @@ pub fn symlink(target_ptr: u64, link_path_ptr: u64) -> u64 {
     let Some(mount) = userspace_mount(&link_path) else {
         return ENOSYS;
     };
-    match vfs::userspace::symlink(mount.mount_id.0, &target, &mount.path) {
+    let Some((uid, gid)) = current_effective_ids() else {
+        return EACCES;
+    };
+    match vfs::userspace::symlink(mount.mount_id.0, &target, &mount.path, uid, gid) {
         Ok(_) => SUCCESS,
         Err(errno) => errno,
     }
@@ -2950,10 +2963,10 @@ pub fn file_sync(fd: u64) -> u64 {
 #[cfg(test)]
 mod unix_mode_tests {
     use super::{
-        access_mode_rights, capability_requirement_satisfied, open_path_required_rights,
-        path_is_in_identity_storage, resolve_relative_to_cwd, sticky_directory_allows_delete,
-        unix_mode_allows, userspace_mode, O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC,
-        PATH_LIST, PATH_READ, PATH_WRITE, UNIX_EXECUTE,
+        O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE,
+        UNIX_EXECUTE, access_mode_rights, capability_requirement_satisfied,
+        open_path_required_rights, path_is_in_identity_storage, resolve_relative_to_cwd,
+        sticky_directory_allows_delete, unix_mode_allows, userspace_mode,
     };
     use crate::capability::Capability;
 

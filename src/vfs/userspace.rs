@@ -174,7 +174,14 @@ pub fn set_attr(
     node_info(response.header, response.payload())
 }
 
-pub fn create(mount_id: u64, path: &str, mode: u32, kind: u32) -> Result<NodeInfo, u64> {
+pub fn create(
+    mount_id: u64,
+    path: &str,
+    mode: u32,
+    kind: u32,
+    uid: u32,
+    gid: u32,
+) -> Result<NodeInfo, u64> {
     if path.is_empty() || path.len() > protocol::MAX_PATH_LEN {
         return Err(EINVAL);
     }
@@ -185,6 +192,7 @@ pub fn create(mount_id: u64, path: &str, mode: u32, kind: u32) -> Result<NodeInf
             length: path.len() as u32,
             flags: kind,
             mode,
+            offset: u64::from(uid) | (u64::from(gid) << 32),
             ..protocol::Header::default()
         },
         path.as_bytes(),
@@ -211,7 +219,13 @@ pub fn unlink(mount_id: u64, path: &str, kind: u32) -> Result<(), u64> {
     Ok(())
 }
 
-pub fn symlink(mount_id: u64, target: &str, link_path: &str) -> Result<NodeInfo, u64> {
+pub fn symlink(
+    mount_id: u64,
+    target: &str,
+    link_path: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<NodeInfo, u64> {
     let total = target.len().checked_add(link_path.len()).ok_or(EINVAL)?;
     if target.is_empty()
         || link_path.is_empty()
@@ -228,6 +242,8 @@ pub fn symlink(mount_id: u64, target: &str, link_path: &str) -> Result<NodeInfo,
         protocol::Header {
             opcode: protocol::OP_SYMLINK,
             mount_id,
+            node_id: u64::from(uid),
+            open_id: u64::from(gid),
             offset: target.len() as u64,
             length: total as u32,
             ..protocol::Header::default()
@@ -356,8 +372,8 @@ fn call(
     let request_id = header.request_id;
     let mut request = vec![0u8; protocol::HEADER_LEN + payload.len()];
     let request_len = protocol::encode(header, payload, &mut request).map_err(|_| EINVAL)?;
-    let endpoint = crate::vfs::userspace_endpoint(crate::vfs::MountId(header.mount_id))
-        .ok_or(ENXIO)?;
+    let endpoint =
+        crate::vfs::userspace_endpoint(crate::vfs::MountId(header.mount_id)).ok_or(ENXIO)?;
     let mut reply = vec![0u8; reply_capacity.max(protocol::HEADER_LEN)];
     let reply_len =
         crate::syscall::ipc::call_from_kernel(endpoint, &request[..request_len], &mut reply)?;
