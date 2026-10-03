@@ -213,6 +213,8 @@ pub enum SyscallNumber {
     IpcSendHandles = 621,
     IpcRecvHandles = 622,
     IpcCallHandles = 623,
+    FilesystemRegister = 624,
+    FilesystemMount = 625,
     CheckGravityExist = 999,
 }
 
@@ -404,6 +406,12 @@ mod credential_spawn_tests {
             super::FILE_HANDLE_RIGHT_ALL & super::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET,
             0
         );
+    }
+
+    #[test]
+    fn userspace_filesystem_syscall_numbers_are_stable() {
+        assert_eq!(super::SyscallNumber::FilesystemRegister as u64, 624);
+        assert_eq!(super::SyscallNumber::FilesystemMount as u64, 625);
     }
 }
 

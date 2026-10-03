@@ -627,6 +627,17 @@ pub fn write_user_u16(ptr: u64, value: u16) -> Result<(), u64> {
 
 pub use types::*;
 
+const _: () = {
+    assert!(
+        mochios_filesystem_protocol::SYS_FILESYSTEM_REGISTER
+            == mnu_abi::SyscallNumber::FilesystemRegister as u64
+    );
+    assert!(
+        mochios_filesystem_protocol::SYS_FILESYSTEM_MOUNT
+            == mnu_abi::SyscallNumber::FilesystemMount as u64
+    );
+};
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 static LAST_SYSCALL_NUM: AtomicU64 = AtomicU64::new(0);
@@ -737,10 +748,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::BlockRead as u64 => storage::block_read(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::BlockWrite as u64 => storage::block_write(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::BlockFlush as u64 => storage::block_flush(arg0),
-        x if x == mochios_filesystem_protocol::SYS_FILESYSTEM_REGISTER => {
-            fs::filesystem_register(arg0)
-        }
-        x if x == mochios_filesystem_protocol::SYS_FILESYSTEM_MOUNT => {
+        x if x == SyscallNumber::FilesystemRegister as u64 => fs::filesystem_register(arg0),
+        x if x == SyscallNumber::FilesystemMount as u64 => {
             fs::filesystem_mount(arg0, arg1, arg2, arg3, arg4)
         }
         x if x == SyscallNumber::BootSystemSlot as u64 => boot_system_slot(),
