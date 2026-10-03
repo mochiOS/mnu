@@ -297,6 +297,70 @@ pub fn call(
     result
 }
 
+/// Performs a synchronous IPC call whose request carries rights-restricted
+/// file handles. Replies use the existing byte-only reply path.
+pub fn call_handles(
+    dest_endpoint_handle: u64,
+    req_ptr: u64,
+    req_len: u64,
+    reply_ptr: u64,
+    reply_len: u64,
+    handles_ptr: u64,
+) -> u64 {
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::IpcClient,
+        crate::capability::Capability::IpcServer,
+    ]) {
+        return EACCES;
+    }
+    let Some(dest_record) = endpoint_record_from_handle(dest_endpoint_handle) else {
+        return EINVAL;
+    };
+    if !dest_record.rights.contains(EndpointRights::RECV) {
+        return EACCES;
+    }
+    let caller = match crate::task::current_thread_id() {
+        Some(id) => id.as_u64(),
+        None => return EINVAL,
+    };
+    let sender = match ensure_endpoint_for_thread(caller) {
+        Some(handle) => handle,
+        None => return EINVAL,
+    };
+    let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
+    let sent = loop {
+        let attachments = match decode_outgoing_file_handles(handles_ptr) {
+            Ok(handles) => handles,
+            Err(error) => return error,
+        };
+        let status = send_to_thread_id_with_kind(
+            dest_record.thread_id,
+            sender,
+            call_id,
+            req_ptr,
+            req_len,
+            false,
+            true,
+            attachments,
+        );
+        if status != EAGAIN {
+            break status;
+        }
+        crate::task::yield_now();
+    };
+    if sent != 0 {
+        return sent;
+    }
+    recv_blocking_reply_for_thread(
+        caller,
+        caller,
+        dest_endpoint_handle,
+        call_id,
+        reply_ptr,
+        reply_len,
+    )
+}
+
 pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
     let current = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),

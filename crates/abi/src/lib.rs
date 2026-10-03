@@ -212,6 +212,7 @@ pub enum SyscallNumber {
     BootEspGuid = 620,
     IpcSendHandles = 621,
     IpcRecvHandles = 622,
+    IpcCallHandles = 623,
     CheckGravityExist = 999,
 }
 
@@ -390,6 +391,7 @@ mod credential_spawn_tests {
     fn ipc_file_handle_abi_is_stable() {
         assert_eq!(super::SyscallNumber::IpcSendHandles as u64, 621);
         assert_eq!(super::SyscallNumber::IpcRecvHandles as u64, 622);
+        assert_eq!(super::SyscallNumber::IpcCallHandles as u64, 623);
         assert_eq!(core::mem::size_of::<super::IpcFileHandle>(), 8);
         assert_eq!(core::mem::size_of::<super::IpcFileHandles>(), 40);
         assert_eq!(super::FILE_HANDLE_RIGHT_ALL & (1 << 4), 0);
