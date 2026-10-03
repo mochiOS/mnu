@@ -507,11 +507,14 @@ pub fn wait(buf_ptr: u64, max_len: u64, blocking: u64) -> u64 {
     if blocking == 0 {
         return recv_from_thread_nonblocking(current, current, buf_ptr, max_len, None);
     }
-    let target_thread = match resolve_endpoint_handle(blocking) {
-        Some(thread_id) => thread_id,
+    let target = match endpoint_record_from_handle(blocking) {
+        Some(record) => record,
         None => return EINVAL,
     };
-    recv_blocking_for_thread(target_thread, current, buf_ptr, max_len, None)
+    if target.thread_id != current || !target.rights.contains(EndpointRights::RECV) {
+        return EACCES;
+    }
+    recv_blocking_for_thread(target.thread_id, current, buf_ptr, max_len, None)
 }
 
 pub fn send_to_endpoint(endpoint: IpcEndpoint, buf_ptr: u64, len: u64) -> u64 {
@@ -2337,11 +2340,20 @@ pub fn recv_handles(buf_ptr: u64, max_len: u64, handles_ptr: u64, blocking: u64)
     if blocking == 0 {
         return recv_from_thread_nonblocking(current, current, buf_ptr, max_len, Some(handles_ptr));
     }
-    let target_thread = match resolve_endpoint_handle(blocking) {
-        Some(thread_id) => thread_id,
+    let target = match endpoint_record_from_handle(blocking) {
+        Some(record) => record,
         None => return EINVAL,
     };
-    recv_blocking_for_thread(target_thread, current, buf_ptr, max_len, Some(handles_ptr))
+    if target.thread_id != current || !target.rights.contains(EndpointRights::RECV) {
+        return EACCES;
+    }
+    recv_blocking_for_thread(
+        target.thread_id,
+        current,
+        buf_ptr,
+        max_len,
+        Some(handles_ptr),
+    )
 }
 
 /// カーネル内部から、特定送信元のIPCをノンブロッキング受信する
