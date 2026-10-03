@@ -231,6 +231,11 @@ pub const FILE_HANDLE_RIGHT_SYNC: u32 = 1 << 9;
 pub const FILE_HANDLE_RIGHT_TRUNCATE: u32 = 1 << 10;
 /// Allows the receiving process to attach the handle to another IPC message.
 pub const FILE_HANDLE_RIGHT_TRANSFER: u32 = 1 << 11;
+/// Requests a new open-file description whose offset starts at zero.
+///
+/// This is an IPC transfer option, not a capability granted to the receiver.
+/// The kernel strips it before validating and installing the requested rights.
+pub const IPC_FILE_HANDLE_FLAG_FRESH_OFFSET: u32 = 1 << 31;
 pub const FILE_HANDLE_RIGHT_ALL: u32 = FILE_HANDLE_RIGHT_READ
     | FILE_HANDLE_RIGHT_WRITE
     | FILE_HANDLE_RIGHT_SEEK
@@ -395,6 +400,10 @@ mod credential_spawn_tests {
         assert_eq!(core::mem::size_of::<super::IpcFileHandle>(), 8);
         assert_eq!(core::mem::size_of::<super::IpcFileHandles>(), 40);
         assert_eq!(super::FILE_HANDLE_RIGHT_ALL & (1 << 4), 0);
+        assert_eq!(
+            super::FILE_HANDLE_RIGHT_ALL & super::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET,
+            0
+        );
     }
 }
 

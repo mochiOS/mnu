@@ -594,13 +594,17 @@ fn decode_outgoing_file_handles(pointer: u64) -> Result<FileHandleAttachments, u
         if fd < crate::task::FD_BASE as i32 {
             return Err(EBADF);
         }
-        let requested = FileHandleCap::from_bits(rights).ok_or(EINVAL)?;
+        let fresh_offset = rights & mnu_abi::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET != 0;
+        let requested_rights = rights & !mnu_abi::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET;
+        let requested = FileHandleCap::from_bits(requested_rights).ok_or(EINVAL)?;
         let duplicated = crate::task::with_process(process_id, |process| {
             let source = process.fd_table().get(fd as usize).ok_or(EBADF)?;
-            source
-                .duplicate_restricted(requested)
-                .map(Box::new)
-                .ok_or(EACCES)
+            let duplicate = if fresh_offset {
+                source.duplicate_restricted_with_fresh_offset(requested)
+            } else {
+                source.duplicate_restricted(requested)
+            };
+            duplicate.map(Box::new).ok_or(EACCES)
         })
         .ok_or(EBADF)??;
         attachments.handles[index] = Some(duplicated);
