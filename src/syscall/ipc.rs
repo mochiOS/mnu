@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-use crate::task::{FileHandle, FileHandleCap};
+use crate::task::{FileHandle, FileHandleCap, HandleRights, KernelObject, ObjectHandleEntry};
 
 use super::{EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EMSGSIZE, ENOSPC};
 
@@ -235,6 +235,52 @@ pub fn create(flags: u64, _reserved: u64) -> u64 {
         None => return EINVAL,
     };
     ensure_endpoint_for_thread(thread_id).unwrap_or(EINVAL)
+}
+
+/// Creates a process-local IPC endpoint handle.
+///
+/// Unlike the transitional global endpoint number returned by `create`, this
+/// value is meaningful only in the caller's object-handle table.
+pub fn create_handle(flags: u64, _reserved: u64) -> u64 {
+    if flags != 0 {
+        return EINVAL;
+    }
+    let thread_id = match crate::task::current_thread_id() {
+        Some(id) => id.as_u64(),
+        None => return EINVAL,
+    };
+    let process_id = match crate::task::thread_to_process_id(thread_id) {
+        Some(process_id) => process_id,
+        None => return EINVAL,
+    };
+    let endpoint = match endpoint_for_thread(thread_id) {
+        Some(endpoint) => endpoint,
+        None => return EINVAL,
+    };
+    let endpoint_rights = endpoint_rights_for_process(process_id.as_u64());
+    let mut rights = HandleRights::DUPLICATE.union(HandleRights::TRANSFER);
+    if endpoint_rights.contains(EndpointRights::SEND) {
+        rights = rights.union(HandleRights::SEND);
+    }
+    if endpoint_rights.contains(EndpointRights::RECV) {
+        rights = rights.union(HandleRights::RECEIVE);
+    }
+    let entry = ObjectHandleEntry::new(
+        KernelObject::IpcEndpoint {
+            thread_id: endpoint.thread_id,
+            slot: endpoint.slot,
+            generation: endpoint.generation,
+        },
+        rights,
+    );
+    crate::task::with_process_mut(process_id, |process| {
+        process
+            .object_handles_mut()
+            .insert(entry)
+            .map(|handle| handle.raw() as u64)
+            .unwrap_or(ENOSPC)
+    })
+    .unwrap_or(EINVAL)
 }
 
 pub fn call(
