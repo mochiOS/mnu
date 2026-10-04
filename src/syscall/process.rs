@@ -708,6 +708,7 @@ fn clone_current_process(result: CloneResult) -> u64 {
     let child_handle = if result == CloneResult::ProcessHandle {
         match crate::task::with_process_mut(parent_pid, |process| {
             let rights = crate::task::HandleRights::WAIT
+                .union(crate::task::HandleRights::SIGNAL)
                 .union(crate::task::HandleRights::DUPLICATE)
                 .union(crate::task::HandleRights::TRANSFER);
             process.object_handles_mut().insert(
@@ -744,13 +745,16 @@ fn clone_current_process(result: CloneResult) -> u64 {
             return ENOMEM;
         }
     };
-    let child_thread = crate::task::Thread::new_fork_child(
+    let mut child_thread = crate::task::Thread::new_fork_child(
         child_pid,
         user_context,
         parent_fs,
         kstack,
         kstack_size,
     );
+    if result == CloneResult::ProcessHandle {
+        child_thread.set_state(crate::task::ThreadState::Blocked);
+    }
     if crate::task::add_thread(child_thread).is_none() {
         crate::task::free_kernel_stack(kstack);
         if let Some(handle) = child_handle {

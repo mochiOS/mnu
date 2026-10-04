@@ -509,6 +509,63 @@ pub fn process_wait(raw: u64, deadline_ticks: u64, output: u64) -> u64 {
     }
 }
 
+pub fn process_resume(raw: u64) -> u64 {
+    let object = match object(raw, HandleRights::SIGNAL) {
+        Ok(object) => object,
+        Err(error) => return error,
+    };
+    let KernelObject::Process(process_id) = object else {
+        return EBADF;
+    };
+    let process_id = crate::task::ProcessId::from_u64(process_id);
+    if crate::task::with_process(process_id, |_| ()).is_none() {
+        return ESRCH;
+    }
+    let mut threads = alloc::vec::Vec::new();
+    crate::task::for_each_thread(|thread| {
+        if thread.process_id() == process_id {
+            threads.push(thread.id());
+        }
+    });
+    if threads.is_empty() {
+        return ESRCH;
+    }
+    for thread in threads {
+        crate::task::wake_thread(thread);
+    }
+    SUCCESS
+}
+
+pub fn process_terminate(raw: u64, exit_code: u64) -> u64 {
+    let object = match object(raw, HandleRights::SIGNAL) {
+        Ok(object) => object,
+        Err(error) => return error,
+    };
+    let KernelObject::Process(process_id) = object else {
+        return EBADF;
+    };
+    let process_id = crate::task::ProcessId::from_u64(process_id);
+    if crate::task::with_process(process_id, |_| ()).is_none() {
+        return ESRCH;
+    }
+    if crate::syscall::security::current_process_id() == Some(process_id) {
+        crate::task::scheduler::exit_current_process(exit_code as i32);
+    }
+    let mut threads = alloc::vec::Vec::new();
+    crate::task::for_each_thread(|thread| {
+        if thread.process_id() == process_id {
+            threads.push(thread.id());
+        }
+    });
+    for thread in threads {
+        crate::task::terminate_thread(thread);
+    }
+    crate::task::release_process_mmio_mappings(process_id);
+    crate::task::release_process_dma_buffers(process_id);
+    crate::task::mark_process_exited(process_id, exit_code);
+    SUCCESS
+}
+
 pub fn launch_get(key: u64) -> u64 {
     let process_id = match current_process() {
         Ok(process_id) => process_id,

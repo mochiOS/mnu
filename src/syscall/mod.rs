@@ -759,6 +759,10 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ProcessHandleWait as u64 => {
             handle::process_wait(arg0, arg1, arg2)
         }
+        x if x == SyscallNumber::ProcessHandleResume as u64 => handle::process_resume(arg0),
+        x if x == SyscallNumber::ProcessHandleTerminate as u64 => {
+            handle::process_terminate(arg0, arg1)
+        }
         x if x == SyscallNumber::ProviderObjectCreate as u64 => {
             handle::provider_object_create(arg0, arg1, arg2)
         }
