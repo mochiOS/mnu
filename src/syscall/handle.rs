@@ -101,6 +101,39 @@ pub fn seek(raw: u64, offset: u64, basis: u64) -> u64 {
     }
 }
 
+pub fn options_get(raw: u64) -> u64 {
+    let object = match object(raw, HandleRights::CONTROL) {
+        Ok(object) => object,
+        Err(error) => return error,
+    };
+    match object {
+        KernelObject::File(file) => match crate::syscall::fs::file_handle_options(&file) {
+            Ok(options) => options,
+            Err(error) => error,
+        },
+        _ => ENOTSUP,
+    }
+}
+
+pub fn options_set(raw: u64, options: u64) -> u64 {
+    if options & !mnu_abi::HANDLE_OPTIONS_ALL != 0 {
+        return EINVAL;
+    }
+    let object = match object(raw, HandleRights::CONTROL) {
+        Ok(object) => object,
+        Err(error) => return error,
+    };
+    match object {
+        KernelObject::File(file) => {
+            match crate::syscall::fs::set_file_handle_options(&file, options) {
+                Ok(()) => SUCCESS,
+                Err(error) => error,
+            }
+        }
+        _ => ENOTSUP,
+    }
+}
+
 fn provider_endpoint(provider: &ProviderObject) -> crate::syscall::ipc::IpcEndpoint {
     crate::syscall::ipc::IpcEndpoint {
         thread_id: provider.endpoint_thread_id,
@@ -870,6 +903,7 @@ pub fn stream_pair_create(output: u64) -> u64 {
             read,
             HandleRights::READ
                 .union(HandleRights::WAIT)
+                .union(HandleRights::CONTROL)
                 .union(HandleRights::DUPLICATE)
                 .union(HandleRights::TRANSFER),
         ));
@@ -880,6 +914,7 @@ pub fn stream_pair_create(output: u64) -> u64 {
             write,
             HandleRights::WRITE
                 .union(HandleRights::WAIT)
+                .union(HandleRights::CONTROL)
                 .union(HandleRights::DUPLICATE)
                 .union(HandleRights::TRANSFER),
         ));

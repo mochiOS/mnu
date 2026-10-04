@@ -78,6 +78,7 @@ impl HandleRights {
     pub const SIGNAL: Self = Self(1 << 5);
     pub const MAP: Self = Self(1 << 6);
     pub const SEEK: Self = Self(1 << 7);
+    pub const CONTROL: Self = Self(1 << 8);
     pub const DUPLICATE: Self = Self(1 << 62);
     pub const TRANSFER: Self = Self(1 << 63);
 
@@ -114,6 +115,7 @@ impl HandleRights {
             | Self::SIGNAL.0
             | Self::MAP.0
             | Self::SEEK.0
+            | Self::CONTROL.0
             | Self::DUPLICATE.0
             | Self::TRANSFER.0,
     );
@@ -342,6 +344,7 @@ mod tests {
                 pipe_id: None,
                 pipe_write: false,
                 open_flags: 0,
+                io_options: 0,
             },
             FileHandleCap::READ.union(FileHandleCap::TRANSFER),
         ));

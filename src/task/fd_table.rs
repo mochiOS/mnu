@@ -115,6 +115,8 @@ pub struct OpenFile {
     pub pipe_write: bool,
     /// open()/openat() のファイル状態フラグ（F_GETFL/F_SETFL 用）
     pub open_flags: u64,
+    /// Native object behavior flags. These are independent of any POSIX ABI.
+    pub io_options: u64,
 }
 
 impl OpenFile {
@@ -128,6 +130,7 @@ impl OpenFile {
             pipe_id: Some(pipe_id),
             pipe_write,
             open_flags,
+            io_options: 0,
         }
     }
 }
@@ -207,6 +210,7 @@ impl FileHandle {
                 pipe_id: None,
                 pipe_write: false,
                 open_flags: open.open_flags,
+                io_options: open.io_options,
             },
             requested,
         ))
@@ -394,6 +398,17 @@ mod tests {
     }
 
     #[test]
+    fn duplicated_stream_handles_share_native_options() {
+        let source = FileHandle::new_pipe_read(usize::MAX);
+        let duplicate = source.duplicate();
+        source.open.lock().io_options = mnu_abi::HANDLE_OPTION_NONBLOCKING;
+        assert_eq!(
+            duplicate.open.lock().io_options,
+            mnu_abi::HANDLE_OPTION_NONBLOCKING
+        );
+    }
+
+    #[test]
     fn fresh_offset_transfer_does_not_share_the_open_file_description() {
         let source = FileHandle::new(
             OpenFile {
@@ -405,6 +420,7 @@ mod tests {
                 pipe_id: None,
                 pipe_write: false,
                 open_flags: 0,
+                io_options: 0,
             },
             FileHandleCap::READ
                 .union(FileHandleCap::SEEK)

@@ -2,7 +2,7 @@
 
 use super::types::{
     EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS,
-    ENOTDIR, EOVERFLOW, EPIPE, EROFS, ESRCH, SUCCESS,
+    ENOTDIR, ENOTSUP, EOVERFLOW, EPIPE, EROFS, ESRCH, SUCCESS,
 };
 use crate::capability::Capability;
 use crate::capability::path::{
@@ -961,6 +961,7 @@ fn open_userspace_for_pid(
             pipe_id: None,
             pipe_write: false,
             open_flags: flags,
+            io_options: 0,
         },
         cap,
     ));
@@ -1058,6 +1059,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
             pipe_id: None,
             pipe_write: false,
             open_flags: flags,
+            io_options: 0,
         },
         cap,
     ));
@@ -1173,6 +1175,26 @@ pub(crate) fn seek_file_handle(handle: &FileHandle, offset: i64, basis: SeekBasi
         Ok(position) => position,
         Err(_) => EOVERFLOW,
     }
+}
+
+pub(crate) fn file_handle_options(handle: &FileHandle) -> Result<u64, u64> {
+    let open = handle.open.lock();
+    if open.pipe_id.is_none() {
+        return Err(ENOTSUP);
+    }
+    Ok(open.io_options)
+}
+
+pub(crate) fn set_file_handle_options(handle: &FileHandle, options: u64) -> Result<(), u64> {
+    if options & !mnu_abi::HANDLE_OPTIONS_ALL != 0 {
+        return Err(EINVAL);
+    }
+    let mut open = handle.open.lock();
+    if open.pipe_id.is_none() {
+        return Err(ENOTSUP);
+    }
+    open.io_options = options;
+    Ok(())
 }
 
 /// Linux x86_64 struct stat をユーザーバッファに書き込む
@@ -1509,13 +1531,13 @@ pub(crate) fn read_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> u
     }
     let open_file = handle.open.clone();
 
-    let (pipe_id, open_flags) = {
+    let (pipe_id, io_options) = {
         let open = open_file.lock();
-        (open.pipe_id, open.open_flags)
+        (open.pipe_id, open.io_options)
     };
 
     if let Some(pipe_id) = pipe_id {
-        return read_pipe(pipe_id, open_flags, buf_ptr, len);
+        return read_pipe(pipe_id, io_options, buf_ptr, len);
     }
 
     let to_copy = match usize::try_from(len) {
@@ -1621,7 +1643,7 @@ pub(crate) fn read_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> u
     written as u64
 }
 
-fn read_pipe(pipe_id: usize, open_flags: u64, buf_ptr: u64, len: u64) -> u64 {
+fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
     let target_len = match usize::try_from(len) {
         Ok(v) => v.min(MAX_IO_BYTES),
         Err(_) => MAX_IO_BYTES,
@@ -1638,7 +1660,7 @@ fn read_pipe(pipe_id: usize, open_flags: u64, buf_ptr: u64, len: u64) -> u64 {
             if pipe.writers == 0 {
                 return 0;
             }
-            if (open_flags & O_NONBLOCK) != 0 {
+            if (io_options & mnu_abi::HANDLE_OPTION_NONBLOCKING) != 0 {
                 return EAGAIN;
             }
             if !pipe.waiters.contains(&current) {
@@ -1701,12 +1723,12 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
         return EACCES;
     }
     let open_file = handle.open.clone();
-    let (pipe_id, open_flags) = {
+    let (pipe_id, io_options) = {
         let open = open_file.lock();
-        (open.pipe_id, open.open_flags)
+        (open.pipe_id, open.io_options)
     };
     if let Some(pipe_id) = pipe_id {
-        return write_pipe(pipe_id, open_flags, buf_ptr, len);
+        return write_pipe(pipe_id, io_options, buf_ptr, len);
     }
 
     let Ok(len_usize) = usize::try_from(len) else {
@@ -1809,7 +1831,7 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
     written as u64
 }
 
-fn write_pipe(pipe_id: usize, open_flags: u64, buf_ptr: u64, len: u64) -> u64 {
+fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
     let Ok(len_usize) = usize::try_from(len) else {
         return EINVAL;
     };
@@ -1840,7 +1862,7 @@ fn write_pipe(pipe_id: usize, open_flags: u64, buf_ptr: u64, len: u64) -> u64 {
             wake_stream_waiters(waiters);
             return len;
         }
-        if (open_flags & O_NONBLOCK) != 0 {
+        if (io_options & mnu_abi::HANDLE_OPTION_NONBLOCKING) != 0 {
             return EAGAIN;
         }
         if !pipe.waiters.contains(&current) {
@@ -1908,6 +1930,13 @@ pub fn fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
             };
             let mut open = open_file.lock();
             open.open_flags = (open.open_flags & O_ACCMODE) | (arg & !O_ACCMODE);
+            if open.pipe_id.is_some() {
+                open.io_options = if (arg & O_NONBLOCK) != 0 {
+                    mnu_abi::HANDLE_OPTION_NONBLOCKING
+                } else {
+                    0
+                };
+            }
             SUCCESS
         }
         F_GETLK => SUCCESS,

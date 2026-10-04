@@ -203,6 +203,8 @@ pub enum SyscallNumber {
     HandleWaitMany = 647,
     ContextHandleBind = 648,
     StreamPairCreate = 649,
+    HandleOptionsGet = 650,
+    HandleOptionsSet = 651,
     CheckGravityExist = 999,
 }
 
@@ -295,6 +297,7 @@ pub const HANDLE_RIGHT_WAIT: u64 = 1 << 4;
 pub const HANDLE_RIGHT_SIGNAL: u64 = 1 << 5;
 pub const HANDLE_RIGHT_MAP: u64 = 1 << 6;
 pub const HANDLE_RIGHT_SEEK: u64 = 1 << 7;
+pub const HANDLE_RIGHT_CONTROL: u64 = 1 << 8;
 pub const HANDLE_RIGHT_DUPLICATE: u64 = 1 << 62;
 pub const HANDLE_RIGHT_TRANSFER: u64 = 1 << 63;
 pub const HANDLE_RIGHT_ALL: u64 = HANDLE_RIGHT_READ
@@ -305,6 +308,7 @@ pub const HANDLE_RIGHT_ALL: u64 = HANDLE_RIGHT_READ
     | HANDLE_RIGHT_SIGNAL
     | HANDLE_RIGHT_MAP
     | HANDLE_RIGHT_SEEK
+    | HANDLE_RIGHT_CONTROL
     | HANDLE_RIGHT_DUPLICATE
     | HANDLE_RIGHT_TRANSFER;
 
@@ -316,6 +320,10 @@ pub const HANDLE_RIGHT_ALL: u64 = HANDLE_RIGHT_READ
 pub const HANDLE_SEEK_START: u64 = 0x4d4e_5501;
 pub const HANDLE_SEEK_CURRENT: u64 = 0x4d4e_5502;
 pub const HANDLE_SEEK_END: u64 = 0x4d4e_5503;
+
+/// Return immediately when an object operation would otherwise block.
+pub const HANDLE_OPTION_NONBLOCKING: u64 = 1 << 0;
+pub const HANDLE_OPTIONS_ALL: u64 = HANDLE_OPTION_NONBLOCKING;
 
 /// One process-local object handle and the rights requested for transfer.
 ///
@@ -433,6 +441,7 @@ mod object_handle_tests {
             HANDLE_RIGHT_SIGNAL,
             HANDLE_RIGHT_MAP,
             HANDLE_RIGHT_SEEK,
+            HANDLE_RIGHT_CONTROL,
             HANDLE_RIGHT_DUPLICATE,
             HANDLE_RIGHT_TRANSFER,
         ];
@@ -471,6 +480,8 @@ mod object_handle_tests {
             SyscallNumber::HandleWaitMany as u64,
             SyscallNumber::ContextHandleBind as u64,
             SyscallNumber::StreamPairCreate as u64,
+            SyscallNumber::HandleOptionsGet as u64,
+            SyscallNumber::HandleOptionsSet as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -619,6 +630,8 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::HandleWaitMany as u64, 647);
         assert_eq!(super::SyscallNumber::ContextHandleBind as u64, 648);
         assert_eq!(super::SyscallNumber::StreamPairCreate as u64, 649);
+        assert_eq!(super::SyscallNumber::HandleOptionsGet as u64, 650);
+        assert_eq!(super::SyscallNumber::HandleOptionsSet as u64, 651);
         assert_eq!(core::mem::size_of::<super::StreamPair>(), 8);
         assert_eq!(super::SyscallNumber::ProcessHandleResume as u64, 645);
         assert_eq!(super::SyscallNumber::ProcessHandleTerminate as u64, 646);
