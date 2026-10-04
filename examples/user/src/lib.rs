@@ -110,9 +110,7 @@ const SYS_EVENT_POLL: u64 = mnu_abi::SyscallNumber::EventPoll as u64;
 const SYS_TIME_NOW: u64 = mnu_abi::SyscallNumber::TimeNow as u64;
 const SYS_SERVICE_SPAWN: u64 = mnu_abi::SyscallNumber::ServiceSpawn as u64;
 const SYS_PERFORMANCE_SNAPSHOT: u64 = mnu_abi::SyscallNumber::PerformanceSnapshot as u64;
-const SYS_YIELD: u64 = mnu_abi::SyscallNumber::Yield as u64;
 const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
-const SYS_GET_TICKS: u64 = mnu_abi::SyscallNumber::GetTicks as u64;
 const SYS_CHECK_THREAD_CAPABILITY: u64 = mnu_abi::SyscallNumber::CheckThreadCapability as u64;
 const SYS_LIST_PROCESSES: u64 = mnu_abi::SyscallNumber::ListProcesses as u64;
 const SYS_FIND_PROCESS_BY_NAME: u64 = mnu_abi::SyscallNumber::FindProcessByName as u64;
@@ -881,7 +879,7 @@ pub fn gettid() -> u64 {
 }
 
 pub fn yield_now() -> u64 {
-    unsafe { syscall0(SYS_YIELD) }
+    unsafe { syscall0(SYS_THREAD_YIELD) }
 }
 
 pub fn sleep(milliseconds: u64) -> u64 {
@@ -889,7 +887,7 @@ pub fn sleep(milliseconds: u64) -> u64 {
 }
 
 pub fn get_ticks() -> u64 {
-    unsafe { syscall0(SYS_GET_TICKS) }
+    unsafe { syscall0(SYS_TIME_NOW) }
 }
 
 pub fn list_processes(buf: &mut [u8]) -> u64 {

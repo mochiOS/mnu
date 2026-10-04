@@ -88,8 +88,6 @@ pub enum SyscallNumber {
     Getrlimit = 97,
     Getdents64 = 217,
 
-    Yield = 512,
-    GetTicks = 513,
     IpcSend = 514,
     IpcRecv = 515,
     Exec = 516,
