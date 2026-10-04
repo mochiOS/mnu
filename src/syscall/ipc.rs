@@ -286,6 +286,47 @@ pub fn create_handle(flags: u64, _reserved: u64) -> u64 {
     .unwrap_or(EINVAL)
 }
 
+fn process_local_endpoint(raw: u64, required: HandleRights) -> Result<IpcEndpoint, u64> {
+    let raw = u32::try_from(raw).map_err(|_| EBADF)?;
+    let handle = ObjectHandle::from_raw(raw).ok_or(EBADF)?;
+    let process_id = crate::syscall::security::current_process_id().ok_or(EINVAL)?;
+    let entry = crate::task::with_process(process_id, |process| {
+        process.object_handles().get(handle)
+    })
+    .flatten()
+    .ok_or(EBADF)?;
+    if !entry.rights().contains(required) {
+        return Err(EACCES);
+    }
+    let KernelObject::IpcEndpoint {
+        thread_id,
+        slot,
+        generation,
+    } = entry.object()
+    else {
+        return Err(EINVAL);
+    };
+    let endpoint = IpcEndpoint {
+        thread_id,
+        slot,
+        generation,
+    };
+    endpoint_is_valid(endpoint).then_some(endpoint).ok_or(EINVAL)
+}
+
+fn resolve_call_destination(raw: u64) -> Result<(u64, u64), u64> {
+    if raw <= crate::task::PROCESS_MAX_OBJECT_HANDLES as u64 {
+        let endpoint = process_local_endpoint(raw, HandleRights::SEND)?;
+        let sender_identity = ensure_endpoint_for_thread(endpoint.thread_id).ok_or(EINVAL)?;
+        return Ok((endpoint.thread_id, sender_identity));
+    }
+    let record = endpoint_record_from_handle(raw).ok_or(EINVAL)?;
+    if !record.rights.contains(EndpointRights::RECV) {
+        return Err(EACCES);
+    }
+    Ok((record.thread_id, raw))
+}
+
 pub fn call(
     dest_endpoint_handle: u64,
     req_ptr: u64,
@@ -299,14 +340,10 @@ pub fn call(
     ]) {
         return EACCES;
     }
-    let dest_record = match endpoint_record_from_handle(dest_endpoint_handle) {
-        Some(record) => record,
-        None => return EINVAL,
+    let (dest_thread_id, expected_sender) = match resolve_call_destination(dest_endpoint_handle) {
+        Ok(destination) => destination,
+        Err(error) => return error,
     };
-    if !dest_record.rights.contains(EndpointRights::RECV) {
-        return EACCES;
-    }
-    let dest_thread_id = dest_record.thread_id;
     let caller = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
         None => return EINVAL,
@@ -331,7 +368,7 @@ pub fn call(
     let result = recv_blocking_reply_for_thread(
         caller,
         caller,
-        dest_endpoint_handle,
+        expected_sender,
         call_id,
         reply_ptr,
         reply_len,
