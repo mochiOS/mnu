@@ -4,6 +4,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::fd_table::FileHandle;
+use super::process::ProcessObject;
 
 pub const PROCESS_MAX_OBJECT_HANDLES: usize = 4096;
 
@@ -130,7 +131,7 @@ pub enum KernelObject {
         generation: u64,
     },
     Event(u64),
-    Process(u64),
+    Process(Arc<ProcessObject>),
     VmObject(u64),
     File(Arc<FileHandle>),
     Provider(Arc<ProviderObject>),
@@ -150,7 +151,10 @@ impl core::fmt::Debug for KernelObject {
                 .field("generation", generation)
                 .finish(),
             Self::Event(id) => formatter.debug_tuple("Event").field(id).finish(),
-            Self::Process(id) => formatter.debug_tuple("Process").field(id).finish(),
+            Self::Process(process) => formatter
+                .debug_tuple("Process")
+                .field(&process.id())
+                .finish(),
             Self::VmObject(id) => formatter.debug_tuple("VmObject").field(id).finish(),
             Self::File(file) => formatter
                 .debug_tuple("File")

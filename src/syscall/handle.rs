@@ -391,6 +391,10 @@ pub fn process_open(endpoint: u64, requested_rights: u64) -> u64 {
     let Some(target) = crate::task::thread_to_process_id(thread_id) else {
         return ESRCH;
     };
+    let Some(target_object) = crate::task::with_process(target, |process| process.process_object())
+    else {
+        return ESRCH;
+    };
     let process_id = match current_process() {
         Ok(process_id) => process_id,
         Err(error) => return error,
@@ -399,7 +403,7 @@ pub fn process_open(endpoint: u64, requested_rights: u64) -> u64 {
         process
             .object_handles_mut()
             .insert(ObjectHandleEntry::new(
-                KernelObject::Process(target.as_u64()),
+                KernelObject::Process(target_object),
                 rights,
             ))
             .map(|handle| handle.raw() as u64)
@@ -410,27 +414,20 @@ pub fn process_open(endpoint: u64, requested_rights: u64) -> u64 {
 
 fn process_status_for(raw: u64) -> Result<mnu_abi::ProcessStatus, u64> {
     let object = object(raw, HandleRights::WAIT)?;
-    let KernelObject::Process(process_id) = object else {
+    let KernelObject::Process(process) = object else {
         return Err(EBADF);
     };
-    let process_id = crate::task::ProcessId::from_u64(process_id);
-    crate::task::with_process(process_id, |process| {
-        let exited = matches!(
-            process.state(),
-            crate::task::ProcessState::Zombie | crate::task::ProcessState::Terminated
-        );
-        mnu_abi::ProcessStatus {
-            process_id: process_id.as_u64(),
-            state: if exited {
-                mnu_abi::PROCESS_STATE_EXITED
-            } else {
-                mnu_abi::PROCESS_STATE_RUNNING
-            },
-            reserved: 0,
-            exit_code: process.exit_code().unwrap_or(0),
-        }
+    let exited = process.is_exited();
+    Ok(mnu_abi::ProcessStatus {
+        process_id: process.id().as_u64(),
+        state: if exited {
+            mnu_abi::PROCESS_STATE_EXITED
+        } else {
+            mnu_abi::PROCESS_STATE_RUNNING
+        },
+        reserved: 0,
+        exit_code: process.exit_code(),
     })
-    .ok_or(ESRCH)
 }
 
 fn write_process_status(output: u64, status: mnu_abi::ProcessStatus) -> u64 {
@@ -459,7 +456,7 @@ pub fn process_status(raw: u64, output: u64) -> u64 {
 /// value; zero polls and `u64::MAX` waits indefinitely.
 pub fn process_wait(raw: u64, deadline_ticks: u64, output: u64) -> u64 {
     let process_id = match object(raw, HandleRights::WAIT) {
-        Ok(KernelObject::Process(process_id)) => crate::task::ProcessId::from_u64(process_id),
+        Ok(KernelObject::Process(process)) => process.id(),
         Ok(_) => return EBADF,
         Err(error) => return error,
     };
@@ -521,18 +518,12 @@ fn wait_item_signal(item: &mut mnu_abi::HandleWaitItem) -> Result<(WaitTarget, b
     }
     let object = object(u64::from(item.handle), HandleRights::WAIT)?;
     match object {
-        KernelObject::Process(process_id) => {
+        KernelObject::Process(process) => {
             if item.interests & !mnu_abi::HANDLE_SIGNAL_TERMINATED != 0 {
                 return Err(EINVAL);
             }
-            let process_id = crate::task::ProcessId::from_u64(process_id);
-            let exited = crate::task::with_process(process_id, |process| {
-                matches!(
-                    process.state(),
-                    crate::task::ProcessState::Zombie | crate::task::ProcessState::Terminated
-                )
-            })
-            .ok_or(ESRCH)?;
+            let process_id = process.id();
+            let exited = process.is_exited();
             item.observed = if exited {
                 mnu_abi::HANDLE_SIGNAL_TERMINATED
             } else {
@@ -696,10 +687,10 @@ pub fn process_resume(raw: u64) -> u64 {
         Ok(object) => object,
         Err(error) => return error,
     };
-    let KernelObject::Process(process_id) = object else {
+    let KernelObject::Process(process) = object else {
         return EBADF;
     };
-    let process_id = crate::task::ProcessId::from_u64(process_id);
+    let process_id = process.id();
     if crate::task::with_process(process_id, |_| ()).is_none() {
         return ESRCH;
     }
@@ -723,10 +714,10 @@ pub fn process_terminate(raw: u64, exit_code: u64) -> u64 {
         Ok(object) => object,
         Err(error) => return error,
     };
-    let KernelObject::Process(process_id) = object else {
+    let KernelObject::Process(process) = object else {
         return EBADF;
     };
-    let process_id = crate::task::ProcessId::from_u64(process_id);
+    let process_id = process.id();
     if crate::task::with_process(process_id, |_| ()).is_none() {
         return ESRCH;
     }

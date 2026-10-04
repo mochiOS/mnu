@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use crate::capability::{CapabilitySet, KernelAuthority, KernelAuthoritySet, KernelCapability};
 use crate::result::{Kernel, Process as ProcessError, Result};
@@ -409,6 +410,43 @@ pub(crate) struct ProcessCredentials {
     effective_gid: u32,
 }
 
+/// Stable native process lifecycle object retained by `ProcessHandle`s after
+/// execution resources leave the process table.
+#[derive(Debug)]
+pub struct ProcessObject {
+    id: ProcessId,
+    state: AtomicU8,
+    exit_code: AtomicU64,
+}
+
+impl ProcessObject {
+    fn new(id: ProcessId) -> Self {
+        Self {
+            id,
+            state: AtomicU8::new(mnu_abi::PROCESS_STATE_RUNNING as u8),
+            exit_code: AtomicU64::new(0),
+        }
+    }
+
+    pub const fn id(&self) -> ProcessId {
+        self.id
+    }
+
+    pub fn is_exited(&self) -> bool {
+        self.state.load(Ordering::Acquire) == mnu_abi::PROCESS_STATE_EXITED as u8
+    }
+
+    pub fn exit_code(&self) -> u64 {
+        self.exit_code.load(Ordering::Acquire)
+    }
+
+    fn mark_exited(&self, exit_code: u64) {
+        self.exit_code.store(exit_code, Ordering::Relaxed);
+        self.state
+            .store(mnu_abi::PROCESS_STATE_EXITED as u8, Ordering::Release);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplicationProvenance {
     BuiltIn,
@@ -543,6 +581,7 @@ impl ProcessCredentials {
 pub struct Process {
     /// プロセスID
     id: ProcessId,
+    object: Arc<ProcessObject>,
     /// 検証済みinstall metadataから導出されたapplication identity。
     application_identity: Option<ApplicationIdentity>,
     pending_exec_security: Option<PendingExecSecurity>,
@@ -639,8 +678,10 @@ impl Process {
         // 0x40000000番地あたりを開始にする例が多いが、ここでは0にしておく。
         let heap_start = 0;
 
+        let id = ProcessId::new();
         Self {
-            id: ProcessId::new(),
+            id,
+            object: Arc::new(ProcessObject::new(id)),
             application_identity: None,
             pending_exec_security: None,
             name: name_buf,
@@ -686,6 +727,10 @@ impl Process {
     /// プロセスIDを取得
     pub fn id(&self) -> ProcessId {
         self.id
+    }
+
+    pub fn process_object(&self) -> Arc<ProcessObject> {
+        Arc::clone(&self.object)
     }
 
     /// セキュリティIDを取得
@@ -820,6 +865,7 @@ impl Process {
     pub fn mark_exited(&mut self, exit_code: u64) {
         self.state = ProcessState::Zombie;
         self.exit_code = Some(exit_code);
+        self.object.mark_exited(exit_code);
     }
 
     /// ページテーブルアドレスを取得

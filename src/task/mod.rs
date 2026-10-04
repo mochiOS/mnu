@@ -30,7 +30,7 @@ pub use process::{
     reap_zombie_child_process, register_process_exit_waiter, release_process_dma_buffers,
     release_process_mmio_mappings, remove_process, remove_process_exit_waiter,
     remove_process_exit_waiters, with_process, with_process_mut, DmaBuffer, MmapBacking, MmapRegion,
-    MmioMapping, Process, ProcessTable, ResourceLimits,
+    MmioMapping, Process, ProcessObject, ProcessTable, ResourceLimits,
 };
 pub use scheduler::{
     block_current_thread, exit_current_task, init_scheduler, is_scheduler_enabled,

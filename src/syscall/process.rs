@@ -700,6 +700,7 @@ fn clone_current_process(result: CloneResult) -> u64 {
         child_proc.set_fd_table(table);
     }
     let child_pid = child_proc.id();
+    let child_object = child_proc.process_object();
     if crate::task::add_process(child_proc).is_none() {
         let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOMEM;
@@ -713,7 +714,7 @@ fn clone_current_process(result: CloneResult) -> u64 {
                 .union(crate::task::HandleRights::TRANSFER);
             process.object_handles_mut().insert(
                 crate::task::ObjectHandleEntry::new(
-                    crate::task::KernelObject::Process(child_pid.as_u64()),
+                    crate::task::KernelObject::Process(child_object),
                     rights,
                 ),
             )
