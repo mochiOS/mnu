@@ -25,6 +25,13 @@ const PIPE_BUFFER_CAP: usize = 64 * 1024;
 const UNIX_EXECUTE: u32 = 1 << 31;
 const LINUX_STAT_SIZE: usize = 144;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SeekBasis {
+    Start,
+    Current,
+    End,
+}
+
 fn transferred_io_bytes(result: u64) -> u64 {
     (result <= MAX_IO_BYTES as u64)
         .then_some(result)
@@ -107,6 +114,10 @@ fn open_file(
         table.get(fd).map(|handle| handle.open.clone())
     })
     .flatten()
+}
+
+fn file_handle(pid_raw: u64, fd: usize) -> Option<FileHandle> {
+    with_fd_table(pid_raw, |table| table.get(fd).map(FileHandle::duplicate)).flatten()
 }
 
 fn file_handle_cap(pid_raw: u64, fd: u64) -> Result<FileHandleCap, u64> {
@@ -1032,22 +1043,30 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
         Some(p) => p,
         None => return EBADF,
     };
-    if let Err(errno) = require_cap(pid, fd, FileHandleCap::SEEK) {
-        return errno;
-    }
     let idx = fd as usize;
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
-
-    let Some(open_file) = open_file(pid, idx) else {
+    let Some(handle) = file_handle(pid, idx) else {
         return EBADF;
     };
-    if whence > 2 {
-        return EINVAL;
-    }
 
-    let end_position = if whence == 2 {
+    let basis = match whence {
+        0 => SeekBasis::Start,
+        1 => SeekBasis::Current,
+        2 => SeekBasis::End,
+        _ => return EINVAL,
+    };
+    seek_file_handle(&handle, offset, basis)
+}
+
+pub(crate) fn seek_file_handle(handle: &FileHandle, offset: i64, basis: SeekBasis) -> u64 {
+    if !handle.cap.contains(FileHandleCap::SEEK) {
+        return EACCES;
+    }
+    let open_file = handle.open.clone();
+
+    let end_position = if basis == SeekBasis::End {
         let (vnode, fallback_size) = {
             let open = open_file.lock();
             (open.vnode.clone(), open.data.len() as u64)
@@ -1066,14 +1085,13 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
     };
 
     let mut open = open_file.lock();
-    let base = match whence {
-        0 => 0,
-        1 => match i64::try_from(open.pos) {
+    let base = match basis {
+        SeekBasis::Start => 0,
+        SeekBasis::Current => match i64::try_from(open.pos) {
             Ok(position) => position,
             Err(_) => return EOVERFLOW,
         },
-        2 => end_position.unwrap_or(0),
-        _ => return EINVAL,
+        SeekBasis::End => end_position.unwrap_or(0),
     };
     let Some(new_position) = base.checked_add(offset) else {
         return EOVERFLOW;
@@ -1577,18 +1595,6 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
 }
 
 fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
-    if buf_ptr == 0 {
-        return EFAULT;
-    }
-
-    if len == 0 {
-        return 0;
-    }
-
-    if !crate::syscall::validate_user_ptr(buf_ptr, len) {
-        return EFAULT;
-    }
-
     if fd < FD_BASE as u64 {
         return EBADF;
     }
@@ -1598,19 +1604,33 @@ fn read_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         None => return EBADF,
     };
 
-    if let Err(errno) = require_cap(pid, fd, FileHandleCap::READ) {
-        return errno;
-    }
-
     let idx = fd as usize;
 
     if idx >= PROCESS_MAX_FDS {
         return EBADF;
     }
 
-    let Some(open_file) = open_file(pid, idx) else {
+    let Some(handle) = file_handle(pid, idx) else {
         return EBADF;
     };
+
+    read_file_handle(&handle, buf_ptr, len)
+}
+
+pub(crate) fn read_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> u64 {
+    if buf_ptr == 0 {
+        return EFAULT;
+    }
+    if len == 0 {
+        return 0;
+    }
+    if !crate::syscall::validate_user_ptr(buf_ptr, len) {
+        return EFAULT;
+    }
+    if !handle.cap.contains(FileHandleCap::READ) {
+        return EACCES;
+    }
+    let open_file = handle.open.clone();
 
     let (pipe_id, open_flags) = {
         let open = open_file.lock();
@@ -1773,6 +1793,24 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
 }
 
 fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
+    if fd < FD_BASE as u64 {
+        return EBADF;
+    }
+    let pid = match current_process_id_raw() {
+        Some(p) => p,
+        None => return EBADF,
+    };
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
+    let Some(handle) = file_handle(pid, idx) else {
+        return EBADF;
+    };
+    write_file_handle(&handle, buf_ptr, len)
+}
+
+pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> u64 {
     if buf_ptr == 0 {
         return EFAULT;
     }
@@ -1782,23 +1820,10 @@ fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if !crate::syscall::validate_user_ptr(buf_ptr, len) {
         return EFAULT;
     }
-    if fd < FD_BASE as u64 {
-        return EBADF;
+    if !handle.cap.contains(FileHandleCap::WRITE) {
+        return EACCES;
     }
-    let pid = match current_process_id_raw() {
-        Some(p) => p,
-        None => return EBADF,
-    };
-    if let Err(errno) = require_cap(pid, fd, FileHandleCap::WRITE) {
-        return errno;
-    }
-    let idx = fd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
-    let Some(open_file) = open_file(pid, idx) else {
-        return EBADF;
-    };
+    let open_file = handle.open.clone();
     let pipe_id = {
         let open = open_file.lock();
         open.pipe_id

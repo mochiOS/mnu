@@ -223,6 +223,9 @@ pub enum SyscallNumber {
     IpcRecvObjectHandles = 631,
     IpcCallObjectHandles = 632,
     IpcReplyObjectHandles = 633,
+    HandleRead = 634,
+    HandleWrite = 635,
+    HandleSeek = 636,
     CheckGravityExist = 999,
 }
 
@@ -236,6 +239,7 @@ pub const HANDLE_RIGHT_RECEIVE: u64 = 1 << 3;
 pub const HANDLE_RIGHT_WAIT: u64 = 1 << 4;
 pub const HANDLE_RIGHT_SIGNAL: u64 = 1 << 5;
 pub const HANDLE_RIGHT_MAP: u64 = 1 << 6;
+pub const HANDLE_RIGHT_SEEK: u64 = 1 << 7;
 pub const HANDLE_RIGHT_DUPLICATE: u64 = 1 << 62;
 pub const HANDLE_RIGHT_TRANSFER: u64 = 1 << 63;
 pub const HANDLE_RIGHT_ALL: u64 = HANDLE_RIGHT_READ
@@ -245,8 +249,18 @@ pub const HANDLE_RIGHT_ALL: u64 = HANDLE_RIGHT_READ
     | HANDLE_RIGHT_WAIT
     | HANDLE_RIGHT_SIGNAL
     | HANDLE_RIGHT_MAP
+    | HANDLE_RIGHT_SEEK
     | HANDLE_RIGHT_DUPLICATE
     | HANDLE_RIGHT_TRANSFER;
+
+/// Native seek bases used by `HandleSeek`.
+///
+/// These values intentionally do not match the POSIX `SEEK_*` constants.
+/// Compatibility libraries must translate their public ABI to this native
+/// mechanism explicitly.
+pub const HANDLE_SEEK_START: u64 = 0x4d4e_5501;
+pub const HANDLE_SEEK_CURRENT: u64 = 0x4d4e_5502;
+pub const HANDLE_SEEK_END: u64 = 0x4d4e_5503;
 
 /// One process-local object handle and the rights requested for transfer.
 ///
@@ -361,6 +375,7 @@ mod object_handle_tests {
             HANDLE_RIGHT_WAIT,
             HANDLE_RIGHT_SIGNAL,
             HANDLE_RIGHT_MAP,
+            HANDLE_RIGHT_SEEK,
             HANDLE_RIGHT_DUPLICATE,
             HANDLE_RIGHT_TRANSFER,
         ];
@@ -383,6 +398,9 @@ mod object_handle_tests {
             SyscallNumber::IpcRecvObjectHandles as u64,
             SyscallNumber::IpcCallObjectHandles as u64,
             SyscallNumber::IpcReplyObjectHandles as u64,
+            SyscallNumber::HandleRead as u64,
+            SyscallNumber::HandleWrite as u64,
+            SyscallNumber::HandleSeek as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -514,6 +532,16 @@ mod credential_spawn_tests {
     fn userspace_filesystem_syscall_numbers_are_stable() {
         assert_eq!(super::SyscallNumber::FilesystemRegister as u64, 624);
         assert_eq!(super::SyscallNumber::FilesystemMount as u64, 625);
+    }
+
+    #[test]
+    fn native_file_handle_io_abi_is_not_posix_seek_abi() {
+        assert_eq!(super::SyscallNumber::HandleRead as u64, 634);
+        assert_eq!(super::SyscallNumber::HandleWrite as u64, 635);
+        assert_eq!(super::SyscallNumber::HandleSeek as u64, 636);
+        assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_START));
+        assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_CURRENT));
+        assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_END));
     }
 }
 

@@ -34,6 +34,7 @@ impl HandleRights {
     pub const WAIT: Self = Self(1 << 4);
     pub const SIGNAL: Self = Self(1 << 5);
     pub const MAP: Self = Self(1 << 6);
+    pub const SEEK: Self = Self(1 << 7);
     pub const DUPLICATE: Self = Self(1 << 62);
     pub const TRANSFER: Self = Self(1 << 63);
 
@@ -69,6 +70,7 @@ impl HandleRights {
             | Self::WAIT.0
             | Self::SIGNAL.0
             | Self::MAP.0
+            | Self::SEEK.0
             | Self::DUPLICATE.0
             | Self::TRANSFER.0,
     );

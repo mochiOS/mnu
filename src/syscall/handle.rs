@@ -1,4 +1,6 @@
-use crate::task::{HandleRights, ObjectHandle};
+use alloc::sync::Arc;
+
+use crate::task::{FileHandle, HandleRights, KernelObject, ObjectHandle};
 
 use super::{EACCES, EBADF, EINVAL, ENOSPC, SUCCESS};
 
@@ -9,6 +11,52 @@ fn current_process() -> Result<crate::task::ProcessId, u64> {
 fn decode_handle(raw: u64) -> Result<ObjectHandle, u64> {
     let raw = u32::try_from(raw).map_err(|_| EBADF)?;
     ObjectHandle::from_raw(raw).ok_or(EBADF)
+}
+
+fn file(raw: u64, required_right: HandleRights) -> Result<Arc<FileHandle>, u64> {
+    let process_id = current_process()?;
+    let handle = decode_handle(raw)?;
+    crate::task::with_process(process_id, |process| {
+        let entry = process.object_handles().get(handle).ok_or(EBADF)?;
+        if !entry.rights().contains(required_right) {
+            return Err(EACCES);
+        }
+        match entry.object() {
+            KernelObject::File(file) => Ok(file.clone()),
+            _ => Err(EBADF),
+        }
+    })
+    .unwrap_or(Err(EINVAL))
+}
+
+pub fn read(raw: u64, buffer: u64, length: u64) -> u64 {
+    let file = match file(raw, HandleRights::READ) {
+        Ok(file) => file,
+        Err(error) => return error,
+    };
+    crate::syscall::fs::read_file_handle(&file, buffer, length)
+}
+
+pub fn write(raw: u64, buffer: u64, length: u64) -> u64 {
+    let file = match file(raw, HandleRights::WRITE) {
+        Ok(file) => file,
+        Err(error) => return error,
+    };
+    crate::syscall::fs::write_file_handle(&file, buffer, length)
+}
+
+pub fn seek(raw: u64, offset: u64, basis: u64) -> u64 {
+    let file = match file(raw, HandleRights::SEEK) {
+        Ok(file) => file,
+        Err(error) => return error,
+    };
+    let basis = match basis {
+        mnu_abi::HANDLE_SEEK_START => crate::syscall::fs::SeekBasis::Start,
+        mnu_abi::HANDLE_SEEK_CURRENT => crate::syscall::fs::SeekBasis::Current,
+        mnu_abi::HANDLE_SEEK_END => crate::syscall::fs::SeekBasis::End,
+        _ => return EINVAL,
+    };
+    crate::syscall::fs::seek_file_handle(&file, offset as i64, basis)
 }
 
 pub fn close(raw: u64) -> u64 {
