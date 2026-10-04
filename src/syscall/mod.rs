@@ -794,15 +794,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::Lseek as u64 => fs::seek(arg0, arg1 as i64, arg2),
         x if x == SyscallNumber::Fsync as u64 => fs::fsync(arg0),
         x if x == SyscallNumber::Fdatasync as u64 => fs::fdatasync(arg0),
-        x if x == SyscallNumber::Unlink as u64 => fs::unlink(arg0),
-        x if x == SyscallNumber::Unlinkat as u64 => fs::unlinkat(arg0 as i64, arg1, arg2),
-        x if x == SyscallNumber::Renameat as u64 => {
-            fs::renameat(arg0 as i64, arg1, arg2 as i64, arg3)
-        }
         x if x == SyscallNumber::Statfs as u64 => fs::statfs(arg0, arg1),
         x if x == SyscallNumber::Getdents64 as u64 => fs::getdents64(arg0, arg1, arg2),
         x if x == SyscallNumber::Ftruncate as u64 => fs::ftruncate(arg0, arg1),
-        x if x == SyscallNumber::Rmdir as u64 => fs::rmdir(arg0),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
         x if x == SyscallNumber::AllocSharedPages as u64 => {
@@ -873,11 +867,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         }
         x if x == SyscallNumber::FileFstat as u64 => fs::file_fstat(arg0, arg1),
         x if x == SyscallNumber::FileReadDir as u64 => fs::file_read_dir(arg0, arg1, arg2),
-        x if x == SyscallNumber::FileCreateDir as u64 => fs::file_create_dir(arg0, arg1),
-        x if x == SyscallNumber::FileRemove as u64 => fs::file_remove(arg0),
-        x if x == SyscallNumber::FileRename as u64 => {
-            fs::file_rename(arg0 as i64, arg1, arg2 as i64, arg3)
-        }
         x if x == SyscallNumber::FileSync as u64 => fs::file_sync(arg0),
         x if x == SyscallNumber::Chdir as u64 => fs::chdir(arg0),
         x if x == SyscallNumber::Getcwd as u64 => fs::getcwd(arg0, arg1),
