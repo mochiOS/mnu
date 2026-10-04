@@ -1534,31 +1534,57 @@ impl Default for ProcessTable {
 /// グローバルプロセステーブル
 static PROCESS_TABLE: SpinLock<ProcessTable> = SpinLock::new(ProcessTable::new());
 const MAX_PROCESS_EXIT_WAITERS: usize = super::ThreadQueue::MAX_THREADS;
-static PROCESS_EXIT_WAITERS: SpinLock<
-    [Option<(super::ThreadId, ProcessId)>; MAX_PROCESS_EXIT_WAITERS],
-> = SpinLock::new([None; MAX_PROCESS_EXIT_WAITERS]);
+
+struct ProcessExitWaiter {
+    thread: super::ThreadId,
+    processes: Vec<ProcessId>,
+}
+
+static PROCESS_EXIT_WAITERS: SpinLock<[Option<ProcessExitWaiter>; MAX_PROCESS_EXIT_WAITERS]> =
+    SpinLock::new([const { None }; MAX_PROCESS_EXIT_WAITERS]);
 
 pub fn register_process_exit_waiter(thread: super::ThreadId, process: ProcessId) -> bool {
     let mut waiters = PROCESS_EXIT_WAITERS.lock();
-    if waiters
-        .iter()
+    if let Some(waiter) = waiters
+        .iter_mut()
         .flatten()
-        .any(|(candidate, _)| *candidate == thread)
+        .find(|waiter| waiter.thread == thread)
     {
-        return false;
+        if !waiter.processes.contains(&process) {
+            waiter.processes.push(process);
+        }
+        return true;
     }
     let Some(slot) = waiters.iter_mut().find(|slot| slot.is_none()) else {
         return false;
     };
-    *slot = Some((thread, process));
+    *slot = Some(ProcessExitWaiter {
+        thread,
+        processes: alloc::vec![process],
+    });
     true
+}
+
+pub fn remove_process_exit_waiters(thread: super::ThreadId) {
+    let mut waiters = PROCESS_EXIT_WAITERS.lock();
+    for slot in waiters.iter_mut() {
+        if slot.as_ref().is_some_and(|waiter| waiter.thread == thread) {
+            *slot = None;
+        }
+    }
 }
 
 pub fn remove_process_exit_waiter(thread: super::ThreadId, process: ProcessId) {
     let mut waiters = PROCESS_EXIT_WAITERS.lock();
     for slot in waiters.iter_mut() {
-        if slot.is_some_and(|entry| entry == (thread, process)) {
-            *slot = None;
+        if let Some(waiter) = slot {
+            if waiter.thread != thread {
+                continue;
+            }
+            waiter.processes.retain(|candidate| *candidate != process);
+            if waiter.processes.is_empty() {
+                *slot = None;
+            }
         }
     }
 }
@@ -1569,10 +1595,13 @@ fn wake_process_exit_waiters(process: ProcessId) {
     {
         let mut waiters = PROCESS_EXIT_WAITERS.lock();
         for slot in waiters.iter_mut() {
-            if slot.is_some_and(|(_, candidate)| candidate == process) {
+            if slot
+                .as_ref()
+                .is_some_and(|waiter| waiter.processes.contains(&process))
+            {
                 if count < wake.len() {
-                    if let Some((thread, _)) = *slot {
-                        wake[count] = Some(thread);
+                    if let Some(waiter) = slot.as_ref() {
+                        wake[count] = Some(waiter.thread);
                         count += 1;
                     }
                 }

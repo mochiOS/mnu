@@ -3,7 +3,7 @@ use alloc::vec;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
-use super::{EACCES, EAGAIN, EBADF, EINVAL, EIO, ENOSPC, ESRCH, SUCCESS};
+use super::{EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EIO, ENOSPC, ENOTSUP, ESRCH, SUCCESS};
 
 pub(crate) fn flush_provider_releases() {
     let releases = crate::task::handle_table::take_provider_releases();
@@ -506,6 +506,132 @@ pub fn process_wait(raw: u64, deadline_ticks: u64, output: u64) -> u64 {
         }
         crate::task::yield_now();
         crate::task::remove_process_exit_waiter(current, process_id);
+    }
+}
+
+fn wait_item_signal(
+    item: &mut mnu_abi::HandleWaitItem,
+) -> Result<(crate::task::ProcessId, bool), u64> {
+    if item.reserved != 0
+        || item.interests == 0
+        || item.interests & !mnu_abi::HANDLE_SIGNAL_TERMINATED != 0
+    {
+        return Err(EINVAL);
+    }
+    let object = object(u64::from(item.handle), HandleRights::WAIT)?;
+    let KernelObject::Process(process_id) = object else {
+        return Err(ENOTSUP);
+    };
+    let process_id = crate::task::ProcessId::from_u64(process_id);
+    let exited = crate::task::with_process(process_id, |process| {
+        matches!(
+            process.state(),
+            crate::task::ProcessState::Zombie | crate::task::ProcessState::Terminated
+        )
+    })
+    .ok_or(ESRCH)?;
+    item.observed = if exited {
+        mnu_abi::HANDLE_SIGNAL_TERMINATED
+    } else {
+        0
+    };
+    Ok((process_id, exited))
+}
+
+fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) -> Result<(), u64> {
+    let bytes = unsafe {
+        core::slice::from_raw_parts(items.as_ptr().cast::<u8>(), core::mem::size_of_val(items))
+    };
+    crate::syscall::copy_to_user(items_ptr, bytes)
+}
+
+/// Waits until one of the supplied process-local object handles observes an
+/// interested native signal. The return value is the ready item's index.
+/// `deadline_ticks` is an absolute `TimeNow` value; zero polls and
+/// `u64::MAX` waits indefinitely.
+pub fn wait_many(items_ptr: u64, count: u64, deadline_ticks: u64) -> u64 {
+    let count = match usize::try_from(count) {
+        Ok(count) if count > 0 && count <= mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS => count,
+        _ => return EINVAL,
+    };
+    let byte_len = match count.checked_mul(core::mem::size_of::<mnu_abi::HandleWaitItem>()) {
+        Some(length) => length,
+        None => return EINVAL,
+    };
+    if !crate::syscall::validate_user_ptr(items_ptr, byte_len as u64) {
+        return EFAULT;
+    }
+    let mut items = alloc::vec![mnu_abi::HandleWaitItem::default(); count];
+    let bytes =
+        unsafe { core::slice::from_raw_parts_mut(items.as_mut_ptr().cast::<u8>(), byte_len) };
+    if let Err(error) = crate::syscall::copy_from_user(items_ptr, bytes) {
+        return error;
+    }
+    let current = match crate::task::current_thread_id() {
+        Some(thread) => thread,
+        None => return EINVAL,
+    };
+
+    loop {
+        crate::task::remove_process_exit_waiters(current);
+        crate::syscall::time::disarm_thread_deadline(current);
+        let mut process_ids = alloc::vec::Vec::with_capacity(items.len());
+        let mut ready = None;
+        for (index, item) in items.iter_mut().enumerate() {
+            match wait_item_signal(item) {
+                Ok((_, true)) if ready.is_none() => ready = Some(index),
+                Ok((process_id, _)) => {
+                    process_ids.push(process_id);
+                }
+                Err(error) => return error,
+            }
+        }
+        if let Some(index) = ready {
+            return match copy_wait_items_to_user(items_ptr, &items) {
+                Ok(()) => index as u64,
+                Err(error) => error,
+            };
+        }
+        if deadline_ticks == mnu_abi::HANDLE_WAIT_POLL
+            || (deadline_ticks != mnu_abi::HANDLE_WAIT_INFINITE
+                && crate::syscall::time::get_ticks() >= deadline_ticks)
+        {
+            return match copy_wait_items_to_user(items_ptr, &items) {
+                Ok(()) => EAGAIN,
+                Err(error) => error,
+            };
+        }
+        for process_id in process_ids {
+            if !crate::task::register_process_exit_waiter(current, process_id) {
+                crate::task::remove_process_exit_waiters(current);
+                return EAGAIN;
+            }
+        }
+        if deadline_ticks != mnu_abi::HANDLE_WAIT_INFINITE
+            && !crate::syscall::time::arm_thread_deadline(current, deadline_ticks)
+        {
+            crate::task::remove_process_exit_waiters(current);
+            return EAGAIN;
+        }
+
+        // Recheck after waiter registration so exits racing with registration
+        // cannot be missed. A pending wakeup prevents sleeping in that case.
+        let mut became_ready = false;
+        for item in &mut items {
+            match wait_item_signal(item) {
+                Ok((_, is_ready)) => became_ready |= is_ready,
+                Err(error) => {
+                    crate::task::remove_process_exit_waiters(current);
+                    crate::syscall::time::disarm_thread_deadline(current);
+                    return error;
+                }
+            }
+        }
+        if became_ready {
+            continue;
+        }
+        let _ = crate::task::sleep_thread_unless_woken(current);
+        crate::task::yield_now();
     }
 }
 

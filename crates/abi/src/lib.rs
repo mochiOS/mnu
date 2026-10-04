@@ -200,13 +200,16 @@ pub enum SyscallNumber {
     ProcessClone = 644,
     ProcessHandleResume = 645,
     ProcessHandleTerminate = 646,
+    HandleWaitMany = 647,
     CheckGravityExist = 999,
 }
 
 pub const PROCESS_STATE_RUNNING: u32 = 1;
 pub const PROCESS_STATE_EXITED: u32 = 2;
-pub const PROCESS_WAIT_POLL: u64 = 0;
-pub const PROCESS_WAIT_INFINITE: u64 = u64::MAX;
+pub const HANDLE_WAIT_POLL: u64 = 0;
+pub const HANDLE_WAIT_INFINITE: u64 = u64::MAX;
+pub const PROCESS_WAIT_POLL: u64 = HANDLE_WAIT_POLL;
+pub const PROCESS_WAIT_INFINITE: u64 = HANDLE_WAIT_INFINITE;
 
 /// Native process lifetime state. `exit_code` is the value supplied to
 /// `ProcessExit`; POSIX wait-status encoding belongs in user space.
@@ -218,6 +221,22 @@ pub struct ProcessStatus {
     pub reserved: u32,
     pub exit_code: u64,
 }
+
+/// A process-local object handle and the signals a caller wants to observe.
+///
+/// `observed` is written by `HandleWaitMany`. Signal meanings describe native
+/// object lifecycle/readiness and are intentionally independent of POSIX.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HandleWaitItem {
+    pub handle: u32,
+    pub reserved: u32,
+    pub interests: u64,
+    pub observed: u64,
+}
+
+pub const HANDLE_SIGNAL_TERMINATED: u64 = 1 << 0;
+pub const HANDLE_WAIT_MANY_MAX_ITEMS: usize = 64;
 
 /// Kernel-provided clocks. These values are native mnu ABI selectors and are
 /// intentionally distinct from POSIX `clockid_t` values.
@@ -384,6 +403,8 @@ mod object_handle_tests {
         assert_eq!(core::mem::size_of::<IpcObjectHandle>(), 16);
         assert_eq!(core::mem::size_of::<IpcObjectHandles>(), 72);
         assert_eq!(core::mem::align_of::<IpcObjectHandles>(), 8);
+        assert_eq!(core::mem::size_of::<HandleWaitItem>(), 24);
+        assert_eq!(core::mem::align_of::<HandleWaitItem>(), 8);
     }
 
     #[test]
@@ -432,6 +453,7 @@ mod object_handle_tests {
             SyscallNumber::ProcessClone as u64,
             SyscallNumber::ProcessHandleResume as u64,
             SyscallNumber::ProcessHandleTerminate as u64,
+            SyscallNumber::HandleWaitMany as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -577,6 +599,7 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::ProcessHandleStatus as u64, 642);
         assert_eq!(super::SyscallNumber::ProcessHandleWait as u64, 643);
         assert_eq!(super::SyscallNumber::ProcessClone as u64, 644);
+        assert_eq!(super::SyscallNumber::HandleWaitMany as u64, 647);
         assert_eq!(super::SyscallNumber::ProcessHandleResume as u64, 645);
         assert_eq!(super::SyscallNumber::ProcessHandleTerminate as u64, 646);
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_START));

@@ -104,6 +104,19 @@ fn register_sleep_entry(tid: ThreadId, wake_tick: u64) -> bool {
     false
 }
 
+pub(crate) fn arm_thread_deadline(tid: ThreadId, wake_tick: u64) -> bool {
+    register_sleep_entry(tid, wake_tick)
+}
+
+pub(crate) fn disarm_thread_deadline(tid: ThreadId) {
+    let mut queue = SLEEP_QUEUE.lock();
+    for slot in queue.iter_mut() {
+        if slot.is_some_and(|entry| entry.tid == tid) {
+            *slot = None;
+        }
+    }
+}
+
 pub fn wake_due_sleepers(now_tick: u64) {
     #[cfg(feature = "performance-instrumentation")]
     let started = crate::performance::timestamp();
