@@ -202,6 +202,7 @@ pub enum SyscallNumber {
     ProcessHandleTerminate = 646,
     HandleWaitMany = 647,
     ContextHandleBind = 648,
+    StreamPairCreate = 649,
     CheckGravityExist = 999,
 }
 
@@ -211,6 +212,14 @@ pub const HANDLE_WAIT_POLL: u64 = 0;
 pub const HANDLE_WAIT_INFINITE: u64 = u64::MAX;
 pub const PROCESS_WAIT_POLL: u64 = HANDLE_WAIT_POLL;
 pub const PROCESS_WAIT_INFINITE: u64 = HANDLE_WAIT_INFINITE;
+
+/// Two process-local endpoints of a native unidirectional byte stream.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamPair {
+    pub read: u32,
+    pub write: u32,
+}
 
 /// Native process lifetime state. `exit_code` is the value supplied to
 /// `ProcessExit`; POSIX wait-status encoding belongs in user space.
@@ -457,6 +466,7 @@ mod object_handle_tests {
             SyscallNumber::ProcessHandleTerminate as u64,
             SyscallNumber::HandleWaitMany as u64,
             SyscallNumber::ContextHandleBind as u64,
+            SyscallNumber::StreamPairCreate as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -604,6 +614,8 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::ProcessClone as u64, 644);
         assert_eq!(super::SyscallNumber::HandleWaitMany as u64, 647);
         assert_eq!(super::SyscallNumber::ContextHandleBind as u64, 648);
+        assert_eq!(super::SyscallNumber::StreamPairCreate as u64, 649);
+        assert_eq!(core::mem::size_of::<super::StreamPair>(), 8);
         assert_eq!(super::SyscallNumber::ProcessHandleResume as u64, 645);
         assert_eq!(super::SyscallNumber::ProcessHandleTerminate as u64, 646);
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_START));

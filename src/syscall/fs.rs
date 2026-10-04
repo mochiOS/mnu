@@ -47,7 +47,7 @@ struct PipeState {
 static PIPE_TABLE: crate::interrupt::spinlock::SpinLock<[Option<PipeState>; MAX_PIPES]> =
     crate::interrupt::spinlock::SpinLock::new([const { None }; MAX_PIPES]);
 
-fn alloc_pipe_state() -> Option<usize> {
+pub(crate) fn alloc_stream_state() -> Option<usize> {
     let mut table = PIPE_TABLE.lock();
     for (index, slot) in table.iter_mut().enumerate() {
         if slot.is_none() {
@@ -1951,7 +1951,7 @@ pub fn pipe2(fds_ptr: u64, flags: u64) -> u64 {
         Some(p) => p,
         None => return EBADF,
     };
-    let Some(pipe_id) = alloc_pipe_state() else {
+    let Some(pipe_id) = alloc_stream_state() else {
         return ENOSPC;
     };
     let cloexec = (flags & O_CLOEXEC) != 0;
