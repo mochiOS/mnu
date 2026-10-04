@@ -25,8 +25,9 @@ pub use launch_context::{
 };
 pub(crate) use process::ProcessCredentials;
 pub use process::{
-    add_process, find_process_id_by_name, for_each_process, has_child_process, mark_process_exited,
-    process_count, process_has_kernel_authority, process_has_kernel_capability_authority,
+    add_process, find_process_id_by_name, flush_deferred_process_reclaims, for_each_process,
+    has_child_process, mark_process_exited, process_count, process_has_kernel_authority,
+    process_has_kernel_capability_authority,
     reap_zombie_child_process, register_process_exit_waiter, release_process_dma_buffers,
     release_process_mmio_mappings, remove_process, remove_process_exit_waiter,
     remove_process_exit_waiters, with_process, with_process_mut, DmaBuffer, MmapBacking, MmapRegion,

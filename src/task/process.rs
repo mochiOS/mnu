@@ -1511,13 +1511,7 @@ impl ProcessTable {
         &mut self,
         parent: ProcessId,
         target: Option<ProcessId>,
-    ) -> Option<(
-        ProcessId,
-        u64,
-        Option<u64>,
-        Vec<MmioMapping>,
-        Vec<DmaBuffer>,
-    )> {
+    ) -> Option<Process> {
         for slot in &mut self.processes {
             let should_reap = slot.as_ref().is_some_and(|proc| {
                 Self::is_child_match(proc, parent, target) && proc.state() == ProcessState::Zombie
@@ -1527,17 +1521,23 @@ impl ProcessTable {
             }
 
             if let Some(proc) = slot.take() {
-                let pid = proc.id();
-                let exit_code = proc.exit_code().unwrap_or(0);
-                let page_table = if proc.page_table_owned() {
-                    proc.page_table()
-                } else {
-                    None
-                };
-                let mmio_mappings = proc.mmio_mappings;
-                let dma_buffers = proc.dma_buffers;
                 self.count = self.count.saturating_sub(1);
-                return Some((pid, exit_code, page_table, mmio_mappings, dma_buffers));
+                return Some(proc);
+            }
+        }
+        None
+    }
+
+    fn take_handle_managed_exited(&mut self, id: ProcessId) -> Option<Process> {
+        for slot in &mut self.processes {
+            let should_reclaim = slot.as_ref().is_some_and(|process| {
+                process.id() == id
+                    && process.parent_id().is_none()
+                    && process.state() == ProcessState::Zombie
+            });
+            if should_reclaim {
+                self.count = self.count.saturating_sub(1);
+                return slot.take();
             }
         }
         None
@@ -1588,6 +1588,24 @@ struct ProcessExitWaiter {
 
 static PROCESS_EXIT_WAITERS: SpinLock<[Option<ProcessExitWaiter>; MAX_PROCESS_EXIT_WAITERS]> =
     SpinLock::new([const { None }; MAX_PROCESS_EXIT_WAITERS]);
+static DEFERRED_PROCESS_RECLAIMS: SpinLock<
+    [Option<ProcessId>; ProcessTable::MAX_PROCESSES],
+> = SpinLock::new([None; ProcessTable::MAX_PROCESSES]);
+
+fn defer_process_reclaim(process: ProcessId) {
+    let mut deferred = DEFERRED_PROCESS_RECLAIMS.lock();
+    if deferred.iter().flatten().any(|candidate| *candidate == process) {
+        return;
+    }
+    if let Some(slot) = deferred.iter_mut().find(|slot| slot.is_none()) {
+        *slot = Some(process);
+    } else {
+        crate::audit::log(
+            crate::audit::AuditEventKind::Fault,
+            "deferred process reclaim queue is full",
+        );
+    }
+}
 
 pub fn register_process_exit_waiter(thread: super::ThreadId, process: ProcessId) -> bool {
     let mut waiters = PROCESS_EXIT_WAITERS.lock();
@@ -1710,14 +1728,18 @@ where
 
 /// プロセスを終了状態（Zombie）へ遷移させる
 pub fn mark_process_exited(id: ProcessId, exit_code: u64) {
-    {
+    let handle_managed = {
         let mut table = PROCESS_TABLE.lock();
         let Some(proc) = table.get_mut(id) else {
             return;
         };
         proc.mark_exited(exit_code);
-    }
+        proc.parent_id().is_none()
+    };
     wake_process_exit_waiters(id);
+    if handle_managed {
+        defer_process_reclaim(id);
+    }
 }
 
 /// 一致する子プロセスが存在するか確認する
@@ -1730,8 +1752,21 @@ pub fn reap_zombie_child_process(
     parent: ProcessId,
     target: Option<ProcessId>,
 ) -> Option<(ProcessId, u64)> {
-    let (pid, exit_code, page_table, mmio_mappings, dma_buffers) =
-        PROCESS_TABLE.lock().reap_zombie_child(parent, target)?;
+    let process = PROCESS_TABLE.lock().reap_zombie_child(parent, target)?;
+    Some(destroy_exited_process(process))
+}
+
+fn destroy_exited_process(mut process: Process) -> (ProcessId, u64) {
+    let pid = process.id();
+    let exit_code = process.exit_code().unwrap_or(0);
+    let page_table = if process.page_table_owned() {
+        process.page_table()
+    } else {
+        None
+    };
+    let mmio_mappings = process.take_mmio_mappings();
+    let dma_buffers = process.take_dma_buffers();
+    crate::capability::path::revoke_scoped_paths(pid.as_u64());
     if let Some(table_phys) = page_table {
         for mmio in &mmio_mappings {
             let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
@@ -1766,7 +1801,41 @@ pub fn reap_zombie_child_process(
             );
         }
     }
-    Some((pid, exit_code))
+    (pid, exit_code)
+}
+
+/// Reclaims exited handle-managed execution records from a context which is
+/// not running on the reclaimed process's address space. ProcessHandle state
+/// remains available through its shared `ProcessObject`.
+pub fn flush_deferred_process_reclaims() {
+    let current = crate::syscall::security::current_process_id();
+    let mut pending = [None; ProcessTable::MAX_PROCESSES];
+    {
+        let mut deferred = DEFERRED_PROCESS_RECLAIMS.lock();
+        core::mem::swap(&mut *deferred, &mut pending);
+    }
+    for process_id in pending.into_iter().flatten() {
+        if current == Some(process_id) {
+            defer_process_reclaim(process_id);
+            continue;
+        }
+        let mut has_threads = false;
+        crate::task::for_each_thread(|thread| {
+            if thread.process_id() == process_id {
+                has_threads = true;
+            }
+        });
+        if has_threads {
+            defer_process_reclaim(process_id);
+            continue;
+        }
+        let process = PROCESS_TABLE
+            .lock()
+            .take_handle_managed_exited(process_id);
+        if let Some(process) = process {
+            let _ = destroy_exited_process(process);
+        }
+    }
 }
 
 pub fn release_process_mmio_mappings(pid: ProcessId) {
