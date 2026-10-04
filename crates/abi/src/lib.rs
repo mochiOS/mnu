@@ -81,7 +81,6 @@ pub enum SyscallNumber {
     Tkill = 200,
     Futex = 202,
     SetTidAddress = 218,
-    ClockGettime = 228,
     ExitGroup = 231,
     Tgkill = 234,
     Pselect6 = 270,
@@ -202,7 +201,39 @@ pub enum SyscallNumber {
     ProviderObjectCreate = 637,
     ProviderObjectIdentify = 638,
     LaunchValueGet = 639,
+    ClockRead = 640,
     CheckGravityExist = 999,
+}
+
+/// Kernel-provided clocks. These values are native mnu ABI selectors and are
+/// intentionally distinct from POSIX `clockid_t` values.
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockId {
+    Realtime = 0x4d4e_5543_4c4b_0001,
+    Monotonic = 0x4d4e_5543_4c4b_0002,
+    ProcessCpu = 0x4d4e_5543_4c4b_0003,
+    ThreadCpu = 0x4d4e_5543_4c4b_0004,
+}
+
+impl ClockId {
+    pub const fn from_raw(raw: u64) -> Option<Self> {
+        match raw {
+            x if x == Self::Realtime as u64 => Some(Self::Realtime),
+            x if x == Self::Monotonic as u64 => Some(Self::Monotonic),
+            x if x == Self::ProcessCpu as u64 => Some(Self::ProcessCpu),
+            x if x == Self::ThreadCpu as u64 => Some(Self::ThreadCpu),
+            _ => None,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClockInstant {
+    pub seconds: u64,
+    pub nanoseconds: u32,
+    pub reserved: u32,
 }
 
 /// Maximum number of generic kernel object handles carried by one IPC message.
@@ -380,6 +411,7 @@ mod object_handle_tests {
             SyscallNumber::ProviderObjectCreate as u64,
             SyscallNumber::ProviderObjectIdentify as u64,
             SyscallNumber::LaunchValueGet as u64,
+            SyscallNumber::ClockRead as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -520,6 +552,7 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::HandleSeek as u64, 636);
         assert_eq!(super::SyscallNumber::ProviderObjectCreate as u64, 637);
         assert_eq!(super::SyscallNumber::ProviderObjectIdentify as u64, 638);
+        assert_eq!(super::SyscallNumber::ClockRead as u64, 640);
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_START));
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_CURRENT));
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_END));

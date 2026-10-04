@@ -171,29 +171,24 @@ pub fn get_ticks() -> u64 {
     crate::interrupt::timer::get_ticks()
 }
 
-/// clock_gettimeシステムコール (Linux互換)
+/// Reads one native mnu clock into a fixed-layout `ClockInstant`.
 ///
-/// # 引数
-/// - `clk_id`: クロックID (0=CLOCK_REALTIME, 1=CLOCK_MONOTONIC)
-/// - `ts_ptr`: timespec構造体へのポインタ
-///
-/// # 戻り値
-/// 成功時は0
-pub fn clock_gettime(clk_id: u64, ts_ptr: u64) -> u64 {
-    const CLOCK_REALTIME: u64 = 0;
-    const CLOCK_MONOTONIC: u64 = 1;
-    const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
-    const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
-
-    if ts_ptr == 0 {
+/// POSIX clock identifiers and `timespec` layout are deliberately translated
+/// in user space rather than exposed by this syscall.
+pub fn clock_read(clock: u64, instant_ptr: u64) -> u64 {
+    let Some(clock) = mnu_abi::ClockId::from_raw(clock) else {
         return EINVAL;
-    }
-    // ユーザー空間アドレスの有効性を検証する (timespec = 16バイト)
-    if !crate::syscall::validate_user_ptr(ts_ptr, 16) {
+    };
+    if instant_ptr == 0
+        || !crate::syscall::validate_user_ptr(
+            instant_ptr,
+            core::mem::size_of::<mnu_abi::ClockInstant>() as u64,
+        )
+    {
         return EFAULT;
     }
 
-    if clk_id == CLOCK_REALTIME
+    if clock == mnu_abi::ClockId::Realtime
         && !crate::syscall::security::caller_has_any_capability(&[
             crate::capability::Capability::SystemTimeRead,
         ])
@@ -201,24 +196,67 @@ pub fn clock_gettime(clk_id: u64, ts_ptr: u64) -> u64 {
         return EACCES;
     }
 
-    let ticks = get_ticks();
     let ticks_per_second = crate::interrupt::timer::ticks_per_second();
-    let tick_ns = crate::interrupt::timer::tick_ms() * 1_000_000;
-    let (sec, nsec) = match clk_id {
-        CLOCK_REALTIME => match realtime() {
+    if ticks_per_second == 0 {
+        return EAGAIN;
+    }
+    let ticks = match clock {
+        mnu_abi::ClockId::Monotonic => get_ticks(),
+        mnu_abi::ClockId::ThreadCpu => {
+            let Some(thread_id) = crate::task::current_thread_id() else {
+                return EAGAIN;
+            };
+            let Some(ticks) = crate::task::with_thread(thread_id, |thread| thread.cpu_ticks())
+            else {
+                return EAGAIN;
+            };
+            ticks
+        }
+        mnu_abi::ClockId::ProcessCpu => {
+            let Some(thread_id) = crate::task::current_thread_id() else {
+                return EAGAIN;
+            };
+            let Some(process_id) =
+                crate::task::with_thread(thread_id, |thread| thread.process_id())
+            else {
+                return EAGAIN;
+            };
+            let mut ticks = 0u64;
+            crate::task::for_each_thread(|thread| {
+                if thread.process_id() == process_id {
+                    ticks = ticks.saturating_add(thread.cpu_ticks());
+                }
+            });
+            ticks
+        }
+        mnu_abi::ClockId::Realtime => 0,
+    };
+    let (seconds, nanoseconds) = match clock {
+        mnu_abi::ClockId::Realtime => match realtime() {
             Ok(value) => value,
             Err(_) => return EAGAIN,
         },
-        CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => (
+        mnu_abi::ClockId::Monotonic
+        | mnu_abi::ClockId::ProcessCpu
+        | mnu_abi::ClockId::ThreadCpu => (
             ticks / ticks_per_second,
-            (ticks % ticks_per_second) * tick_ns,
+            (ticks % ticks_per_second)
+                .saturating_mul(crate::interrupt::timer::tick_ms())
+                .saturating_mul(1_000_000),
         ),
-        _ => return EINVAL,
     };
-    let mut buf = [0u8; 16];
-    buf[0..8].copy_from_slice(&(sec as i64).to_ne_bytes());
-    buf[8..16].copy_from_slice(&(nsec as i64).to_ne_bytes());
-    match crate::syscall::copy_to_user(ts_ptr, &buf) {
+    let instant = mnu_abi::ClockInstant {
+        seconds,
+        nanoseconds: nanoseconds as u32,
+        reserved: 0,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&instant as *const mnu_abi::ClockInstant).cast::<u8>(),
+            core::mem::size_of::<mnu_abi::ClockInstant>(),
+        )
+    };
+    match crate::syscall::copy_to_user(instant_ptr, bytes) {
         Ok(()) => SUCCESS,
         Err(e) => e,
     }
