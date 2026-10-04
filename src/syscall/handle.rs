@@ -452,9 +452,9 @@ pub fn process_status(raw: u64, output: u64) -> u64 {
     }
 }
 
-/// Waits until the process exits. `deadline_ticks` is an absolute `TimeNow`
-/// value; zero polls and `u64::MAX` waits indefinitely.
-pub fn process_wait(raw: u64, deadline_ticks: u64, output: u64) -> u64 {
+/// Waits until the process exits. `deadline_nanoseconds` is an absolute
+/// monotonic-clock value; zero polls and `u64::MAX` waits indefinitely.
+pub fn process_wait(raw: u64, deadline_nanoseconds: u64, output: u64) -> u64 {
     let process_id = match object(raw, HandleRights::WAIT) {
         Ok(KernelObject::Process(process)) => process.id(),
         Ok(_) => return EBADF,
@@ -464,20 +464,31 @@ pub fn process_wait(raw: u64, deadline_ticks: u64, output: u64) -> u64 {
         Some(thread) => thread,
         None => return EINVAL,
     };
+    let deadline_tick = if matches!(
+        deadline_nanoseconds,
+        mnu_abi::PROCESS_WAIT_POLL | mnu_abi::PROCESS_WAIT_INFINITE
+    ) {
+        deadline_nanoseconds
+    } else {
+        crate::syscall::time::monotonic_deadline_tick(deadline_nanoseconds)
+    };
     loop {
+        crate::syscall::time::disarm_thread_deadline(current);
         let status = match process_status_for(raw) {
             Ok(status) => status,
             Err(error) => return error,
         };
         if status.state == mnu_abi::PROCESS_STATE_EXITED {
             crate::task::remove_process_exit_waiter(current, process_id);
+            crate::syscall::time::disarm_thread_deadline(current);
             return write_process_status(output, status);
         }
-        if deadline_ticks == mnu_abi::PROCESS_WAIT_POLL
-            || (deadline_ticks != mnu_abi::PROCESS_WAIT_INFINITE
-                && crate::syscall::time::get_ticks() >= deadline_ticks)
+        if deadline_nanoseconds == mnu_abi::PROCESS_WAIT_POLL
+            || (deadline_nanoseconds != mnu_abi::PROCESS_WAIT_INFINITE
+                && crate::syscall::time::monotonic_nanoseconds() >= deadline_nanoseconds)
         {
             crate::task::remove_process_exit_waiter(current, process_id);
+            crate::syscall::time::disarm_thread_deadline(current);
             return EAGAIN;
         }
         if !crate::task::register_process_exit_waiter(current, process_id) {
@@ -490,17 +501,23 @@ pub fn process_wait(raw: u64, deadline_ticks: u64, output: u64) -> u64 {
             Ok(status) => status,
             Err(error) => {
                 crate::task::remove_process_exit_waiter(current, process_id);
+                crate::syscall::time::disarm_thread_deadline(current);
                 return error;
             }
         };
         if status.state == mnu_abi::PROCESS_STATE_EXITED {
             crate::task::remove_process_exit_waiter(current, process_id);
+            crate::syscall::time::disarm_thread_deadline(current);
             return write_process_status(output, status);
         }
 
-        if deadline_ticks == mnu_abi::PROCESS_WAIT_INFINITE {
-            let _ = crate::task::sleep_thread_unless_woken(current);
+        if deadline_nanoseconds != mnu_abi::PROCESS_WAIT_INFINITE
+            && !crate::syscall::time::arm_thread_deadline(current, deadline_tick)
+        {
+            crate::task::remove_process_exit_waiter(current, process_id);
+            return EAGAIN;
         }
+        let _ = crate::task::sleep_thread_unless_woken(current);
         crate::task::yield_now();
         crate::task::remove_process_exit_waiter(current, process_id);
     }
@@ -592,9 +609,9 @@ fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) ->
 
 /// Waits until one of the supplied process-local object handles observes an
 /// interested native signal. The return value is the ready item's index.
-/// `deadline_ticks` is an absolute `TimeNow` value; zero polls and
+/// `deadline_nanoseconds` is an absolute monotonic-clock value; zero polls and
 /// `u64::MAX` waits indefinitely.
-pub fn wait_many(items_ptr: u64, count: u64, deadline_ticks: u64) -> u64 {
+pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
     let count = match usize::try_from(count) {
         Ok(count) if count > 0 && count <= mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS => count,
         _ => return EINVAL,
@@ -618,6 +635,14 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_ticks: u64) -> u64 {
     };
     let mut registered_endpoints = alloc::vec::Vec::new();
     let mut registered_streams = alloc::vec::Vec::new();
+    let deadline_tick = if matches!(
+        deadline_nanoseconds,
+        mnu_abi::HANDLE_WAIT_POLL | mnu_abi::HANDLE_WAIT_INFINITE
+    ) {
+        deadline_nanoseconds
+    } else {
+        crate::syscall::time::monotonic_deadline_tick(deadline_nanoseconds)
+    };
 
     loop {
         crate::task::remove_process_exit_waiters(current);
@@ -643,9 +668,9 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_ticks: u64) -> u64 {
                 Err(error) => error,
             };
         }
-        if deadline_ticks == mnu_abi::HANDLE_WAIT_POLL
-            || (deadline_ticks != mnu_abi::HANDLE_WAIT_INFINITE
-                && crate::syscall::time::get_ticks() >= deadline_ticks)
+        if deadline_nanoseconds == mnu_abi::HANDLE_WAIT_POLL
+            || (deadline_nanoseconds != mnu_abi::HANDLE_WAIT_INFINITE
+                && crate::syscall::time::monotonic_nanoseconds() >= deadline_nanoseconds)
         {
             return match copy_wait_items_to_user(items_ptr, &items) {
                 Ok(()) => EAGAIN,
@@ -686,8 +711,8 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_ticks: u64) -> u64 {
                 }
             }
         }
-        if deadline_ticks != mnu_abi::HANDLE_WAIT_INFINITE
-            && !crate::syscall::time::arm_thread_deadline(current, deadline_ticks)
+        if deadline_nanoseconds != mnu_abi::HANDLE_WAIT_INFINITE
+            && !crate::syscall::time::arm_thread_deadline(current, deadline_tick)
         {
             crate::task::remove_process_exit_waiters(current);
             remove_endpoint_waiters(current, &registered_endpoints);

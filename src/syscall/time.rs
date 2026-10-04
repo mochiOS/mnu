@@ -184,6 +184,26 @@ pub fn get_ticks() -> u64 {
     crate::interrupt::timer::get_ticks()
 }
 
+pub(crate) fn monotonic_nanoseconds() -> u64 {
+    let ticks_per_second = crate::interrupt::timer::ticks_per_second();
+    if ticks_per_second == 0 {
+        return 0;
+    }
+    ((u128::from(get_ticks()) * 1_000_000_000u128) / u128::from(ticks_per_second))
+        .min(u128::from(u64::MAX)) as u64
+}
+
+pub(crate) fn monotonic_deadline_tick(deadline_nanoseconds: u64) -> u64 {
+    let ticks_per_second = crate::interrupt::timer::ticks_per_second();
+    if ticks_per_second == 0 {
+        return get_ticks();
+    }
+    let numerator = u128::from(deadline_nanoseconds) * u128::from(ticks_per_second);
+    numerator
+        .div_ceil(1_000_000_000u128)
+        .min(u128::from(u64::MAX)) as u64
+}
+
 /// Reads one native mnu clock into a fixed-layout `ClockInstant`.
 ///
 /// POSIX clock identifiers and `timespec` layout are deliberately translated

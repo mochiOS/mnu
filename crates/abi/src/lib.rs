@@ -208,7 +208,9 @@ pub enum SyscallNumber {
 
 pub const PROCESS_STATE_RUNNING: u32 = 1;
 pub const PROCESS_STATE_EXITED: u32 = 2;
+/// Poll without sleeping when passed as a `HandleWaitMany` deadline.
 pub const HANDLE_WAIT_POLL: u64 = 0;
+/// Wait without a deadline when passed to `HandleWaitMany`.
 pub const HANDLE_WAIT_INFINITE: u64 = u64::MAX;
 pub const PROCESS_WAIT_POLL: u64 = HANDLE_WAIT_POLL;
 pub const PROCESS_WAIT_INFINITE: u64 = HANDLE_WAIT_INFINITE;
