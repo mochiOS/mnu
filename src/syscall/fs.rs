@@ -2054,67 +2054,6 @@ pub fn ftruncate(fd: u64, len: u64) -> u64 {
     }
 }
 
-pub fn pipe2(fds_ptr: u64, flags: u64) -> u64 {
-    if fds_ptr == 0 || !crate::syscall::validate_user_ptr(fds_ptr, 8) {
-        return EFAULT;
-    }
-    const PIPE_ALLOWED_FLAGS: u64 = O_CLOEXEC;
-    if flags & !PIPE_ALLOWED_FLAGS != 0 {
-        return EINVAL;
-    }
-    let pid = match current_process_id_raw() {
-        Some(p) => p,
-        None => return EBADF,
-    };
-    let Some(pipe_id) = alloc_stream_state() else {
-        return ENOSPC;
-    };
-    let cloexec = (flags & O_CLOEXEC) != 0;
-    let allocated = with_fd_table_mut(pid, |t| {
-        let read_fd = match t.alloc(
-            alloc::boxed::Box::new(FileHandle::new_pipe_read(pipe_id)),
-            cloexec,
-        ) {
-            Some(fd) => fd,
-            None => return Err(ENOSPC),
-        };
-        let write_fd = match t.alloc(
-            alloc::boxed::Box::new(FileHandle::new_pipe_write(pipe_id)),
-            cloexec,
-        ) {
-            Some(fd) => fd,
-            None => {
-                let _ = t.take(read_fd);
-                return Err(ENOSPC);
-            }
-        };
-        Ok((read_fd, write_fd))
-    });
-    let (read_fd, write_fd) = match allocated {
-        Some(Ok(fds)) => fds,
-        _ => {
-            close_pipe_endpoint_from_kernel(pipe_id, false);
-            close_pipe_endpoint_from_kernel(pipe_id, true);
-            return ENOSPC;
-        }
-    };
-    let mut out = [0u8; 8];
-    out[..4].copy_from_slice(&(read_fd as i32).to_ne_bytes());
-    out[4..].copy_from_slice(&(write_fd as i32).to_ne_bytes());
-    if let Err(errno) = crate::syscall::copy_to_user(fds_ptr, &out) {
-        let _ = with_fd_table_mut(pid, |t| {
-            let _ = t.take(read_fd);
-            let _ = t.take(write_fd);
-        });
-        return errno;
-    }
-    SUCCESS
-}
-
-pub fn pipe(fds_ptr: u64) -> u64 {
-    pipe2(fds_ptr, 0)
-}
-
 /// Dup システムコール: FD を複製して最小の空き番号に割り当てる
 pub fn dup(fd: u64) -> u64 {
     if fd < FD_BASE as u64 {

@@ -327,50 +327,6 @@ pub fn mprotect(addr: u64, len: u64, prot: u64) -> u64 {
     }
 }
 
-/// poll システムコール（最小実装）
-///
-/// 端末系 readiness はユーザーランドへ移したため、ここでは常に未対応。
-pub fn poll(fds_ptr: u64, nfds: u64, timeout_arg: u64) -> u64 {
-    let _ = (fds_ptr, nfds, timeout_arg);
-    ENOTSUP
-}
-
-/// ppoll システムコール（最小実装）
-///
-/// timeout は timespec*。sigmask/sigsetsize は現状未使用。
-pub fn ppoll(
-    fds_ptr: u64,
-    nfds: u64,
-    timeout_ptr: u64,
-    _sigmask_ptr: u64,
-    _sigsetsize: u64,
-) -> u64 {
-    let _ = (fds_ptr, nfds, timeout_ptr, _sigmask_ptr, _sigsetsize);
-    ENOTSUP
-}
-
-/// pselect6/select システムコール（最小実装）
-///
-/// 端末系 readiness はユーザーランドへ移したため、ここでは未対応。
-pub fn pselect6(
-    nfds: u64,
-    readfds_ptr: u64,
-    writefds_ptr: u64,
-    _exceptfds_ptr: u64,
-    timeout_ptr: u64,
-    _sigmask_ptr: u64,
-) -> u64 {
-    let _ = (
-        nfds,
-        readfds_ptr,
-        writefds_ptr,
-        timeout_ptr,
-        _exceptfds_ptr,
-        _sigmask_ptr,
-    );
-    ENOTSUP
-}
-
 /// access システムコール（ファイルアクセス可能性チェック）
 ///
 /// initfs/rootfs にファイルが存在すれば常に成功を返す。
