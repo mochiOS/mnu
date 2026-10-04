@@ -64,8 +64,6 @@ pub enum SyscallNumber {
     Truncate = 76,
     Ftruncate = 77,
     Getcwd = 79,
-    Chmod = 90,
-    Chown = 92,
     Unlink = 87,
     Symlink = 88,
     Readlink = 89,

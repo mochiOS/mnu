@@ -334,22 +334,6 @@ pub fn create(path: &str, mode: u32, uid: u32, gid: u32) -> i32 {
     unsafe { ((*ops).create)(path_arg(path), mode, uid, gid) }
 }
 
-pub fn chmod(path: &str, mode: u32) -> i32 {
-    let ops = ops_ptr();
-    if ops.is_null() {
-        return -38;
-    }
-    unsafe { ((*ops).chmod)(path_arg(path), mode) }
-}
-
-pub fn chown(path: &str, uid: u32, gid: u32) -> i32 {
-    let ops = ops_ptr();
-    if ops.is_null() {
-        return -38;
-    }
-    unsafe { ((*ops).chown)(path_arg(path), uid, gid) }
-}
-
 pub fn remove(path: &str, is_dir: bool) -> i32 {
     let ops = ops_ptr();
     if ops.is_null() {

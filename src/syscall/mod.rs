@@ -795,8 +795,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::Fsync as u64 => fs::fsync(arg0),
         x if x == SyscallNumber::Fdatasync as u64 => fs::fdatasync(arg0),
         x if x == SyscallNumber::Truncate as u64 => fs::truncate(arg0, arg1),
-        x if x == SyscallNumber::Chmod as u64 => fs::chmod(arg0, arg1),
-        x if x == SyscallNumber::Chown as u64 => fs::chown(arg0, arg1, arg2),
         x if x == SyscallNumber::Unlink as u64 => fs::unlink(arg0),
         x if x == SyscallNumber::Unlinkat as u64 => fs::unlinkat(arg0 as i64, arg1, arg2),
         x if x == SyscallNumber::Renameat as u64 => {
