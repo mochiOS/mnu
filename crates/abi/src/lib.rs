@@ -197,6 +197,7 @@ pub enum SyscallNumber {
     ProcessHandleOpen = 641,
     ProcessHandleStatus = 642,
     ProcessHandleWait = 643,
+    ProcessClone = 644,
     CheckGravityExist = 999,
 }
 
@@ -426,6 +427,7 @@ mod object_handle_tests {
             SyscallNumber::ProcessHandleOpen as u64,
             SyscallNumber::ProcessHandleStatus as u64,
             SyscallNumber::ProcessHandleWait as u64,
+            SyscallNumber::ProcessClone as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -570,6 +572,7 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::ProcessHandleOpen as u64, 641);
         assert_eq!(super::SyscallNumber::ProcessHandleStatus as u64, 642);
         assert_eq!(super::SyscallNumber::ProcessHandleWait as u64, 643);
+        assert_eq!(super::SyscallNumber::ProcessClone as u64, 644);
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_START));
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_CURRENT));
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_END));

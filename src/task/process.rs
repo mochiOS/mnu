@@ -1228,6 +1228,10 @@ impl Process {
         self.launch_context = context;
     }
 
+    pub fn clone_launch_context(&self) -> alloc::boxed::Box<LaunchContext> {
+        alloc::boxed::Box::new((*self.launch_context).clone())
+    }
+
     /// プロセスグループ ID を取得（0 は自身の PID を意味する）
     pub fn pgid(&self) -> u64 {
         if self.pgid == 0 {
