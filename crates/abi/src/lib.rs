@@ -230,6 +230,7 @@ pub enum SyscallNumber {
     HandleWrite = 635,
     HandleSeek = 636,
     ProviderObjectCreate = 637,
+    ProviderObjectIdentify = 638,
     CheckGravityExist = 999,
 }
 
@@ -406,6 +407,7 @@ mod object_handle_tests {
             SyscallNumber::HandleWrite as u64,
             SyscallNumber::HandleSeek as u64,
             SyscallNumber::ProviderObjectCreate as u64,
+            SyscallNumber::ProviderObjectIdentify as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -545,6 +547,7 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::HandleWrite as u64, 635);
         assert_eq!(super::SyscallNumber::HandleSeek as u64, 636);
         assert_eq!(super::SyscallNumber::ProviderObjectCreate as u64, 637);
+        assert_eq!(super::SyscallNumber::ProviderObjectIdentify as u64, 638);
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_START));
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_CURRENT));
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_END));

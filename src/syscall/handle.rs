@@ -226,6 +226,11 @@ fn provider_seek(
 }
 
 pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u64) -> u64 {
+    // Object IDs are returned directly by ProviderObjectIdentify, so keep the
+    // syscall's negative range unambiguous.
+    if object_id > i64::MAX as u64 {
+        return EINVAL;
+    }
     let process_id = match current_process() {
         Ok(process_id) => process_id,
         Err(error) => return error,
@@ -251,6 +256,41 @@ pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u
             .insert(ObjectHandleEntry::new(object, rights))
             .map(|handle| handle.raw() as u64)
             .unwrap_or(ENOSPC)
+    })
+    .unwrap_or(EINVAL)
+}
+
+/// Returns the opaque identifier of a provider object only to the exact
+/// endpoint thread that created it.
+pub fn provider_object_identify(raw: u64) -> u64 {
+    let process_id = match current_process() {
+        Ok(process_id) => process_id,
+        Err(error) => return error,
+    };
+    let handle = match decode_handle(raw) {
+        Ok(handle) => handle,
+        Err(error) => return error,
+    };
+    let current = match crate::task::current_thread_id()
+        .and_then(|thread| crate::syscall::ipc::endpoint_for_thread(thread.as_u64()))
+    {
+        Some(endpoint) => endpoint,
+        None => return EINVAL,
+    };
+    crate::task::with_process(process_id, |process| {
+        let Some(entry) = process.object_handles().get(handle) else {
+            return EBADF;
+        };
+        let KernelObject::Provider(provider) = entry.object() else {
+            return EBADF;
+        };
+        if provider.endpoint_thread_id != current.thread_id
+            || provider.endpoint_slot != current.slot
+            || provider.endpoint_generation != current.generation
+        {
+            return EACCES;
+        }
+        provider.object_id
     })
     .unwrap_or(EINVAL)
 }
