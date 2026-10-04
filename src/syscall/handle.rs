@@ -385,3 +385,22 @@ pub fn launch_get(key: u64) -> u64 {
     })
     .unwrap_or(EINVAL)
 }
+
+pub fn launch_value_get(key: u64, output: u64) -> u64 {
+    let process_id = match current_process() {
+        Ok(process_id) => process_id,
+        Err(error) => return error,
+    };
+    let value = match crate::task::with_process(process_id, |process| {
+        process.launch_context().value(key)
+    })
+    .flatten()
+    {
+        Some(value) => value,
+        None => return EBADF,
+    };
+    match crate::syscall::write_user_u64(output, value) {
+        Ok(()) => SUCCESS,
+        Err(error) => error,
+    }
+}

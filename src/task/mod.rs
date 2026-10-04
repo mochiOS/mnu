@@ -20,7 +20,9 @@ pub use handle_table::{
     ProviderObject, PROCESS_MAX_OBJECT_HANDLES,
 };
 pub use ids::{PrivilegeLevel, ProcessId, ProcessState, SchedulingClass, ThreadId, ThreadState};
-pub use launch_context::{LaunchContext, PROCESS_MAX_INHERITED_HANDLES};
+pub use launch_context::{
+    LaunchContext, PROCESS_MAX_INHERITED_HANDLES, PROCESS_MAX_INHERITED_VALUES,
+};
 pub(crate) use process::ProcessCredentials;
 pub use process::{
     add_process, find_process_id_by_name, for_each_process, has_child_process, mark_process_exited,

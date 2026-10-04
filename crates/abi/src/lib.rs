@@ -231,6 +231,7 @@ pub enum SyscallNumber {
     HandleSeek = 636,
     ProviderObjectCreate = 637,
     ProviderObjectIdentify = 638,
+    LaunchValueGet = 639,
     CheckGravityExist = 999,
 }
 
@@ -408,6 +409,7 @@ mod object_handle_tests {
             SyscallNumber::HandleSeek as u64,
             SyscallNumber::ProviderObjectCreate as u64,
             SyscallNumber::ProviderObjectIdentify as u64,
+            SyscallNumber::LaunchValueGet as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {

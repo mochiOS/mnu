@@ -4,18 +4,21 @@ use alloc::collections::BTreeMap;
 use super::handle_table::ObjectHandle;
 
 pub const PROCESS_MAX_INHERITED_HANDLES: usize = 256;
+pub const PROCESS_MAX_INHERITED_VALUES: usize = 256;
 
 /// Opaque launch metadata mapping user-space-defined keys to process-local
 /// kernel object handles. The kernel never assigns meaning to a key.
 #[derive(Clone, Debug)]
 pub struct LaunchContext {
     inherited_handles: BTreeMap<u64, ObjectHandle>,
+    inherited_values: BTreeMap<u64, u64>,
 }
 
 impl LaunchContext {
     pub fn new_boxed() -> Box<Self> {
         Box::new(Self {
             inherited_handles: BTreeMap::new(),
+            inherited_values: BTreeMap::new(),
         })
     }
 
@@ -40,6 +43,20 @@ impl LaunchContext {
     pub fn remove_handle(&mut self, handle: ObjectHandle) {
         self.inherited_handles
             .retain(|_, inherited| *inherited != handle);
+    }
+
+    pub fn value(&self, key: u64) -> Option<u64> {
+        self.inherited_values.get(&key).copied()
+    }
+
+    pub fn install_value(&mut self, key: u64, value: u64) -> bool {
+        if self.inherited_values.len() >= PROCESS_MAX_INHERITED_VALUES
+            || self.inherited_values.contains_key(&key)
+        {
+            return false;
+        }
+        self.inherited_values.insert(key, value);
+        true
     }
 }
 
@@ -68,5 +85,15 @@ mod tests {
         assert_eq!(context.get(1), None);
         context.remove_handle(second);
         assert_eq!(context.get(2), None);
+    }
+
+    #[test]
+    fn opaque_values_are_independent_from_handle_keys() {
+        let mut context = LaunchContext::new_boxed();
+        let handle = ObjectHandle::from_raw(1).unwrap();
+        assert!(context.install(7, handle));
+        assert!(context.install_value(7, u64::MAX));
+        assert_eq!(context.value(7), Some(u64::MAX));
+        assert!(!context.install_value(7, 1));
     }
 }

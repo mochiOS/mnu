@@ -19,7 +19,8 @@ use mnu_abi::exec::{
     APPLICATION_PROVENANCE_PREFIX, APPLICATION_SUBJECT_KEY_ID_PREFIX, ENVIRONMENT_PREFIX,
     EXECUTABLE_DIGEST_PREFIX, EXEC_AUTHORIZATION_CLASS_PREFIX,
     EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE, EXEC_AUTHORIZATION_KIND_PREFIX,
-    EXEC_AUTHORIZATION_KIND_SPAWN, INHERITED_HANDLE_PREFIX, SECURITY_IDENTITY_PREFIX,
+    EXEC_AUTHORIZATION_KIND_SPAWN, INHERITED_HANDLE_PREFIX, INHERITED_VALUE_PREFIX,
+    SECURITY_IDENTITY_PREFIX,
 };
 use sha2::{Digest, Sha256};
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -35,6 +36,12 @@ struct InheritedHandleSpec {
 struct InheritedHandleGrant {
     key: u64,
     entry: crate::task::ObjectHandleEntry,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InheritedValueSpec {
+    key: u64,
+    value: u64,
 }
 
 struct InitialUserStack {
@@ -533,6 +540,7 @@ fn exec_manifest_common(
     let mut identity_subject_key: Option<[u8; 32]> = None;
     let mut identity_provenance: Option<crate::task::process::ApplicationProvenance> = None;
     let mut inherited_handle_specs = Vec::new();
+    let mut inherited_value_specs = Vec::new();
     for item in &extra_args_owned {
         if let Some(env) = item.strip_prefix(ENVIRONMENT_PREFIX) {
             if env.is_empty() || !env.contains('=') {
@@ -551,6 +559,18 @@ fn exec_manifest_common(
                 return EINVAL;
             }
             inherited_handle_specs.push(spec);
+        } else if let Some(value) = item.strip_prefix(INHERITED_VALUE_PREFIX) {
+            let Some(spec) = parse_inherited_value_spec(value) else {
+                return EINVAL;
+            };
+            if inherited_value_specs.len() >= crate::task::PROCESS_MAX_INHERITED_VALUES
+                || inherited_value_specs
+                    .iter()
+                    .any(|existing: &InheritedValueSpec| existing.key == spec.key)
+            {
+                return EINVAL;
+            }
+            inherited_value_specs.push(spec);
         } else if item.starts_with(SECURITY_IDENTITY_PREFIX) {
             // Opaque identities are no longer accepted. A trusted launcher must
             // provide the complete structured identity below.
@@ -700,6 +720,7 @@ fn exec_manifest_common(
         parent_override,
         application_identity,
         &inherited_handles,
+        &inherited_value_specs,
         true,
         expected_digest,
     )
@@ -718,6 +739,16 @@ fn parse_inherited_handle_spec(value: &str) -> Option<InheritedHandleSpec> {
         source: crate::task::ObjectHandle::from_raw(source)?,
         rights: crate::task::HandleRights::from_bits(rights)?,
     })
+}
+
+fn parse_inherited_value_spec(value: &str) -> Option<InheritedValueSpec> {
+    let mut fields = value.split(':');
+    let key = fields.next()?.parse::<u64>().ok()?;
+    let value = fields.next()?.parse::<u64>().ok()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(InheritedValueSpec { key, value })
 }
 
 fn export_inherited_handles(
@@ -773,6 +804,20 @@ fn install_inherited_handles(
     Ok(())
 }
 
+fn install_inherited_values(
+    process: &mut crate::task::Process,
+    values: &[InheritedValueSpec],
+) -> Result<(), u64> {
+    use crate::syscall::types::EINVAL;
+
+    for value in values {
+        if !process.launch_context_mut().install_value(value.key, value.value) {
+            return Err(EINVAL);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod inherited_handle_tests {
     use super::*;
@@ -796,6 +841,20 @@ mod inherited_handle_tests {
         assert!(parse_inherited_handle_spec("1:2").is_none());
         assert!(parse_inherited_handle_spec("1:2:0:4").is_none());
         assert!(parse_inherited_handle_spec("1:2:128").is_none());
+    }
+
+    #[test]
+    fn inherited_value_metadata_is_strict_and_opaque() {
+        assert_eq!(
+            parse_inherited_value_spec("7:18446744073709551615"),
+            Some(InheritedValueSpec {
+                key: 7,
+                value: u64::MAX,
+            })
+        );
+        assert!(parse_inherited_value_spec("7").is_none());
+        assert!(parse_inherited_value_spec("7:8:9").is_none());
+        assert!(parse_inherited_value_spec("x:8").is_none());
     }
 }
 
@@ -1017,6 +1076,7 @@ pub fn exec_kernel_with_name_caps_and_authorities(
         None,
         None,
         &[],
+        &[],
         false,
         None,
     )
@@ -1035,6 +1095,7 @@ fn exec_internal(
     parent_override: Option<crate::task::ProcessId>,
     application_identity: Option<crate::task::process::ApplicationIdentity>,
     inherited_handles: &[InheritedHandleGrant],
+    inherited_values: &[InheritedValueSpec],
     enforce_path_access: bool,
     expected_digest: Option<[u8; 32]>,
 ) -> u64 {
@@ -1090,6 +1151,7 @@ fn exec_internal(
             requested_privilege,
             application_identity,
             inherited_handles,
+            inherited_values,
             &mut measurement,
         );
         measurement.finish(result)
@@ -1305,6 +1367,7 @@ fn exec_with_data(
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     application_identity: Option<crate::task::process::ApplicationIdentity>,
     inherited_handles: &[InheritedHandleGrant],
+    inherited_values: &[InheritedValueSpec],
     measurement: &mut ExecMeasurement,
 ) -> u64 {
     crate::debug!("exec: name={}", process_name);
@@ -1511,6 +1574,9 @@ fn exec_with_data(
             proc.set_kernel_authorities_for_exec(authorities);
         }
         if let Err(errno) = install_inherited_handles(&mut proc, inherited_handles) {
+            return errno;
+        }
+        if let Err(errno) = install_inherited_values(&mut proc, inherited_values) {
             return errno;
         }
         proc.set_page_table(new_pt_phys);

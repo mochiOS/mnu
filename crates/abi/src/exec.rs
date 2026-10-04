@@ -10,6 +10,12 @@ pub const ENVIRONMENT_PREFIX: &str = "__MNU_EXEC_ENV=";
 /// envp. The source handle must carry TRANSFER and all requested rights.
 pub const INHERITED_HANDLE_PREFIX: &str = "__MNU_EXEC_INHERIT_HANDLE=";
 
+/// Adds an opaque key/value pair to a child's LaunchContext.
+///
+/// The value is `key:value`, with unsigned decimal fields. mnu stores both
+/// fields without assigning application-level meaning to either one.
+pub const INHERITED_VALUE_PREFIX: &str = "__MNU_EXEC_INHERIT_VALUE=";
+
 /// Assigns an opaque security identity to a new process.
 ///
 /// mnu uses this identity only for generic isolation mechanisms. The user space
