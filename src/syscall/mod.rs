@@ -817,7 +817,13 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::IpcCallHandles as u64 => {
             ipc::call_handles(arg0, arg1, arg2, arg3, arg4, arg5)
         }
+        x if x == SyscallNumber::IpcCallObjectHandles as u64 => {
+            ipc::call_object_handles(arg0, arg1, arg2, arg3, arg4, arg5)
+        }
         x if x == SyscallNumber::IpcReply as u64 => ipc::reply(arg0, arg1, arg2),
+        x if x == SyscallNumber::IpcReplyObjectHandles as u64 => {
+            ipc::reply_object_handles(arg0, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::IpcWait as u64 => ipc::wait(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcRecvHandles as u64 => ipc::recv_handles(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::IpcRecvObjectHandles as u64 => {
@@ -945,6 +951,8 @@ fn is_ipc_syscall(num: u64) -> bool {
         || num == SyscallNumber::IpcCallHandles as u64
         || num == SyscallNumber::IpcSendObjectHandles as u64
         || num == SyscallNumber::IpcRecvObjectHandles as u64
+        || num == SyscallNumber::IpcCallObjectHandles as u64
+        || num == SyscallNumber::IpcReplyObjectHandles as u64
         || num == SyscallNumber::IpcEndpointAlive as u64
         || num == SyscallNumber::IpcEndpointOwner as u64
         || num == SyscallNumber::IpcCreate as u64

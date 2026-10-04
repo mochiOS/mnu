@@ -372,6 +372,8 @@ pub fn call(
         call_id,
         reply_ptr,
         reply_len,
+        None,
+        None,
     );
     #[cfg(feature = "performance-instrumentation")]
     if (result as i64) >= 0 {
@@ -444,10 +446,113 @@ pub fn call_handles(
         call_id,
         reply_ptr,
         reply_len,
+        None,
+        None,
+    )
+}
+
+/// Performs a synchronous IPC call with rights-restricted generic object
+/// handles in both directions.
+///
+/// `handles_ptr` is an in/out `IpcObjectHandles`: its initial contents are
+/// attached to the request and it is replaced with the handles attached to the
+/// reply. Handle numbers remain process-local on both sides.
+pub fn call_object_handles(
+    dest_endpoint_handle: u64,
+    req_ptr: u64,
+    req_len: u64,
+    reply_ptr: u64,
+    reply_len: u64,
+    handles_ptr: u64,
+) -> u64 {
+    if handles_ptr == 0 {
+        return EFAULT;
+    }
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::IpcClient,
+        crate::capability::Capability::IpcServer,
+    ]) {
+        return EACCES;
+    }
+    let (dest_thread_id, expected_sender) = match resolve_call_destination(dest_endpoint_handle) {
+        Ok(destination) => destination,
+        Err(error) => return error,
+    };
+    let caller = match crate::task::current_thread_id() {
+        Some(id) => id.as_u64(),
+        None => return EINVAL,
+    };
+    let sender = match ensure_endpoint_for_thread(caller) {
+        Some(handle) => handle,
+        None => return EINVAL,
+    };
+    let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
+    let sent = loop {
+        let attachments = match decode_outgoing_object_handles(handles_ptr) {
+            Ok(handles) => handles,
+            Err(error) => return error,
+        };
+        let status = send_to_thread_id_with_attachments(
+            dest_thread_id,
+            sender,
+            call_id,
+            req_ptr,
+            req_len,
+            false,
+            true,
+            FileHandleAttachments::empty(),
+            attachments,
+        );
+        if status != EAGAIN {
+            break status;
+        }
+        crate::task::yield_now();
+    };
+    if sent != 0 {
+        return sent;
+    }
+    recv_blocking_reply_for_thread(
+        caller,
+        caller,
+        expected_sender,
+        call_id,
+        reply_ptr,
+        reply_len,
+        None,
+        Some(handles_ptr),
     )
 }
 
 pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
+    reply_with_attachments(
+        dest_thread_id,
+        buf_ptr,
+        len,
+        ObjectHandleAttachments::empty(),
+    )
+}
+
+/// Replies to a synchronous call and transfers rights-restricted generic
+/// object handles to the caller.
+pub fn reply_object_handles(
+    dest_thread_id: u64,
+    buf_ptr: u64,
+    len: u64,
+    handles_ptr: u64,
+) -> u64 {
+    let attachments = match decode_outgoing_object_handles(handles_ptr) {
+        Ok(handles) => handles,
+        Err(error) => return error,
+    };
+    reply_with_attachments(dest_thread_id, buf_ptr, len, attachments)
+}
+
+fn reply_with_attachments(
+    dest_thread_id: u64,
+    buf_ptr: u64,
+    len: u64,
+    object_handles: ObjectHandleAttachments,
+) -> u64 {
     let current = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
         None => return EINVAL,
@@ -477,7 +582,7 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         Some(thread_id) => thread_id,
         None => return EINVAL,
     };
-    let status = send_to_thread_id_with_kind(
+    let status = send_to_thread_id_with_attachments(
         target_thread,
         caller_handle,
         target.call_id,
@@ -486,6 +591,7 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         true,
         false,
         FileHandleAttachments::empty(),
+        object_handles,
     );
     if status == 0 {
         let mut boxes = lock_mailboxes();
@@ -505,6 +611,8 @@ fn recv_blocking_reply_for_thread(
     expected_call_id: u64,
     buf_ptr: u64,
     max_len: u64,
+    file_handles_output: Option<u64>,
+    object_handles_output: Option<u64>,
 ) -> u64 {
     let (idx, receiver_generation) =
         match crate::task::thread_slot_index_and_generation_by_u64(receiver_thread_id) {
@@ -528,6 +636,8 @@ fn recv_blocking_reply_for_thread(
                 receiver_generation,
                 buf_ptr,
                 max_copy,
+                file_handles_output.is_some(),
+                object_handles_output.is_some(),
             ) {
                 Ok(Some(v)) => Some(v),
                 Ok(None) => {
@@ -539,7 +649,17 @@ fn recv_blocking_reply_for_thread(
         };
 
         match recv {
-            Some((from, copy_len)) => {
+            Some(receive) => {
+                let (from, copy_len, _) = match finish_user_receive(
+                    receiver_thread_id,
+                    buf_ptr,
+                    receive,
+                    file_handles_output,
+                    object_handles_output,
+                ) {
+                    Ok(result) => result,
+                    Err(error) => return error,
+                };
                 return (from << 32) | (copy_len as u64);
             }
             None => {
@@ -553,11 +673,24 @@ fn recv_blocking_reply_for_thread(
                         receiver_generation,
                         buf_ptr,
                         max_copy,
+                        file_handles_output.is_some(),
+                        object_handles_output.is_some(),
                     );
-                    if let Ok(Some((from, copy_len))) = second_try {
+                    if let Ok(Some(receive)) = second_try {
                         if boxes[idx].waiter == caller_thread_id {
                             boxes[idx].waiter = 0;
                         }
+                        drop(boxes);
+                        let (from, copy_len, _) = match finish_user_receive(
+                            receiver_thread_id,
+                            buf_ptr,
+                            receive,
+                            file_handles_output,
+                            object_handles_output,
+                        ) {
+                            Ok(result) => result,
+                            Err(error) => return error,
+                        };
                         return (from << 32) | (copy_len as u64);
                     }
                     if let Err(error) = second_try {
@@ -1286,7 +1419,9 @@ impl Mailbox {
         receiver_generation: u64,
         buf_ptr: u64,
         max_copy: usize,
-    ) -> Result<Option<(u64, usize)>, u64> {
+        accept_file_handles: bool,
+        accept_object_handles: bool,
+    ) -> Result<Option<UserReceive>, u64> {
         if self.count == 0 {
             return Ok(None);
         }
@@ -1296,7 +1431,11 @@ impl Mailbox {
             let Some(slot_idx) = self.dequeue_slot() else {
                 return Ok(None);
             };
-            let Some(msg) = self.slots.get(slot_idx).and_then(Option::as_deref) else {
+            let Some(msg) = self
+                .slots
+                .get_mut(slot_idx)
+                .and_then(Option::as_deref_mut)
+            else {
                 self.quarantine("ipc mailbox queue points to an empty slot");
                 return Ok(None);
             };
@@ -1314,21 +1453,57 @@ impl Mailbox {
                 continue;
             }
 
-            let copy_len = core::cmp::min(msg.len, max_copy);
-            if copy_len > 0 && buf_ptr != 0 {
-                if let Err(error) = crate::syscall::copy_to_user(buf_ptr, &msg.data[..copy_len]) {
-                    if self.enqueue_slot(slot_idx).is_err() {
-                        let _ = self.free_slot(slot_idx);
-                    }
-                    return Err(error);
+            if (!accept_file_handles && !msg.file_handles.is_empty())
+                || (!accept_object_handles && !msg.object_handles.is_empty())
+            {
+                if !self.free_slot(slot_idx) {
+                    return Ok(None);
                 }
-                record_ipc_copy(copy_len);
+                return Err(EMSGSIZE);
             }
-            let from = msg.from;
+
+            let copy_len = core::cmp::min(msg.len, max_copy);
+            let mut external_header = [0u8; 16];
+            if msg.ext_pages.is_empty() {
+                if copy_len > 0 && buf_ptr != 0 {
+                    if let Err(error) = crate::syscall::copy_to_user(buf_ptr, &msg.data[..copy_len]) {
+                        if self.enqueue_slot(slot_idx).is_err() {
+                            let _ = self.free_slot(slot_idx);
+                        }
+                        return Err(error);
+                    }
+                    record_ipc_copy(copy_len);
+                }
+            } else {
+                if copy_len < external_header.len() {
+                    if !self.free_slot(slot_idx) {
+                        return Ok(None);
+                    }
+                    return Err(EFAULT);
+                }
+                external_header.copy_from_slice(&msg.data[..16]);
+                record_ipc_copy(16);
+            }
+            let receive = UserReceive {
+                from: msg.from,
+                copy_len,
+                ext_pages: msg.ext_pages,
+                expects_reply: false,
+                call_id: msg.call_id,
+                external_header,
+                file_handles: core::mem::replace(
+                    &mut msg.file_handles,
+                    FileHandleAttachments::empty(),
+                ),
+                object_handles: core::mem::replace(
+                    &mut msg.object_handles,
+                    ObjectHandleAttachments::empty(),
+                ),
+            };
             if !self.free_slot(slot_idx) {
                 return Ok(None);
             }
-            return Ok(Some((from, copy_len)));
+            return Ok(Some(receive));
         }
 
         Ok(None)
@@ -2813,8 +2988,21 @@ pub fn recv_blocking_from_sender_for_kernel(
 mod tests {
     use alloc::boxed::Box;
 
-    use super::{FileHandleAttachments, Mailbox, Message, ReplyTarget};
-    use crate::task::FileHandle;
+    use super::{
+        FileHandleAttachments, Mailbox, Message, ObjectHandleAttachments, ReplyTarget,
+    };
+    use crate::task::{FileHandle, HandleRights, KernelObject, ObjectHandleEntry};
+
+    fn endpoint_entry() -> ObjectHandleEntry {
+        ObjectHandleEntry::new(
+            KernelObject::IpcEndpoint {
+                thread_id: 42,
+                slot: 2,
+                generation: 7,
+            },
+            HandleRights::SEND,
+        )
+    }
 
     #[test]
     fn legacy_receive_does_not_consume_attached_handles() {
@@ -2873,11 +3061,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            mailbox.pop_reply_to_user(11, 200, 20, 1, 2, 0, 0),
+            mailbox
+                .pop_reply_to_user(11, 200, 20, 1, 2, 0, 0, false, false)
+                .map(|received| received.map(|value| (value.from, value.copy_len))),
             Ok(Some((11, 0)))
         );
         assert_eq!(
-            mailbox.pop_reply_to_user(10, 100, 20, 1, 2, 0, 0),
+            mailbox
+                .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false, false)
+                .map(|received| received.map(|value| (value.from, value.copy_len))),
             Ok(Some((10, 0)))
         );
     }
@@ -2893,12 +3085,61 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            mailbox.pop_reply_to_user(10, 101, 20, 1, 2, 0, 0),
+            mailbox
+                .pop_reply_to_user(10, 101, 20, 1, 2, 0, 0, false, false)
+                .map(|received| received.map(|value| (value.from, value.copy_len))),
             Ok(Some((10, 0)))
         );
         assert_eq!(
-            mailbox.pop_reply_to_user(10, 100, 20, 1, 2, 0, 0),
+            mailbox
+                .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false, false)
+                .map(|received| received.map(|value| (value.from, value.copy_len))),
             Ok(Some((10, 0)))
         );
+    }
+
+    #[test]
+    fn synchronous_call_explicitly_accepts_reply_object_handles() {
+        let mut mailbox = Mailbox::new();
+        let mut message = Box::new(Message::empty());
+        message.from = 10;
+        message.to = 20;
+        message.to_slot = 1;
+        message.to_generation = 2;
+        message.is_reply = true;
+        message.call_id = 100;
+        message.object_handles = ObjectHandleAttachments::empty();
+        message.object_handles.count = 1;
+        message.object_handles.handles[0] = Some(endpoint_entry());
+        mailbox.enqueue_message(message).unwrap();
+
+        let received = mailbox
+            .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false, true)
+            .unwrap()
+            .expect("reply should be received");
+        assert_eq!(received.object_handles.count, 1);
+        assert_eq!(mailbox.count, 0);
+    }
+
+    #[test]
+    fn byte_only_call_rejects_and_discards_reply_object_handles() {
+        let mut mailbox = Mailbox::new();
+        let mut message = Box::new(Message::empty());
+        message.from = 10;
+        message.to = 20;
+        message.to_slot = 1;
+        message.to_generation = 2;
+        message.is_reply = true;
+        message.call_id = 100;
+        message.object_handles = ObjectHandleAttachments::empty();
+        message.object_handles.count = 1;
+        message.object_handles.handles[0] = Some(endpoint_entry());
+        mailbox.enqueue_message(message).unwrap();
+
+        assert!(matches!(
+            mailbox.pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false, false),
+            Err(error) if error == mnu_abi::EMSGSIZE
+        ));
+        assert_eq!(mailbox.count, 0);
     }
 }
