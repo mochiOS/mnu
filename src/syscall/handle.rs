@@ -613,21 +613,26 @@ fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) ->
 /// `u64::MAX` waits indefinitely.
 pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
     let count = match usize::try_from(count) {
-        Ok(count) if count > 0 && count <= mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS => count,
+        Ok(count) if count <= mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS => count,
         _ => return EINVAL,
     };
+    if count == 0 && deadline_nanoseconds == mnu_abi::HANDLE_WAIT_INFINITE {
+        return EINVAL;
+    }
     let byte_len = match count.checked_mul(core::mem::size_of::<mnu_abi::HandleWaitItem>()) {
         Some(length) => length,
         None => return EINVAL,
     };
-    if !crate::syscall::validate_user_ptr(items_ptr, byte_len as u64) {
+    if byte_len != 0 && !crate::syscall::validate_user_ptr(items_ptr, byte_len as u64) {
         return EFAULT;
     }
     let mut items = alloc::vec![mnu_abi::HandleWaitItem::default(); count];
-    let bytes =
-        unsafe { core::slice::from_raw_parts_mut(items.as_mut_ptr().cast::<u8>(), byte_len) };
-    if let Err(error) = crate::syscall::copy_from_user(items_ptr, bytes) {
-        return error;
+    if byte_len != 0 {
+        let bytes =
+            unsafe { core::slice::from_raw_parts_mut(items.as_mut_ptr().cast::<u8>(), byte_len) };
+        if let Err(error) = crate::syscall::copy_from_user(items_ptr, bytes) {
+            return error;
+        }
     }
     let current = match crate::task::current_thread_id() {
         Some(thread) => thread,
@@ -672,6 +677,9 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
             || (deadline_nanoseconds != mnu_abi::HANDLE_WAIT_INFINITE
                 && crate::syscall::time::monotonic_nanoseconds() >= deadline_nanoseconds)
         {
+            if items.is_empty() {
+                return EAGAIN;
+            }
             return match copy_wait_items_to_user(items_ptr, &items) {
                 Ok(()) => EAGAIN,
                 Err(error) => error,
