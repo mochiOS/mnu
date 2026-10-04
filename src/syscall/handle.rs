@@ -756,6 +756,33 @@ pub fn launch_get(key: u64) -> u64 {
     .unwrap_or(EINVAL)
 }
 
+/// Associates one of the caller's existing object handles with an opaque
+/// process-context key. The kernel assigns no meaning to either the key or the
+/// object and never resolves service names on the caller's behalf.
+pub fn context_bind(key: u64, raw: u64) -> u64 {
+    let process_id = match current_process() {
+        Ok(process_id) => process_id,
+        Err(error) => return error,
+    };
+    let handle = match decode_handle(raw) {
+        Ok(handle) => handle,
+        Err(error) => return error,
+    };
+    crate::task::with_process_mut(process_id, |process| {
+        if process.object_handles().get(handle).is_none() {
+            return EBADF;
+        }
+        if process.launch_context().get(key).is_some() {
+            return super::EEXIST;
+        }
+        if !process.launch_context_mut().install(key, handle) {
+            return ENOSPC;
+        }
+        SUCCESS
+    })
+    .unwrap_or(EINVAL)
+}
+
 pub fn launch_value_get(key: u64, output: u64) -> u64 {
     let process_id = match current_process() {
         Ok(process_id) => process_id,
