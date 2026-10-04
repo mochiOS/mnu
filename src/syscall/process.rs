@@ -1791,14 +1791,10 @@ pub fn set_robust_list(_head: u64, _len: u64) -> u64 {
     SUCCESS
 }
 
-/// Fill a userspace buffer from the initialized kernel CSPRNG.
-pub fn getrandom(buf_ptr: u64, len: u64, flags: u64) -> u64 {
+fn fill_random_buffer(buf_ptr: u64, len: u64) -> u64 {
     const CHUNK_LEN: usize = 256;
     if len == 0 {
         return 0;
-    }
-    if flags != 0 {
-        return EINVAL;
     }
     if buf_ptr == 0 || len > isize::MAX as u64 || !super::validate_user_ptr(buf_ptr, len) {
         return EFAULT;
@@ -1827,7 +1823,7 @@ pub fn random_fill(buf_ptr: u64, len: u64) -> u64 {
     ]) {
         return super::types::EACCES;
     }
-    getrandom(buf_ptr, len, 0)
+    fill_random_buffer(buf_ptr, len)
 }
 
 /// FindProcessByNameシステムコール

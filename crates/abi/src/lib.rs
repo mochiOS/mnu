@@ -88,7 +88,6 @@ pub enum SyscallNumber {
     SetRobustList = 273,
     Pipe2 = 293,
     Prlimit64 = 302,
-    Getrandom = 318,
     Getrlimit = 97,
     Getdents64 = 217,
 
