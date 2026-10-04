@@ -672,6 +672,7 @@ pub fn last_syscall_snapshot() -> (u64, [u64; 5]) {
 
 /// システムコールのディスパッチ
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
+    handle::flush_provider_releases();
     record_syscall(num, arg0, arg1, arg2, arg3, arg4);
     #[cfg(feature = "performance-instrumentation")]
     let _allocation_scope =

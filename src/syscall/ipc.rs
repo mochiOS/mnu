@@ -1728,6 +1728,41 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
     })
 }
 
+/// Sends one non-blocking message to an exact provider endpoint identity.
+pub(crate) fn send_provider_from_kernel(endpoint: IpcEndpoint, data: &[u8]) -> bool {
+    if data.len() > ipc_max_msg_size() || !endpoint_is_valid(endpoint) {
+        return false;
+    }
+    let sender = crate::task::current_thread_id()
+        .and_then(|thread| ensure_endpoint_for_thread(thread.as_u64()))
+        .unwrap_or(0);
+    let mut mailboxes = lock_mailboxes();
+    let Some(mailbox) = mailboxes.get_mut(endpoint.slot as usize) else {
+        return false;
+    };
+    if mailbox
+        .push_message(
+            sender,
+            endpoint.thread_id,
+            endpoint.slot,
+            endpoint.generation,
+            data,
+            false,
+            false,
+            0,
+        )
+        .is_err()
+    {
+        return false;
+    }
+    let waiter = mailbox.take_waiter();
+    drop(mailboxes);
+    if waiter != 0 {
+        crate::task::wake_ipc_waiter(crate::task::ThreadId::from_u64(waiter));
+    }
+    true
+}
+
 /// Performs a synchronous IPC call without copying through userspace buffers.
 pub fn call_from_kernel(
     dest_endpoint_handle: u64,

@@ -1,11 +1,39 @@
 use alloc::sync::Arc;
 use alloc::vec;
 
-use crate::task::{
-    HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject,
-};
+use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
 use super::{EACCES, EBADF, EINVAL, EIO, ENOSPC, SUCCESS};
+
+pub(crate) fn flush_provider_releases() {
+    let releases = crate::task::handle_table::take_provider_releases();
+    let mut retry = alloc::vec::Vec::new();
+    for release in releases {
+        let endpoint = crate::syscall::ipc::IpcEndpoint {
+            thread_id: release.endpoint_thread_id,
+            slot: release.endpoint_slot,
+            generation: release.endpoint_generation,
+        };
+        if !crate::syscall::ipc::endpoint_is_valid(endpoint) {
+            continue;
+        }
+        let header = mnu_abi::provider::RequestHeader {
+            opcode: mnu_abi::provider::OP_RELEASE,
+            object_id: release.object_id,
+            argument: 0,
+            basis: 0,
+            length: 0,
+            data_length: 0,
+        };
+        let mut request = [0u8; mnu_abi::provider::REQUEST_HEADER_LEN];
+        if header.encode(&[], &mut request).is_ok()
+            && !crate::syscall::ipc::send_provider_from_kernel(endpoint, &request)
+        {
+            retry.push(release);
+        }
+    }
+    crate::task::handle_table::requeue_provider_releases(&mut retry);
+}
 
 fn current_process() -> Result<crate::task::ProcessId, u64> {
     crate::syscall::security::current_process_id().ok_or(EINVAL)
@@ -65,7 +93,9 @@ pub fn seek(raw: u64, offset: u64, basis: u64) -> u64 {
         _ => return EINVAL,
     };
     match object {
-        KernelObject::File(file) => crate::syscall::fs::seek_file_handle(&file, offset as i64, basis),
+        KernelObject::File(file) => {
+            crate::syscall::fs::seek_file_handle(&file, offset as i64, basis)
+        }
         KernelObject::Provider(provider) => provider_seek(&provider, offset as i64, basis),
         _ => EBADF,
     }
@@ -85,10 +115,7 @@ fn provider_call(
     request_data: &[u8],
     response_storage: &mut [u8],
 ) -> Result<(mnu_abi::provider::ResponseHeader, usize), u64> {
-    let mut request = vec![
-        0u8;
-        mnu_abi::provider::REQUEST_HEADER_LEN + request_data.len()
-    ];
+    let mut request = vec![0u8; mnu_abi::provider::REQUEST_HEADER_LEN + request_data.len()];
     let request_len = request_header
         .encode(request_data, &mut request)
         .map_err(|_| EINVAL)?;
@@ -97,10 +124,9 @@ fn provider_call(
         &request[..request_len],
         response_storage,
     )?;
-    let (response, data) = mnu_abi::provider::ResponseHeader::decode(
-        response_storage.get(..response_len).ok_or(EIO)?,
-    )
-    .map_err(|_| EIO)?;
+    let (response, data) =
+        mnu_abi::provider::ResponseHeader::decode(response_storage.get(..response_len).ok_or(EIO)?)
+            .map_err(|_| EIO)?;
     if response.opcode != request_header.opcode || response.object_id != provider.object_id {
         return Err(EIO);
     }
@@ -116,10 +142,8 @@ fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         Err(_) => return EINVAL,
     };
     let mut total = 0usize;
-    let mut response_storage = vec![
-        0u8;
-        mnu_abi::provider::RESPONSE_HEADER_LEN + mnu_abi::provider::MAX_DATA_LEN
-    ];
+    let mut response_storage =
+        vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + mnu_abi::provider::MAX_DATA_LEN];
     while total < length {
         let chunk = (length - total).min(mnu_abi::provider::MAX_DATA_LEN);
         let request = mnu_abi::provider::RequestHeader {
@@ -130,11 +154,11 @@ fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
             length: chunk as u32,
             data_length: 0,
         };
-        let (response, data_len) = match provider_call(provider, request, &[], &mut response_storage)
-        {
-            Ok(response) => response,
-            Err(error) => return if total == 0 { error } else { total as u64 },
-        };
+        let (response, data_len) =
+            match provider_call(provider, request, &[], &mut response_storage) {
+                Ok(response) => response,
+                Err(error) => return if total == 0 { error } else { total as u64 },
+            };
         if response.value as usize != data_len || data_len > chunk {
             return if total == 0 { EIO } else { total as u64 };
         }
@@ -331,12 +355,13 @@ pub fn duplicate(raw: u64, requested_rights: u64) -> u64 {
         let Some(source) = process.object_handles().get(handle) else {
             return EBADF;
         };
-        if !source.rights().contains(HandleRights::DUPLICATE)
-            || !source.rights().contains(rights)
-        {
+        if !source.rights().contains(HandleRights::DUPLICATE) || !source.rights().contains(rights) {
             return EACCES;
         }
-        match process.object_handles_mut().duplicate_restricted(handle, rights) {
+        match process
+            .object_handles_mut()
+            .duplicate_restricted(handle, rights)
+        {
             Some(duplicate) => duplicate.raw() as u64,
             None => ENOSPC,
         }

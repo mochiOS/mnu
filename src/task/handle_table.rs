@@ -1,17 +1,51 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use super::fd_table::FileHandle;
 
 pub const PROCESS_MAX_OBJECT_HANDLES: usize = 4096;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderObject {
     pub endpoint_thread_id: u64,
     pub endpoint_slot: u16,
     pub endpoint_generation: u64,
     pub object_id: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ProviderRelease {
+    pub endpoint_thread_id: u64,
+    pub endpoint_slot: u16,
+    pub endpoint_generation: u64,
+    pub object_id: u64,
+}
+
+static PENDING_PROVIDER_RELEASES: crate::interrupt::spinlock::SpinLock<Vec<ProviderRelease>> =
+    crate::interrupt::spinlock::SpinLock::new(Vec::new());
+
+pub(crate) fn take_provider_releases() -> Vec<ProviderRelease> {
+    core::mem::take(&mut *PENDING_PROVIDER_RELEASES.lock())
+}
+
+pub(crate) fn requeue_provider_releases(releases: &mut Vec<ProviderRelease>) {
+    if releases.is_empty() {
+        return;
+    }
+    PENDING_PROVIDER_RELEASES.lock().append(releases);
+}
+
+impl Drop for ProviderObject {
+    fn drop(&mut self) {
+        PENDING_PROVIDER_RELEASES.lock().push(ProviderRelease {
+            endpoint_thread_id: self.endpoint_thread_id,
+            endpoint_slot: self.endpoint_slot,
+            endpoint_generation: self.endpoint_generation,
+            object_id: self.object_id,
+        });
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

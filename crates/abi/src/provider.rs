@@ -9,6 +9,7 @@ pub const VERSION: u16 = 1;
 pub const OP_READ: u16 = 1;
 pub const OP_WRITE: u16 = 2;
 pub const OP_SEEK: u16 = 3;
+pub const OP_RELEASE: u16 = 4;
 
 pub const REQUEST_HEADER_LEN: usize = 48;
 pub const RESPONSE_HEADER_LEN: usize = 40;
@@ -153,7 +154,7 @@ impl ResponseHeader {
 }
 
 const fn valid_opcode(opcode: u16) -> bool {
-    matches!(opcode, OP_READ | OP_WRITE | OP_SEEK)
+    matches!(opcode, OP_READ | OP_WRITE | OP_SEEK | OP_RELEASE)
 }
 
 const fn valid_request_fields(header: RequestHeader) -> bool {
@@ -178,6 +179,12 @@ const fn valid_request_fields(header: RequestHeader) -> bool {
                     crate::HANDLE_SEEK_START | crate::HANDLE_SEEK_CURRENT | crate::HANDLE_SEEK_END
                 )
         }
+        OP_RELEASE => {
+            header.argument == 0
+                && header.basis == 0
+                && header.length == 0
+                && header.data_length == 0
+        }
         _ => false,
     }
 }
@@ -192,7 +199,7 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
     }
     match header.opcode {
         OP_READ => header.value == header.data_length as u64,
-        OP_WRITE | OP_SEEK => header.data_length == 0,
+        OP_WRITE | OP_SEEK | OP_RELEASE => header.data_length == 0,
         _ => false,
     }
 }
@@ -250,9 +257,15 @@ mod tests {
         };
         let mut bytes = [0u8; REQUEST_HEADER_LEN + 3];
         let length = header.encode(b"abc", &mut bytes).unwrap();
-        assert_eq!(RequestHeader::decode(&bytes[..length]), Ok((header, &b"abc"[..])));
+        assert_eq!(
+            RequestHeader::decode(&bytes[..length]),
+            Ok((header, &b"abc"[..]))
+        );
         bytes[47] = 1;
-        assert_eq!(RequestHeader::decode(&bytes), Err(DecodeError::InvalidReserved));
+        assert_eq!(
+            RequestHeader::decode(&bytes),
+            Err(DecodeError::InvalidReserved)
+        );
     }
 
     #[test]
@@ -266,8 +279,14 @@ mod tests {
         };
         let mut bytes = [0u8; RESPONSE_HEADER_LEN + 2];
         let length = header.encode(b"ok", &mut bytes).unwrap();
-        assert_eq!(ResponseHeader::decode(&bytes[..length]), Ok((header, &b"ok"[..])));
+        assert_eq!(
+            ResponseHeader::decode(&bytes[..length]),
+            Ok((header, &b"ok"[..]))
+        );
         bytes[32..36].copy_from_slice(&1u32.to_le_bytes());
-        assert_eq!(ResponseHeader::decode(&bytes), Err(DecodeError::InvalidLength));
+        assert_eq!(
+            ResponseHeader::decode(&bytes),
+            Err(DecodeError::InvalidLength)
+        );
     }
 }
