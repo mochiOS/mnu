@@ -327,6 +327,22 @@ fn resolve_call_destination(raw: u64) -> Result<(u64, u64), u64> {
     Ok((record.thread_id, raw))
 }
 
+fn resolve_receive_thread(raw: u64, current_thread_id: u64) -> Result<u64, u64> {
+    let thread_id = if raw <= crate::task::PROCESS_MAX_OBJECT_HANDLES as u64 {
+        process_local_endpoint(raw, HandleRights::RECEIVE)?.thread_id
+    } else {
+        let record = endpoint_record_from_handle(raw).ok_or(EINVAL)?;
+        if !record.rights.contains(EndpointRights::RECV) {
+            return Err(EACCES);
+        }
+        record.thread_id
+    };
+    if thread_id != current_thread_id {
+        return Err(EACCES);
+    }
+    Ok(thread_id)
+}
+
 pub fn call(
     dest_endpoint_handle: u64,
     req_ptr: u64,
@@ -726,14 +742,11 @@ pub fn wait(buf_ptr: u64, max_len: u64, blocking: u64) -> u64 {
     if blocking == 0 {
         return recv_from_thread_nonblocking(current, current, buf_ptr, max_len, None, None);
     }
-    let target = match endpoint_record_from_handle(blocking) {
-        Some(record) => record,
-        None => return EINVAL,
+    let target = match resolve_receive_thread(blocking, current) {
+        Ok(thread_id) => thread_id,
+        Err(error) => return error,
     };
-    if target.thread_id != current || !target.rights.contains(EndpointRights::RECV) {
-        return EACCES;
-    }
-    recv_blocking_for_thread(target.thread_id, current, buf_ptr, max_len, None, None)
+    recv_blocking_for_thread(target, current, buf_ptr, max_len, None, None)
 }
 
 pub fn send_to_endpoint(endpoint: IpcEndpoint, buf_ptr: u64, len: u64) -> u64 {
@@ -2816,15 +2829,12 @@ pub fn recv_handles(buf_ptr: u64, max_len: u64, handles_ptr: u64, blocking: u64)
             None,
         );
     }
-    let target = match endpoint_record_from_handle(blocking) {
-        Some(record) => record,
-        None => return EINVAL,
+    let target = match resolve_receive_thread(blocking, current) {
+        Ok(thread_id) => thread_id,
+        Err(error) => return error,
     };
-    if target.thread_id != current || !target.rights.contains(EndpointRights::RECV) {
-        return EACCES;
-    }
     recv_blocking_for_thread(
-        target.thread_id,
+        target,
         current,
         buf_ptr,
         max_len,
@@ -2858,15 +2868,12 @@ pub fn recv_object_handles(
             Some(handles_ptr),
         );
     }
-    let target = match endpoint_record_from_handle(blocking) {
-        Some(record) => record,
-        None => return EINVAL,
+    let target = match resolve_receive_thread(blocking, current) {
+        Ok(thread_id) => thread_id,
+        Err(error) => return error,
     };
-    if target.thread_id != current || !target.rights.contains(EndpointRights::RECV) {
-        return EACCES;
-    }
     recv_blocking_for_thread(
-        target.thread_id,
+        target,
         current,
         buf_ptr,
         max_len,
