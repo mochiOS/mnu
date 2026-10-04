@@ -783,14 +783,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::Dup2 as u64 => fs::dup2(arg0, arg1),
         x if x == SyscallNumber::Fcntl as u64 => fs::fcntl(arg0, arg1, arg2),
         x if x == SyscallNumber::Read as u64 => fs::read(arg0, arg1, arg2),
-        x if x == SyscallNumber::Open as u64 => fs::open(arg0, arg1),
-        x if x == SyscallNumber::Openat as u64 => fs::openat(arg0 as i64, arg1, arg2, arg3),
-        x if x == SyscallNumber::Stat as u64 => fs::stat(arg0, arg1),
-        x if x == SyscallNumber::Fstat as u64 => fs::fstat(arg0, arg1),
-        x if x == SyscallNumber::Lstat as u64 => fs::lstat(arg0, arg1),
-        x if x == SyscallNumber::Newfstatat as u64 => fs::newfstatat(arg0 as i64, arg1, arg2, arg3),
-        x if x == SyscallNumber::Access as u64 => fs::faccessat(-100, arg0, arg1, 0),
-        x if x == SyscallNumber::Faccessat as u64 => fs::faccessat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Lseek as u64 => fs::seek(arg0, arg1 as i64, arg2),
         x if x == SyscallNumber::Fsync as u64 => fs::fsync(arg0),
         x if x == SyscallNumber::Fdatasync as u64 => fs::fdatasync(arg0),
@@ -868,8 +860,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::FileFstat as u64 => fs::file_fstat(arg0, arg1),
         x if x == SyscallNumber::FileReadDir as u64 => fs::file_read_dir(arg0, arg1, arg2),
         x if x == SyscallNumber::FileSync as u64 => fs::file_sync(arg0),
-        x if x == SyscallNumber::Chdir as u64 => fs::chdir(arg0),
-        x if x == SyscallNumber::Getcwd as u64 => fs::getcwd(arg0, arg1),
         _ => ENOSYS,
     };
 
@@ -980,8 +970,7 @@ fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
     use crate::performance::LatencyMetric;
 
     match num {
-        x if x == SyscallNumber::Open as u64
-            || x == SyscallNumber::FileOpen as u64
+        x if x == SyscallNumber::FileOpen as u64
             || x == SyscallNumber::FileOpenAt as u64 =>
         {
             Some(LatencyMetric::VfsOpen)
