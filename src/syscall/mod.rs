@@ -784,17 +784,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryProtect as u64 => pgroup::mprotect(arg0, arg1, arg2),
-        x if x == SyscallNumber::Close as u64 => fs::close(arg0),
-        x if x == SyscallNumber::Dup as u64 => fs::dup(arg0),
-        x if x == SyscallNumber::Dup2 as u64 => fs::dup2(arg0, arg1),
-        x if x == SyscallNumber::Fcntl as u64 => fs::fcntl(arg0, arg1, arg2),
         x if x == SyscallNumber::Read as u64 => fs::read(arg0, arg1, arg2),
-        x if x == SyscallNumber::Lseek as u64 => fs::seek(arg0, arg1 as i64, arg2),
-        x if x == SyscallNumber::Fsync as u64 => fs::fsync(arg0),
-        x if x == SyscallNumber::Fdatasync as u64 => fs::fdatasync(arg0),
-        x if x == SyscallNumber::Statfs as u64 => fs::statfs(arg0, arg1),
-        x if x == SyscallNumber::Getdents64 as u64 => fs::getdents64(arg0, arg1, arg2),
-        x if x == SyscallNumber::Ftruncate as u64 => fs::ftruncate(arg0, arg1),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
         x if x == SyscallNumber::AllocSharedPages as u64 => {
@@ -956,10 +946,22 @@ fn is_ipc_syscall(num: u64) -> bool {
 
 #[cfg(feature = "performance-instrumentation")]
 fn is_vfs_syscall(num: u64) -> bool {
-    matches!(
-        num,
-        0..=8 | 19..=22 | 32..=33 | 72 | 74..=77 | 79 | 87 | 89..=92 | 137 | 217 | 257 | 262..=264 | 267 | 269 | 293 | 560..=573 | 634..=636
-    )
+    num == SyscallNumber::Read as u64
+        || num == SyscallNumber::Write as u64
+        || num == SyscallNumber::FileOpen as u64
+        || num == SyscallNumber::FileOpenAt as u64
+        || num == SyscallNumber::FileClose as u64
+        || num == SyscallNumber::FileRead as u64
+        || num == SyscallNumber::FileWrite as u64
+        || num == SyscallNumber::FileSeek as u64
+        || num == SyscallNumber::FileStat as u64
+        || num == SyscallNumber::FileStatAt as u64
+        || num == SyscallNumber::FileFstat as u64
+        || num == SyscallNumber::FileReadDir as u64
+        || num == SyscallNumber::FileSync as u64
+        || num == SyscallNumber::HandleRead as u64
+        || num == SyscallNumber::HandleWrite as u64
+        || num == SyscallNumber::HandleSeek as u64
 }
 
 #[cfg(feature = "performance-instrumentation")]
@@ -990,7 +992,7 @@ fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
         x if x == SyscallNumber::Write as u64 || x == SyscallNumber::FileWrite as u64 => {
             Some(LatencyMetric::VfsWrite)
         }
-        x if x == SyscallNumber::Close as u64 || x == SyscallNumber::FileClose as u64 => {
+        x if x == SyscallNumber::FileClose as u64 => {
             Some(LatencyMetric::VfsClose)
         }
         x if x == SyscallNumber::FileStat as u64
