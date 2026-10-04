@@ -1,6 +1,8 @@
 use alloc::sync::Arc;
 
-use crate::task::{FileHandle, HandleRights, KernelObject, ObjectHandle};
+use crate::task::{
+    FileHandle, HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject,
+};
 
 use super::{EACCES, EBADF, EINVAL, ENOSPC, SUCCESS};
 
@@ -57,6 +59,36 @@ pub fn seek(raw: u64, offset: u64, basis: u64) -> u64 {
         _ => return EINVAL,
     };
     crate::syscall::fs::seek_file_handle(&file, offset as i64, basis)
+}
+
+pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u64) -> u64 {
+    let process_id = match current_process() {
+        Ok(process_id) => process_id,
+        Err(error) => return error,
+    };
+    let rights = match HandleRights::from_bits(requested_rights) {
+        Some(rights) => rights,
+        None => return EINVAL,
+    };
+    let (endpoint_thread_id, endpoint_slot, endpoint_generation) =
+        match crate::syscall::ipc::resolve_provider_endpoint(endpoint) {
+            Ok(endpoint) => endpoint,
+            Err(error) => return error,
+        };
+    let object = KernelObject::Provider(Arc::new(ProviderObject {
+        endpoint_thread_id,
+        endpoint_slot,
+        endpoint_generation,
+        object_id,
+    }));
+    crate::task::with_process_mut(process_id, |process| {
+        process
+            .object_handles_mut()
+            .insert(ObjectHandleEntry::new(object, rights))
+            .map(|handle| handle.raw() as u64)
+            .unwrap_or(ENOSPC)
+    })
+    .unwrap_or(EINVAL)
 }
 
 pub fn close(raw: u64) -> u64 {

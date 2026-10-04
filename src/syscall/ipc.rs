@@ -314,6 +314,15 @@ fn process_local_endpoint(raw: u64, required: HandleRights) -> Result<IpcEndpoin
     endpoint_is_valid(endpoint).then_some(endpoint).ok_or(EINVAL)
 }
 
+pub(crate) fn resolve_provider_endpoint(raw: u64) -> Result<(u64, u16, u64), u64> {
+    let endpoint = process_local_endpoint(raw, HandleRights::RECEIVE)?;
+    Ok((
+        endpoint.thread_id,
+        endpoint.slot,
+        endpoint.generation,
+    ))
+}
+
 fn resolve_call_destination(raw: u64) -> Result<(u64, u64), u64> {
     if raw <= crate::task::PROCESS_MAX_OBJECT_HANDLES as u64 {
         let endpoint = process_local_endpoint(raw, HandleRights::SEND)?;

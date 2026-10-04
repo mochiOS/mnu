@@ -17,7 +17,7 @@ pub use context::{switch_context, switch_to_thread, Context};
 pub use fd_table::{FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, PROCESS_MAX_FDS};
 pub use handle_table::{
     HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ObjectHandleTable,
-    PROCESS_MAX_OBJECT_HANDLES,
+    ProviderObject, PROCESS_MAX_OBJECT_HANDLES,
 };
 pub use ids::{PrivilegeLevel, ProcessId, ProcessState, SchedulingClass, ThreadId, ThreadState};
 pub use launch_context::{LaunchContext, PROCESS_MAX_INHERITED_HANDLES};

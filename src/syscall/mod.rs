@@ -759,6 +759,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::HandleRead as u64 => handle::read(arg0, arg1, arg2),
         x if x == SyscallNumber::HandleWrite as u64 => handle::write(arg0, arg1, arg2),
         x if x == SyscallNumber::HandleSeek as u64 => handle::seek(arg0, arg1, arg2),
+        x if x == SyscallNumber::ProviderObjectCreate as u64 => {
+            handle::provider_object_create(arg0, arg1, arg2)
+        }
         x if x == SyscallNumber::BootSystemSlot as u64 => boot_system_slot(),
         x if x == SyscallNumber::BootEspGuid as u64 => boot_esp_guid(arg0, arg1),
         x if x == SyscallNumber::DeviceControl as u64 => {

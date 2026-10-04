@@ -6,6 +6,14 @@ use super::fd_table::FileHandle;
 
 pub const PROCESS_MAX_OBJECT_HANDLES: usize = 4096;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderObject {
+    pub endpoint_thread_id: u64,
+    pub endpoint_slot: u16,
+    pub endpoint_generation: u64,
+    pub object_id: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ObjectHandle(u32);
 
@@ -91,6 +99,7 @@ pub enum KernelObject {
     Process(u64),
     VmObject(u64),
     File(Arc<FileHandle>),
+    Provider(Arc<ProviderObject>),
 }
 
 impl core::fmt::Debug for KernelObject {
@@ -113,6 +122,7 @@ impl core::fmt::Debug for KernelObject {
                 .debug_tuple("File")
                 .field(&(Arc::as_ptr(file) as usize))
                 .finish(),
+            Self::Provider(object) => formatter.debug_tuple("Provider").field(object).finish(),
         }
     }
 }
@@ -318,5 +328,36 @@ mod tests {
             panic!("file object changed type during duplication");
         };
         assert!(Arc::ptr_eq(source, duplicate));
+    }
+
+    #[test]
+    fn provider_objects_are_opaque_and_share_identity_across_duplicates() {
+        let provider = Arc::new(ProviderObject {
+            endpoint_thread_id: 31,
+            endpoint_slot: 4,
+            endpoint_generation: 8,
+            object_id: 99,
+        });
+        let mut table = ObjectHandleTable::new_boxed();
+        let source = table
+            .insert(ObjectHandleEntry::new(
+                KernelObject::Provider(provider),
+                HandleRights::READ
+                    .union(HandleRights::DUPLICATE)
+                    .union(HandleRights::TRANSFER),
+            ))
+            .unwrap();
+        let duplicate = table
+            .duplicate_restricted(source, HandleRights::READ)
+            .unwrap();
+        let source = table.get(source).unwrap();
+        let duplicate = table.get(duplicate).unwrap();
+        let (KernelObject::Provider(source), KernelObject::Provider(duplicate)) =
+            (source.object(), duplicate.object())
+        else {
+            panic!("provider object changed type during duplication");
+        };
+        assert!(Arc::ptr_eq(source, duplicate));
+        assert_eq!(source.object_id, 99);
     }
 }
