@@ -42,6 +42,28 @@ struct PipeState {
     data: Vec<u8>,
     readers: usize,
     writers: usize,
+    waiters: Vec<crate::task::ThreadId>,
+}
+
+impl PipeState {
+    fn signals(&self, write_end: bool) -> u64 {
+        let mut signals = 0;
+        if write_end {
+            if self.readers == 0 {
+                signals |= mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+            } else if self.data.len() < PIPE_BUFFER_CAP {
+                signals |= mnu_abi::HANDLE_SIGNAL_WRITABLE;
+            }
+        } else {
+            if !self.data.is_empty() || self.writers == 0 {
+                signals |= mnu_abi::HANDLE_SIGNAL_READABLE;
+            }
+            if self.writers == 0 {
+                signals |= mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+            }
+        }
+        signals
+    }
 }
 
 static PIPE_TABLE: crate::interrupt::spinlock::SpinLock<[Option<PipeState>; MAX_PIPES]> =
@@ -55,6 +77,7 @@ pub(crate) fn alloc_stream_state() -> Option<usize> {
                 data: Vec::new(),
                 readers: 1,
                 writers: 1,
+                waiters: Vec::new(),
             });
             return Some(index);
         }
@@ -63,20 +86,66 @@ pub(crate) fn alloc_stream_state() -> Option<usize> {
 }
 
 pub fn close_pipe_endpoint_from_kernel(pipe_id: usize, write_end: bool) {
-    let mut table = PIPE_TABLE.lock();
-    let Some(slot) = table.get_mut(pipe_id) else {
-        return;
+    let waiters = {
+        let mut table = PIPE_TABLE.lock();
+        let Some(slot) = table.get_mut(pipe_id) else {
+            return;
+        };
+        let Some(pipe) = slot.as_mut() else {
+            return;
+        };
+        if write_end {
+            pipe.writers = pipe.writers.saturating_sub(1);
+        } else {
+            pipe.readers = pipe.readers.saturating_sub(1);
+        }
+        let waiters = core::mem::take(&mut pipe.waiters);
+        if pipe.readers == 0 && pipe.writers == 0 {
+            *slot = None;
+        }
+        waiters
     };
-    let Some(pipe) = slot.as_mut() else {
-        return;
-    };
-    if write_end {
-        pipe.writers = pipe.writers.saturating_sub(1);
-    } else {
-        pipe.readers = pipe.readers.saturating_sub(1);
+    wake_stream_waiters(waiters);
+}
+
+fn wake_stream_waiters(waiters: Vec<crate::task::ThreadId>) {
+    for waiter in waiters {
+        crate::task::wake_ipc_waiter(waiter);
     }
-    if pipe.readers == 0 && pipe.writers == 0 {
-        *slot = None;
+}
+
+pub(crate) fn stream_signals(handle: &FileHandle) -> Result<u64, u64> {
+    let Some((stream_id, write_end)) = handle.stream_endpoint() else {
+        return Err(EBADF);
+    };
+    let table = PIPE_TABLE.lock();
+    let Some(Some(stream)) = table.get(stream_id) else {
+        return Err(EBADF);
+    };
+    Ok(stream.signals(write_end))
+}
+
+pub(crate) fn register_stream_waiter(
+    handle: &FileHandle,
+    waiter: crate::task::ThreadId,
+) -> Result<usize, u64> {
+    let Some((stream_id, _)) = handle.stream_endpoint() else {
+        return Err(EBADF);
+    };
+    let mut table = PIPE_TABLE.lock();
+    let Some(Some(stream)) = table.get_mut(stream_id) else {
+        return Err(EBADF);
+    };
+    if !stream.waiters.contains(&waiter) {
+        stream.waiters.push(waiter);
+    }
+    Ok(stream_id)
+}
+
+pub(crate) fn remove_stream_waiter(stream_id: usize, waiter: crate::task::ThreadId) {
+    let mut table = PIPE_TABLE.lock();
+    if let Some(Some(stream)) = table.get_mut(stream_id) {
+        stream.waiters.retain(|candidate| *candidate != waiter);
     }
 }
 
@@ -1557,39 +1626,39 @@ fn read_pipe(pipe_id: usize, open_flags: u64, buf_ptr: u64, len: u64) -> u64 {
         Ok(v) => v.min(MAX_IO_BYTES),
         Err(_) => MAX_IO_BYTES,
     };
+    let Some(current) = crate::task::current_thread_id() else {
+        return EBADF;
+    };
     loop {
-        let chunk = {
-            let table = PIPE_TABLE.lock();
-            let Some(Some(pipe)) = table.get(pipe_id) else {
-                return EBADF;
-            };
-            if pipe.data.is_empty() {
-                if pipe.writers == 0 {
-                    return 0;
-                }
-                if (open_flags & O_NONBLOCK) != 0 {
-                    return EAGAIN;
-                }
-                None
-            } else {
-                let take = core::cmp::min(pipe.data.len(), target_len);
-                Some(pipe.data[..take].to_vec())
-            }
-        };
-        let Some(chunk) = chunk else {
-            crate::task::yield_now();
-            continue;
-        };
-        crate::performance::record_vfs_temporary_buffer(chunk.len());
-        if crate::syscall::copy_to_user(buf_ptr, &chunk).is_err() {
-            return EFAULT;
-        }
         let mut table = PIPE_TABLE.lock();
         let Some(Some(pipe)) = table.get_mut(pipe_id) else {
             return EBADF;
         };
-        pipe.data.drain(0..chunk.len());
-        return chunk.len() as u64;
+        if pipe.data.is_empty() {
+            if pipe.writers == 0 {
+                return 0;
+            }
+            if (open_flags & O_NONBLOCK) != 0 {
+                return EAGAIN;
+            }
+            if !pipe.waiters.contains(&current) {
+                pipe.waiters.push(current);
+            }
+            drop(table);
+            let _ = crate::task::sleep_thread_unless_woken(current);
+            crate::task::yield_now();
+            continue;
+        }
+        let take = core::cmp::min(pipe.data.len(), target_len);
+        if crate::syscall::copy_to_user(buf_ptr, &pipe.data[..take]).is_err() {
+            return EFAULT;
+        }
+        pipe.data.drain(0..take);
+        pipe.waiters.retain(|waiter| *waiter != current);
+        let waiters = core::mem::take(&mut pipe.waiters);
+        drop(table);
+        wake_stream_waiters(waiters);
+        return take as u64;
     }
 }
 
@@ -1632,12 +1701,12 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
         return EACCES;
     }
     let open_file = handle.open.clone();
-    let pipe_id = {
+    let (pipe_id, open_flags) = {
         let open = open_file.lock();
-        open.pipe_id
+        (open.pipe_id, open.open_flags)
     };
     if let Some(pipe_id) = pipe_id {
-        return write_pipe(pipe_id, buf_ptr, len);
+        return write_pipe(pipe_id, open_flags, buf_ptr, len);
     }
 
     let Ok(len_usize) = usize::try_from(len) else {
@@ -1740,7 +1809,7 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
     written as u64
 }
 
-fn write_pipe(pipe_id: usize, buf_ptr: u64, len: u64) -> u64 {
+fn write_pipe(pipe_id: usize, open_flags: u64, buf_ptr: u64, len: u64) -> u64 {
     let Ok(len_usize) = usize::try_from(len) else {
         return EINVAL;
     };
@@ -1752,18 +1821,35 @@ fn write_pipe(pipe_id: usize, buf_ptr: u64, len: u64) -> u64 {
     if let Err(errno) = crate::syscall::copy_from_user(buf_ptr, &mut tmp) {
         return errno;
     }
-    let mut table = PIPE_TABLE.lock();
-    let Some(Some(pipe)) = table.get_mut(pipe_id) else {
+    let Some(current) = crate::task::current_thread_id() else {
         return EBADF;
     };
-    if pipe.readers == 0 {
-        return EPIPE;
+    loop {
+        let mut table = PIPE_TABLE.lock();
+        let Some(Some(pipe)) = table.get_mut(pipe_id) else {
+            return EBADF;
+        };
+        if pipe.readers == 0 {
+            return EPIPE;
+        }
+        if pipe.data.len().saturating_add(tmp.len()) <= PIPE_BUFFER_CAP {
+            pipe.data.extend_from_slice(&tmp);
+            pipe.waiters.retain(|waiter| *waiter != current);
+            let waiters = core::mem::take(&mut pipe.waiters);
+            drop(table);
+            wake_stream_waiters(waiters);
+            return len;
+        }
+        if (open_flags & O_NONBLOCK) != 0 {
+            return EAGAIN;
+        }
+        if !pipe.waiters.contains(&current) {
+            pipe.waiters.push(current);
+        }
+        drop(table);
+        let _ = crate::task::sleep_thread_unless_woken(current);
+        crate::task::yield_now();
     }
-    if pipe.data.len().saturating_add(tmp.len()) > PIPE_BUFFER_CAP {
-        return EAGAIN;
-    }
-    pipe.data.extend_from_slice(&tmp);
-    len
 }
 
 /// Fcntl システムコール（FD フラグ操作）
@@ -2378,11 +2464,38 @@ pub fn file_sync(fd: u64) -> u64 {
 mod unix_mode_tests {
     use super::{
         O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE,
-        UNIX_EXECUTE, access_mode_rights, capability_requirement_satisfied,
-        open_path_required_rights, path_is_in_identity_storage, resolve_relative_to_cwd,
-        sticky_directory_allows_delete, unix_mode_allows, userspace_mode,
+        PIPE_BUFFER_CAP, PipeState, UNIX_EXECUTE, access_mode_rights,
+        capability_requirement_satisfied, open_path_required_rights, path_is_in_identity_storage,
+        resolve_relative_to_cwd, sticky_directory_allows_delete, unix_mode_allows, userspace_mode,
     };
     use crate::capability::Capability;
+
+    #[test]
+    fn stream_signals_cover_data_capacity_and_peer_closure() {
+        let mut stream = PipeState {
+            data: alloc::vec::Vec::new(),
+            readers: 1,
+            writers: 1,
+            waiters: alloc::vec::Vec::new(),
+        };
+        assert_eq!(stream.signals(false), 0);
+        assert_eq!(stream.signals(true), mnu_abi::HANDLE_SIGNAL_WRITABLE);
+
+        stream.data.resize(PIPE_BUFFER_CAP, 0);
+        assert_eq!(stream.signals(false), mnu_abi::HANDLE_SIGNAL_READABLE);
+        assert_eq!(stream.signals(true), 0);
+
+        stream.writers = 0;
+        assert_eq!(
+            stream.signals(false),
+            mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
+        );
+        stream.readers = 0;
+        assert_eq!(
+            stream.signals(true),
+            mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
+        );
+    }
 
     #[test]
     fn root_bypasses_unix_mode_bits() {

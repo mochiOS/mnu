@@ -247,6 +247,8 @@ pub struct HandleWaitItem {
 
 pub const HANDLE_SIGNAL_TERMINATED: u64 = 1 << 0;
 pub const HANDLE_SIGNAL_READABLE: u64 = 1 << 1;
+pub const HANDLE_SIGNAL_WRITABLE: u64 = 1 << 2;
+pub const HANDLE_SIGNAL_PEER_CLOSED: u64 = 1 << 3;
 pub const HANDLE_WAIT_MANY_MAX_ITEMS: usize = 64;
 
 /// Kernel-provided clocks. These values are native mnu ABI selectors and are

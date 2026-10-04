@@ -228,6 +228,11 @@ impl FileHandle {
             FileHandleCap::WRITE.union(FileHandleCap::TRANSFER),
         )
     }
+
+    pub fn stream_endpoint(&self) -> Option<(usize, bool)> {
+        let open = self.open.lock();
+        open.pipe_id.map(|stream_id| (stream_id, open.pipe_write))
+    }
 }
 
 /// プロセスごとのファイルディスクリプタテーブル
