@@ -3,7 +3,7 @@ use alloc::vec;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
-use super::{EACCES, EBADF, EINVAL, EIO, ENOSPC, SUCCESS};
+use super::{EACCES, EAGAIN, EBADF, EINVAL, EIO, ENOSPC, ESRCH, SUCCESS};
 
 pub(crate) fn flush_provider_releases() {
     let releases = crate::task::handle_table::take_provider_releases();
@@ -367,6 +367,146 @@ pub fn duplicate(raw: u64, requested_rights: u64) -> u64 {
         }
     })
     .unwrap_or(EINVAL)
+}
+
+const PROCESS_HANDLE_RIGHTS: HandleRights = HandleRights::WAIT
+    .union(HandleRights::DUPLICATE)
+    .union(HandleRights::TRANSFER);
+
+/// Creates a process handle for the process owning an authenticated IPC
+/// endpoint. No caller-supplied process identifier is accepted.
+pub fn process_open(endpoint: u64, requested_rights: u64) -> u64 {
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::ProcessInspect,
+    ]) {
+        return EACCES;
+    }
+    let rights = match HandleRights::from_bits(requested_rights) {
+        Some(rights) if PROCESS_HANDLE_RIGHTS.contains(rights) => rights,
+        _ => return EINVAL,
+    };
+    let Some(thread_id) = crate::syscall::ipc::resolve_endpoint_handle(endpoint) else {
+        return EINVAL;
+    };
+    let Some(target) = crate::task::thread_to_process_id(thread_id) else {
+        return ESRCH;
+    };
+    let process_id = match current_process() {
+        Ok(process_id) => process_id,
+        Err(error) => return error,
+    };
+    crate::task::with_process_mut(process_id, |process| {
+        process
+            .object_handles_mut()
+            .insert(ObjectHandleEntry::new(
+                KernelObject::Process(target.as_u64()),
+                rights,
+            ))
+            .map(|handle| handle.raw() as u64)
+            .unwrap_or(ENOSPC)
+    })
+    .unwrap_or(EINVAL)
+}
+
+fn process_status_for(raw: u64) -> Result<mnu_abi::ProcessStatus, u64> {
+    let object = object(raw, HandleRights::WAIT)?;
+    let KernelObject::Process(process_id) = object else {
+        return Err(EBADF);
+    };
+    let process_id = crate::task::ProcessId::from_u64(process_id);
+    crate::task::with_process(process_id, |process| {
+        let exited = matches!(
+            process.state(),
+            crate::task::ProcessState::Zombie | crate::task::ProcessState::Terminated
+        );
+        mnu_abi::ProcessStatus {
+            process_id: process_id.as_u64(),
+            state: if exited {
+                mnu_abi::PROCESS_STATE_EXITED
+            } else {
+                mnu_abi::PROCESS_STATE_RUNNING
+            },
+            reserved: 0,
+            exit_code: process.exit_code().unwrap_or(0),
+        }
+    })
+    .ok_or(ESRCH)
+}
+
+fn write_process_status(output: u64, status: mnu_abi::ProcessStatus) -> u64 {
+    if output == 0 {
+        return EINVAL;
+    }
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&status as *const mnu_abi::ProcessStatus).cast::<u8>(),
+            core::mem::size_of::<mnu_abi::ProcessStatus>(),
+        )
+    };
+    crate::syscall::copy_to_user(output, bytes)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(|error| error)
+}
+
+pub fn process_status(raw: u64, output: u64) -> u64 {
+    match process_status_for(raw) {
+        Ok(status) => write_process_status(output, status),
+        Err(error) => error,
+    }
+}
+
+/// Waits until the process exits. `deadline_ticks` is an absolute `TimeNow`
+/// value; zero polls and `u64::MAX` waits indefinitely.
+pub fn process_wait(raw: u64, deadline_ticks: u64, output: u64) -> u64 {
+    let process_id = match object(raw, HandleRights::WAIT) {
+        Ok(KernelObject::Process(process_id)) => crate::task::ProcessId::from_u64(process_id),
+        Ok(_) => return EBADF,
+        Err(error) => return error,
+    };
+    let current = match crate::task::current_thread_id() {
+        Some(thread) => thread,
+        None => return EINVAL,
+    };
+    loop {
+        let status = match process_status_for(raw) {
+            Ok(status) => status,
+            Err(error) => return error,
+        };
+        if status.state == mnu_abi::PROCESS_STATE_EXITED {
+            crate::task::remove_process_exit_waiter(current, process_id);
+            return write_process_status(output, status);
+        }
+        if deadline_ticks == mnu_abi::PROCESS_WAIT_POLL
+            || (deadline_ticks != mnu_abi::PROCESS_WAIT_INFINITE
+                && crate::syscall::time::get_ticks() >= deadline_ticks)
+        {
+            crate::task::remove_process_exit_waiter(current, process_id);
+            return EAGAIN;
+        }
+        if !crate::task::register_process_exit_waiter(current, process_id) {
+            return EAGAIN;
+        }
+
+        // Recheck after registration so an exit racing with registration
+        // cannot be missed.
+        let status = match process_status_for(raw) {
+            Ok(status) => status,
+            Err(error) => {
+                crate::task::remove_process_exit_waiter(current, process_id);
+                return error;
+            }
+        };
+        if status.state == mnu_abi::PROCESS_STATE_EXITED {
+            crate::task::remove_process_exit_waiter(current, process_id);
+            return write_process_status(output, status);
+        }
+
+        if deadline_ticks == mnu_abi::PROCESS_WAIT_INFINITE {
+            let _ = crate::task::sleep_thread_unless_woken(current);
+        }
+        crate::task::yield_now();
+        crate::task::remove_process_exit_waiter(current, process_id);
+    }
 }
 
 pub fn launch_get(key: u64) -> u64 {

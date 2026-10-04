@@ -1529,6 +1529,57 @@ impl Default for ProcessTable {
 
 /// グローバルプロセステーブル
 static PROCESS_TABLE: SpinLock<ProcessTable> = SpinLock::new(ProcessTable::new());
+const MAX_PROCESS_EXIT_WAITERS: usize = super::ThreadQueue::MAX_THREADS;
+static PROCESS_EXIT_WAITERS: SpinLock<
+    [Option<(super::ThreadId, ProcessId)>; MAX_PROCESS_EXIT_WAITERS],
+> = SpinLock::new([None; MAX_PROCESS_EXIT_WAITERS]);
+
+pub fn register_process_exit_waiter(thread: super::ThreadId, process: ProcessId) -> bool {
+    let mut waiters = PROCESS_EXIT_WAITERS.lock();
+    if waiters
+        .iter()
+        .flatten()
+        .any(|(candidate, _)| *candidate == thread)
+    {
+        return false;
+    }
+    let Some(slot) = waiters.iter_mut().find(|slot| slot.is_none()) else {
+        return false;
+    };
+    *slot = Some((thread, process));
+    true
+}
+
+pub fn remove_process_exit_waiter(thread: super::ThreadId, process: ProcessId) {
+    let mut waiters = PROCESS_EXIT_WAITERS.lock();
+    for slot in waiters.iter_mut() {
+        if slot.is_some_and(|entry| entry == (thread, process)) {
+            *slot = None;
+        }
+    }
+}
+
+fn wake_process_exit_waiters(process: ProcessId) {
+    let mut wake = [None; MAX_PROCESS_EXIT_WAITERS];
+    let mut count = 0usize;
+    {
+        let mut waiters = PROCESS_EXIT_WAITERS.lock();
+        for slot in waiters.iter_mut() {
+            if slot.is_some_and(|(_, candidate)| candidate == process) {
+                if count < wake.len() {
+                    if let Some((thread, _)) = *slot {
+                        wake[count] = Some(thread);
+                        count += 1;
+                    }
+                }
+                *slot = None;
+            }
+        }
+    }
+    for thread in wake.into_iter().take(count).flatten() {
+        crate::task::wake_ipc_waiter(thread);
+    }
+}
 
 /// プロセステーブルにプロセスを追加
 pub fn add_process(process: Process) -> Option<ProcessId> {
@@ -1580,10 +1631,14 @@ where
 
 /// プロセスを終了状態（Zombie）へ遷移させる
 pub fn mark_process_exited(id: ProcessId, exit_code: u64) {
-    let mut table = PROCESS_TABLE.lock();
-    if let Some(proc) = table.get_mut(id) {
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let Some(proc) = table.get_mut(id) else {
+            return;
+        };
         proc.mark_exited(exit_code);
     }
+    wake_process_exit_waiters(id);
 }
 
 /// 一致する子プロセスが存在するか確認する

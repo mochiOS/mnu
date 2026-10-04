@@ -194,7 +194,26 @@ pub enum SyscallNumber {
     ProviderObjectIdentify = 638,
     LaunchValueGet = 639,
     ClockRead = 640,
+    ProcessHandleOpen = 641,
+    ProcessHandleStatus = 642,
+    ProcessHandleWait = 643,
     CheckGravityExist = 999,
+}
+
+pub const PROCESS_STATE_RUNNING: u32 = 1;
+pub const PROCESS_STATE_EXITED: u32 = 2;
+pub const PROCESS_WAIT_POLL: u64 = 0;
+pub const PROCESS_WAIT_INFINITE: u64 = u64::MAX;
+
+/// Native process lifetime state. `exit_code` is the value supplied to
+/// `ProcessExit`; POSIX wait-status encoding belongs in user space.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcessStatus {
+    pub process_id: u64,
+    pub state: u32,
+    pub reserved: u32,
+    pub exit_code: u64,
 }
 
 /// Kernel-provided clocks. These values are native mnu ABI selectors and are
@@ -404,6 +423,9 @@ mod object_handle_tests {
             SyscallNumber::ProviderObjectIdentify as u64,
             SyscallNumber::LaunchValueGet as u64,
             SyscallNumber::ClockRead as u64,
+            SyscallNumber::ProcessHandleOpen as u64,
+            SyscallNumber::ProcessHandleStatus as u64,
+            SyscallNumber::ProcessHandleWait as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -545,6 +567,9 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::ProviderObjectCreate as u64, 637);
         assert_eq!(super::SyscallNumber::ProviderObjectIdentify as u64, 638);
         assert_eq!(super::SyscallNumber::ClockRead as u64, 640);
+        assert_eq!(super::SyscallNumber::ProcessHandleOpen as u64, 641);
+        assert_eq!(super::SyscallNumber::ProcessHandleStatus as u64, 642);
+        assert_eq!(super::SyscallNumber::ProcessHandleWait as u64, 643);
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_START));
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_CURRENT));
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_END));
