@@ -1339,39 +1339,6 @@ pub fn rmdir(path_ptr: u64) -> u64 {
     SUCCESS
 }
 
-/// Creates a symbolic link. The target is stored verbatim; only the link path
-/// is resolved against the caller's current directory and mount namespace.
-pub fn symlink(target_ptr: u64, link_path_ptr: u64) -> u64 {
-    if target_ptr == 0 || link_path_ptr == 0 {
-        return EINVAL;
-    }
-    let pid = match current_process_id_raw() {
-        Some(pid) => pid,
-        None => return EBADF,
-    };
-    let target = match read_cstring(target_ptr) {
-        Ok(target) => target,
-        Err(errno) => return errno,
-    };
-    let link_path = match read_cstring(link_path_ptr) {
-        Ok(path) => resolve_path(pid, &path),
-        Err(errno) => return errno,
-    };
-    if let Err(errno) = ensure_fs_path_access(&link_path, PATH_CREATE) {
-        return errno;
-    }
-    let Some(mount) = userspace_mount(&link_path) else {
-        return ENOSYS;
-    };
-    let Some((uid, gid)) = current_effective_ids() else {
-        return EACCES;
-    };
-    match vfs::userspace::symlink(mount.mount_id.0, &target, &mount.path, uid, gid) {
-        Ok(_) => SUCCESS,
-        Err(errno) => errno,
-    }
-}
-
 /// Readdirシステムコール
 pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     if buf_ptr == 0 || buf_len == 0 {
@@ -2069,65 +2036,6 @@ pub fn fdatasync(fd: u64) -> u64 {
     fsync(fd)
 }
 
-/// truncate システムコール（最小実装）
-pub fn truncate(path_ptr: u64, len: u64) -> u64 {
-    if path_ptr == 0 {
-        return EFAULT;
-    }
-    let path = match read_cstring(path_ptr) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let pid = match current_process_id_raw() {
-        Some(p) => p,
-        None => return EBADF,
-    };
-    let path = resolve_path(pid, &path);
-    if let Err(errno) = ensure_fs_path_access(&path, PATH_WRITE) {
-        return errno;
-    }
-    if let Some(mount) = userspace_mount(&path) {
-        let node = match vfs::userspace::lookup(mount.mount_id.0, &mount.path) {
-            Ok(node) => node,
-            Err(errno) => return errno,
-        };
-        if node.kind == mochios_filesystem_protocol::NODE_TYPE_DIRECTORY {
-            return EISDIR;
-        }
-        let open_id = match vfs::userspace::open(mount.mount_id.0, node.node_id, O_WRONLY as u32) {
-            Ok(open_id) => open_id,
-            Err(errno) => return errno,
-        };
-        let result = vfs::userspace::truncate(mount.mount_id.0, open_id, len);
-        let close_result = vfs::userspace::close(mount.mount_id.0, open_id);
-        return match result.and(close_result) {
-            Ok(()) => {
-                crate::mem::vm_object::truncate_inode(mount.mount_id, InodeId(node.node_id), len);
-                SUCCESS
-            }
-            Err(errno) => errno,
-        };
-    }
-    match metadata_rootfs_first(&path) {
-        Some((mode, _, _, _)) if mode_is_directory(mode) => return EISDIR,
-        Some(_) => {}
-        None => return ENOENT,
-    }
-    if crate::cext::fs::file_metadata(&path).is_none() {
-        return ENOENT;
-    }
-    let rc = crate::cext::fs::truncate(&path, len);
-    if rc != 0 {
-        return errno_from_cext(rc);
-    }
-    let mount_id = vfs::resolve(&path)
-        .map(|mount| mount.mount_id)
-        .unwrap_or(MountId(1));
-    let vnode = Vnode::legacy_path_on(mount_id, path, VnodeKind::Regular);
-    crate::mem::vm_object::truncate_inode(vnode.inode.mount_id, vnode.inode.inode_id, len);
-    SUCCESS
-}
-
 /// ftruncate システムコール（ローカル一時FDのみ）
 pub fn ftruncate(fd: u64, len: u64) -> u64 {
     if fd < FD_BASE as u64 {
@@ -2652,78 +2560,6 @@ pub fn statfs(path_ptr: u64, buf_ptr: u64) -> u64 {
     crate::syscall::copy_to_user(buf_ptr, &buf)
         .map(|_| SUCCESS)
         .unwrap_or_else(|e| e)
-}
-
-pub fn readlink(path_ptr: u64, buf_ptr: u64, buf_len: u64) -> u64 {
-    const AT_FDCWD: i64 = -100;
-    readlinkat(AT_FDCWD, path_ptr, buf_ptr, buf_len)
-}
-
-/// Reads a symbolic-link target without following the final component.
-pub fn readlinkat(dirfd: i64, path_ptr: u64, buf_ptr: u64, buf_len: u64) -> u64 {
-    if path_ptr == 0 || buf_ptr == 0 || buf_len == 0 {
-        return EINVAL;
-    }
-    if !crate::syscall::validate_user_ptr(buf_ptr, buf_len) {
-        return EFAULT;
-    }
-    let pid_raw = match current_process_id_raw() {
-        Some(pid) => pid,
-        None => return EBADF,
-    };
-    let path = match resolve_path_at(pid_raw, dirfd, path_ptr) {
-        Ok(path) => path,
-        Err(errno) => return errno,
-    };
-    let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
-    if let Some(mount) = userspace_mount(&path) {
-        if let Err(errno) = ensure_fs_path_access(&path, PATH_READ) {
-            return errno;
-        }
-        let node = match vfs::userspace::lookup(mount.mount_id.0, &mount.path) {
-            Ok(node) => node,
-            Err(errno) => return errno,
-        };
-        if node.kind != mochios_filesystem_protocol::NODE_TYPE_SYMLINK {
-            return EINVAL;
-        }
-        let target = match vfs::userspace::read_link(mount.mount_id.0, node.node_id) {
-            Ok(target) => target,
-            Err(errno) => return errno,
-        };
-        let copy_len = core::cmp::min(target.len(), buf_len as usize);
-        return crate::syscall::copy_to_user(buf_ptr, &target[..copy_len])
-            .map(|_| copy_len as u64)
-            .unwrap_or_else(|errno| errno);
-    }
-    let target = if path == "/proc/self/exe" {
-        match crate::task::with_process(pid, |p| {
-            let exe = p.exe_path();
-            if exe.is_empty() {
-                String::from(p.name())
-            } else {
-                String::from(exe)
-            }
-        }) {
-            Some(name) if name.starts_with('/') => name,
-            Some(name) => alloc::format!("/{}", name),
-            None => return ESRCH,
-        }
-    } else if path == "/proc/self/cwd" {
-        match crate::task::with_process(pid, |p| String::from(p.cwd())) {
-            Some(cwd) => cwd,
-            None => return ESRCH,
-        }
-    } else {
-        return ENOENT;
-    };
-
-    let bytes = target.as_bytes();
-    let copy_len = core::cmp::min(bytes.len(), buf_len as usize);
-    if let Err(errno) = crate::syscall::copy_to_user(buf_ptr, &bytes[..copy_len]) {
-        return errno;
-    }
-    copy_len as u64
 }
 
 /// Getdents64 システムコール

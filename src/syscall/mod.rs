@@ -794,15 +794,11 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::Lseek as u64 => fs::seek(arg0, arg1 as i64, arg2),
         x if x == SyscallNumber::Fsync as u64 => fs::fsync(arg0),
         x if x == SyscallNumber::Fdatasync as u64 => fs::fdatasync(arg0),
-        x if x == SyscallNumber::Truncate as u64 => fs::truncate(arg0, arg1),
         x if x == SyscallNumber::Unlink as u64 => fs::unlink(arg0),
         x if x == SyscallNumber::Unlinkat as u64 => fs::unlinkat(arg0 as i64, arg1, arg2),
         x if x == SyscallNumber::Renameat as u64 => {
             fs::renameat(arg0 as i64, arg1, arg2 as i64, arg3)
         }
-        x if x == SyscallNumber::Symlink as u64 => fs::symlink(arg0, arg1),
-        x if x == SyscallNumber::Readlink as u64 => fs::readlink(arg0, arg1, arg2),
-        x if x == SyscallNumber::Readlinkat as u64 => fs::readlinkat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Statfs as u64 => fs::statfs(arg0, arg1),
         x if x == SyscallNumber::Getdents64 as u64 => fs::getdents64(arg0, arg1, arg2),
         x if x == SyscallNumber::Ftruncate as u64 => fs::ftruncate(arg0, arg1),
