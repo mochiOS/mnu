@@ -266,7 +266,9 @@ pub fn create_handle(flags: u64, _reserved: u64) -> u64 {
         rights = rights.union(HandleRights::SEND);
     }
     if endpoint_rights.contains(EndpointRights::RECV) {
-        rights = rights.union(HandleRights::RECEIVE);
+        rights = rights
+            .union(HandleRights::RECEIVE)
+            .union(HandleRights::WAIT);
     }
     let entry = ObjectHandleEntry::new(
         KernelObject::IpcEndpoint {
@@ -284,6 +286,43 @@ pub fn create_handle(flags: u64, _reserved: u64) -> u64 {
             .unwrap_or(ENOSPC)
     })
     .unwrap_or(EINVAL)
+}
+
+pub(crate) fn endpoint_wait_ready(endpoint: IpcEndpoint) -> Result<bool, u64> {
+    if !endpoint_is_valid(endpoint) {
+        return Err(EINVAL);
+    }
+    let mailboxes = lock_mailboxes();
+    let mailbox = mailboxes.get(endpoint.slot as usize).ok_or(EINVAL)?;
+    Ok(mailbox.count > 0)
+}
+
+pub(crate) fn register_endpoint_waiter(
+    endpoint: IpcEndpoint,
+    waiter: crate::task::ThreadId,
+) -> Result<(), u64> {
+    if !endpoint_is_valid(endpoint) || endpoint.thread_id != waiter.as_u64() {
+        return Err(EACCES);
+    }
+    let mut mailboxes = lock_mailboxes();
+    let mailbox = mailboxes.get_mut(endpoint.slot as usize).ok_or(EINVAL)?;
+    if mailbox.waiter != 0 && mailbox.waiter != waiter.as_u64() {
+        return Err(EAGAIN);
+    }
+    mailbox.waiter = waiter.as_u64();
+    Ok(())
+}
+
+pub(crate) fn remove_endpoint_waiter(endpoint: IpcEndpoint, waiter: crate::task::ThreadId) {
+    if !endpoint_is_valid(endpoint) {
+        return;
+    }
+    let mut mailboxes = lock_mailboxes();
+    if let Some(mailbox) = mailboxes.get_mut(endpoint.slot as usize) {
+        if mailbox.waiter == waiter.as_u64() {
+            mailbox.waiter = 0;
+        }
+    }
 }
 
 fn process_local_endpoint(raw: u64, required: HandleRights) -> Result<IpcEndpoint, u64> {

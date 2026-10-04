@@ -509,33 +509,69 @@ pub fn process_wait(raw: u64, deadline_ticks: u64, output: u64) -> u64 {
     }
 }
 
-fn wait_item_signal(
-    item: &mut mnu_abi::HandleWaitItem,
-) -> Result<(crate::task::ProcessId, bool), u64> {
-    if item.reserved != 0
-        || item.interests == 0
-        || item.interests & !mnu_abi::HANDLE_SIGNAL_TERMINATED != 0
-    {
+#[derive(Clone, Copy)]
+enum WaitTarget {
+    Process(crate::task::ProcessId),
+    IpcEndpoint(crate::syscall::ipc::IpcEndpoint),
+}
+
+fn wait_item_signal(item: &mut mnu_abi::HandleWaitItem) -> Result<(WaitTarget, bool), u64> {
+    if item.reserved != 0 || item.interests == 0 {
         return Err(EINVAL);
     }
     let object = object(u64::from(item.handle), HandleRights::WAIT)?;
-    let KernelObject::Process(process_id) = object else {
-        return Err(ENOTSUP);
-    };
-    let process_id = crate::task::ProcessId::from_u64(process_id);
-    let exited = crate::task::with_process(process_id, |process| {
-        matches!(
-            process.state(),
-            crate::task::ProcessState::Zombie | crate::task::ProcessState::Terminated
-        )
-    })
-    .ok_or(ESRCH)?;
-    item.observed = if exited {
-        mnu_abi::HANDLE_SIGNAL_TERMINATED
-    } else {
-        0
-    };
-    Ok((process_id, exited))
+    match object {
+        KernelObject::Process(process_id) => {
+            if item.interests & !mnu_abi::HANDLE_SIGNAL_TERMINATED != 0 {
+                return Err(EINVAL);
+            }
+            let process_id = crate::task::ProcessId::from_u64(process_id);
+            let exited = crate::task::with_process(process_id, |process| {
+                matches!(
+                    process.state(),
+                    crate::task::ProcessState::Zombie | crate::task::ProcessState::Terminated
+                )
+            })
+            .ok_or(ESRCH)?;
+            item.observed = if exited {
+                mnu_abi::HANDLE_SIGNAL_TERMINATED
+            } else {
+                0
+            };
+            Ok((WaitTarget::Process(process_id), exited))
+        }
+        KernelObject::IpcEndpoint {
+            thread_id,
+            slot,
+            generation,
+        } => {
+            if item.interests & !mnu_abi::HANDLE_SIGNAL_READABLE != 0 {
+                return Err(EINVAL);
+            }
+            let endpoint = crate::syscall::ipc::IpcEndpoint {
+                thread_id,
+                slot,
+                generation,
+            };
+            let readable = crate::syscall::ipc::endpoint_wait_ready(endpoint)?;
+            item.observed = if readable {
+                mnu_abi::HANDLE_SIGNAL_READABLE
+            } else {
+                0
+            };
+            Ok((WaitTarget::IpcEndpoint(endpoint), readable))
+        }
+        _ => Err(ENOTSUP),
+    }
+}
+
+fn remove_endpoint_waiters(
+    waiter: crate::task::ThreadId,
+    endpoints: &[crate::syscall::ipc::IpcEndpoint],
+) {
+    for endpoint in endpoints {
+        crate::syscall::ipc::remove_endpoint_waiter(*endpoint, waiter);
+    }
 }
 
 fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) -> Result<(), u64> {
@@ -571,17 +607,20 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_ticks: u64) -> u64 {
         Some(thread) => thread,
         None => return EINVAL,
     };
+    let mut registered_endpoints = alloc::vec::Vec::new();
 
     loop {
         crate::task::remove_process_exit_waiters(current);
+        remove_endpoint_waiters(current, &registered_endpoints);
+        registered_endpoints.clear();
         crate::syscall::time::disarm_thread_deadline(current);
-        let mut process_ids = alloc::vec::Vec::with_capacity(items.len());
+        let mut targets = alloc::vec::Vec::with_capacity(items.len());
         let mut ready = None;
         for (index, item) in items.iter_mut().enumerate() {
             match wait_item_signal(item) {
                 Ok((_, true)) if ready.is_none() => ready = Some(index),
-                Ok((process_id, _)) => {
-                    process_ids.push(process_id);
+                Ok((target, _)) => {
+                    targets.push(target);
                 }
                 Err(error) => return error,
             }
@@ -601,16 +640,32 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_ticks: u64) -> u64 {
                 Err(error) => error,
             };
         }
-        for process_id in process_ids {
-            if !crate::task::register_process_exit_waiter(current, process_id) {
-                crate::task::remove_process_exit_waiters(current);
-                return EAGAIN;
+        for target in targets {
+            match target {
+                WaitTarget::Process(process_id) => {
+                    if !crate::task::register_process_exit_waiter(current, process_id) {
+                        crate::task::remove_process_exit_waiters(current);
+                        remove_endpoint_waiters(current, &registered_endpoints);
+                        return EAGAIN;
+                    }
+                }
+                WaitTarget::IpcEndpoint(endpoint) => {
+                    if let Err(error) =
+                        crate::syscall::ipc::register_endpoint_waiter(endpoint, current)
+                    {
+                        crate::task::remove_process_exit_waiters(current);
+                        remove_endpoint_waiters(current, &registered_endpoints);
+                        return error;
+                    }
+                    registered_endpoints.push(endpoint);
+                }
             }
         }
         if deadline_ticks != mnu_abi::HANDLE_WAIT_INFINITE
             && !crate::syscall::time::arm_thread_deadline(current, deadline_ticks)
         {
             crate::task::remove_process_exit_waiters(current);
+            remove_endpoint_waiters(current, &registered_endpoints);
             return EAGAIN;
         }
 
@@ -622,6 +677,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_ticks: u64) -> u64 {
                 Ok((_, is_ready)) => became_ready |= is_ready,
                 Err(error) => {
                     crate::task::remove_process_exit_waiters(current);
+                    remove_endpoint_waiters(current, &registered_endpoints);
                     crate::syscall::time::disarm_thread_deadline(current);
                     return error;
                 }
