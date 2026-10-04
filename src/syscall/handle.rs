@@ -616,9 +616,6 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
         Ok(count) if count <= mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS => count,
         _ => return EINVAL,
     };
-    if count == 0 && deadline_nanoseconds == mnu_abi::HANDLE_WAIT_INFINITE {
-        return EINVAL;
-    }
     let byte_len = match count.checked_mul(core::mem::size_of::<mnu_abi::HandleWaitItem>()) {
         Some(length) => length,
         None => return EINVAL,
