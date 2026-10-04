@@ -1741,18 +1741,56 @@ pub fn call_from_kernel(
     if !dest_record.rights.contains(EndpointRights::RECV) {
         return Err(EACCES);
     }
+    call_endpoint_from_kernel(
+        IpcEndpoint {
+            thread_id: dest_record.thread_id,
+            slot: dest_record.slot,
+            generation: dest_record.generation,
+        },
+        dest_endpoint_handle,
+        request,
+        reply,
+    )
+}
+
+/// Performs a synchronous kernel-originated call against an exact endpoint
+/// identity rather than a process-visible endpoint handle.
+pub(crate) fn call_provider_from_kernel(
+    endpoint: IpcEndpoint,
+    request: &[u8],
+    reply: &mut [u8],
+) -> Result<usize, u64> {
+    if !endpoint_is_valid(endpoint) {
+        return Err(EINVAL);
+    }
+    let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id).ok_or(EINVAL)?;
+    call_endpoint_from_kernel(endpoint, expected_sender, request, reply)
+}
+
+fn call_endpoint_from_kernel(
+    endpoint: IpcEndpoint,
+    expected_sender: u64,
+    request: &[u8],
+    reply: &mut [u8],
+) -> Result<usize, u64> {
+    if request.len() > ipc_max_msg_size() || reply.len() > ipc_max_msg_size() {
+        return Err(EINVAL);
+    }
     let caller = crate::task::current_thread_id().ok_or(EINVAL)?.as_u64();
     let sender = ensure_endpoint_for_thread(caller).ok_or(EINVAL)?;
     let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let (dest_slot, dest_generation) =
-        crate::task::thread_slot_index_and_generation_by_u64(dest_record.thread_id)
+        crate::task::thread_slot_index_and_generation_by_u64(endpoint.thread_id)
+            .filter(|(slot, generation)| {
+                *slot as u16 == endpoint.slot && *generation == endpoint.generation
+            })
             .ok_or(EINVAL)?;
     loop {
         let mut mailboxes = lock_mailboxes();
         let mailbox = mailboxes.get_mut(dest_slot).ok_or(EINVAL)?;
         match mailbox.push_message(
             sender,
-            dest_record.thread_id,
+            endpoint.thread_id,
             dest_slot as u16,
             dest_generation,
             request,
@@ -1781,7 +1819,7 @@ pub fn call_from_kernel(
             let mut mailboxes = lock_mailboxes();
             let mailbox = mailboxes.get_mut(caller_slot).ok_or(EINVAL)?;
             let received = mailbox.pop_reply_copy(
-                dest_endpoint_handle,
+                expected_sender,
                 call_id,
                 caller,
                 caller_slot as u16,

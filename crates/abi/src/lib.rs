@@ -15,6 +15,9 @@ pub mod hypervisor;
 /// mnuの性能計測結果をユーザー空間へ渡す固定ABIです。
 pub mod performance;
 
+/// Generic user-space-backed object operation protocol.
+pub mod provider;
+
 /// Grantで共有するrequest/response ringの固定ABIです。
 pub mod shared_ring;
 
