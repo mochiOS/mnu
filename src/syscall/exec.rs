@@ -31,7 +31,7 @@ struct InheritedHandleSpec {
     rights: crate::task::HandleRights,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct InheritedHandleGrant {
     key: u64,
     entry: crate::task::ObjectHandleEntry,

@@ -1,5 +1,8 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+
+use super::fd_table::FileHandle;
 
 pub const PROCESS_MAX_OBJECT_HANDLES: usize = 4096;
 
@@ -75,7 +78,7 @@ impl HandleRights {
 ///
 /// Variants describe mechanism only. User-space policy and service names must
 /// never be represented here.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum KernelObject {
     IpcEndpoint {
         thread_id: u64,
@@ -85,9 +88,34 @@ pub enum KernelObject {
     Event(u64),
     Process(u64),
     VmObject(u64),
+    File(Arc<FileHandle>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl core::fmt::Debug for KernelObject {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::IpcEndpoint {
+                thread_id,
+                slot,
+                generation,
+            } => formatter
+                .debug_struct("IpcEndpoint")
+                .field("thread_id", thread_id)
+                .field("slot", slot)
+                .field("generation", generation)
+                .finish(),
+            Self::Event(id) => formatter.debug_tuple("Event").field(id).finish(),
+            Self::Process(id) => formatter.debug_tuple("Process").field(id).finish(),
+            Self::VmObject(id) => formatter.debug_tuple("VmObject").field(id).finish(),
+            Self::File(file) => formatter
+                .debug_tuple("File")
+                .field(&(Arc::as_ptr(file) as usize))
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ObjectHandleEntry {
     object: KernelObject,
     rights: HandleRights,
@@ -185,6 +213,7 @@ impl ObjectHandleTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::{FileHandleCap, OpenFile};
 
     fn endpoint() -> KernelObject {
         KernelObject::IpcEndpoint {
@@ -249,5 +278,43 @@ mod tests {
         assert!(table
             .export_restricted(source, HandleRights::SEND)
             .is_none());
+    }
+
+    #[test]
+    fn duplicated_file_handles_share_the_same_open_file_description() {
+        let file = Arc::new(FileHandle::new(
+            OpenFile {
+                data: Box::new([]),
+                pos: 0,
+                vnode: None,
+                is_remote: false,
+                fd_remote: 0,
+                pipe_id: None,
+                pipe_write: false,
+                open_flags: 0,
+            },
+            FileHandleCap::READ.union(FileHandleCap::TRANSFER),
+        ));
+        let mut table = ObjectHandleTable::new_boxed();
+        let source = table
+            .insert(ObjectHandleEntry::new(
+                KernelObject::File(file.clone()),
+                HandleRights::READ
+                    .union(HandleRights::DUPLICATE)
+                    .union(HandleRights::TRANSFER),
+            ))
+            .unwrap();
+        let duplicate = table
+            .duplicate_restricted(source, HandleRights::READ)
+            .unwrap();
+
+        let source = table.get(source).unwrap();
+        let duplicate = table.get(duplicate).unwrap();
+        let (KernelObject::File(source), KernelObject::File(duplicate)) =
+            (source.object(), duplicate.object())
+        else {
+            panic!("file object changed type during duplication");
+        };
+        assert!(Arc::ptr_eq(source, duplicate));
     }
 }
