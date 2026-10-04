@@ -7,16 +7,6 @@ pub fn yield_now() -> u64 {
     0
 }
 
-/// 現在のスレッドを終了
-pub fn exit(_code: u64) -> u64 {
-    if let Some(id) = crate::task::current_thread_id() {
-        crate::task::terminate_thread(id);
-        0
-    } else {
-        EINVAL
-    }
-}
-
 /// 現在のスレッドIDを取得
 pub fn get_thread_id() -> u64 {
     match crate::task::current_thread_id() {
