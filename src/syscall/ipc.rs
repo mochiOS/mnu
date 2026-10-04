@@ -307,9 +307,9 @@ fn process_local_endpoint(raw: u64, required: HandleRights) -> Result<IpcEndpoin
         return Err(EINVAL);
     };
     let endpoint = IpcEndpoint {
-        thread_id,
-        slot,
-        generation,
+        thread_id: *thread_id,
+        slot: *slot,
+        generation: *generation,
     };
     endpoint_is_valid(endpoint).then_some(endpoint).ok_or(EINVAL)
 }
@@ -1006,7 +1006,7 @@ impl ObjectHandleAttachments {
     const fn empty() -> Self {
         Self {
             count: 0,
-            handles: [None; MAX_OBJECT_HANDLES],
+            handles: [const { None }; MAX_OBJECT_HANDLES],
         }
     }
 

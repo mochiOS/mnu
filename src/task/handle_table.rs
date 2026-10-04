@@ -75,7 +75,7 @@ impl HandleRights {
 ///
 /// Variants describe mechanism only. User-space policy and service names must
 /// never be represented here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KernelObject {
     IpcEndpoint {
         thread_id: u64,
@@ -87,7 +87,7 @@ pub enum KernelObject {
     VmObject(u64),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectHandleEntry {
     object: KernelObject,
     rights: HandleRights,
@@ -98,18 +98,18 @@ impl ObjectHandleEntry {
         Self { object, rights }
     }
 
-    pub const fn object(self) -> KernelObject {
-        self.object
+    pub const fn object(&self) -> &KernelObject {
+        &self.object
     }
 
-    pub const fn rights(self) -> HandleRights {
+    pub const fn rights(&self) -> HandleRights {
         self.rights
     }
 
-    fn restricted(self, requested: HandleRights) -> Option<Self> {
+    fn restricted(&self, requested: HandleRights) -> Option<Self> {
         self.rights
             .contains(requested)
-            .then_some(Self::new(self.object, requested))
+            .then(|| Self::new(self.object.clone(), requested))
     }
 }
 
@@ -128,7 +128,7 @@ impl ObjectHandleTable {
     }
 
     pub fn get(&self, handle: ObjectHandle) -> Option<ObjectHandleEntry> {
-        self.entries.get(&handle).copied()
+        self.entries.get(&handle).cloned()
     }
 
     pub fn insert(&mut self, entry: ObjectHandleEntry) -> Option<ObjectHandle> {

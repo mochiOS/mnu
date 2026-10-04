@@ -31,7 +31,7 @@ struct InheritedHandleSpec {
     rights: crate::task::HandleRights,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct InheritedHandleGrant {
     key: u64,
     entry: crate::task::ObjectHandleEntry,
@@ -764,7 +764,7 @@ fn install_inherited_handles(
     for grant in grants {
         let handle = process
             .object_handles_mut()
-            .insert(grant.entry)
+            .insert(grant.entry.clone())
             .ok_or(ENOSPC)?;
         if !process.launch_context_mut().install(grant.key, handle) {
             return Err(EINVAL);
