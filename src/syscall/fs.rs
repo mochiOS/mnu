@@ -1217,12 +1217,6 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
     stat_resolved(&resolved, stat_ptr, true)
 }
 
-pub fn lstat(path_ptr: u64, stat_ptr: u64) -> u64 {
-    const AT_FDCWD: i64 = -100;
-    const AT_SYMLINK_NOFOLLOW: u64 = 2;
-    newfstatat(AT_FDCWD, path_ptr, stat_ptr, AT_SYMLINK_NOFOLLOW)
-}
-
 fn stat_resolved(resolved: &str, stat_ptr: u64, follow_final_symlink: bool) -> u64 {
     if let Err(errno) = ensure_fs_path_access(&resolved, PATH_READ) {
         return errno;
@@ -1399,76 +1393,6 @@ fn protocol_kind_to_dirent(kind: u32) -> u8 {
         mochios_filesystem_protocol::NODE_TYPE_SYMLINK => 10,
         _ => 0,
     }
-}
-
-/// Chdirシステムコール
-pub fn chdir(path_ptr: u64) -> u64 {
-    if path_ptr == 0 {
-        return EINVAL;
-    }
-    let pid_raw = match current_process_id_raw() {
-        Some(pid) => pid,
-        None => return EBADF,
-    };
-    let path = match read_cstring(path_ptr) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let resolved = resolve_path(pid_raw, &path);
-    if let Err(errno) = ensure_fs_capability_access(&resolved, PATH_LIST) {
-        return errno;
-    }
-    if let Err(errno) = ensure_unix_traversal(&resolved) {
-        return errno;
-    }
-    if let Err(errno) = ensure_unix_mode_access(&resolved, UNIX_EXECUTE) {
-        return errno;
-    }
-    match metadata_rootfs_first(&resolved) {
-        Some((mode, _, _, _)) => {
-            if !mode_is_directory(mode) {
-                return ENOTDIR;
-            }
-        }
-        None => return ENOENT,
-    }
-    let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
-    crate::task::with_process_mut(pid, |p| p.set_cwd(&resolved));
-    SUCCESS
-}
-
-/// Getcwdシステムコール
-pub fn getcwd(buf_ptr: u64, size: u64) -> u64 {
-    if buf_ptr == 0 || size == 0 {
-        return EINVAL;
-    }
-    if !crate::syscall::validate_user_ptr(buf_ptr, size) {
-        return EFAULT;
-    }
-    let pid_raw = match current_process_id_raw() {
-        Some(pid) => pid,
-        None => return EFAULT,
-    };
-    let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
-    let mut tmp = [0u8; 256];
-    let cwd_len = crate::task::with_process(pid, |p| {
-        let s = p.cwd().as_bytes();
-        let n = s.len().min(255);
-        tmp[..n].copy_from_slice(&s[..n]);
-        n
-    })
-    .unwrap_or(1);
-    let needed = cwd_len + 1;
-    if (size as usize) < needed {
-        return EINVAL;
-    }
-    if crate::syscall::copy_to_user(buf_ptr, &tmp[..cwd_len]).is_err() {
-        return EFAULT;
-    }
-    if crate::syscall::copy_to_user(buf_ptr + cwd_len as u64, &[0]).is_err() {
-        return EFAULT;
-    }
-    buf_ptr
 }
 
 /// Read: 開かれたファイルからデータを読み込む
@@ -2250,44 +2174,6 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
         Err(errno) => return errno,
     };
     stat_resolved(&resolved, stat_ptr, flags & AT_SYMLINK_NOFOLLOW == 0)
-}
-
-/// Faccessat システムコール
-pub fn faccessat(dirfd: i64, path_ptr: u64, mode: u64, flags: u64) -> u64 {
-    const F_OK: u64 = 0;
-    const AT_EACCESS: u64 = 0x200;
-    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
-    const SUPPORTED_FLAGS: u64 = AT_EACCESS | AT_SYMLINK_NOFOLLOW;
-    let Some(rights) = access_mode_rights(mode) else {
-        return EINVAL;
-    };
-    if path_ptr == 0 || flags & !SUPPORTED_FLAGS != 0 {
-        return EINVAL;
-    }
-    let pid = match current_process_id_raw() {
-        Some(pid) => pid,
-        None => return EBADF,
-    };
-    let resolved = match resolve_path_at(pid, dirfd, path_ptr) {
-        Ok(path) => path,
-        Err(errno) => return errno,
-    };
-    if metadata_rootfs_first(&resolved).is_none() {
-        return ENOENT;
-    }
-    if mode == F_OK {
-        if let Err(errno) = ensure_fs_capability_access(&resolved, PATH_READ) {
-            return errno;
-        }
-        return match ensure_unix_traversal(&resolved) {
-            Ok(()) => SUCCESS,
-            Err(errno) => errno,
-        };
-    }
-    match ensure_fs_path_access(&resolved, rights) {
-        Ok(()) => SUCCESS,
-        Err(errno) => errno,
-    }
 }
 
 /// statfs システムコール（最小実装）
