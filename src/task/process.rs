@@ -1054,10 +1054,6 @@ impl Process {
         self.mmap_regions.clone()
     }
 
-    pub fn clone_kernel_authorities_for_fork(&self) -> KernelAuthoritySet {
-        self.kernel_authorities.clone()
-    }
-
     pub fn has_kernel_authority(&self, authority: &KernelAuthority) -> bool {
         self.kernel_authorities.implies(authority)
     }
