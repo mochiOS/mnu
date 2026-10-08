@@ -40,8 +40,8 @@ To run the mnu kernel, you can use QEMU. After building the kernel, you can run 
 The public syscall ABI is fixed to a small kernel surface:
 
 - `process_exit`
-- `process_spawn`
-- `process_wait`
+- `process_clone`
+- `process_handle_wait`
 - `thread_create`
 - `thread_exit`
 - `thread_yield`

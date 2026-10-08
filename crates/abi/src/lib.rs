@@ -58,7 +58,6 @@ pub enum SyscallNumber {
     BlockWrite = 556,
     IpcEndpointOwner = 557,
     ProcessExit = 574,
-    ProcessSpawn = 575,
     ThreadCreate = 577,
     ThreadExit = 578,
     ThreadYield = 579,

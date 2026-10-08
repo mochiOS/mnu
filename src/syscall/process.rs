@@ -252,13 +252,7 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
     written as u64
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CloneResult {
-    ProcessId,
-    ProcessHandle,
-}
-
-fn clone_current_process(result: CloneResult) -> u64 {
+fn clone_current_process() -> u64 {
     if !caller_has_process_spawn_capability() {
         return crate::syscall::EPERM;
     }
@@ -308,7 +302,6 @@ fn clone_current_process(result: CloneResult) -> u64 {
         ipc_mapping_end,
         stack_bottom,
         stack_top,
-        parent_cwd,
         parent_exe_path,
         parent_security_identity,
         parent_limits,
@@ -329,7 +322,6 @@ fn clone_current_process(result: CloneResult) -> u64 {
             p.ipc_mapping_end(),
             p.stack_bottom(),
             p.stack_top(),
-            p.cwd().to_string(),
             p.exe_path().to_string(),
             p.application_identity().cloned(),
             p.resource_limits(),
@@ -383,12 +375,7 @@ fn clone_current_process(result: CloneResult) -> u64 {
         return ENOSYS;
     }
 
-    let child_fd_table = (result == CloneResult::ProcessId)
-        .then(|| crate::task::with_process(parent_pid, |p| p.clone_fd_table_for_fork()))
-        .flatten();
-
-    let parent = (result == CloneResult::ProcessId).then_some(parent_pid);
-    let mut child_proc = crate::task::Process::new("clone", parent_priv, parent, parent_priority);
+    let mut child_proc = crate::task::Process::new("clone", parent_priv, None, parent_priority);
     child_proc.set_foreground(parent_foreground);
     child_proc.set_capabilities_for_exec(parent_caps);
     child_proc.set_credentials_for_exec(parent_credentials);
@@ -398,9 +385,6 @@ fn clone_current_process(result: CloneResult) -> u64 {
     child_proc.set_ipc_mapping_end(ipc_mapping_end);
     child_proc.set_stack_bottom(stack_bottom);
     child_proc.set_stack_top(stack_top);
-    if result == CloneResult::ProcessId {
-        child_proc.set_cwd(&parent_cwd);
-    }
     child_proc.set_exe_path(&parent_exe_path);
     if let Some(identity) = parent_security_identity {
         child_proc.set_application_identity(identity);
@@ -414,10 +398,6 @@ fn clone_current_process(result: CloneResult) -> u64 {
         stack_bottom,
         stack_top
     );
-    // 親の FD テーブルを子に継承する
-    if let Some(table) = child_fd_table {
-        child_proc.set_fd_table(table);
-    }
     let child_pid = child_proc.id();
     let child_object = child_proc.process_object();
     if crate::task::add_process(child_proc).is_none() {
@@ -425,41 +405,35 @@ fn clone_current_process(result: CloneResult) -> u64 {
         return ENOMEM;
     }
 
-    let child_handle = if result == CloneResult::ProcessHandle {
-        match crate::task::with_process_mut(parent_pid, |process| {
-            let rights = crate::task::HandleRights::WAIT
-                .union(crate::task::HandleRights::SIGNAL)
-                .union(crate::task::HandleRights::DUPLICATE)
-                .union(crate::task::HandleRights::TRANSFER);
-            process.object_handles_mut().insert(
-                crate::task::ObjectHandleEntry::new(
-                    crate::task::KernelObject::Process(child_object),
-                    rights,
-                ),
-            )
-        })
-        .flatten()
-        {
-            Some(handle) => Some(handle),
-            None => {
-                let _ = crate::task::remove_process(child_pid);
-                let _ = crate::mem::paging::destroy_user_page_table(child_pt);
-                return ENOSPC;
-            }
+    let child_handle = match crate::task::with_process_mut(parent_pid, |process| {
+        let rights = crate::task::HandleRights::WAIT
+            .union(crate::task::HandleRights::SIGNAL)
+            .union(crate::task::HandleRights::DUPLICATE)
+            .union(crate::task::HandleRights::TRANSFER);
+        process.object_handles_mut().insert(
+            crate::task::ObjectHandleEntry::new(
+                crate::task::KernelObject::Process(child_object),
+                rights,
+            ),
+        )
+    })
+    .flatten()
+    {
+        Some(handle) => handle,
+        None => {
+            let _ = crate::task::remove_process(child_pid);
+            let _ = crate::mem::paging::destroy_user_page_table(child_pt);
+            return ENOSPC;
         }
-    } else {
-        None
     };
 
     let kstack_size = crate::config::kernel().exec.kernel_thread_stack_size;
     let kstack = match crate::task::thread::allocate_kernel_stack_in_table(kstack_size, child_pt) {
         Some(s) => s,
         None => {
-            if let Some(handle) = child_handle {
-                let _ = crate::task::with_process_mut(parent_pid, |process| {
-                    process.object_handles_mut().close(handle)
-                });
-            }
+            let _ = crate::task::with_process_mut(parent_pid, |process| {
+                process.object_handles_mut().close(child_handle)
+            });
             let _ = crate::task::remove_process(child_pid);
             let _ = crate::mem::paging::destroy_user_page_table(child_pt);
             return ENOMEM;
@@ -472,44 +446,25 @@ fn clone_current_process(result: CloneResult) -> u64 {
         kstack,
         kstack_size,
     );
-    if result == CloneResult::ProcessHandle {
-        child_thread.set_state(crate::task::ThreadState::Blocked);
-    }
+    child_thread.set_state(crate::task::ThreadState::Blocked);
     if crate::task::add_thread(child_thread).is_none() {
         crate::task::free_kernel_stack(kstack);
-        if let Some(handle) = child_handle {
-            let _ = crate::task::with_process_mut(parent_pid, |process| {
-                process.object_handles_mut().close(handle)
-            });
-        }
+        let _ = crate::task::with_process_mut(parent_pid, |process| {
+            process.object_handles_mut().close(child_handle)
+        });
         let _ = crate::task::remove_process(child_pid);
         let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOMEM;
     }
 
-    child_handle
-        .map(|handle| handle.raw() as u64)
-        .unwrap_or_else(|| child_pid.as_u64())
-}
-
-fn clone_process_id() -> u64 {
-    clone_current_process(CloneResult::ProcessId)
+    child_handle.raw() as u64
 }
 
 /// Clones the current process using native mnu semantics. The parent receives
 /// a process-local handle for the child; the child resumes with a zero return
 /// value from the cloned syscall frame.
 pub fn clone_process() -> u64 {
-    clone_current_process(CloneResult::ProcessHandle)
-}
-
-/// Spawnシステムコール
-///
-/// 現状は現在のプロセスを複製する最小実装。
-/// flags/reserved は将来のプロセス生成オプション用に確保してある。
-pub fn spawn(flags: u64, reserved: u64) -> u64 {
-    let _ = (flags, reserved);
-    clone_process_id()
+    clone_current_process()
 }
 
 /// Sleepシステムコール

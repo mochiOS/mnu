@@ -65,8 +65,6 @@ ptr        ユーザー空間ポインタ
 | 分類               | syscall               |
 |------------------|-----------------------|
 | Process / Thread | process_exit          |
-| Process / Thread | process_spawn         |
-| Process / Thread | process_wait          |
 | Process / Thread | thread_create         |
 | Process / Thread | thread_exit           |
 | Process / Thread | thread_yield          |
@@ -122,22 +120,6 @@ process_exit(status: i64) -> never
 `status` は親プロセスや監視側へ返される終了コードです。
 
 このシステムコールは成功時に呼び出し元へ戻りません。
-
-### process_spawn
-
-新しいプロセスを生成します。
-
-```
-process_spawn(image_cap: cap_t, args_ptr: ptr, args_len: usize, flags: u64) -> pid_t
-```
-
-`image_cap` は実行可能イメージ、または将来のローダに渡される実行対象を示すCapabilityです。
-
-`args_ptr` と `args_len` は起動引数領域を表します。
-
-`flags` は生成オプションです。
-
-実装がまだ存在しない場合は、成功扱いにせず `ENOSYS` を返します。
 
 ### thread_create
 

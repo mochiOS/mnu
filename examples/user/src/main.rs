@@ -33,7 +33,7 @@ const STAGE_IPC_SR: &[u8] = b"stage: ipc send/recv\n";
 const STAGE_IPC_PP: &[u8] = b"stage: ipc ping/pong\n";
 const STAGE_CAP: &[u8] = b"stage: capability\n";
 const STAGE_THREAD: &[u8] = b"stage: thread\n";
-const STAGE_SPAWN: &[u8] = b"stage: process_spawn\n";
+const STAGE_CLONE: &[u8] = b"stage: process_clone\n";
 const STAGE_FS_BENCH: &[u8] = b"stage: fs bench\n";
 const STAGE_PERFORMANCE: &[u8] = b"stage: performance counters\n";
 const FS_BYTES_LINE: &[u8] = b" bytes, ";
@@ -409,7 +409,7 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
     0
 }
 
-fn run_process_spawn_test() -> bool {
+fn run_process_clone_test() -> bool {
     const EXPECTED_BYTE: u8 = 0xa5;
     const CHILD_BYTE: u8 = 0x5a;
     const SHARED_BYTE: u8 = 0x3c;
@@ -442,7 +442,7 @@ fn run_process_spawn_test() -> bool {
         let _ = user::file_close(fd);
         return false;
     }
-    let child = user::process_spawn(0, 0);
+    let child = user::process_clone();
     if is_error(child) {
         let _ = user::memory_unmap(mapping, PAGE_SIZE);
         let _ = user::file_close(fd);
@@ -457,7 +457,7 @@ fn run_process_spawn_test() -> bool {
     }
 
     let mut status = 0i32;
-    let waited = user::process_wait(child, (&mut status as *mut i32) as u64, 0);
+    let waited = user::process_wait_handle(child, (&mut status as *mut i32) as u64);
     let parent_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
     let _ = user::memory_unmap(mapping, PAGE_SIZE);
     if waited != child || status != i32::from(CHILD_BYTE) << 8 || parent_byte != EXPECTED_BYTE {
@@ -475,7 +475,7 @@ fn run_process_spawn_test() -> bool {
         return false;
     }
     let _ = unsafe { core::ptr::read_volatile(shared_mapping as *const u8) };
-    let child = user::process_spawn(0, 0);
+    let child = user::process_clone();
     if is_error(child) {
         let _ = user::memory_unmap(shared_mapping, PAGE_SIZE);
         let _ = user::file_close(fd);
@@ -488,7 +488,7 @@ fn run_process_spawn_test() -> bool {
         user::process_exit(u64::from(SHARED_BYTE));
     }
     let mut status = 0i32;
-    let waited = user::process_wait(child, (&mut status as *mut i32) as u64, 0);
+    let waited = user::process_wait_handle(child, (&mut status as *mut i32) as u64);
     let shared_byte = unsafe { core::ptr::read_volatile(shared_mapping as *const u8) };
     let _ = user::memory_unmap(shared_mapping, PAGE_SIZE);
     let _ = user::file_close(fd);
@@ -503,7 +503,7 @@ fn run_process_spawn_test() -> bool {
     let mut children = [0u64; 4];
     for (index, child_slot) in children.iter_mut().enumerate() {
         let exit_code = index as u64 + 1;
-        let child = user::process_spawn(0, 0);
+        let child = user::process_clone();
         if is_error(child) {
             return false;
         }
@@ -515,14 +515,14 @@ fn run_process_spawn_test() -> bool {
     for (index, child) in children.into_iter().enumerate() {
         let exit_code = index as u64 + 1;
         let mut status = 0i32;
-        if user::process_wait(child, (&mut status as *mut i32) as u64, 0) != child
+        if user::process_wait_handle(child, (&mut status as *mut i32) as u64) != child
             || status != (exit_code as i32) << 8
         {
             return false;
         }
     }
     for exit_code in 5u64..=15 {
-        let child = user::process_spawn(0, 0);
+        let child = user::process_clone();
         if is_error(child) {
             return false;
         }
@@ -530,7 +530,7 @@ fn run_process_spawn_test() -> bool {
             user::process_exit(exit_code);
         }
         let mut status = 0i32;
-        if user::process_wait(child, (&mut status as *mut i32) as u64, 0) != child
+        if user::process_wait_handle(child, (&mut status as *mut i32) as u64) != child
             || status != (exit_code as i32) << 8
         {
             return false;
@@ -551,7 +551,7 @@ fn verify_parent_copy_on_write() -> bool {
         core::ptr::write_volatile(mapping as *mut u8, ORIGINAL_BYTE);
     }
 
-    let child = user::process_spawn(0, 0);
+    let child = user::process_clone();
     if is_error(child) {
         let _ = user::memory_unmap(mapping, PAGE_SIZE);
         return false;
@@ -566,7 +566,7 @@ fn verify_parent_copy_on_write() -> bool {
         core::ptr::write_volatile(mapping as *mut u8, PARENT_BYTE);
     }
     let mut status = 0i32;
-    let waited = user::process_wait(child, (&mut status as *mut i32) as u64, 0);
+    let waited = user::process_wait_handle(child, (&mut status as *mut i32) as u64);
     let parent_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
     let unmapped = user::memory_unmap(mapping, PAGE_SIZE);
     waited == child
@@ -587,7 +587,7 @@ fn verify_allocated_shared_page_fork() -> bool {
         core::ptr::write_volatile(mapping as *mut u8, 0x21);
     }
 
-    let child = user::process_spawn(0, 0);
+    let child = user::process_clone();
     if is_error(child) {
         let _ = user::memory_unmap(mapping, PAGE_SIZE);
         return false;
@@ -600,7 +600,7 @@ fn verify_allocated_shared_page_fork() -> bool {
     }
 
     let mut status = 0i32;
-    let waited = user::process_wait(child, (&mut status as *mut i32) as u64, 0);
+    let waited = user::process_wait_handle(child, (&mut status as *mut i32) as u64);
     let shared_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
     let unmapped = user::memory_unmap(mapping, PAGE_SIZE);
     waited == child
@@ -788,7 +788,7 @@ fn run_thread_test() -> bool {
         THREAD_TEST_RELEASE.store(true, Ordering::Release);
         return false;
     }
-    let fork_result = user::process_spawn(0, 0);
+    let fork_result = user::process_clone();
     if fork_result != mnu_abi::EAGAIN {
         write_literal(b"thread: fork result=");
         write_decimal(fork_result);
@@ -822,8 +822,8 @@ fn run_all_tests() -> u64 {
     if !user::has_capability("process.spawn") {
         return 0;
     }
-    let _ = user::debug_write(STAGE_SPAWN.as_ptr() as u64, STAGE_SPAWN.len() as u64);
-    if !run_process_spawn_test() {
+    let _ = user::debug_write(STAGE_CLONE.as_ptr() as u64, STAGE_CLONE.len() as u64);
+    if !run_process_clone_test() {
         return 9;
     }
     let _ = user::debug_write(
