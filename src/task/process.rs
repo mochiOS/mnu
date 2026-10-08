@@ -633,10 +633,6 @@ pub struct Process {
     foreground: bool,
     /// 終了コード（生存中はNone）
     exit_code: Option<u64>,
-    /// プロセスグループID（0 = 自身の PID と同じ）
-    pgid: u64,
-    /// セッションID（0 = 自身の PID と同じ）
-    sid: u64,
     /// シグナル状態（ハンドラ・マスク・pending）— ヒープに置いてスタック消費を抑える
     signal_state: alloc::boxed::Box<SignalState>,
     /// プロセスごとのファイルディスクリプタテーブル — ヒープに置いてスタック消費を抑える
@@ -711,8 +707,6 @@ impl Process {
             priority,
             foreground: false,
             exit_code: None,
-            pgid: 0,
-            sid: 0,
             signal_state: alloc::boxed::Box::new(SignalState::new()),
             fd_table: FdTable::new_boxed(),
             object_handles: ObjectHandleTable::new_boxed(),
@@ -1278,33 +1272,6 @@ impl Process {
         alloc::boxed::Box::new((*self.launch_context).clone())
     }
 
-    /// プロセスグループ ID を取得（0 は自身の PID を意味する）
-    pub fn pgid(&self) -> u64 {
-        if self.pgid == 0 {
-            self.id.as_u64()
-        } else {
-            self.pgid
-        }
-    }
-
-    /// プロセスグループ ID を設定
-    pub fn set_pgid(&mut self, pgid: u64) {
-        self.pgid = pgid;
-    }
-
-    /// セッション ID を取得（0 は自身の PID を意味する）
-    pub fn sid(&self) -> u64 {
-        if self.sid == 0 {
-            self.id.as_u64()
-        } else {
-            self.sid
-        }
-    }
-
-    /// セッション ID を設定
-    pub fn set_sid(&mut self, sid: u64) {
-        self.sid = sid;
-    }
 }
 
 fn regions_overlap(a: &MmapRegion, b: &MmapRegion) -> bool {

@@ -966,9 +966,7 @@ fn is_vfs_syscall(num: u64) -> bool {
 
 #[cfg(feature = "performance-instrumentation")]
 fn is_process_creation_syscall(num: u64) -> bool {
-    num == SyscallNumber::Fork as u64
-        || num == SyscallNumber::Clone as u64
-        || num == SyscallNumber::Execve as u64
+    num == SyscallNumber::Execve as u64
         || num == SyscallNumber::ProcessSpawn as u64
         || num == SyscallNumber::ProcessClone as u64
         || num == SyscallNumber::ExecManifest as u64

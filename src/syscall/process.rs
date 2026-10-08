@@ -527,7 +527,7 @@ pub fn brk(addr: u64) -> u64 {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CloneResult {
-    LegacyProcessId,
+    ProcessId,
     ProcessHandle,
 }
 
@@ -585,8 +585,6 @@ fn clone_current_process(result: CloneResult) -> u64 {
         parent_exe_path,
         parent_security_identity,
         parent_limits,
-        parent_pgid,
-        parent_sid,
         parent_mmap_regions,
         parent_dma_buffers,
         parent_object_handles,
@@ -608,8 +606,6 @@ fn clone_current_process(result: CloneResult) -> u64 {
             p.exe_path().to_string(),
             p.application_identity().cloned(),
             p.resource_limits(),
-            p.pgid(),
-            p.sid(),
             p.clone_mmap_regions_for_fork(),
             p.dma_buffers().to_vec(),
             p.clone_object_handles(),
@@ -660,11 +656,11 @@ fn clone_current_process(result: CloneResult) -> u64 {
         return ENOSYS;
     }
 
-    let child_fd_table = (result == CloneResult::LegacyProcessId)
+    let child_fd_table = (result == CloneResult::ProcessId)
         .then(|| crate::task::with_process(parent_pid, |p| p.clone_fd_table_for_fork()))
         .flatten();
 
-    let parent = (result == CloneResult::LegacyProcessId).then_some(parent_pid);
+    let parent = (result == CloneResult::ProcessId).then_some(parent_pid);
     let mut child_proc = crate::task::Process::new("clone", parent_priv, parent, parent_priority);
     child_proc.set_foreground(parent_foreground);
     child_proc.set_capabilities_for_exec(parent_caps);
@@ -675,7 +671,7 @@ fn clone_current_process(result: CloneResult) -> u64 {
     child_proc.set_ipc_mapping_end(ipc_mapping_end);
     child_proc.set_stack_bottom(stack_bottom);
     child_proc.set_stack_top(stack_top);
-    if result == CloneResult::LegacyProcessId {
+    if result == CloneResult::ProcessId {
         child_proc.set_cwd(&parent_cwd);
     }
     child_proc.set_exe_path(&parent_exe_path);
@@ -683,10 +679,6 @@ fn clone_current_process(result: CloneResult) -> u64 {
         child_proc.set_application_identity(identity);
     }
     child_proc.set_resource_limits(parent_limits);
-    if result == CloneResult::LegacyProcessId {
-        child_proc.set_pgid(parent_pgid);
-        child_proc.set_sid(parent_sid);
-    }
     child_proc.set_mmap_regions(parent_mmap_regions);
     child_proc.set_object_handles(parent_object_handles);
     child_proc.set_launch_context(parent_launch_context);
@@ -773,9 +765,8 @@ fn clone_current_process(result: CloneResult) -> u64 {
         .unwrap_or_else(|| child_pid.as_u64())
 }
 
-/// Transitional Linux/POSIX process duplication entry point.
-pub fn fork() -> u64 {
-    clone_current_process(CloneResult::LegacyProcessId)
+fn clone_process_id() -> u64 {
+    clone_current_process(CloneResult::ProcessId)
 }
 
 /// Clones the current process using native mnu semantics. The parent receives
@@ -787,11 +778,11 @@ pub fn clone_process() -> u64 {
 
 /// Spawnシステムコール
 ///
-/// 現状は `fork()` と同じく現在のプロセスを複製する最小実装。
+/// 現状は現在のプロセスを複製する最小実装。
 /// flags/reserved は将来のプロセス生成オプション用に確保してある。
 pub fn spawn(flags: u64, reserved: u64) -> u64 {
     let _ = (flags, reserved);
-    fork()
+    clone_process_id()
 }
 
 /// Sleepシステムコール
