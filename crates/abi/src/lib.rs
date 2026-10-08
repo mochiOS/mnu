@@ -51,7 +51,6 @@ pub enum SyscallNumber {
     Log = 519,
     PortIn = 520,
     PortOut = 521,
-    Readdir = 524,
     Reserved526 = 526,
     GetThreadPrivilege = 527,
     GetFramebufferInfo = 528,
