@@ -108,7 +108,6 @@ const SYS_EVENT_WAIT: u64 = mnu_abi::SyscallNumber::EventWait as u64;
 const SYS_EVENT_SIGNAL: u64 = mnu_abi::SyscallNumber::EventSignal as u64;
 const SYS_EVENT_POLL: u64 = mnu_abi::SyscallNumber::EventPoll as u64;
 const SYS_TIME_NOW: u64 = mnu_abi::SyscallNumber::TimeNow as u64;
-const SYS_SERVICE_SPAWN: u64 = mnu_abi::SyscallNumber::ServiceSpawn as u64;
 const SYS_PERFORMANCE_SNAPSHOT: u64 = mnu_abi::SyscallNumber::PerformanceSnapshot as u64;
 const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
 const SYS_CHECK_THREAD_CAPABILITY: u64 = mnu_abi::SyscallNumber::CheckThreadCapability as u64;
@@ -534,10 +533,6 @@ pub fn event_poll(ids_ptr: u64, count: u64, timeout: u64) -> u64 {
 
 pub fn time_now() -> u64 {
     unsafe { syscall0(SYS_TIME_NOW) }
-}
-
-pub fn service_spawn(path_ptr: u64) -> u64 {
-    unsafe { syscall1(SYS_SERVICE_SPAWN, path_ptr) }
 }
 
 fn file_path_bytes(path: &str) -> [u8; 96] {
