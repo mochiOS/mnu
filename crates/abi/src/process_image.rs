@@ -144,7 +144,11 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
     let initial_stack_pointer = read_u32(input, 12).ok_or(Error::InvalidHeader)?;
     let stack_len = read_u32(input, 16).ok_or(Error::InvalidHeader)? as usize;
     let relocation_count = read_u32(input, 20).ok_or(Error::InvalidHeader)? as usize;
-    if stack_len == 0 || stack_len > MAX_STACK_BYTES || relocation_count > MAX_RELOCATIONS {
+    if stack_len == 0
+        || stack_len > MAX_STACK_BYTES
+        || stack_len & 7 != 0
+        || relocation_count > MAX_RELOCATIONS
+    {
         return Err(Error::InvalidLength);
     }
     let relocations_len = relocation_count
@@ -198,6 +202,7 @@ pub fn encode(
 ) -> Result<usize, Error> {
     if stack.is_empty()
         || stack.len() > MAX_STACK_BYTES
+        || stack.len() & 7 != 0
         || relocations.len() > MAX_RELOCATIONS
         || initial_stack_pointer as usize >= stack.len()
         || initial_stack_pointer & 7 != 0

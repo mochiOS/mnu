@@ -173,6 +173,7 @@ pub enum SyscallNumber {
     ContextValueSet = 662,
     ContextValueRemove = 663,
     HandleRightsGet = 664,
+    ProcessImageReplace = 665,
     CheckGravityExist = 999,
 }
 

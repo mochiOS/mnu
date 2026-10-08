@@ -3,7 +3,7 @@ use alloc::vec;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
-use super::{EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EIO, ENOSPC, ENOTSUP, ESRCH, SUCCESS};
+use super::{EACCES, EAGAIN, EBADF, EFAULT, EFBIG, EINVAL, EIO, ENOSPC, ENOTSUP, ESRCH, SUCCESS};
 
 pub(crate) fn flush_provider_releases() {
     let releases = crate::task::handle_table::take_provider_releases();
@@ -256,11 +256,11 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
     total as u64
 }
 
-fn provider_seek(
+fn provider_seek_result(
     provider: &ProviderObject,
     offset: i64,
     basis: crate::syscall::fs::SeekBasis,
-) -> u64 {
+) -> Result<u64, u64> {
     let basis = match basis {
         crate::syscall::fs::SeekBasis::Start => mnu_abi::HANDLE_SEEK_START,
         crate::syscall::fs::SeekBasis::Current => mnu_abi::HANDLE_SEEK_CURRENT,
@@ -276,10 +276,60 @@ fn provider_seek(
     };
     let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
     match provider_call(provider, request, &[], &mut response_storage) {
-        Ok((response, 0)) => response.value,
-        Ok(_) => EIO,
-        Err(error) => error,
+        Ok((response, 0)) => Ok(response.value),
+        Ok(_) => Err(EIO),
+        Err(error) => Err(error),
     }
+}
+
+fn provider_seek(
+    provider: &ProviderObject,
+    offset: i64,
+    basis: crate::syscall::fs::SeekBasis,
+) -> u64 {
+    provider_seek_result(provider, offset, basis).unwrap_or_else(|error| error)
+}
+
+/// Reads one seekable object into kernel-owned storage without exposing any
+/// filesystem path or provider identifier to the caller.
+pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Vec<u8>, u64> {
+    let object = object(raw, HandleRights::READ.union(HandleRights::SEEK))?;
+    let KernelObject::Provider(provider) = object else {
+        return Err(ENOTSUP);
+    };
+    let length = provider_seek_result(&provider, 0, crate::syscall::fs::SeekBasis::End)?;
+    let length = usize::try_from(length).map_err(|_| EFBIG)?;
+    if length > maximum_length {
+        return Err(EFBIG);
+    }
+    provider_seek_result(&provider, 0, crate::syscall::fs::SeekBasis::Start)?;
+    let mut output = alloc::vec![0u8; length];
+    let mut offset = 0usize;
+    let mut response_storage = alloc::vec![
+        0u8;
+        mnu_abi::provider::RESPONSE_HEADER_LEN + mnu_abi::provider::MAX_DATA_LEN
+    ];
+    while offset < output.len() {
+        let chunk = (output.len() - offset).min(mnu_abi::provider::MAX_DATA_LEN);
+        let request = mnu_abi::provider::RequestHeader {
+            opcode: mnu_abi::provider::OP_READ,
+            object_id: provider.object_id,
+            argument: 0,
+            basis: 0,
+            length: chunk as u32,
+            data_length: 0,
+        };
+        let (response, data_len) = provider_call(&provider, request, &[], &mut response_storage)?;
+        if response.value as usize != data_len || data_len == 0 || data_len > chunk {
+            return Err(EIO);
+        }
+        output[offset..offset + data_len].copy_from_slice(
+            &response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN
+                ..mnu_abi::provider::RESPONSE_HEADER_LEN + data_len],
+        );
+        offset += data_len;
+    }
+    Ok(output)
 }
 
 pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u64) -> u64 {

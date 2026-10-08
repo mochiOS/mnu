@@ -1354,6 +1354,57 @@ fn build_initial_user_stack(
     })
 }
 
+fn build_relocatable_user_stack(
+    aslr_seed: u64,
+    startup: mnu_abi::process_image::StartupImage<'_>,
+    phdr_vaddr: u64,
+    phentsize: u64,
+    phnum: u64,
+    entry: u64,
+) -> Result<InitialUserStack, u64> {
+    use mnu_abi::process_image::RelocationKind;
+
+    let exec = crate::config::kernel().exec;
+    let stack_end_vaddr = exec.stack_top_base.saturating_sub(
+        aslr_offset_pages(aslr_seed ^ 0x53a9_1e2d, exec.stack_aslr_max_pages) * 4096,
+    );
+    let stack_base_vaddr = stack_end_vaddr - (exec.user_stack_size_pages as u64 * 4096);
+    let image_offset = 4096usize
+        .checked_sub(startup.stack().len())
+        .ok_or(crate::syscall::types::EINVAL)?;
+    let image_base = stack_end_vaddr - startup.stack().len() as u64;
+    let mut page_data = alloc::vec![0u8; 4096];
+    page_data[image_offset..].copy_from_slice(startup.stack());
+    for relocation in startup.relocations() {
+        let offset = image_offset + relocation.offset as usize;
+        let stored = u64::from_le_bytes(
+            page_data[offset..offset + 8]
+                .try_into()
+                .map_err(|_| crate::syscall::types::EINVAL)?,
+        );
+        let value = match relocation.kind {
+            RelocationKind::StackAddress => image_base
+                .checked_add(stored)
+                .ok_or(crate::syscall::types::EINVAL)?,
+            RelocationKind::ElfProgramHeaders => phdr_vaddr,
+            RelocationKind::ElfProgramHeaderSize => phentsize,
+            RelocationKind::ElfProgramHeaderCount => phnum,
+            RelocationKind::ElfEntry => entry,
+            RelocationKind::PageSize => 4096,
+        };
+        page_data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    let initial_rsp = image_base
+        .checked_add(u64::from(startup.initial_stack_pointer()))
+        .ok_or(crate::syscall::types::EINVAL)?;
+    Ok(InitialUserStack {
+        stack_base_vaddr,
+        stack_end_vaddr,
+        initial_rsp,
+        page_data,
+    })
+}
+
 fn exec_with_data(
     data: &[u8],
     process_name: &str,
@@ -1763,6 +1814,262 @@ fn read_user_ptr_array(array_ptr: u64, max_entries: usize) -> Vec<String> {
     result
 }
 
+enum ReplacementStartup<'a> {
+    Legacy {
+        argv: &'a [&'a str],
+        envp: &'a [&'a str],
+        execfn: &'a str,
+    },
+    Relocatable(mnu_abi::process_image::StartupImage<'a>),
+}
+
+fn replace_current_process_image(
+    data: &[u8],
+    identity: &str,
+    authorization: crate::task::process::PendingExecSecurity,
+    startup: ReplacementStartup<'_>,
+    mut measurement: ExecMeasurement,
+) -> u64 {
+    use crate::syscall::types::EINVAL;
+
+    let aslr_seed = next_aslr_seed(identity);
+    let new_pt_phys = match crate::mem::paging::create_user_page_table() {
+        Ok(page_table) => page_table,
+        Err(error) => return mapping_error_errno(error),
+    };
+    let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
+    let ElfImageLayout {
+        entry,
+        phdr_vaddr,
+        phentsize,
+        phnum,
+        deferred_zero_regions,
+    } = match map_elf_image(data, new_pt_phys, &mut measurement) {
+        Ok(layout) => layout,
+        Err(errno) => return errno,
+    };
+    let stack = match startup {
+        ReplacementStartup::Legacy { argv, envp, execfn } => {
+            let auxv_entries = [
+                (3u64, phdr_vaddr),
+                (4u64, phentsize),
+                (5u64, phnum),
+                (6u64, 4096u64),
+                (7u64, 0u64),
+                (8u64, 0u64),
+                (9u64, entry),
+                (11u64, 0u64),
+                (12u64, 0u64),
+                (13u64, 0u64),
+                (14u64, 0u64),
+                (16u64, 0u64),
+                (17u64, 100u64),
+                (23u64, 0u64),
+                (25u64, 0u64),
+                (31u64, 0u64),
+                (0u64, 0u64),
+            ];
+            build_initial_user_stack(aslr_seed, argv, envp, execfn, &auxv_entries)
+        }
+        ReplacementStartup::Relocatable(startup) => {
+            build_relocatable_user_stack(aslr_seed, startup, phdr_vaddr, phentsize, phnum, entry)
+        }
+    };
+    let InitialUserStack {
+        stack_base_vaddr,
+        stack_end_vaddr,
+        initial_rsp,
+        page_data,
+    } = match stack {
+        Ok(stack) => stack,
+        Err(errno) => return errno,
+    };
+    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
+        new_pt_phys,
+        stack_base_vaddr,
+        0,
+        (crate::config::kernel().exec.user_stack_size_pages - 1) as u64 * 4096,
+        &[],
+        true,
+        false,
+    ) {
+        return mapping_error_errno(error);
+    }
+    let top_page_vaddr = stack_end_vaddr - 4096;
+    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
+        new_pt_phys,
+        top_page_vaddr,
+        4096,
+        4096,
+        &page_data,
+        true,
+        false,
+    ) {
+        return mapping_error_errno(error);
+    }
+    let exec_cfg = crate::config::kernel().exec;
+    let heap_base = exec_cfg.mmap_heap_base_min.saturating_add(
+        aslr_offset_pages(aslr_seed ^ 0x4a11_6b5c, exec_cfg.mmap_heap_aslr_max_pages) * 4096,
+    );
+    let heap_map_size: u64 = 4096 * 2;
+    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
+        new_pt_phys,
+        heap_base,
+        0,
+        heap_map_size,
+        &[],
+        true,
+        false,
+    ) {
+        return mapping_error_errno(error);
+    }
+    let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
+        Ok(base) => base,
+        Err(errno) => return errno,
+    };
+    let current_tid = match crate::task::current_thread_id() {
+        Some(thread) => thread,
+        None => return EINVAL,
+    };
+    let pid = match crate::task::with_thread(current_tid, |thread| thread.process_id()) {
+        Some(process) => process,
+        None => return EINVAL,
+    };
+    let kernel_stack =
+        match crate::task::with_thread(current_tid, |thread| thread.kernel_stack_base()) {
+            Some(base) => base,
+            None => return EINVAL,
+        };
+    if !crate::task::remap_kernel_stack_user_table(kernel_stack, new_pt_phys) {
+        return crate::syscall::types::ENOMEM;
+    }
+    crate::task::release_process_mmio_mappings(pid);
+    crate::task::release_process_dma_buffers(pid);
+    crate::task::with_thread_mut(current_tid, |thread| thread.set_fs_base(initial_fs_base));
+    let old_pt_phys = crate::task::with_process_mut(pid, |process| {
+        let previous = process.page_table();
+        process.set_page_table(new_pt_phys);
+        process.set_heap_start(heap_base);
+        process.set_heap_end(heap_base + heap_map_size);
+        process.set_ipc_mapping_end(0);
+        process.set_mmap_regions(deferred_zero_regions);
+        process.set_stack_bottom(stack_base_vaddr);
+        process.set_stack_top(stack_end_vaddr + 4096);
+        process.set_exe_path(identity);
+        process.set_capabilities_for_exec(authorization.capabilities);
+        process.set_kernel_authorities_for_exec(crate::capability::KernelAuthoritySet::empty());
+        process.set_application_identity(authorization.identity);
+        process.retain_launch_context_handles_for_exec();
+        previous
+    })
+    .flatten();
+    if let Some(old) = old_pt_phys {
+        if old != new_pt_phys {
+            let _ = crate::mem::paging::destroy_user_page_table(old);
+        }
+    }
+    new_pt_guard.disarm();
+    crate::task::with_process_mut(pid, |process| process.fd_table_mut().close_cloexec_fds());
+    measurement.record();
+    unsafe {
+        crate::mem::paging::switch_page_table(new_pt_phys);
+        crate::task::jump_to_usermode(entry, initial_rsp, 0);
+    }
+}
+
+/// Replaces the current process image from an already-authorized object
+/// handle. The kernel treats `identity` as an opaque authorization key and the
+/// startup image as an opaque byte layout plus a small set of ELF relocations;
+/// POSIX argv/envp construction remains entirely in user space.
+pub fn process_image_replace_syscall(
+    image_handle: u64,
+    identity_ptr: u64,
+    identity_len: u64,
+    startup_ptr: u64,
+    startup_len: u64,
+) -> u64 {
+    use crate::syscall::types::{EACCES, EINVAL, EPERM};
+
+    const MAX_IDENTITY_BYTES: usize = 256;
+    const MAX_EXECUTABLE_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::HEADER_LEN
+        + mnu_abi::process_image::MAX_RELOCATIONS * 8
+        + mnu_abi::process_image::MAX_STACK_BYTES;
+
+    if !caller_has_process_spawn_capability() {
+        return EPERM;
+    }
+    let Ok(identity_len) = usize::try_from(identity_len) else {
+        return EINVAL;
+    };
+    let Ok(startup_len) = usize::try_from(startup_len) else {
+        return EINVAL;
+    };
+    if identity_len == 0
+        || identity_len > MAX_IDENTITY_BYTES
+        || startup_len == 0
+        || startup_len > MAX_STARTUP_IMAGE_BYTES
+    {
+        return EINVAL;
+    }
+
+    let mut identity_bytes = vec![0u8; identity_len];
+    if let Err(errno) = crate::syscall::copy_from_user(identity_ptr, &mut identity_bytes) {
+        return errno;
+    }
+    if identity_bytes.contains(&0) {
+        return EINVAL;
+    }
+    let identity = match core::str::from_utf8(&identity_bytes) {
+        Ok(identity) => identity,
+        Err(_) => return EINVAL,
+    };
+
+    let mut startup_bytes = vec![0u8; startup_len];
+    if let Err(errno) = crate::syscall::copy_from_user(startup_ptr, &mut startup_bytes) {
+        return errno;
+    }
+    let startup = match mnu_abi::process_image::decode(&startup_bytes) {
+        Ok(startup) => startup,
+        Err(_) => return EINVAL,
+    };
+
+    let Some(pid) = crate::syscall::security::current_process_id() else {
+        return EACCES;
+    };
+    let Some(thread) = crate::task::current_thread_id() else {
+        return EACCES;
+    };
+    let Some(authorization) = crate::task::with_process_mut(pid, |process| {
+        process.take_exec_authorization(identity, thread)
+    })
+    .flatten() else {
+        return EACCES;
+    };
+    if authorization.kind != crate::task::process::PendingExecKind::ImageReplace
+        || authorization.execution_class != ExecutionClass::Unprivileged
+    {
+        return EACCES;
+    }
+
+    let executable = match crate::syscall::handle::read_all(image_handle, MAX_EXECUTABLE_BYTES) {
+        Ok(executable) => executable,
+        Err(errno) => return errno,
+    };
+    let digest: [u8; 32] = Sha256::digest(&executable).into();
+    if digest != authorization.executable_digest {
+        return EACCES;
+    }
+
+    replace_current_process_image(
+        &executable,
+        identity,
+        authorization,
+        ReplacementStartup::Relocatable(startup),
+        ExecMeasurement::start(),
+    )
+}
+
 /// execve システムコール
 ///
 /// 現在のプロセスイメージを新しいプログラムで置き換える
@@ -1774,7 +2081,7 @@ fn read_user_ptr_array(array_ptr: u64, max_entries: usize) -> Vec<String> {
 pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     use crate::syscall::types::{EACCES, EINVAL, ENOENT, EPERM};
 
-    let mut measurement = ExecMeasurement::start();
+    let measurement = ExecMeasurement::start();
     if path_ptr == 0 {
         crate::warn!("execve: null path pointer");
         return EINVAL;
@@ -1818,7 +2125,6 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         return errno;
     }
 
-    let aslr_seed = next_aslr_seed(&path_owned);
     let (data_vec, source) = match load_exec_image(&path_owned, ExecutionClass::Unprivileged) {
         Some(loaded) => loaded,
         None => return ENOENT,
@@ -1837,28 +2143,6 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         source,
         data_vec.len()
     );
-    let data: &[u8] = &data_vec;
-
-    // 新しいページテーブルを作成
-    let new_pt_phys = match crate::mem::paging::create_user_page_table() {
-        Ok(p) => p,
-        Err(error) => return mapping_error_errno(error),
-    };
-    let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
-
-    let ElfImageLayout {
-        entry,
-        phdr_vaddr,
-        phentsize,
-        phnum,
-        deferred_zero_regions,
-    } = match map_elf_image(data, new_pt_phys, &mut measurement) {
-        Ok(layout) => layout,
-        Err(errno) => return errno,
-    };
-
-    // ユーザースタックをセットアップ (Linux x86_64 ABI: argc, argv[], NULL, envp[], NULL, auxv[])
-    // argv / envp をユーザー空間から読み込む
     let argv_strings = read_user_ptr_array(argv, 256);
     let envp_strings = read_user_ptr_array(envp, 1024);
     let mut argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
@@ -1866,146 +2150,15 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         argv_refs.push(&path_owned);
     }
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
-    let auxv_entries = [
-        (3u64, phdr_vaddr),
-        (4u64, phentsize),
-        (5u64, phnum),
-        (6u64, 4096u64),
-        (7u64, 0u64),
-        (8u64, 0u64),
-        (9u64, entry),
-        (11u64, 0u64),
-        (12u64, 0u64),
-        (13u64, 0u64),
-        (14u64, 0u64),
-        (16u64, 0u64),
-        (17u64, 100u64),
-        (23u64, 0u64),
-        (25u64, 0u64),
-        (31u64, 0u64),
-        (0u64, 0u64),
-    ];
-    let InitialUserStack {
-        stack_base_vaddr,
-        stack_end_vaddr,
-        initial_rsp,
-        page_data,
-    } = match build_initial_user_stack(
-        aslr_seed,
-        &argv_refs,
-        &envp_refs,
+    replace_current_process_image(
+        &data_vec,
         &path_owned,
-        &auxv_entries,
-    ) {
-        Ok(stack) => stack,
-        Err(errno) => return errno,
-    };
-
-    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
-        new_pt_phys,
-        stack_base_vaddr,
-        0,
-        (crate::config::kernel().exec.user_stack_size_pages - 1) as u64 * 4096,
-        &[],
-        true,
-        false,
-    ) {
-        return mapping_error_errno(error);
-    }
-    let top_page_vaddr = stack_end_vaddr - 4096;
-    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
-        new_pt_phys,
-        top_page_vaddr,
-        4096,
-        4096,
-        &page_data,
-        true,
-        false,
-    ) {
-        return mapping_error_errno(error);
-    }
-
-    // 初期ヒープをASLR付きで確保
-    let exec_cfg = crate::config::kernel().exec;
-    let heap_base = exec_cfg.mmap_heap_base_min.saturating_add(
-        aslr_offset_pages(aslr_seed ^ 0x4a11_6b5c, exec_cfg.mmap_heap_aslr_max_pages) * 4096,
-    );
-    let heap_map_size: u64 = 4096 * 2;
-    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
-        new_pt_phys,
-        heap_base,
-        0,
-        heap_map_size,
-        &[],
-        true,
-        false,
-    ) {
-        return mapping_error_errno(error);
-    }
-    let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
-        Ok(base) => base,
-        Err(errno) => return errno,
-    };
-
-    // 現在のプロセスのページテーブルとヒープを更新
-    let current_tid = match crate::task::current_thread_id() {
-        Some(t) => t,
-        None => return EINVAL,
-    };
-    let pid = match crate::task::with_thread(current_tid, |t| t.process_id()) {
-        Some(p) => p,
-        None => return EINVAL,
-    };
-    let kernel_stack =
-        match crate::task::with_thread(current_tid, |thread| thread.kernel_stack_base()) {
-            Some(base) => base,
-            None => return EINVAL,
-        };
-    if !crate::task::remap_kernel_stack_user_table(kernel_stack, new_pt_phys) {
-        return crate::syscall::types::ENOMEM;
-    }
-    crate::task::release_process_mmio_mappings(pid);
-    crate::task::release_process_dma_buffers(pid);
-    crate::task::with_thread_mut(current_tid, |t| t.set_fs_base(initial_fs_base));
-    let old_pt_phys = crate::task::with_process_mut(pid, |p| {
-        let prev = p.page_table();
-        p.set_page_table(new_pt_phys);
-        p.set_heap_start(heap_base);
-        p.set_heap_end(heap_base + heap_map_size);
-        p.set_ipc_mapping_end(0);
-        p.set_mmap_regions(deferred_zero_regions);
-        p.set_stack_bottom(stack_base_vaddr);
-        p.set_stack_top(stack_end_vaddr + 4096);
-        p.set_exe_path(&path_owned);
-        p.set_capabilities_for_exec(exec_authorization.capabilities);
-        p.set_kernel_authorities_for_exec(crate::capability::KernelAuthoritySet::empty());
-        p.set_application_identity(exec_authorization.identity);
-        p.retain_launch_context_handles_for_exec();
-        crate::debug!(
-            "[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}",
-            p.name(),
-            stack_base_vaddr,
-            stack_end_vaddr,
-            stack_end_vaddr + 4096
-        );
-        prev
-    })
-    .flatten();
-    if let Some(old) = old_pt_phys {
-        if old != new_pt_phys {
-            let _ = crate::mem::paging::destroy_user_page_table(old);
-        }
-    }
-    new_pt_guard.disarm();
-
-    // Legacy descriptors remain migration-only. Native object handles were
-    // already reduced to the opaque LaunchContext selection above.
-    crate::task::with_process_mut(pid, |p| p.fd_table_mut().close_cloexec_fds());
-
-    // 新しいページテーブルに切り替えてジャンプ
-    measurement.record();
-    unsafe {
-        crate::mem::paging::switch_page_table(new_pt_phys);
-        crate::task::jump_to_usermode(entry, initial_rsp, 0);
-    }
+        exec_authorization,
+        ReplacementStartup::Legacy {
+            argv: &argv_refs,
+            envp: &envp_refs,
+            execfn: &path_owned,
+        },
+        measurement,
+    )
 }
