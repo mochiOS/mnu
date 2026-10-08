@@ -764,6 +764,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ThreadHandleCreate as u64 => upcall::create_thread_handle(),
         x if x == SyscallNumber::ThreadInterrupt as u64 => upcall::interrupt(arg0, arg1),
         x if x == SyscallNumber::ThreadHandleStatus as u64 => upcall::thread_status(arg0, arg1),
+        x if x == SyscallNumber::ProcessHandleOpenById as u64 => {
+            handle::process_open_by_id(arg0, arg1)
+        }
         x if x == SyscallNumber::ProviderObjectCreate as u64 => {
             handle::provider_object_create(arg0, arg1, arg2)
         }
