@@ -103,6 +103,65 @@ pub fn seek(raw: u64, offset: u64, basis: u64) -> u64 {
     }
 }
 
+/// Sends an opaque bounded control request to a user-space-backed object.
+/// The kernel enforces handle rights and memory safety but does not interpret
+/// the provider-owned control code or payload.
+pub fn control(
+    raw: u64,
+    control_code: u64,
+    input: u64,
+    input_length: u64,
+    output: u64,
+    output_length: u64,
+) -> u64 {
+    let object = match object(raw, HandleRights::CONTROL) {
+        Ok(object) => object,
+        Err(error) => return error,
+    };
+    let KernelObject::Provider(provider) = object else {
+        return ENOTSUP;
+    };
+    let input_length = match usize::try_from(input_length) {
+        Ok(length) if length <= mnu_abi::provider::MAX_DATA_LEN => length,
+        _ => return EINVAL,
+    };
+    let output_length = match usize::try_from(output_length) {
+        Ok(length) if length <= mnu_abi::provider::MAX_DATA_LEN => length,
+        _ => return EINVAL,
+    };
+    let mut input_bytes = vec![0u8; input_length];
+    if input_length != 0 {
+        if let Err(error) = crate::syscall::copy_from_user(input, &mut input_bytes) {
+            return error;
+        }
+    }
+    let request = mnu_abi::provider::RequestHeader {
+        opcode: mnu_abi::provider::OP_CONTROL,
+        object_id: provider.object_id,
+        argument: 0,
+        basis: control_code,
+        length: output_length as u32,
+        data_length: input_length as u32,
+    };
+    let mut response_storage = vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + output_length];
+    let (response, data_length) =
+        match provider_call(&provider, request, &input_bytes, &mut response_storage) {
+            Ok(response) => response,
+            Err(error) => return error,
+        };
+    if response.value as usize != data_length || data_length > output_length {
+        return EIO;
+    }
+    if data_length != 0 {
+        let data = &response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN
+            ..mnu_abi::provider::RESPONSE_HEADER_LEN + data_length];
+        if let Err(error) = crate::syscall::copy_to_user(output, data) {
+            return error;
+        }
+    }
+    data_length as u64
+}
+
 pub fn options_get(raw: u64) -> u64 {
     let object = match object(raw, HandleRights::CONTROL) {
         Ok(object) => object,

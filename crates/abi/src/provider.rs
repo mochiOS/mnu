@@ -10,6 +10,7 @@ pub const OP_READ: u16 = 1;
 pub const OP_WRITE: u16 = 2;
 pub const OP_SEEK: u16 = 3;
 pub const OP_RELEASE: u16 = 4;
+pub const OP_CONTROL: u16 = 5;
 
 pub const REQUEST_HEADER_LEN: usize = 48;
 pub const RESPONSE_HEADER_LEN: usize = 40;
@@ -154,7 +155,10 @@ impl ResponseHeader {
 }
 
 const fn valid_opcode(opcode: u16) -> bool {
-    matches!(opcode, OP_READ | OP_WRITE | OP_SEEK | OP_RELEASE)
+    matches!(
+        opcode,
+        OP_READ | OP_WRITE | OP_SEEK | OP_RELEASE | OP_CONTROL
+    )
 }
 
 const fn valid_request_fields(header: RequestHeader) -> bool {
@@ -185,6 +189,11 @@ const fn valid_request_fields(header: RequestHeader) -> bool {
                 && header.length == 0
                 && header.data_length == 0
         }
+        OP_CONTROL => {
+            header.argument == 0
+                && header.length as usize <= MAX_DATA_LEN
+                && header.data_length as usize <= MAX_DATA_LEN
+        }
         _ => false,
     }
 }
@@ -198,7 +207,7 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
         return header.value == 0 && header.data_length == 0;
     }
     match header.opcode {
-        OP_READ => header.value == header.data_length as u64,
+        OP_READ | OP_CONTROL => header.value == header.data_length as u64,
         OP_WRITE | OP_SEEK | OP_RELEASE => header.data_length == 0,
         _ => false,
     }
@@ -287,6 +296,38 @@ mod tests {
         assert_eq!(
             ResponseHeader::decode(&bytes),
             Err(DecodeError::InvalidLength)
+        );
+    }
+
+    #[test]
+    fn control_round_trip_keeps_code_and_bounded_payloads() {
+        let header = RequestHeader {
+            opcode: OP_CONTROL,
+            object_id: 11,
+            argument: 0,
+            basis: 0xfeed_beef,
+            length: 8,
+            data_length: 3,
+        };
+        let mut request = [0u8; REQUEST_HEADER_LEN + 3];
+        let request_len = header.encode(b"set", &mut request).unwrap();
+        assert_eq!(
+            RequestHeader::decode(&request[..request_len]),
+            Ok((header, &b"set"[..]))
+        );
+
+        let response = ResponseHeader {
+            opcode: OP_CONTROL,
+            status: 0,
+            object_id: 11,
+            value: 3,
+            data_length: 3,
+        };
+        let mut reply = [0u8; RESPONSE_HEADER_LEN + 3];
+        let reply_len = response.encode(b"get", &mut reply).unwrap();
+        assert_eq!(
+            ResponseHeader::decode(&reply[..reply_len]),
+            Ok((response, &b"get"[..]))
         );
     }
 }
