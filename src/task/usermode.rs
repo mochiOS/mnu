@@ -118,7 +118,6 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64, user_arg0: u64) -> !
         "push r11",        // RFLAGS
         "push r10",        // CS (ユーザーコードセグメント)
         "push r12",        // RIP (エントリーポイント)
-        "mov rdi, {arg0}", // 最初の引数を user rdi に載せる
 
         // iretqでユーザーモードへジャンプ
         "iretq",
@@ -127,7 +126,9 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64, user_arg0: u64) -> !
         in("r9") user_stack,
         in("r10") user_cs,
         in("r12") entry,
-        arg0 = in(reg) user_arg0,
+        // RAX and R11 are scratch registers during frame construction.
+        // Bind the entry argument directly to its userspace ABI register.
+        in("rdi") user_arg0,
         options(noreturn)
     )
 }
