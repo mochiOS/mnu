@@ -113,6 +113,7 @@ pub fn options_get(raw: u64) -> u64 {
             Ok(options) => options,
             Err(error) => error,
         },
+        KernelObject::Provider(provider) => provider.io_options(),
         _ => ENOTSUP,
     }
 }
@@ -131,6 +132,10 @@ pub fn options_set(raw: u64, options: u64) -> u64 {
                 Ok(()) => SUCCESS,
                 Err(error) => error,
             }
+        }
+        KernelObject::Provider(provider) => {
+            provider.set_io_options(options);
+            SUCCESS
         }
         _ => ENOTSUP,
     }

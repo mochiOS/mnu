@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::fd_table::FileHandle;
 use super::process::ProcessObject;
@@ -15,6 +15,7 @@ pub struct ProviderObject {
     pub endpoint_generation: u64,
     pub object_id: u64,
     registered: AtomicBool,
+    io_options: AtomicU64,
     signal_state: crate::interrupt::spinlock::SpinLock<ProviderSignalState>,
 }
 
@@ -26,6 +27,7 @@ impl core::fmt::Debug for ProviderObject {
             .field("endpoint_slot", &self.endpoint_slot)
             .field("endpoint_generation", &self.endpoint_generation)
             .field("object_id", &self.object_id)
+            .field("io_options", &self.io_options())
             .field("signals", &self.signals())
             .finish()
     }
@@ -100,6 +102,7 @@ impl ProviderObject {
             endpoint_generation,
             object_id,
             registered: AtomicBool::new(false),
+            io_options: AtomicU64::new(0),
             signal_state: crate::interrupt::spinlock::SpinLock::new(ProviderSignalState::default()),
         }
     }
@@ -115,6 +118,14 @@ impl ProviderObject {
 
     pub(crate) fn signals(&self) -> u64 {
         self.signal_state.lock().signals
+    }
+
+    pub(crate) fn io_options(&self) -> u64 {
+        self.io_options.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_io_options(&self, options: u64) {
+        self.io_options.store(options, Ordering::Release);
     }
 
     pub(crate) fn register_waiter(&self, waiter: super::ids::ThreadId) -> bool {
@@ -575,6 +586,9 @@ mod tests {
         };
         assert!(Arc::ptr_eq(source, duplicate));
         assert_eq!(source.object_id, 99);
+        assert_eq!(source.io_options(), 0);
+        source.set_io_options(mnu_abi::HANDLE_OPTION_NONBLOCKING);
+        assert_eq!(duplicate.io_options(), mnu_abi::HANDLE_OPTION_NONBLOCKING);
     }
 
     #[test]
