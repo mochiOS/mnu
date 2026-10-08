@@ -179,8 +179,11 @@ language runtimeが管理し、カーネルは解釈しません。
 現在のスレッドを終了します。
 
 ```
-thread_exit(status: i64) -> never
+thread_exit(status: u64) -> never
 ```
+
+現在のthreadだけを終了します。同じprocessに他のlive threadが存在しない場合は、
+process lifecycleも終了状態へ遷移します。
 
 最後のスレッドが終了した場合、そのプロセスも終了します。
 
