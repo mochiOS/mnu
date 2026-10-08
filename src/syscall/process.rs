@@ -44,6 +44,7 @@ pub fn get_thread_security_context(sender_endpoint: u64, output: u64, output_len
         let credentials = process.credentials();
         let mut context = mnu_abi::ThreadSecurityContext::default();
         context.process_id = pid.as_u64();
+        context.thread_id = thread_id;
         context.effective_uid = credentials.effective_uid();
         context.effective_gid = credentials.effective_gid();
         if let Some(identity) = process.application_identity() {
@@ -379,20 +380,6 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
     }
 
     written as u64
-}
-
-/// GetTidシステムコール
-///
-/// 現在のスレッドIDを取得する
-///
-/// # 戻り値
-/// スレッドID
-pub fn gettid() -> u64 {
-    if let Some(tid) = current_thread_id() {
-        tid.as_u64()
-    } else {
-        0
-    }
 }
 
 /// Brkシステムコール

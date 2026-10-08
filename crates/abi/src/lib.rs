@@ -49,7 +49,6 @@ pub enum SyscallNumber {
     FileSync = 573,
     Sigaltstack = 131,
     ArchPrctl = 158,
-    GetTid = 186,
     Tkill = 200,
     Futex = 202,
     Tgkill = 234,
@@ -502,6 +501,7 @@ pub const APPLICATION_ID_FIELD_LEN: usize = 128;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadSecurityContext {
     pub process_id: u64,
+    pub thread_id: u64,
     pub effective_uid: u32,
     pub effective_gid: u32,
     pub provenance: u8,
@@ -518,6 +518,7 @@ impl Default for ThreadSecurityContext {
     fn default() -> Self {
         Self {
             process_id: 0,
+            thread_id: 0,
             effective_uid: 0,
             effective_gid: 0,
             provenance: 0,
