@@ -849,7 +849,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::FileRead as u64 => fs::file_read(arg0, arg1, arg2),
         x if x == SyscallNumber::FileWrite as u64 => fs::file_write(arg0, arg1, arg2),
         x if x == SyscallNumber::FileSeek as u64 => fs::file_seek(arg0, arg1 as i64, arg2),
-        x if x == SyscallNumber::FileFstat as u64 => fs::file_fstat(arg0, arg1),
         x if x == SyscallNumber::FileReadDir as u64 => fs::file_read_dir(arg0, arg1, arg2),
         _ => ENOSYS,
     };
@@ -947,7 +946,6 @@ fn is_vfs_syscall(num: u64) -> bool {
         || num == SyscallNumber::FileRead as u64
         || num == SyscallNumber::FileWrite as u64
         || num == SyscallNumber::FileSeek as u64
-        || num == SyscallNumber::FileFstat as u64
         || num == SyscallNumber::FileReadDir as u64
         || num == SyscallNumber::HandleRead as u64
         || num == SyscallNumber::HandleWrite as u64
@@ -974,9 +972,6 @@ fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
         x if x == SyscallNumber::FileRead as u64 => Some(LatencyMetric::VfsRead),
         x if x == SyscallNumber::FileWrite as u64 => Some(LatencyMetric::VfsWrite),
         x if x == SyscallNumber::FileClose as u64 => Some(LatencyMetric::VfsClose),
-        x if x == SyscallNumber::FileFstat as u64 => {
-            Some(LatencyMetric::VfsStat)
-        }
         _ => None,
     }
 }

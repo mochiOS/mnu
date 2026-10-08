@@ -35,7 +35,6 @@ pub enum SyscallNumber {
     FileRead = 563,
     FileWrite = 564,
     FileSeek = 565,
-    FileFstat = 568,
     FileReadDir = 569,
     IpcSend = 514,
     IpcRecv = 515,

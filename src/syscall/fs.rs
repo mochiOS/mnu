@@ -2263,10 +2263,6 @@ pub fn file_seek(fd: u64, offset: i64, whence: u64) -> u64 {
     seek(fd, offset, whence)
 }
 
-pub fn file_fstat(fd: u64, stat_ptr: u64) -> u64 {
-    fstat(fd, stat_ptr)
-}
-
 pub fn file_read_dir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     getdents64(fd, buf_ptr, buf_len)
 }

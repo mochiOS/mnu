@@ -101,7 +101,6 @@ ptr        ユーザー空間ポインタ
 | Filesystem       | file_seek             |
 | Filesystem       | file_stat             |
 | Filesystem       | file_stat_at          |
-| Filesystem       | file_fstat            |
 | Filesystem       | file_read_dir         |
 | Filesystem       | file_create_dir       |
 | Filesystem       | file_remove           |
@@ -545,12 +544,6 @@ file_write(fd: u64, buf: ptr, len: usize) -> isize
 
 ```
 file_seek(fd: u64, offset: i64, whence: u64) -> isize
-```
-
-### file_fstat
-
-```
-file_fstat(fd: u64, stat: ptr) -> isize
 ```
 
 ### file_read_dir
