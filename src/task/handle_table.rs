@@ -140,6 +140,39 @@ pub enum KernelObject {
     Provider(Arc<ProviderObject>),
 }
 
+impl KernelObject {
+    /// Returns whether two handles name the same kernel object. This exposes
+    /// no object identifier and therefore cannot be used to name an object
+    /// that the caller does not already possess.
+    pub(crate) fn is_same_object(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::IpcEndpoint {
+                    thread_id: left_thread,
+                    slot: left_slot,
+                    generation: left_generation,
+                },
+                Self::IpcEndpoint {
+                    thread_id: right_thread,
+                    slot: right_slot,
+                    generation: right_generation,
+                },
+            ) => {
+                left_thread == right_thread
+                    && left_slot == right_slot
+                    && left_generation == right_generation
+            }
+            (Self::Event(left), Self::Event(right)) => left == right,
+            (Self::Process(left), Self::Process(right)) => Arc::ptr_eq(left, right),
+            (Self::Thread(left), Self::Thread(right)) => left == right,
+            (Self::VmObject(left), Self::VmObject(right)) => left == right,
+            (Self::File(left), Self::File(right)) => Arc::ptr_eq(left, right),
+            (Self::Provider(left), Self::Provider(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
 impl core::fmt::Debug for KernelObject {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -312,6 +345,13 @@ mod tests {
             .duplicate_restricted(source, HandleRights::SEND)
             .unwrap();
         assert_eq!(table.get(duplicate).unwrap().rights(), HandleRights::SEND);
+        assert!(
+            table
+                .get(source)
+                .unwrap()
+                .object()
+                .is_same_object(table.get(duplicate).unwrap().object())
+        );
         assert!(table
             .duplicate_restricted(source, HandleRights::RECEIVE)
             .is_none());

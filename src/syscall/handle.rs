@@ -452,6 +452,33 @@ pub fn duplicate(raw: u64, requested_rights: u64) -> u64 {
     .unwrap_or(EINVAL)
 }
 
+/// Compares two process-local handles without disclosing a globally reusable
+/// object identifier. Possession of both valid handles is sufficient.
+pub fn same_object(left_raw: u64, right_raw: u64) -> u64 {
+    let process_id = match current_process() {
+        Ok(process_id) => process_id,
+        Err(error) => return error,
+    };
+    let left = match decode_handle(left_raw) {
+        Ok(handle) => handle,
+        Err(error) => return error,
+    };
+    let right = match decode_handle(right_raw) {
+        Ok(handle) => handle,
+        Err(error) => return error,
+    };
+    crate::task::with_process(process_id, |process| {
+        let Some(left) = process.object_handles().get(left) else {
+            return EBADF;
+        };
+        let Some(right) = process.object_handles().get(right) else {
+            return EBADF;
+        };
+        u64::from(left.object().is_same_object(right.object()))
+    })
+    .unwrap_or(EINVAL)
+}
+
 const PROCESS_HANDLE_RIGHTS: HandleRights = HandleRights::WAIT
     .union(HandleRights::DUPLICATE)
     .union(HandleRights::TRANSFER);
