@@ -314,6 +314,11 @@ pub unsafe extern "C" fn syscall_entry() {
         // syscall戻り値を保存
         "mov [rsp + 120], rax",
 
+        // A native thread upcall may replace this return context. Returning
+        // from an upcall restores the complete saved context here as well.
+        "mov rdi, rsp",
+        "call {prepare_thread_upcall}",
+
         // user RIP/RFLAGS を復元する前に user CR3 を取得する。
         // saved r10 slot は CR3 の一時領域として使うため、元の r10 を退避する。
         "mov rax, [rsp + 88]",
@@ -400,6 +405,7 @@ pub unsafe extern "C" fn syscall_entry() {
         trampoline_rsp_off = const crate::percpu::GS_SYSCALL_TRAMPOLINE_RSP_OFFSET,
         verify_kernel_page_table = sym verify_kernel_page_table_before_rust,
         save_user_context_for_fork = sym crate::syscall::save_user_context_for_fork,
+        prepare_thread_upcall = sym crate::syscall::prepare_thread_upcall_for_sysret,
         fs_base_fn = sym current_thread_fs_base_for_sysret,
         dispatch = sym super::syscall_dispatch_sysv,
         kill_fn = sym kill_non_canonical_rsp,

@@ -44,7 +44,7 @@ fn decode_handle(raw: u64) -> Result<ObjectHandle, u64> {
     ObjectHandle::from_raw(raw).ok_or(EBADF)
 }
 
-fn object(raw: u64, required_right: HandleRights) -> Result<KernelObject, u64> {
+pub(crate) fn object(raw: u64, required_right: HandleRights) -> Result<KernelObject, u64> {
     let process_id = current_process()?;
     let handle = decode_handle(raw)?;
     crate::task::with_process(process_id, |process| {

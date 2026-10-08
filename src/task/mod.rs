@@ -46,6 +46,6 @@ pub use thread::{
     thread_count, thread_id_exists, thread_slot_index, thread_slot_index_and_generation,
     thread_slot_index_and_generation_by_u64, thread_slot_index_by_u64, thread_to_process_id,
     with_thread, with_thread_at_slot, with_thread_at_slot_mut, with_thread_mut, Thread,
-    ThreadQueue,
+    ThreadQueue, ThreadUpcallDelivery, ThreadUpcallError, UserUpcallContext,
 };
 pub use usermode::{jump_to_usermode, jump_to_usermode_fork_child};

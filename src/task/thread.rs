@@ -46,6 +46,133 @@ impl SyscallUserContext {
     }
 }
 
+const THREAD_UPCALL_QUEUE_CAPACITY: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserUpcallContext {
+    pub user_rsp: u64,
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub user_rflags: u64,
+    pub user_rip: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub r10: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rax: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadUpcallDelivery {
+    pub entry: u64,
+    pub stack_top: u64,
+    pub payload: u64,
+    pub token: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadUpcallError {
+    Active,
+    QueueFull,
+    InvalidToken,
+}
+
+#[derive(Clone, Copy)]
+struct ThreadUpcallState {
+    entry: u64,
+    stack_top: u64,
+    pending: [u64; THREAD_UPCALL_QUEUE_CAPACITY],
+    pending_head: usize,
+    pending_len: usize,
+    next_token: u64,
+    active_token: u64,
+    saved_context: Option<UserUpcallContext>,
+    restore_pending: bool,
+}
+
+impl ThreadUpcallState {
+    const fn new() -> Self {
+        Self {
+            entry: 0,
+            stack_top: 0,
+            pending: [0; THREAD_UPCALL_QUEUE_CAPACITY],
+            pending_head: 0,
+            pending_len: 0,
+            next_token: 1,
+            active_token: 0,
+            saved_context: None,
+            restore_pending: false,
+        }
+    }
+
+    fn install(&mut self, entry: u64, stack_top: u64) -> Result<(), ThreadUpcallError> {
+        if self.active_token != 0 {
+            return Err(ThreadUpcallError::Active);
+        }
+        self.entry = entry;
+        self.stack_top = stack_top;
+        Ok(())
+    }
+
+    fn enqueue(&mut self, payload: u64) -> Result<(), ThreadUpcallError> {
+        if self.pending_len == THREAD_UPCALL_QUEUE_CAPACITY {
+            return Err(ThreadUpcallError::QueueFull);
+        }
+        let tail = (self.pending_head + self.pending_len) % THREAD_UPCALL_QUEUE_CAPACITY;
+        self.pending[tail] = payload;
+        self.pending_len += 1;
+        Ok(())
+    }
+
+    fn begin(&mut self, context: UserUpcallContext) -> Option<ThreadUpcallDelivery> {
+        if self.entry == 0
+            || self.stack_top == 0
+            || self.pending_len == 0
+            || self.active_token != 0
+        {
+            return None;
+        }
+        let payload = self.pending[self.pending_head];
+        self.pending_head = (self.pending_head + 1) % THREAD_UPCALL_QUEUE_CAPACITY;
+        self.pending_len -= 1;
+        let token = self.next_token.max(1);
+        self.next_token = token.wrapping_add(1).max(1);
+        self.active_token = token;
+        self.saved_context = Some(context);
+        self.restore_pending = false;
+        Some(ThreadUpcallDelivery {
+            entry: self.entry,
+            stack_top: self.stack_top,
+            payload,
+            token,
+        })
+    }
+
+    fn request_return(&mut self, token: u64) -> Result<(), ThreadUpcallError> {
+        if token == 0 || token != self.active_token || self.saved_context.is_none() {
+            return Err(ThreadUpcallError::InvalidToken);
+        }
+        self.restore_pending = true;
+        Ok(())
+    }
+
+    fn take_restored_context(&mut self) -> Option<UserUpcallContext> {
+        if !self.restore_pending {
+            return None;
+        }
+        let context = self.saved_context.take()?;
+        self.restore_pending = false;
+        self.active_token = 0;
+        Some(context)
+    }
+}
+
 // L4 風の short IPC を register 相当で運ぶための上限。
 // ここを少し広げると、小さめの RPC が slow path に落ちにくくなる。
 const FAST_IPC_MAX_BYTES: usize = 128;
@@ -256,6 +383,7 @@ pub struct Thread {
     pending_wakeup: bool,
     /// 低遅延IPCの待機/受信状態
     fast_ipc: IpcFastState,
+    upcall: ThreadUpcallState,
     /// 直近の対話的な待機/起床の傾向
     interactive_score: u8,
     /// 直近の量子使い切りの傾向
@@ -728,6 +856,7 @@ impl Thread {
             syscall_user_context: SyscallUserContext::empty(),
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
+            upcall: ThreadUpcallState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
             cpu_ticks: 0,
@@ -849,6 +978,7 @@ impl Thread {
             syscall_user_context: SyscallUserContext::empty(),
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
+            upcall: ThreadUpcallState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
             cpu_ticks: 0,
@@ -951,6 +1081,7 @@ impl Thread {
             syscall_user_context: user_context,
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
+            upcall: ThreadUpcallState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
             cpu_ticks: 0,
@@ -1019,6 +1150,33 @@ impl Thread {
 
     pub fn clear_fast_ipc(&mut self) {
         self.fast_ipc.clear();
+    }
+
+    pub fn install_upcall(
+        &mut self,
+        entry: u64,
+        stack_top: u64,
+    ) -> Result<(), ThreadUpcallError> {
+        self.upcall.install(entry, stack_top)
+    }
+
+    pub fn enqueue_upcall(&mut self, payload: u64) -> Result<(), ThreadUpcallError> {
+        self.upcall.enqueue(payload)
+    }
+
+    pub fn begin_upcall(
+        &mut self,
+        context: UserUpcallContext,
+    ) -> Option<ThreadUpcallDelivery> {
+        self.upcall.begin(context)
+    }
+
+    pub fn request_upcall_return(&mut self, token: u64) -> Result<(), ThreadUpcallError> {
+        self.upcall.request_return(token)
+    }
+
+    pub fn take_restored_upcall_context(&mut self) -> Option<UserUpcallContext> {
+        self.upcall.take_restored_context()
     }
 
     pub fn interactive_score(&self) -> u8 {

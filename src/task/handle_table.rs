@@ -134,6 +134,7 @@ pub enum KernelObject {
     },
     Event(u64),
     Process(Arc<ProcessObject>),
+    Thread(super::ids::ThreadId),
     VmObject(u64),
     File(Arc<FileHandle>),
     Provider(Arc<ProviderObject>),
@@ -157,6 +158,7 @@ impl core::fmt::Debug for KernelObject {
                 .debug_tuple("Process")
                 .field(&process.id())
                 .finish(),
+            Self::Thread(thread) => formatter.debug_tuple("Thread").field(thread).finish(),
             Self::VmObject(id) => formatter.debug_tuple("VmObject").field(id).finish(),
             Self::File(file) => formatter
                 .debug_tuple("File")

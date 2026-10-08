@@ -17,6 +17,7 @@ pub mod storage;
 pub mod syscall_entry;
 pub mod task;
 pub mod time;
+pub mod upcall;
 
 mod types;
 
@@ -762,6 +763,10 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::HandleOptionsSet as u64 => handle::options_set(arg0, arg1),
         x if x == SyscallNumber::WaitOnAddress as u64 => address_wait::wait(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::WakeAddress as u64 => address_wait::wake(arg0, arg1),
+        x if x == SyscallNumber::ThreadUpcallInstall as u64 => upcall::install(arg0, arg1),
+        x if x == SyscallNumber::ThreadUpcallReturn as u64 => upcall::return_from(arg0),
+        x if x == SyscallNumber::ThreadHandleCreate as u64 => upcall::create_thread_handle(),
+        x if x == SyscallNumber::ThreadInterrupt as u64 => upcall::interrupt(arg0, arg1),
         x if x == SyscallNumber::ProviderObjectCreate as u64 => {
             handle::provider_object_create(arg0, arg1, arg2)
         }
@@ -998,22 +1003,29 @@ fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
 
 #[repr(C)]
 pub struct SavedSyscallFrame {
-    user_rsp: u64,
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    rbx: u64,
-    rbp: u64,
-    user_rflags: u64,
-    user_rip: u64,
-    arg5: u64,
-    arg4: u64,
-    arg3: u64,
-    arg2: u64,
-    arg1: u64,
-    arg0: u64,
-    num: u64,
+    pub(crate) user_rsp: u64,
+    pub(crate) r15: u64,
+    pub(crate) r14: u64,
+    pub(crate) r13: u64,
+    pub(crate) r12: u64,
+    pub(crate) rbx: u64,
+    pub(crate) rbp: u64,
+    pub(crate) user_rflags: u64,
+    pub(crate) user_rip: u64,
+    pub(crate) arg5: u64,
+    pub(crate) arg4: u64,
+    pub(crate) arg3: u64,
+    pub(crate) arg2: u64,
+    pub(crate) arg1: u64,
+    pub(crate) arg0: u64,
+    pub(crate) num: u64,
+}
+
+#[no_mangle]
+pub extern "sysv64" fn prepare_thread_upcall_for_sysret(frame: *mut SavedSyscallFrame) {
+    if let Some(frame) = unsafe { frame.as_mut() } {
+        upcall::prepare_syscall_return(frame);
+    }
 }
 
 const _: () = {

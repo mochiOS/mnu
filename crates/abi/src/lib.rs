@@ -162,6 +162,10 @@ pub enum SyscallNumber {
     HandleOptionsSet = 651,
     WaitOnAddress = 652,
     WakeAddress = 653,
+    ThreadUpcallInstall = 654,
+    ThreadUpcallReturn = 655,
+    ThreadHandleCreate = 656,
+    ThreadInterrupt = 657,
     CheckGravityExist = 999,
 }
 
@@ -207,6 +211,22 @@ pub struct ThreadCreateContext {
     pub thread_local_base: u64,
     pub flags: u64,
     pub reserved: [u64; 3],
+}
+
+/// User-space entry point and private stack for a native thread upcall.
+///
+/// The kernel treats `payload` values as opaque. The entry point receives the
+/// payload in the first argument register and a one-shot return token in the
+/// second argument register. It must finish with `ThreadUpcallReturn` rather
+/// than returning normally.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadUpcallConfig {
+    pub entry: u64,
+    pub stack_base: u64,
+    pub stack_size: u64,
+    pub flags: u64,
+    pub reserved: [u64; 4],
 }
 
 /// A process-local object handle and the signals a caller wants to observe.
@@ -482,6 +502,10 @@ mod object_handle_tests {
             SyscallNumber::HandleOptionsSet as u64,
             SyscallNumber::WaitOnAddress as u64,
             SyscallNumber::WakeAddress as u64,
+            SyscallNumber::ThreadUpcallInstall as u64,
+            SyscallNumber::ThreadUpcallReturn as u64,
+            SyscallNumber::ThreadHandleCreate as u64,
+            SyscallNumber::ThreadInterrupt as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -636,6 +660,11 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::HandleOptionsSet as u64, 651);
         assert_eq!(super::SyscallNumber::WaitOnAddress as u64, 652);
         assert_eq!(super::SyscallNumber::WakeAddress as u64, 653);
+        assert_eq!(super::SyscallNumber::ThreadUpcallInstall as u64, 654);
+        assert_eq!(super::SyscallNumber::ThreadUpcallReturn as u64, 655);
+        assert_eq!(super::SyscallNumber::ThreadHandleCreate as u64, 656);
+        assert_eq!(super::SyscallNumber::ThreadInterrupt as u64, 657);
+        assert_eq!(core::mem::size_of::<super::ThreadUpcallConfig>(), 64);
         assert_eq!(
             super::AddressWaitResult::from_raw(2),
             Some(super::AddressWaitResult::DeadlineReached)
