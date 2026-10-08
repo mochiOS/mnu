@@ -15,6 +15,9 @@ pub mod hypervisor;
 /// mnuの性能計測結果をユーザー空間へ渡す固定ABIです。
 pub mod performance;
 
+/// Relocatable initial-stack image for native process image replacement.
+pub mod process_image;
+
 /// Generic user-space-backed object operation protocol.
 pub mod provider;
 
