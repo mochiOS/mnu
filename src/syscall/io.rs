@@ -1,14 +1,9 @@
 //! I/O関連のシステムコール
 
-use super::types::{EBADF, EFAULT, EINVAL, EPERM, SUCCESS};
+use super::types::{EFAULT, EINVAL, EPERM, SUCCESS};
 use crate::capability::Capability;
 use crate::util::console;
 use crate::{debug, error, info, warn};
-
-/// 標準出力のファイルディスクリプタ
-const STDOUT_FD: u64 = 1;
-/// 標準エラー出力のファイルディスクリプタ
-const STDERR_FD: u64 = 2;
 
 fn caller_has_port_io_access() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
@@ -20,31 +15,16 @@ fn caller_has_port_io_access() -> bool {
     ])
 }
 
-/// Writeシステムコール
+/// Writes raw bytes to the kernel's early diagnostic console.
 ///
-/// # 引数
-/// - `fd`: ファイルディスクリプタ (1=stdout, 2=stderr, >=3=ファイル/パイプ)
-/// - `buf_ptr`: 書き込むデータのポインタ
-/// - `len`: 書き込むデータの長さ
-///
-/// # 戻り値
-/// 書き込んだバイト数、またはエラーコード
-pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
-    debug!("write: fd={}, buf_ptr={:#x}, len={}", fd, buf_ptr, len);
-
+/// This is a native debugging mechanism, not a POSIX file descriptor or
+/// standard-stream operation. Normal application I/O uses object handles.
+pub fn debug_write(buf_ptr: u64, len: u64) -> u64 {
     if len == 0 {
         return SUCCESS;
     }
     if buf_ptr == 0 {
         return EFAULT;
-    }
-
-    if fd >= 3 {
-        return crate::syscall::fs::write(fd, buf_ptr, len);
-    }
-
-    if fd != STDOUT_FD && fd != STDERR_FD {
-        return EBADF;
     }
 
     let mut buf = alloc::vec![0u8; len as usize];
@@ -65,26 +45,6 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     }
 
     len
-}
-
-/// Readシステムコール
-/// - fd >= 3 の場合はファイルシステムへ委譲する
-pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
-    use super::types::EFAULT;
-
-    if buf_ptr == 0 {
-        return EFAULT;
-    }
-    if len == 0 {
-        return 0;
-    }
-
-    if fd >= 3 {
-        return crate::syscall::fs::read(fd, buf_ptr, len);
-    }
-
-    // fd=1,2 への read は無効
-    EBADF
 }
 
 /// Logシステムコール

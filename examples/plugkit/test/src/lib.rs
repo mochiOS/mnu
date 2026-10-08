@@ -8,8 +8,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const HEAP_SIZE: usize = 128 * 1024;
-const SYS_WRITE: u64 = mnu_abi::SyscallNumber::Write as u64;
-const STDOUT_FD: u64 = 1;
+const SYS_DEBUG_WRITE: u64 = mnu_abi::SyscallNumber::DebugWrite as u64;
 
 #[repr(align(16))]
 struct Heap([u8; HEAP_SIZE]);
@@ -167,14 +166,9 @@ driver!(NullDriver);
 
 pub fn write_line(s: &str) {
     unsafe {
-        let _ = syscall3(SYS_WRITE, STDOUT_FD, s.as_ptr() as u64, s.len() as u64);
+        let _ = syscall2(SYS_DEBUG_WRITE, s.as_ptr() as u64, s.len() as u64);
         let newline = b'\n';
-        let _ = syscall3(
-            SYS_WRITE,
-            STDOUT_FD,
-            core::ptr::addr_of!(newline) as u64,
-            1,
-        );
+        let _ = syscall2(SYS_DEBUG_WRITE, core::ptr::addr_of!(newline) as u64, 1);
     }
 }
 

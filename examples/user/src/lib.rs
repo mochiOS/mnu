@@ -70,7 +70,7 @@ fn alloc_error(_layout: Layout) -> ! {
     }
 }
 
-const SYS_WRITE: u64 = mnu_abi::SyscallNumber::Write as u64;
+const SYS_DEBUG_WRITE: u64 = mnu_abi::SyscallNumber::DebugWrite as u64;
 const SYS_GET_SECURITY_CONTEXT: u64 = mnu_abi::SyscallNumber::GetThreadSecurityContext as u64;
 const SYS_EXEC: u64 = mnu_abi::SyscallNumber::Exec as u64;
 const SYS_EXEC_MANIFEST: u64 = mnu_abi::SyscallNumber::ExecManifest as u64;
@@ -120,7 +120,6 @@ const SYS_FILE_CLOSE: u64 = mnu_abi::SyscallNumber::FileClose as u64;
 const SYS_FILE_READ: u64 = mnu_abi::SyscallNumber::FileRead as u64;
 const SYS_FILE_WRITE: u64 = mnu_abi::SyscallNumber::FileWrite as u64;
 const SYS_FILE_SEEK: u64 = mnu_abi::SyscallNumber::FileSeek as u64;
-const STDOUT_FD: u64 = 1;
 const PLUGKIT_TEST_DRIVER_PATH: &str = "/plugkit/test/entry.elf";
 const INIT_FS_TEST_PATH: &str = "/tmp/init.fs-test";
 const SIGNATURE_DB_PATH: &str = "/policy/execution.allowlist";
@@ -267,12 +266,12 @@ unsafe fn syscall4(n: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
 
 pub fn write_str(s: &str) {
     unsafe {
-        let _ = syscall3(SYS_WRITE, STDOUT_FD, s.as_ptr() as u64, s.len() as u64);
+        let _ = syscall2(SYS_DEBUG_WRITE, s.as_ptr() as u64, s.len() as u64);
     }
 }
 
-pub fn write(fd: u64, ptr: u64, len: u64) -> u64 {
-    unsafe { syscall3(SYS_WRITE, fd, ptr, len) }
+pub fn debug_write(ptr: u64, len: u64) -> u64 {
+    unsafe { syscall2(SYS_DEBUG_WRITE, ptr, len) }
 }
 
 pub fn process_exit(code: u64) -> ! {
@@ -1294,8 +1293,8 @@ pub fn run_self_test() -> bool {
 
 pub fn write_line(s: &str) {
     unsafe {
-        let _ = syscall3(SYS_WRITE, STDOUT_FD, s.as_ptr() as u64, s.len() as u64);
+        let _ = syscall2(SYS_DEBUG_WRITE, s.as_ptr() as u64, s.len() as u64);
         let nl = b"\n";
-        let _ = syscall3(SYS_WRITE, STDOUT_FD, nl.as_ptr() as u64, 1);
+        let _ = syscall2(SYS_DEBUG_WRITE, nl.as_ptr() as u64, 1);
     }
 }

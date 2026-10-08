@@ -62,7 +62,7 @@ fn expect_errno(ret: u64) -> bool {
     is_error(ret)
 }
 
-fn write_decimal(fd: u64, mut value: u64) {
+fn write_decimal(mut value: u64) {
     let mut buf = [0u8; 32];
     let mut idx = buf.len();
     if value == 0 {
@@ -75,11 +75,11 @@ fn write_decimal(fd: u64, mut value: u64) {
             value /= 10;
         }
     }
-    let _ = user::write(fd, buf[idx..].as_ptr() as u64, (buf.len() - idx) as u64);
+    let _ = user::debug_write(buf[idx..].as_ptr() as u64, (buf.len() - idx) as u64);
 }
 
-fn write_literal(fd: u64, bytes: &[u8]) {
-    let _ = user::write(fd, bytes.as_ptr() as u64, bytes.len() as u64);
+fn write_literal(bytes: &[u8]) {
+    let _ = user::debug_write(bytes.as_ptr() as u64, bytes.len() as u64);
 }
 
 fn write_bench_line(
@@ -91,21 +91,21 @@ fn write_bench_line(
     elapsed_ms: u64,
     mib_s: u64,
 ) {
-    write_literal(1, kind);
-    write_literal(1, chunk_label);
-    write_literal(1, FS_LABEL_SUFFIX);
-    write_literal(1, b"bytes=");
-    write_decimal(1, bytes);
-    write_literal(1, FS_BYTES_LINE);
-    write_literal(1, b"ticks=");
-    write_decimal(1, ticks);
-    write_literal(1, FS_TICK_HZ_LINE);
-    write_decimal(1, tick_hz);
-    write_literal(1, FS_ELAPSED_MS_LINE);
-    write_decimal(1, elapsed_ms);
-    write_literal(1, b" MiB/s=");
-    write_decimal(1, mib_s);
-    write_literal(1, b"\n");
+    write_literal(kind);
+    write_literal(chunk_label);
+    write_literal(FS_LABEL_SUFFIX);
+    write_literal(b"bytes=");
+    write_decimal(bytes);
+    write_literal(FS_BYTES_LINE);
+    write_literal(b"ticks=");
+    write_decimal(ticks);
+    write_literal(FS_TICK_HZ_LINE);
+    write_decimal(tick_hz);
+    write_literal(FS_ELAPSED_MS_LINE);
+    write_decimal(elapsed_ms);
+    write_literal(b" MiB/s=");
+    write_decimal(mib_s);
+    write_literal(b"\n");
 }
 
 fn run_memory_tests() -> bool {
@@ -116,11 +116,11 @@ fn run_memory_tests() -> bool {
 
     let inaccessible = user::memory_map(0, PAGE_SIZE, 0, MAP_ANONYMOUS_PRIVATE, 0);
     if inaccessible == 0 || is_error(inaccessible) {
-        write_literal(1, b"memory: inaccessible mmap failed\n");
+        write_literal(b"memory: inaccessible mmap failed\n");
         return false;
     }
     if !expect_success(user::memory_protect(inaccessible, PAGE_SIZE, 3)) {
-        write_literal(1, b"memory: inaccessible mprotect failed\n");
+        write_literal(b"memory: inaccessible mprotect failed\n");
         return false;
     }
     unsafe {
@@ -130,14 +130,14 @@ fn run_memory_tests() -> bool {
         }
     }
     if !expect_success(user::memory_unmap(inaccessible, PAGE_SIZE)) {
-        write_literal(1, b"memory: inaccessible munmap failed\n");
+        write_literal(b"memory: inaccessible munmap failed\n");
         return false;
     }
 
     let writable_executable = user::memory_map(0, PAGE_SIZE, 6, MAP_ANONYMOUS_PRIVATE, 0);
     if !is_error(writable_executable) {
         let _ = user::memory_unmap(writable_executable, PAGE_SIZE);
-        write_literal(1, b"memory: writable executable mmap allowed\n");
+        write_literal(b"memory: writable executable mmap allowed\n");
         return false;
     }
 
@@ -147,25 +147,25 @@ fn run_memory_tests() -> bool {
 
     let ptr = user::memory_map(0, PAGE_SIZE, 3, MAP_ANONYMOUS_PRIVATE, 0);
     if ptr == 0 || is_error(ptr) {
-        write_literal(1, b"memory: mmap failed\n");
+        write_literal(b"memory: mmap failed\n");
         return false;
     }
     let share = user::memory_share(ptr, PAGE_SIZE, 0);
     if !expect_success(share) {
-        write_literal(1, b"memory: share failed\n");
+        write_literal(b"memory: share failed\n");
         return false;
     }
     let sync = user::memory_sync(ptr, PAGE_SIZE, 0);
     if !expect_success(sync) {
-        write_literal(1, b"memory: sync failed\n");
+        write_literal(b"memory: sync failed\n");
         return false;
     }
     if !expect_success(user::memory_protect(ptr, PAGE_SIZE, 3)) {
-        write_literal(1, b"memory: protect failed\n");
+        write_literal(b"memory: protect failed\n");
         return false;
     }
     if !expect_success(user::memory_unmap(ptr, PAGE_SIZE)) {
-        write_literal(1, b"memory: unmap failed\n");
+        write_literal(b"memory: unmap failed\n");
         return false;
     }
 
@@ -173,21 +173,21 @@ fn run_memory_tests() -> bool {
         core::str::from_utf8(MEMORY_SYNC_TEST_PATH).unwrap_or("/tmp/init.msync-test");
     let create_fd = user::file_open(path, 0o2 | 0o100 | 0o1000);
     if create_fd == 0 || is_error(create_fd) {
-        write_literal(1, b"memory: sync file create failed\n");
+        write_literal(b"memory: sync file create failed\n");
         return false;
     }
     let _ = user::file_close(create_fd);
 
     let fd = user::file_open(path, 0o2);
     if fd == 0 || is_error(fd) {
-        write_literal(1, b"memory: sync file open failed\n");
+        write_literal(b"memory: sync file open failed\n");
         return false;
     }
 
     let wrote = user::file_write(fd, &initial);
     if wrote != payload_len as u64 {
         let _ = user::file_close(fd);
-        write_literal(1, b"memory: sync file seed failed\n");
+        write_literal(b"memory: sync file seed failed\n");
         return false;
     }
     let _ = user::file_seek(fd, 0, 0);
@@ -195,7 +195,7 @@ fn run_memory_tests() -> bool {
     let file_ptr = user::memory_map(0, PAGE_SIZE, 3, 0x1, fd);
     if file_ptr == 0 || is_error(file_ptr) {
         let _ = user::file_close(fd);
-        write_literal(1, b"memory: sync mmap failed\n");
+        write_literal(b"memory: sync mmap failed\n");
         return false;
     }
 
@@ -211,7 +211,7 @@ fn run_memory_tests() -> bool {
     if peer_ptr == 0 || is_error(peer_ptr) {
         let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
         let _ = user::file_close(fd);
-        write_literal(1, b"memory: shared peer mmap failed\n");
+        write_literal(b"memory: shared peer mmap failed\n");
         return false;
     }
     let peer = unsafe { core::slice::from_raw_parts(peer_ptr as *const u8, PAGE_SIZE as usize) };
@@ -219,7 +219,7 @@ fn run_memory_tests() -> bool {
         let _ = user::memory_unmap(peer_ptr, PAGE_SIZE);
         let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
         let _ = user::file_close(fd);
-        write_literal(1, b"memory: shared mappings diverged\n");
+        write_literal(b"memory: shared mappings diverged\n");
         return false;
     }
     let immediate_read = user::file_read(fd, &mut read_back);
@@ -227,7 +227,7 @@ fn run_memory_tests() -> bool {
         let _ = user::memory_unmap(peer_ptr, PAGE_SIZE);
         let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
         let _ = user::file_close(fd);
-        write_literal(1, b"memory: mapped write not visible to read\n");
+        write_literal(b"memory: mapped write not visible to read\n");
         return false;
     }
     let _ = user::file_seek(fd, 0, 0);
@@ -236,7 +236,7 @@ fn run_memory_tests() -> bool {
     if !expect_success(user::memory_sync(file_ptr, PAGE_SIZE, 0)) {
         let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
         let _ = user::file_close(fd);
-        write_literal(1, b"memory: sync writeback failed\n");
+        write_literal(b"memory: sync writeback failed\n");
         return false;
     }
 
@@ -246,13 +246,13 @@ fn run_memory_tests() -> bool {
     let _ = user::file_close(fd);
     let fd = user::file_open(path, 0);
     if fd == 0 || is_error(fd) {
-        write_literal(1, b"memory: sync reopen failed\n");
+        write_literal(b"memory: sync reopen failed\n");
         return false;
     }
     let read = user::file_read(fd, &mut read_back);
     let _ = user::file_close(fd);
     if read != payload_len as u64 || expected != read_back {
-        write_literal(1, b"memory: sync verify failed\n");
+        write_literal(b"memory: sync verify failed\n");
         return false;
     }
 
@@ -267,16 +267,14 @@ fn run_event_tests() -> u64 {
     }
 
     if !expect_success(user::event_signal(event_b)) {
-        let _ = user::write(
-            1,
+        let _ = user::debug_write(
             EVENT_SIGNAL_A_FAIL.as_ptr() as u64,
             EVENT_SIGNAL_A_FAIL.len() as u64,
         );
         return 32;
     }
     if !expect_success(user::event_wait(event_b, 0)) {
-        let _ = user::write(
-            1,
+        let _ = user::debug_write(
             EVENT_WAIT_A_FAIL.as_ptr() as u64,
             EVENT_WAIT_A_FAIL.len() as u64,
         );
@@ -284,8 +282,7 @@ fn run_event_tests() -> u64 {
     }
 
     if !expect_success(user::event_signal(event_b)) {
-        let _ = user::write(
-            1,
+        let _ = user::debug_write(
             EVENT_SIGNAL_B_FAIL.as_ptr() as u64,
             EVENT_SIGNAL_B_FAIL.len() as u64,
         );
@@ -294,8 +291,7 @@ fn run_event_tests() -> u64 {
     let ids = [event_b, event_a];
     let polled = user::event_poll(ids.as_ptr() as u64, ids.len() as u64, 0);
     if polled != event_b {
-        let _ = user::write(
-            1,
+        let _ = user::debug_write(
             EVENT_POLL_FAIL.as_ptr() as u64,
             EVENT_POLL_FAIL.len() as u64,
         );
@@ -627,36 +623,34 @@ fn verify_exec_measurements() -> bool {
         return false;
     }
 
-    write_literal(1, b"process.fork: count=");
-    write_decimal(1, snapshot.process_activity.fork_latency.count);
-    write_literal(1, b" p50_cycles=");
-    write_decimal(1, snapshot.process_activity.fork_latency.p50_cycles);
-    write_literal(1, b" p95_cycles=");
-    write_decimal(1, snapshot.process_activity.fork_latency.p95_cycles);
-    write_literal(1, b" p99_cycles=");
-    write_decimal(1, snapshot.process_activity.fork_latency.p99_cycles);
-    write_literal(1, b" pages_copied=");
-    write_decimal(1, snapshot.process_activity.fork_pages_copied);
-    write_literal(1, b" pages_shared=");
-    write_decimal(1, snapshot.process_activity.fork_pages_shared);
-    write_literal(1, b" cow_faults=");
-    write_decimal(1, snapshot.process_activity.copy_on_write_faults);
-    write_literal(1, b" cow_copies=");
-    write_decimal(1, snapshot.process_activity.copy_on_write_pages_copied);
-    write_literal(1, b"\n");
+    write_literal(b"process.fork: count=");
+    write_decimal(snapshot.process_activity.fork_latency.count);
+    write_literal(b" p50_cycles=");
+    write_decimal(snapshot.process_activity.fork_latency.p50_cycles);
+    write_literal(b" p95_cycles=");
+    write_decimal(snapshot.process_activity.fork_latency.p95_cycles);
+    write_literal(b" p99_cycles=");
+    write_decimal(snapshot.process_activity.fork_latency.p99_cycles);
+    write_literal(b" pages_copied=");
+    write_decimal(snapshot.process_activity.fork_pages_copied);
+    write_literal(b" pages_shared=");
+    write_decimal(snapshot.process_activity.fork_pages_shared);
+    write_literal(b" cow_faults=");
+    write_decimal(snapshot.process_activity.copy_on_write_faults);
+    write_literal(b" cow_copies=");
+    write_decimal(snapshot.process_activity.copy_on_write_pages_copied);
+    write_literal(b"\n");
 
-    write_literal(1, b"process.exec: bytes_read=");
+    write_literal(b"process.exec: bytes_read=");
     write_decimal(
-        1,
         snapshot.counters[CounterMetric::ExecutableBytesRead as usize],
     );
-    write_literal(1, b" pages_allocated=");
+    write_literal(b" pages_allocated=");
     write_decimal(
-        1,
         snapshot.frame_activity.allocated_pages_by_subsystem
             [AllocationSubsystem::ProcessCreation as usize],
     );
-    write_literal(1, b"\n");
+    write_literal(b"\n");
 
     let fork_pages = snapshot
         .process_activity
@@ -790,17 +784,17 @@ fn run_thread_test() -> bool {
         let _ = user::yield_now();
     }
     if !THREAD_TEST_READY.load(Ordering::Acquire) {
-        write_literal(1, b"thread: helper did not become ready\n");
+        write_literal(b"thread: helper did not become ready\n");
         THREAD_TEST_RELEASE.store(true, Ordering::Release);
         return false;
     }
     let fork_result = user::process_spawn(0, 0);
     if fork_result != mnu_abi::EAGAIN {
-        write_literal(1, b"thread: fork result=");
-        write_decimal(1, fork_result);
-        write_literal(1, b" expected=");
-        write_decimal(1, mnu_abi::EAGAIN);
-        write_literal(1, b"\n");
+        write_literal(b"thread: fork result=");
+        write_decimal(fork_result);
+        write_literal(b" expected=");
+        write_decimal(mnu_abi::EAGAIN);
+        write_literal(b"\n");
         THREAD_TEST_RELEASE.store(true, Ordering::Release);
         return false;
     }
@@ -814,7 +808,7 @@ fn run_thread_test() -> bool {
         let _ = user::yield_now();
     }
     let _ = user::memory_unmap(stack_base, stack_bytes);
-    write_literal(1, b"thread: helper did not exit\n");
+    write_literal(b"thread: helper did not exit\n");
     false
 }
 
@@ -828,20 +822,18 @@ fn run_all_tests() -> u64 {
     if !user::has_capability("process.spawn") {
         return 0;
     }
-    let _ = user::write(1, STAGE_SPAWN.as_ptr() as u64, STAGE_SPAWN.len() as u64);
+    let _ = user::debug_write(STAGE_SPAWN.as_ptr() as u64, STAGE_SPAWN.len() as u64);
     if !run_process_spawn_test() {
         return 9;
     }
-    let _ = user::write(
-        1,
+    let _ = user::debug_write(
         STAGE_PERFORMANCE.as_ptr() as u64,
         STAGE_PERFORMANCE.len() as u64,
     );
     if !verify_exec_measurements() {
         return 10;
     }
-    let _ = user::write(
-        1,
+    let _ = user::debug_write(
         STAGE_FS_BENCH.as_ptr() as u64,
         STAGE_FS_BENCH.len() as u64,
     );
@@ -849,16 +841,16 @@ fn run_all_tests() -> u64 {
     if fs != 0 {
         return fs;
     }
-    let _ = user::write(1, STAGE_MEMORY.as_ptr() as u64, STAGE_MEMORY.len() as u64);
+    let _ = user::debug_write(STAGE_MEMORY.as_ptr() as u64, STAGE_MEMORY.len() as u64);
     if !run_memory_tests() {
         return 2;
     }
-    let _ = user::write(1, STAGE_EVENT.as_ptr() as u64, STAGE_EVENT.len() as u64);
+    let _ = user::debug_write(STAGE_EVENT.as_ptr() as u64, STAGE_EVENT.len() as u64);
     let event = run_event_tests();
     if event != 0 {
         return event;
     }
-    let _ = user::write(1, STAGE_IPC_SR.as_ptr() as u64, STAGE_IPC_SR.len() as u64);
+    let _ = user::debug_write(STAGE_IPC_SR.as_ptr() as u64, STAGE_IPC_SR.len() as u64);
     let endpoint = user::ipc_create(0);
     if endpoint == 0 || is_error(endpoint) {
         return 4;
@@ -866,16 +858,16 @@ fn run_all_tests() -> u64 {
     if !run_ipc_send_recv_tests(endpoint) {
         return 5;
     }
-    let _ = user::write(1, STAGE_IPC_PP.as_ptr() as u64, STAGE_IPC_PP.len() as u64);
+    let _ = user::debug_write(STAGE_IPC_PP.as_ptr() as u64, STAGE_IPC_PP.len() as u64);
     let ping = run_ipc_ping_pong(endpoint);
     if ping != 0 {
         return ping;
     }
-    let _ = user::write(1, STAGE_CAP.as_ptr() as u64, STAGE_CAP.len() as u64);
+    let _ = user::debug_write(STAGE_CAP.as_ptr() as u64, STAGE_CAP.len() as u64);
     if !run_capability_tests(endpoint) {
         return 7;
     }
-    let _ = user::write(1, STAGE_THREAD.as_ptr() as u64, STAGE_THREAD.len() as u64);
+    let _ = user::debug_write(STAGE_THREAD.as_ptr() as u64, STAGE_THREAD.len() as u64);
     if !run_thread_test() {
         return 8;
     }
@@ -886,7 +878,7 @@ fn run_all_tests() -> u64 {
 pub extern "C" fn _start() -> ! {
     let code = run_all_tests();
     let line = if code == 0 { PASS_LINE } else { FAIL_LINE };
-    let _ = user::write(1, line.as_ptr() as u64, line.len() as u64);
+    let _ = user::debug_write(line.as_ptr() as u64, line.len() as u64);
     user::process_exit(code);
 }
 

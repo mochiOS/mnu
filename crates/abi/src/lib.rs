@@ -25,8 +25,6 @@ pub mod shared_ring;
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyscallNumber {
-    Read = 0,
-    Write = 1,
     Execve = 59,
     // Native mnu file syscalls
     FileOpen = 560,
@@ -167,6 +165,7 @@ pub enum SyscallNumber {
     ThreadInterrupt = 657,
     ThreadHandleStatus = 658,
     ProcessHandleOpenById = 659,
+    DebugWrite = 660,
     CheckGravityExist = 999,
 }
 
@@ -524,6 +523,7 @@ mod object_handle_tests {
             SyscallNumber::ThreadInterrupt as u64,
             SyscallNumber::ThreadHandleStatus as u64,
             SyscallNumber::ProcessHandleOpenById as u64,
+            SyscallNumber::DebugWrite as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -684,6 +684,7 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::ThreadInterrupt as u64, 657);
         assert_eq!(super::SyscallNumber::ThreadHandleStatus as u64, 658);
         assert_eq!(super::SyscallNumber::ProcessHandleOpenById as u64, 659);
+        assert_eq!(super::SyscallNumber::DebugWrite as u64, 660);
         assert_eq!(core::mem::size_of::<super::ThreadUpcallConfig>(), 64);
         assert_eq!(core::mem::size_of::<super::ThreadStatus>(), 24);
         assert_eq!(

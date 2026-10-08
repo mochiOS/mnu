@@ -782,7 +782,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::MemoryProtect as u64 => pgroup::mprotect(arg0, arg1, arg2),
-        x if x == SyscallNumber::Read as u64 => fs::read(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
         x if x == SyscallNumber::AllocSharedPages as u64 => {
@@ -835,7 +834,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::TimeNow as u64 => time::get_ticks(),
         x if x == SyscallNumber::ClockRead as u64 => time::clock_read(arg0, arg1),
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
-        x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
+        x if x == SyscallNumber::DebugWrite as u64 => io::debug_write(arg0, arg1),
         x if x == SyscallNumber::PortIn as u64 => io::port_in(arg0, arg1),
         x if x == SyscallNumber::PortOut as u64 => io::port_out(arg0, arg1, arg2),
         x if x == SyscallNumber::Execve as u64 => exec::execve_syscall(arg0, arg1, arg2),
@@ -944,9 +943,7 @@ fn is_ipc_syscall(num: u64) -> bool {
 
 #[cfg(feature = "performance-instrumentation")]
 fn is_vfs_syscall(num: u64) -> bool {
-    num == SyscallNumber::Read as u64
-        || num == SyscallNumber::Write as u64
-        || num == SyscallNumber::FileOpen as u64
+    num == SyscallNumber::FileOpen as u64
         || num == SyscallNumber::FileOpenAt as u64
         || num == SyscallNumber::FileClose as u64
         || num == SyscallNumber::FileRead as u64
@@ -980,12 +977,8 @@ fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
         x if x == SyscallNumber::FileOpen as u64 || x == SyscallNumber::FileOpenAt as u64 => {
             Some(LatencyMetric::VfsOpen)
         }
-        x if x == SyscallNumber::Read as u64 || x == SyscallNumber::FileRead as u64 => {
-            Some(LatencyMetric::VfsRead)
-        }
-        x if x == SyscallNumber::Write as u64 || x == SyscallNumber::FileWrite as u64 => {
-            Some(LatencyMetric::VfsWrite)
-        }
+        x if x == SyscallNumber::FileRead as u64 => Some(LatencyMetric::VfsRead),
+        x if x == SyscallNumber::FileWrite as u64 => Some(LatencyMetric::VfsWrite),
         x if x == SyscallNumber::FileClose as u64 => Some(LatencyMetric::VfsClose),
         x if x == SyscallNumber::FileStat as u64
             || x == SyscallNumber::FileStatAt as u64
