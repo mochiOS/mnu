@@ -2263,14 +2263,6 @@ pub fn file_seek(fd: u64, offset: i64, whence: u64) -> u64 {
     seek(fd, offset, whence)
 }
 
-pub fn file_stat(path_ptr: u64, stat_ptr: u64) -> u64 {
-    stat(path_ptr, stat_ptr)
-}
-
-pub fn file_stat_at(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
-    newfstatat(dirfd, path_ptr, stat_ptr, flags)
-}
-
 pub fn file_fstat(fd: u64, stat_ptr: u64) -> u64 {
     fstat(fd, stat_ptr)
 }

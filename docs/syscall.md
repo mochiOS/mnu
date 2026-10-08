@@ -608,18 +608,6 @@ file_write(fd: u64, buf: ptr, len: usize) -> isize
 file_seek(fd: u64, offset: i64, whence: u64) -> isize
 ```
 
-### file_stat
-
-```
-file_stat(path: ptr, stat: ptr) -> isize
-```
-
-### file_stat_at
-
-```
-file_stat_at(dirfd: i64, path: ptr, stat: ptr, flags: u64) -> isize
-```
-
 ### file_fstat
 
 ```

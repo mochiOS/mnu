@@ -35,8 +35,6 @@ pub enum SyscallNumber {
     FileRead = 563,
     FileWrite = 564,
     FileSeek = 565,
-    FileStat = 566,
-    FileStatAt = 567,
     FileFstat = 568,
     FileReadDir = 569,
     FileSync = 573,
