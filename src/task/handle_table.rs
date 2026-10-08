@@ -1,20 +1,47 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::fd_table::FileHandle;
 use super::process::ProcessObject;
 
 pub const PROCESS_MAX_OBJECT_HANDLES: usize = 4096;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderObject {
     pub endpoint_thread_id: u64,
     pub endpoint_slot: u16,
     pub endpoint_generation: u64,
     pub object_id: u64,
+    registered: AtomicBool,
+    signal_state: crate::interrupt::spinlock::SpinLock<ProviderSignalState>,
 }
+
+impl core::fmt::Debug for ProviderObject {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ProviderObject")
+            .field("endpoint_thread_id", &self.endpoint_thread_id)
+            .field("endpoint_slot", &self.endpoint_slot)
+            .field("endpoint_generation", &self.endpoint_generation)
+            .field("object_id", &self.object_id)
+            .field("signals", &self.signals())
+            .finish()
+    }
+}
+
+#[derive(Default)]
+struct ProviderSignalState {
+    signals: u64,
+    waiters: Vec<super::ids::ThreadId>,
+}
+
+type ProviderKey = (u64, u16, u64, u64);
+
+static PROVIDER_OBJECTS: crate::interrupt::spinlock::SpinLock<
+    BTreeMap<ProviderKey, Weak<ProviderObject>>,
+> = crate::interrupt::spinlock::SpinLock::new(BTreeMap::new());
 
 #[derive(Clone, Copy)]
 pub(crate) struct ProviderRelease {
@@ -40,6 +67,17 @@ pub(crate) fn requeue_provider_releases(releases: &mut Vec<ProviderRelease>) {
 
 impl Drop for ProviderObject {
     fn drop(&mut self) {
+        let mut objects = PROVIDER_OBJECTS.lock();
+        if objects
+            .get(&self.key())
+            .is_some_and(|object| core::ptr::eq(object.as_ptr(), self))
+        {
+            objects.remove(&self.key());
+        }
+        drop(objects);
+        if !self.registered.load(Ordering::Acquire) {
+            return;
+        }
         PENDING_PROVIDER_RELEASES.lock().push(ProviderRelease {
             endpoint_thread_id: self.endpoint_thread_id,
             endpoint_slot: self.endpoint_slot,
@@ -47,6 +85,102 @@ impl Drop for ProviderObject {
             object_id: self.object_id,
         });
     }
+}
+
+impl ProviderObject {
+    pub(crate) fn new(
+        endpoint_thread_id: u64,
+        endpoint_slot: u16,
+        endpoint_generation: u64,
+        object_id: u64,
+    ) -> Self {
+        Self {
+            endpoint_thread_id,
+            endpoint_slot,
+            endpoint_generation,
+            object_id,
+            registered: AtomicBool::new(false),
+            signal_state: crate::interrupt::spinlock::SpinLock::new(ProviderSignalState::default()),
+        }
+    }
+
+    fn key(&self) -> ProviderKey {
+        (
+            self.endpoint_thread_id,
+            self.endpoint_slot,
+            self.endpoint_generation,
+            self.object_id,
+        )
+    }
+
+    pub(crate) fn signals(&self) -> u64 {
+        self.signal_state.lock().signals
+    }
+
+    pub(crate) fn register_waiter(&self, waiter: super::ids::ThreadId) -> bool {
+        let mut state = self.signal_state.lock();
+        state
+            .waiters
+            .retain(|candidate| crate::task::thread_id_exists(candidate.as_u64()));
+        if state.waiters.contains(&waiter) {
+            return true;
+        }
+        if state.waiters.len() >= super::ThreadQueue::MAX_THREADS {
+            return false;
+        }
+        state.waiters.push(waiter);
+        true
+    }
+
+    pub(crate) fn remove_waiter(&self, waiter: super::ids::ThreadId) {
+        self.signal_state
+            .lock()
+            .waiters
+            .retain(|candidate| *candidate != waiter);
+    }
+
+    pub(crate) fn update_signals(&self, set: u64, clear: u64) {
+        let waiters = {
+            let mut state = self.signal_state.lock();
+            let updated = (state.signals | set) & !clear;
+            if updated == state.signals {
+                return;
+            }
+            state.signals = updated;
+            core::mem::take(&mut state.waiters)
+        };
+        for waiter in waiters {
+            crate::task::wake_thread(waiter);
+        }
+    }
+}
+
+pub(crate) fn register_provider_object(object: &Arc<ProviderObject>) -> bool {
+    let mut objects = PROVIDER_OBJECTS.lock();
+    let key = object.key();
+    if objects.get(&key).and_then(Weak::upgrade).is_some() {
+        return false;
+    }
+    objects.insert(key, Arc::downgrade(object));
+    object.registered.store(true, Ordering::Release);
+    true
+}
+
+pub(crate) fn provider_object(
+    endpoint_thread_id: u64,
+    endpoint_slot: u16,
+    endpoint_generation: u64,
+    object_id: u64,
+) -> Option<Arc<ProviderObject>> {
+    PROVIDER_OBJECTS
+        .lock()
+        .get(&(
+            endpoint_thread_id,
+            endpoint_slot,
+            endpoint_generation,
+            object_id,
+        ))
+        .and_then(Weak::upgrade)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -419,12 +553,7 @@ mod tests {
 
     #[test]
     fn provider_objects_are_opaque_and_share_identity_across_duplicates() {
-        let provider = Arc::new(ProviderObject {
-            endpoint_thread_id: 31,
-            endpoint_slot: 4,
-            endpoint_generation: 8,
-            object_id: 99,
-        });
+        let provider = Arc::new(ProviderObject::new(31, 4, 8, 99));
         let mut table = ObjectHandleTable::new_boxed();
         let source = table
             .insert(ObjectHandleEntry::new(
@@ -446,5 +575,28 @@ mod tests {
         };
         assert!(Arc::ptr_eq(source, duplicate));
         assert_eq!(source.object_id, 99);
+    }
+
+    #[test]
+    fn provider_readiness_signals_are_generic_and_level_triggered() {
+        let provider = ProviderObject::new(41, 5, 9, 101);
+
+        assert_eq!(provider.signals(), 0);
+        provider.update_signals(
+            mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_WRITABLE,
+            0,
+        );
+        assert_eq!(
+            provider.signals(),
+            mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_WRITABLE
+        );
+        provider.update_signals(
+            mnu_abi::HANDLE_SIGNAL_PEER_CLOSED,
+            mnu_abi::HANDLE_SIGNAL_WRITABLE,
+        );
+        assert_eq!(
+            provider.signals(),
+            mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
+        );
     }
 }

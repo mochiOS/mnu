@@ -3,7 +3,9 @@ use alloc::vec;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
-use super::{EACCES, EAGAIN, EBADF, EFAULT, EFBIG, EINVAL, EIO, ENOSPC, ENOTSUP, ESRCH, SUCCESS};
+use super::{
+    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, ENOSPC, ENOTSUP, ESRCH, SUCCESS,
+};
 
 pub(crate) fn flush_provider_releases() {
     let releases = crate::task::handle_table::take_provider_releases();
@@ -351,12 +353,16 @@ pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u
             Ok(endpoint) => endpoint,
             Err(error) => return error,
         };
-    let object = KernelObject::Provider(Arc::new(ProviderObject {
+    let provider = Arc::new(ProviderObject::new(
         endpoint_thread_id,
         endpoint_slot,
         endpoint_generation,
         object_id,
-    }));
+    ));
+    if !crate::task::handle_table::register_provider_object(&provider) {
+        return EEXIST;
+    }
+    let object = KernelObject::Provider(provider);
     crate::task::with_process_mut(process_id, |process| {
         process
             .object_handles_mut()
@@ -400,6 +406,38 @@ pub fn provider_object_identify(raw: u64) -> u64 {
         provider.object_id
     })
     .unwrap_or(EINVAL)
+}
+
+/// Updates native readiness signals for an object owned by the caller's
+/// provider endpoint. The object identifier is meaningful only inside that
+/// endpoint and cannot address objects owned by another provider.
+pub fn provider_object_signal(object_id: u64, set: u64, clear: u64) -> u64 {
+    let supported = mnu_abi::HANDLE_SIGNAL_READABLE
+        | mnu_abi::HANDLE_SIGNAL_WRITABLE
+        | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+    if object_id > i64::MAX as u64
+        || set & !supported != 0
+        || clear & !supported != 0
+        || set & clear != 0
+    {
+        return EINVAL;
+    }
+    let current = match crate::task::current_thread_id()
+        .and_then(|thread| crate::syscall::ipc::endpoint_for_thread(thread.as_u64()))
+    {
+        Some(endpoint) => endpoint,
+        None => return EINVAL,
+    };
+    let Some(provider) = crate::task::handle_table::provider_object(
+        current.thread_id,
+        current.slot,
+        current.generation,
+        object_id,
+    ) else {
+        return EBADF;
+    };
+    provider.update_signals(set, clear);
+    SUCCESS
 }
 
 pub fn close(raw: u64) -> u64 {
@@ -669,6 +707,7 @@ enum WaitTarget {
     Process(crate::task::ProcessId),
     IpcEndpoint(crate::syscall::ipc::IpcEndpoint),
     Stream(Arc<crate::task::FileHandle>),
+    Provider(Arc<ProviderObject>),
 }
 
 fn wait_item_signal(item: &mut mnu_abi::HandleWaitItem) -> Result<(WaitTarget, bool), u64> {
@@ -722,6 +761,16 @@ fn wait_item_signal(item: &mut mnu_abi::HandleWaitItem) -> Result<(WaitTarget, b
             item.observed = signals & item.interests;
             Ok((WaitTarget::Stream(file), item.observed != 0))
         }
+        KernelObject::Provider(provider) => {
+            let supported = mnu_abi::HANDLE_SIGNAL_READABLE
+                | mnu_abi::HANDLE_SIGNAL_WRITABLE
+                | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+            if item.interests & !supported != 0 {
+                return Err(EINVAL);
+            }
+            item.observed = provider.signals() & item.interests;
+            Ok((WaitTarget::Provider(provider), item.observed != 0))
+        }
         _ => Err(ENOTSUP),
     }
 }
@@ -738,6 +787,12 @@ fn remove_endpoint_waiters(
 fn remove_stream_waiters(waiter: crate::task::ThreadId, streams: &[usize]) {
     for stream in streams {
         crate::syscall::fs::remove_stream_waiter(*stream, waiter);
+    }
+}
+
+fn remove_provider_waiters(waiter: crate::task::ThreadId, providers: &[Arc<ProviderObject>]) {
+    for provider in providers {
+        provider.remove_waiter(waiter);
     }
 }
 
@@ -778,6 +833,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
     };
     let mut registered_endpoints = alloc::vec::Vec::new();
     let mut registered_streams = alloc::vec::Vec::new();
+    let mut registered_providers = alloc::vec::Vec::new();
     let deadline_tick = if matches!(
         deadline_nanoseconds,
         mnu_abi::HANDLE_WAIT_POLL | mnu_abi::HANDLE_WAIT_INFINITE
@@ -791,8 +847,10 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
         crate::task::remove_process_exit_waiters(current);
         remove_endpoint_waiters(current, &registered_endpoints);
         remove_stream_waiters(current, &registered_streams);
+        remove_provider_waiters(current, &registered_providers);
         registered_endpoints.clear();
         registered_streams.clear();
+        registered_providers.clear();
         crate::syscall::time::disarm_thread_deadline(current);
         let mut targets = alloc::vec::Vec::with_capacity(items.len());
         let mut ready = None;
@@ -830,6 +888,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
                         crate::task::remove_process_exit_waiters(current);
                         remove_endpoint_waiters(current, &registered_endpoints);
                         remove_stream_waiters(current, &registered_streams);
+                        remove_provider_waiters(current, &registered_providers);
                         return EAGAIN;
                     }
                 }
@@ -840,6 +899,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
                         crate::task::remove_process_exit_waiters(current);
                         remove_endpoint_waiters(current, &registered_endpoints);
                         remove_stream_waiters(current, &registered_streams);
+                        remove_provider_waiters(current, &registered_providers);
                         return error;
                     }
                     registered_endpoints.push(endpoint);
@@ -851,9 +911,20 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
                             crate::task::remove_process_exit_waiters(current);
                             remove_endpoint_waiters(current, &registered_endpoints);
                             remove_stream_waiters(current, &registered_streams);
+                            remove_provider_waiters(current, &registered_providers);
                             return error;
                         }
                     }
+                }
+                WaitTarget::Provider(provider) => {
+                    if !provider.register_waiter(current) {
+                        crate::task::remove_process_exit_waiters(current);
+                        remove_endpoint_waiters(current, &registered_endpoints);
+                        remove_stream_waiters(current, &registered_streams);
+                        remove_provider_waiters(current, &registered_providers);
+                        return EAGAIN;
+                    }
+                    registered_providers.push(provider);
                 }
             }
         }
@@ -863,6 +934,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
             crate::task::remove_process_exit_waiters(current);
             remove_endpoint_waiters(current, &registered_endpoints);
             remove_stream_waiters(current, &registered_streams);
+            remove_provider_waiters(current, &registered_providers);
             return EAGAIN;
         }
 
@@ -876,6 +948,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
                     crate::task::remove_process_exit_waiters(current);
                     remove_endpoint_waiters(current, &registered_endpoints);
                     remove_stream_waiters(current, &registered_streams);
+                    remove_provider_waiters(current, &registered_providers);
                     crate::syscall::time::disarm_thread_deadline(current);
                     return error;
                 }
