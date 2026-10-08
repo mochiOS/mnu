@@ -2271,10 +2271,6 @@ pub fn file_read_dir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     getdents64(fd, buf_ptr, buf_len)
 }
 
-pub fn file_sync(fd: u64) -> u64 {
-    fsync(fd)
-}
-
 #[cfg(test)]
 mod unix_mode_tests {
     use super::{

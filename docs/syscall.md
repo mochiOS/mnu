@@ -108,7 +108,6 @@ ptr        ユーザー空間ポインタ
 | Filesystem       | file_create_dir       |
 | Filesystem       | file_remove           |
 | Filesystem       | file_rename           |
-| Filesystem       | file_sync             |
 
 ## Process / Thread
 
@@ -594,12 +593,6 @@ file_remove(path: ptr) -> isize
 
 ```
 file_rename(old_dirfd: i64, old_path: ptr, new_dirfd: i64, new_path: ptr) -> isize
-```
-
-### file_sync
-
-```
-file_sync(fd: u64) -> isize
 ```
 
 ## 高速IPCの扱い
