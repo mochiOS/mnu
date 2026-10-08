@@ -239,7 +239,8 @@ pub struct TimerQueueSnapshot {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TimerActivitySnapshot {
     pub sleep_queue: TimerQueueSnapshot,
-    pub futex_timeout_queue: TimerQueueSnapshot,
+    /// Reserved to preserve the version 6 snapshot prefix.
+    pub reserved: TimerQueueSnapshot,
 }
 
 #[repr(C)]

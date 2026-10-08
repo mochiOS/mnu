@@ -407,7 +407,6 @@ pub fn terminate_thread(id: ThreadId) {
         Some(id) != current_thread_id() && previous_state == Some(ThreadState::Running);
 
     if Some(id) == current_thread_id() {
-        crate::syscall::process::clear_futex_waiter(id);
         let kernel_stack = remove_thread(id)
             .map(|thread| thread.kernel_stack_base())
             .unwrap_or(0);
@@ -420,7 +419,6 @@ pub fn terminate_thread(id: ThreadId) {
         }
     }
 
-    crate::syscall::process::clear_futex_waiter(id);
     if running_elsewhere {
         crate::warn!(
             "retaining remotely running terminated thread {:?} until CPU handoff",
@@ -473,7 +471,6 @@ pub fn exit_current_task(exit_code: u64) -> ! {
                 crate::debug!("Switching from exited thread to {:?}", next_id);
 
                 // スレッドをキューから削除（コンテキストスイッチ前に削除）
-                crate::syscall::process::clear_futex_waiter(current_id);
                 let kstack_base = with_thread(current_id, |t| t.kernel_stack_base()).unwrap_or(0);
                 remove_thread(current_id);
 
@@ -498,7 +495,6 @@ pub fn exit_current_task(exit_code: u64) -> ! {
         });
 
         // スレッドをキューから削除
-        crate::syscall::process::clear_futex_waiter(current_id);
         if let Some(thread) = remove_thread(current_id) {
             crate::task::retire_current_kernel_stack(thread.kernel_stack_base());
         }

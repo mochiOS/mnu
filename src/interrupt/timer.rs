@@ -20,7 +20,6 @@ fn advance_clock() {
         .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
     crate::syscall::time::wake_due_sleepers(ticks);
-    crate::syscall::process::wake_due_futex_waiters(ticks);
 }
 
 /// タイマー割り込みハンドラ（IRQ0）

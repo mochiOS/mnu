@@ -252,8 +252,6 @@ pub struct Thread {
     syscall_user_cr3: u64,
     /// 直近の SYSCALL 入口で保存した fork 復帰用ユーザー文脈
     syscall_user_context: SyscallUserContext,
-    /// futex wait timeout で起床したことを示すフラグ
-    futex_timed_out: bool,
     /// IPC受信などで眠る前に起床要求が来たことを示すフラグ
     pending_wakeup: bool,
     /// 低遅延IPCの待機/受信状態
@@ -728,7 +726,6 @@ impl Thread {
             in_syscall: false,
             syscall_user_cr3: 0,
             syscall_user_context: SyscallUserContext::empty(),
-            futex_timed_out: false,
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
             interactive_score: 0,
@@ -850,7 +847,6 @@ impl Thread {
             in_syscall: false,
             syscall_user_cr3: 0,
             syscall_user_context: SyscallUserContext::empty(),
-            futex_timed_out: false,
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
             interactive_score: 0,
@@ -953,7 +949,6 @@ impl Thread {
             in_syscall: false,
             syscall_user_cr3: 0,
             syscall_user_context: user_context,
-            futex_timed_out: false,
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
             interactive_score: 0,
@@ -1000,16 +995,6 @@ impl Thread {
 
     pub fn set_syscall_user_context(&mut self, context: SyscallUserContext) {
         self.syscall_user_context = context;
-    }
-
-    pub fn set_futex_timed_out(&mut self, timed_out: bool) {
-        self.futex_timed_out = timed_out;
-    }
-
-    pub fn take_futex_timed_out(&mut self) -> bool {
-        let timed_out = self.futex_timed_out;
-        self.futex_timed_out = false;
-        timed_out
     }
 
     /// 起床要求フラグを立てる（眠る前に wake が呼ばれた場合の競合回避）

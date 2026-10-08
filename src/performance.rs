@@ -160,12 +160,11 @@ static ALLOCATION_CONTEXTS: [AtomicU8; ALLOCATION_CONTEXT_SLOTS] =
 #[derive(Clone, Copy)]
 pub(crate) enum TimerQueueKind {
     Sleep,
-    FutexTimeout,
 }
 
 #[cfg(feature = "performance-instrumentation")]
 impl TimerQueueKind {
-    const COUNT: usize = Self::FutexTimeout as usize + 1;
+    const COUNT: usize = Self::Sleep as usize + 1;
 }
 
 pub struct AllocationScope {
@@ -734,7 +733,7 @@ pub fn snapshot() -> mnu_abi::performance::KernelPerformanceSnapshot {
         },
         timer_activity: TimerActivitySnapshot {
             sleep_queue: timer_queue_snapshot(TimerQueueKind::Sleep),
-            futex_timeout_queue: timer_queue_snapshot(TimerQueueKind::FutexTimeout),
+            reserved: Default::default(),
         },
         vfs_activity: VfsActivitySnapshot {
             metadata_queries: VFS_METADATA_QUERIES.load(Ordering::Relaxed),
