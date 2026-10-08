@@ -44,9 +44,7 @@ pub enum SyscallNumber {
     FileFstat = 568,
     FileReadDir = 569,
     FileSync = 573,
-    Tkill = 200,
     Futex = 202,
-    Tgkill = 234,
 
     IpcSend = 514,
     IpcRecv = 515,
