@@ -31,7 +31,8 @@ fn level_to_u8(level: LogLevel) -> u8 {
 }
 
 fn should_log(level: LogLevel) -> bool {
-    cfg!(debug_assertions) && level_to_u8(level) >= LOG_LEVEL.load(Ordering::Relaxed)
+    (cfg!(debug_assertions) || level == LogLevel::Error)
+        && level_to_u8(level) >= LOG_LEVEL.load(Ordering::Relaxed)
 }
 
 /// ログレベルを設定
@@ -45,8 +46,6 @@ pub fn log(level: LogLevel, args: core::fmt::Arguments) {
         return;
     }
 
-    use crate::sprintln;
-
     let prefix = match level {
         LogLevel::Trace => "[TRACE]",
         LogLevel::Debug => "[DEBUG]",
@@ -55,7 +54,7 @@ pub fn log(level: LogLevel, args: core::fmt::Arguments) {
         LogLevel::Error => "[ERROR]",
     };
 
-    sprintln!("{} {}", prefix, args);
+    crate::util::console::print(format_args!("{} {}\n", prefix, args));
 }
 
 /// 起動検証に必要な少数のマイルストーンを release ビルドでもシリアルへ出す。
