@@ -1053,6 +1053,27 @@ pub fn process_resume(raw: u64) -> u64 {
     SUCCESS
 }
 
+/// Suspends every thread belonging to the process referenced by `raw`.
+/// This is a policy-free lifecycle operation; callers assign their own
+/// meaning to the scheduling state.
+pub fn process_suspend(raw: u64) -> u64 {
+    let object = match object(raw, HandleRights::SIGNAL) {
+        Ok(object) => object,
+        Err(error) => return error,
+    };
+    let KernelObject::Process(process) = object else {
+        return EBADF;
+    };
+    let process_id = process.id();
+    if crate::task::with_process(process_id, |_| ()).is_none() {
+        return ESRCH;
+    }
+    if crate::task::suspend_process_threads(process_id) == 0 {
+        return ESRCH;
+    }
+    SUCCESS
+}
+
 pub fn process_terminate(raw: u64, exit_code: u64) -> u64 {
     let object = match object(raw, HandleRights::SIGNAL) {
         Ok(object) => object,
