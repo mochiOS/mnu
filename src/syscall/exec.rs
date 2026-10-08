@@ -1775,59 +1775,11 @@ fn exec_with_data(
     }
 }
 
-/// ユーザー空間の null 終端ポインタ配列（char**）を読み取る
-///
-/// 各エントリは 64 ビットポインタ。NULL で終端。
-/// max_entries を超えた場合は切り捨てる。
-fn read_user_ptr_array(array_ptr: u64, max_entries: usize) -> Vec<String> {
-    if array_ptr == 0 {
-        return Vec::new();
-    }
-    let mut result = Vec::new();
-    for i in 0..=max_entries {
-        let ptr_addr = match (i as u64)
-            .checked_mul(8)
-            .and_then(|o| array_ptr.checked_add(o))
-        {
-            Some(a) => a,
-            None => break,
-        };
-        if !crate::syscall::validate_user_ptr(ptr_addr, 8) {
-            break;
-        }
-        let entry_ptr = match crate::syscall::read_user_u64(ptr_addr) {
-            Ok(ptr) => ptr,
-            Err(_) => break,
-        };
-        if entry_ptr == 0 {
-            break;
-        }
-        let s = match crate::syscall::read_user_cstring(entry_ptr, 4096) {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-        result.push(s);
-        if result.len() >= max_entries {
-            break;
-        }
-    }
-    result
-}
-
-enum ReplacementStartup<'a> {
-    Legacy {
-        argv: &'a [&'a str],
-        envp: &'a [&'a str],
-        execfn: &'a str,
-    },
-    Relocatable(mnu_abi::process_image::StartupImage<'a>),
-}
-
 fn replace_current_process_image(
     data: &[u8],
     identity: &str,
     authorization: crate::task::process::PendingExecSecurity,
-    startup: ReplacementStartup<'_>,
+    startup: mnu_abi::process_image::StartupImage<'_>,
     mut measurement: ExecMeasurement,
 ) -> u64 {
     use crate::syscall::types::EINVAL;
@@ -1848,33 +1800,8 @@ fn replace_current_process_image(
         Ok(layout) => layout,
         Err(errno) => return errno,
     };
-    let stack = match startup {
-        ReplacementStartup::Legacy { argv, envp, execfn } => {
-            let auxv_entries = [
-                (3u64, phdr_vaddr),
-                (4u64, phentsize),
-                (5u64, phnum),
-                (6u64, 4096u64),
-                (7u64, 0u64),
-                (8u64, 0u64),
-                (9u64, entry),
-                (11u64, 0u64),
-                (12u64, 0u64),
-                (13u64, 0u64),
-                (14u64, 0u64),
-                (16u64, 0u64),
-                (17u64, 100u64),
-                (23u64, 0u64),
-                (25u64, 0u64),
-                (31u64, 0u64),
-                (0u64, 0u64),
-            ];
-            build_initial_user_stack(aslr_seed, argv, envp, execfn, &auxv_entries)
-        }
-        ReplacementStartup::Relocatable(startup) => {
-            build_relocatable_user_stack(aslr_seed, startup, phdr_vaddr, phentsize, phnum, entry)
-        }
-    };
+    let stack =
+        build_relocatable_user_stack(aslr_seed, startup, phdr_vaddr, phentsize, phnum, entry);
     let InitialUserStack {
         stack_base_vaddr,
         stack_end_vaddr,
@@ -2065,100 +1992,7 @@ pub fn process_image_replace_syscall(
         &executable,
         identity,
         authorization,
-        ReplacementStartup::Relocatable(startup),
+        startup,
         ExecMeasurement::start(),
-    )
-}
-
-/// execve システムコール
-///
-/// 現在のプロセスイメージを新しいプログラムで置き換える
-///
-/// # 引数
-/// - `path_ptr`: 実行ファイルパスのポインタ (null 終端)
-/// - `argv`: 引数ポインタ配列 (char*[]) — null 終端、0 の場合は [path] を使用
-/// - `envp`: 環境変数ポインタ配列 (char*[]) — null 終端、0 の場合は空
-pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
-    use crate::syscall::types::{EACCES, EINVAL, ENOENT, EPERM};
-
-    let measurement = ExecMeasurement::start();
-    if path_ptr == 0 {
-        crate::warn!("execve: null path pointer");
-        return EINVAL;
-    }
-    if !caller_has_process_spawn_capability() {
-        crate::warn!("execve: missing process spawn capability");
-        return EPERM;
-    }
-
-    let path_owned = match crate::syscall::read_user_cstring(path_ptr, 256) {
-        Ok(s) => s,
-        Err(err) => {
-            crate::warn!("execve: read path failed errno={}", err);
-            return EINVAL;
-        }
-    };
-
-    crate::info!("execve: launching: {}", path_owned);
-
-    let Some(pid) = crate::syscall::security::current_process_id() else {
-        return crate::syscall::types::EACCES;
-    };
-    let Some(authorization_thread) = crate::task::current_thread_id() else {
-        return crate::syscall::types::EACCES;
-    };
-    let Some(exec_authorization) = crate::task::with_process_mut(pid, |process| {
-        process.take_exec_authorization(&path_owned, authorization_thread)
-    })
-    .flatten() else {
-        crate::warn!("execve: no matching security decision for '{}'", path_owned);
-        return EACCES;
-    };
-    if exec_authorization.kind != crate::task::process::PendingExecKind::ImageReplace
-        || exec_authorization.execution_class != ExecutionClass::Unprivileged
-    {
-        crate::warn!("execve: authorization kind mismatch for '{}'", path_owned);
-        return EACCES;
-    }
-    if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(&path_owned, pid)
-    {
-        return errno;
-    }
-
-    let (data_vec, source) = match load_exec_image(&path_owned, ExecutionClass::Unprivileged) {
-        Some(loaded) => loaded,
-        None => return ENOENT,
-    };
-    if Sha256::digest(&data_vec).as_slice() != exec_authorization.executable_digest {
-        crate::warn!(
-            "execve: executable changed after authorization '{}'",
-            path_owned
-        );
-        return EACCES;
-    }
-
-    crate::info!(
-        "execve: loaded '{}' from {} ({} bytes)",
-        path_owned,
-        source,
-        data_vec.len()
-    );
-    let argv_strings = read_user_ptr_array(argv, 256);
-    let envp_strings = read_user_ptr_array(envp, 1024);
-    let mut argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
-    if argv_refs.is_empty() {
-        argv_refs.push(&path_owned);
-    }
-    let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
-    replace_current_process_image(
-        &data_vec,
-        &path_owned,
-        exec_authorization,
-        ReplacementStartup::Legacy {
-            argv: &argv_refs,
-            envp: &envp_refs,
-            execfn: &path_owned,
-        },
-        measurement,
     )
 }

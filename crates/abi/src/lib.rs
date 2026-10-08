@@ -28,7 +28,6 @@ pub mod shared_ring;
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyscallNumber {
-    Execve = 59,
     // Native mnu file syscalls
     FileOpen = 560,
     FileOpenAt = 561,
