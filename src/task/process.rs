@@ -1258,6 +1258,14 @@ impl Process {
         alloc::boxed::Box::new((*self.launch_context).clone())
     }
 
+    /// Drops object handles which were not explicitly selected for the next
+    /// process image. Launch-context keys remain opaque to the kernel.
+    pub fn retain_launch_context_handles_for_exec(&mut self) {
+        let launch_context = &self.launch_context;
+        self.object_handles
+            .retain(|handle| launch_context.references_handle(handle));
+    }
+
 }
 
 fn regions_overlap(a: &MmapRegion, b: &MmapRegion) -> bool {

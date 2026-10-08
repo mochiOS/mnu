@@ -1980,6 +1980,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         p.set_capabilities_for_exec(exec_authorization.capabilities);
         p.set_kernel_authorities_for_exec(crate::capability::KernelAuthoritySet::empty());
         p.set_application_identity(exec_authorization.identity);
+        p.retain_launch_context_handles_for_exec();
         crate::debug!(
             "[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}",
             p.name(),
@@ -1997,7 +1998,8 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     }
     new_pt_guard.disarm();
 
-    // FD_CLOEXEC が設定された FD を exec 時に閉じる
+    // Legacy descriptors remain migration-only. Native object handles were
+    // already reduced to the opaque LaunchContext selection above.
     crate::task::with_process_mut(pid, |p| p.fd_table_mut().close_cloexec_fds());
 
     // 新しいページテーブルに切り替えてジャンプ

@@ -55,6 +55,12 @@ impl LaunchContext {
             .retain(|_, inherited| *inherited != handle);
     }
 
+    pub fn references_handle(&self, handle: ObjectHandle) -> bool {
+        self.inherited_handles
+            .values()
+            .any(|inherited| *inherited == handle)
+    }
+
     pub fn value(&self, key: u64) -> Option<u64> {
         self.inherited_values.get(&key).copied()
     }

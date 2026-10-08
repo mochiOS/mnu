@@ -237,6 +237,10 @@ impl ObjectHandleTable {
         self.entries.remove(&handle).is_some()
     }
 
+    pub fn retain(&mut self, mut keep: impl FnMut(ObjectHandle) -> bool) {
+        self.entries.retain(|handle, _| keep(*handle));
+    }
+
     pub fn duplicate_restricted(
         &mut self,
         source: ObjectHandle,
