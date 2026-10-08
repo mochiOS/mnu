@@ -13,7 +13,6 @@ use super::fd_table::FdTable;
 use super::handle_table::ObjectHandleTable;
 use super::ids::{PrivilegeLevel, ProcessId, ProcessState};
 use super::launch_context::LaunchContext;
-use super::signal::SignalState;
 
 /// プロセス単位の resource limit
 #[derive(Clone, Copy, Debug)]
@@ -633,8 +632,6 @@ pub struct Process {
     foreground: bool,
     /// 終了コード（生存中はNone）
     exit_code: Option<u64>,
-    /// シグナル状態（ハンドラ・マスク・pending）— ヒープに置いてスタック消費を抑える
-    signal_state: alloc::boxed::Box<SignalState>,
     /// プロセスごとのファイルディスクリプタテーブル — ヒープに置いてスタック消費を抑える
     fd_table: alloc::boxed::Box<FdTable>,
     /// Process-local references to kernel mechanism objects.
@@ -707,7 +704,6 @@ impl Process {
             priority,
             foreground: false,
             exit_code: None,
-            signal_state: alloc::boxed::Box::new(SignalState::new()),
             fd_table: FdTable::new_boxed(),
             object_handles: ObjectHandleTable::new_boxed(),
             launch_context: LaunchContext::new_boxed(),
@@ -977,16 +973,6 @@ impl Process {
     pub fn set_exe_path(&mut self, path: &str) {
         self.exe_path.clear();
         self.exe_path.push_str(path);
-    }
-
-    /// シグナル状態への読み取りアクセス
-    pub fn signal_state(&self) -> &SignalState {
-        &self.signal_state
-    }
-
-    /// シグナル状態への可変アクセス
-    pub fn signal_state_mut(&mut self) -> &mut SignalState {
-        &mut self.signal_state
     }
 
     /// FD テーブルへの読み取りアクセス

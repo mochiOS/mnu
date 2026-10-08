@@ -9,7 +9,6 @@ pub mod ids;
 pub mod launch_context;
 pub mod process;
 pub mod scheduler;
-pub mod signal;
 pub mod thread;
 pub mod usermode;
 
@@ -37,11 +36,6 @@ pub use scheduler::{
     block_current_thread, exit_current_task, init_scheduler, is_scheduler_enabled,
     schedule_and_switch, scheduler_tick, sleep_thread, sleep_thread_unless_woken, start_scheduling,
     terminate_thread, wake_registered_waiter, wake_thread, yield_now,
-};
-pub use signal::{
-    default_action, sigreturn_stub_addr, DefaultAction, SigAction, SignalState, SA_RESTORER,
-    SIGCHLD, SIGINT, SIGKILL, SIGNAL_FRAME_MAGIC, SIGTERM, SIG_DFL, SIG_IGN,
-    USER_SIGRETURN_STUB_OFFSET,
 };
 pub use thread::{
     add_thread, allocate_kernel_stack, allocate_kernel_stack_in_table, count_threads_by_state,

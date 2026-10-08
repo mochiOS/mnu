@@ -27,7 +27,6 @@ pub mod shared_ring;
 pub enum SyscallNumber {
     Read = 0,
     Write = 1,
-    RtSigreturn = 15,
     Execve = 59,
     Kill = 62,
     // Native mnu file syscalls

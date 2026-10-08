@@ -13,7 +13,6 @@ pub mod performance;
 pub mod pgroup;
 pub mod process;
 pub mod security;
-pub mod signal;
 pub mod storage;
 pub mod syscall_entry;
 pub mod task;
@@ -1138,9 +1137,8 @@ pub unsafe extern "C" fn syscall_interrupt_handler() {
 
 /// int 0x80 経路専用の Rust wrapper。
 ///
-/// dispatch 本体だけでなく signal 配送/rt_sigreturn まで kernel CR3 上で完結させる。
-/// これにより、KPTI で user CR3 から外した kernel heap / task metadata へ
-/// user CR3 のまま触れてしまう事故を防ぐ。
+/// KPTIでuser CR3から外したkernel heap/task metadataを参照するため、
+/// dispatchをkernel CR3上で完結させる。
 extern "sysv64" fn syscall_interrupt_handler_rust(kstack: *mut u64) -> u64 {
     crate::percpu::install_current_cpu_gs_base();
 
@@ -1173,7 +1171,6 @@ extern "sysv64" fn syscall_interrupt_handler_rust(kstack: *mut u64) -> u64 {
         crate::task::with_thread_mut(tid, |t| t.set_in_syscall(false));
     }
 
-    let ret = signal::signal_and_return(kstack, ret);
     // int 0x80 復帰フレームの CS/SS を GDT 実値で正規化する。
     // 一部環境で固定値と実際の GDT 割当がずれると iretq で #GP(index=3/4) を起こすため、
     // 毎回ここで明示的に揃える。
