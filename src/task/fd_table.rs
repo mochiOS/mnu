@@ -24,7 +24,6 @@ pub const O_CLOEXEC: u64 = 0x80000;
 pub struct FileHandleCap(u32);
 
 impl FileHandleCap {
-    pub const NONE: Self = Self(0);
     pub const READ: Self = Self(1 << 0);
     pub const WRITE: Self = Self(1 << 1);
     pub const SEEK: Self = Self(1 << 2);
@@ -32,28 +31,8 @@ impl FileHandleCap {
     // Bit 4 used to represent CLOSE. Closing only discards a descriptor owned
     // by the current process, so it is intentionally not a resource right.
     pub const READDIR: Self = Self(1 << 5);
-    pub const CREATE: Self = Self(1 << 6);
-    pub const REMOVE: Self = Self(1 << 7);
-    pub const RENAME: Self = Self(1 << 8);
     pub const SYNC: Self = Self(1 << 9);
     pub const TRUNCATE: Self = Self(1 << 10);
-    pub const ALL: Self = Self(
-        Self::READ.0
-            | Self::WRITE.0
-            | Self::SEEK.0
-            | Self::STAT.0
-            | Self::READDIR.0
-            | Self::CREATE.0
-            | Self::REMOVE.0
-            | Self::RENAME.0
-            | Self::SYNC.0
-            | Self::TRUNCATE.0,
-    );
-
-    #[inline]
-    pub const fn bits(self) -> u32 {
-        self.0
-    }
 
     #[inline]
     pub const fn contains(self, other: Self) -> bool {
@@ -63,14 +42,6 @@ impl FileHandleCap {
     #[inline]
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
-    }
-
-    pub const fn from_bits(bits: u32) -> Option<Self> {
-        if bits != 0 && (bits & !Self::ALL.0) == 0 {
-            Some(Self(bits))
-        } else {
-            None
-        }
     }
 
     pub fn from_open_flags(flags: u64) -> Self {
@@ -89,12 +60,6 @@ impl FileHandleCap {
                 .union(Self::READ)
                 .union(Self::WRITE)
                 .union(Self::TRUNCATE);
-        }
-        if (flags & 0o100) != 0 {
-            cap = cap.union(Self::CREATE);
-        }
-        if (flags & 0o200) != 0 {
-            cap = cap.union(Self::CREATE);
         }
         if (flags & 0o1000) != 0 {
             cap = cap.union(Self::TRUNCATE);
@@ -337,12 +302,6 @@ impl Drop for FdTable {
 #[cfg(test)]
 mod tests {
     use super::{FileHandle, FileHandleCap};
-
-    #[test]
-    fn close_is_not_a_file_handle_right() {
-        assert_eq!(FileHandleCap::ALL.bits() & (1 << 4), 0);
-        assert!(FileHandleCap::from_bits(1 << 4).is_none());
-    }
 
     #[test]
     fn duplicated_stream_handles_share_native_options() {
