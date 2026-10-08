@@ -45,8 +45,6 @@ The public syscall ABI is fixed to a small kernel surface:
 - `thread_create`
 - `thread_exit`
 - `thread_yield`
-- `memory_alloc`
-- `memory_free`
 - `memory_map`
 - `memory_unmap`
 - `memory_protect`

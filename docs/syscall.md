@@ -70,8 +70,6 @@ ptr        ユーザー空間ポインタ
 | Process / Thread | thread_create         |
 | Process / Thread | thread_exit           |
 | Process / Thread | thread_yield          |
-| Memory / VM      | memory_alloc          |
-| Memory / VM      | memory_free           |
 | Memory / VM      | memory_map            |
 | Memory / VM      | memory_unmap          |
 | Memory / VM      | memory_protect        |
@@ -200,32 +198,6 @@ thread_yield() -> isize
 スケジューラは別の実行可能スレッドへ切り替えることができます。
 
 ## Memory / VM
-
-### memory_alloc
-
-匿名メモリを確保します。
-
-```
-memory_alloc(size: usize, align: usize, flags: u64) -> ptr
-```
-
-`size` は確保するバイト数です。
-
-`align` は要求するアラインメントです。
-
-`flags` には読み取り、書き込み、実行可否、ユーザー空間配置などの属性を指定します。
-
-### memory_free
-
-`memory_alloc` で確保した匿名メモリを解放します。
-
-```
-memory_free(addr: ptr, size: usize) -> isize
-```
-
-`addr` と `size` は確保時の領域に対応している必要があります。
-
-不正な範囲、二重解放、未確保領域の解放はエラーにします。
 
 ### memory_map
 

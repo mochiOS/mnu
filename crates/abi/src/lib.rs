@@ -66,8 +66,6 @@ pub enum SyscallNumber {
     ThreadCreate = 577,
     ThreadExit = 578,
     ThreadYield = 579,
-    MemoryAlloc = 580,
-    MemoryFree = 581,
     MemoryMap = 582,
     MemoryUnmap = 583,
     MemoryProtect = 584,

@@ -80,8 +80,6 @@ const SYS_PROCESS_WAIT: u64 = mnu_abi::SyscallNumber::ProcessWait as u64;
 const SYS_THREAD_CREATE: u64 = mnu_abi::SyscallNumber::ThreadCreate as u64;
 const SYS_THREAD_EXIT: u64 = mnu_abi::SyscallNumber::ThreadExit as u64;
 const SYS_THREAD_YIELD: u64 = mnu_abi::SyscallNumber::ThreadYield as u64;
-const SYS_MEMORY_ALLOC: u64 = mnu_abi::SyscallNumber::MemoryAlloc as u64;
-const SYS_MEMORY_FREE: u64 = mnu_abi::SyscallNumber::MemoryFree as u64;
 const SYS_MEMORY_MAP: u64 = mnu_abi::SyscallNumber::MemoryMap as u64;
 const SYS_MEMORY_UNMAP: u64 = mnu_abi::SyscallNumber::MemoryUnmap as u64;
 const SYS_MEMORY_PROTECT: u64 = mnu_abi::SyscallNumber::MemoryProtect as u64;
@@ -245,6 +243,27 @@ unsafe fn syscall5(n: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
 }
 
 #[inline(always)]
+unsafe fn syscall6(n: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+        "syscall",
+        inlateout("rax") n => ret,
+        in("rdi") a0,
+        in("rsi") a1,
+        in("rdx") a2,
+        in("r10") a3,
+        in("r8") a4,
+        in("r9") a5,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack),
+        );
+    }
+    ret
+}
+
+#[inline(always)]
 #[allow(dead_code)]
 unsafe fn syscall4(n: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     let ret: u64;
@@ -347,11 +366,11 @@ pub fn thread_yield() -> u64 {
 }
 
 pub fn memory_alloc(len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
-    unsafe { syscall5(SYS_MEMORY_ALLOC, len, prot, flags, fd, offset) }
+    unsafe { syscall6(SYS_MEMORY_MAP, 0, len, prot, flags, fd, offset) }
 }
 
 pub fn memory_free(addr: u64, len: u64) -> u64 {
-    unsafe { syscall2(SYS_MEMORY_FREE, addr, len) }
+    unsafe { syscall2(SYS_MEMORY_UNMAP, addr, len) }
 }
 
 pub fn memory_map(addr: u64, len: u64, prot: u64, flags: u64, fd: u64) -> u64 {
