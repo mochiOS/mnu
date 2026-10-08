@@ -110,7 +110,7 @@ pub fn close_pipe_endpoint_from_kernel(pipe_id: usize, write_end: bool) {
 
 fn wake_stream_waiters(waiters: Vec<crate::task::ThreadId>) {
     for waiter in waiters {
-        crate::task::wake_ipc_waiter(waiter);
+        crate::task::wake_registered_waiter(waiter);
     }
 }
 

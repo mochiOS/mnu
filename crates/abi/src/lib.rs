@@ -161,6 +161,8 @@ pub enum SyscallNumber {
     StreamPairCreate = 649,
     HandleOptionsGet = 650,
     HandleOptionsSet = 651,
+    WaitOnAddress = 652,
+    WakeAddress = 653,
     CheckGravityExist = 999,
 }
 
@@ -210,6 +212,31 @@ pub const HANDLE_SIGNAL_READABLE: u64 = 1 << 1;
 pub const HANDLE_SIGNAL_WRITABLE: u64 = 1 << 2;
 pub const HANDLE_SIGNAL_PEER_CLOSED: u64 = 1 << 3;
 pub const HANDLE_WAIT_MANY_MAX_ITEMS: usize = 64;
+
+/// Native result returned by `WaitOnAddress`.
+///
+/// POSIX errno translation deliberately belongs in user space.
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressWaitResult {
+    Awoken = 0,
+    ValueChanged = 1,
+    DeadlineReached = 2,
+}
+
+impl AddressWaitResult {
+    pub const fn from_raw(raw: u64) -> Option<Self> {
+        match raw {
+            x if x == Self::Awoken as u64 => Some(Self::Awoken),
+            x if x == Self::ValueChanged as u64 => Some(Self::ValueChanged),
+            x if x == Self::DeadlineReached as u64 => Some(Self::DeadlineReached),
+            _ => None,
+        }
+    }
+}
+
+/// Wait without a deadline when passed to `WaitOnAddress`.
+pub const ADDRESS_WAIT_INFINITE: u64 = u64::MAX;
 
 /// Kernel-provided clocks. These values are native mnu ABI selectors and are
 /// intentionally distinct from POSIX `clockid_t` values.
@@ -438,6 +465,8 @@ mod object_handle_tests {
             SyscallNumber::StreamPairCreate as u64,
             SyscallNumber::HandleOptionsGet as u64,
             SyscallNumber::HandleOptionsSet as u64,
+            SyscallNumber::WaitOnAddress as u64,
+            SyscallNumber::WakeAddress as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -590,6 +619,13 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::StreamPairCreate as u64, 649);
         assert_eq!(super::SyscallNumber::HandleOptionsGet as u64, 650);
         assert_eq!(super::SyscallNumber::HandleOptionsSet as u64, 651);
+        assert_eq!(super::SyscallNumber::WaitOnAddress as u64, 652);
+        assert_eq!(super::SyscallNumber::WakeAddress as u64, 653);
+        assert_eq!(
+            super::AddressWaitResult::from_raw(2),
+            Some(super::AddressWaitResult::DeadlineReached)
+        );
+        assert_eq!(super::AddressWaitResult::from_raw(3), None);
         assert_eq!(core::mem::size_of::<super::StreamPair>(), 8);
         assert_eq!(super::SyscallNumber::ProcessHandleResume as u64, 645);
         assert_eq!(super::SyscallNumber::ProcessHandleTerminate as u64, 646);

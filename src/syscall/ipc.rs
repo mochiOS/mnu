@@ -1758,7 +1758,7 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
         {
             let waiter = mb.take_waiter();
             if waiter != 0 {
-                crate::task::wake_ipc_waiter(crate::task::ThreadId::from_u64(waiter));
+                crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(waiter));
             }
             true
         } else {
@@ -1797,7 +1797,7 @@ pub(crate) fn send_provider_from_kernel(endpoint: IpcEndpoint, data: &[u8]) -> b
     let waiter = mailbox.take_waiter();
     drop(mailboxes);
     if waiter != 0 {
-        crate::task::wake_ipc_waiter(crate::task::ThreadId::from_u64(waiter));
+        crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(waiter));
     }
     true
 }
@@ -1876,7 +1876,7 @@ fn call_endpoint_from_kernel(
                 let waiter = mailbox.take_waiter();
                 drop(mailboxes);
                 if waiter != 0 {
-                    crate::task::wake_ipc_waiter(crate::task::ThreadId::from_u64(waiter));
+                    crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(waiter));
                 }
                 break;
             }
@@ -1975,7 +1975,7 @@ pub fn send_pages_from_kernel(
             }
             let waiter = mb.take_waiter();
             if waiter != 0 {
-                crate::task::wake_ipc_waiter(crate::task::ThreadId::from_u64(waiter));
+                crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(waiter));
             }
             true
         } else {
@@ -2042,7 +2042,7 @@ fn send_virtual_pages_from_kernel(
             }
             let waiter = mb.take_waiter();
             if waiter != 0 {
-                crate::task::wake_ipc_waiter(crate::task::ThreadId::from_u64(waiter));
+                crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(waiter));
             }
             true
         } else {
@@ -2112,7 +2112,7 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
             }
             let waiter = mb.take_waiter();
             if waiter != 0 {
-                crate::task::wake_ipc_waiter(crate::task::ThreadId::from_u64(waiter));
+                crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(waiter));
             }
             true
         } else {
@@ -2254,7 +2254,7 @@ fn send_to_thread_id_with_attachments(
     let waiter = boxes[idx].take_waiter();
     drop(boxes);
     if waiter != 0 {
-        crate::task::wake_ipc_waiter(crate::task::ThreadId::from_u64(waiter));
+        crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(waiter));
     }
 
     #[cfg(feature = "performance-instrumentation")]

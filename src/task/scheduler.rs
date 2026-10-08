@@ -325,12 +325,12 @@ pub fn wake_thread(id: ThreadId) {
     }
 }
 
-/// Wake a thread that has already registered itself as an IPC mailbox waiter.
+/// Wake a thread that has registered itself with a kernel wait queue.
 ///
-/// A waiter can still be Running in the short interval before it transitions
-/// to Sleeping. Latch that wakeup so `sleep_thread_unless_woken` cannot miss a
-/// message delivered in that interval.
-pub fn wake_ipc_waiter(id: ThreadId) {
+/// A registered waiter can still be Running in the short interval before it
+/// transitions to Sleeping. Latch that wakeup so `sleep_thread_unless_woken`
+/// cannot miss a notification delivered in that interval.
+pub fn wake_registered_waiter(id: ThreadId) {
     if let Some(current_state) = crate::task::with_thread(id, |thread| thread.state()) {
         if current_state == ThreadState::Sleeping || current_state == ThreadState::Blocked {
             let _ = with_thread_mut(id, |thread| thread.note_interactive_wakeup());
@@ -407,6 +407,7 @@ pub fn terminate_thread(id: ThreadId) {
         Some(id) != current_thread_id() && previous_state == Some(ThreadState::Running);
 
     if Some(id) == current_thread_id() {
+        crate::syscall::address_wait::remove_waiter(id);
         let kernel_stack = remove_thread(id)
             .map(|thread| thread.kernel_stack_base())
             .unwrap_or(0);
@@ -426,6 +427,7 @@ pub fn terminate_thread(id: ThreadId) {
         );
         return;
     }
+    crate::syscall::address_wait::remove_waiter(id);
     if let Some(thread) = remove_thread(id) {
         crate::task::free_kernel_stack(thread.kernel_stack_base());
     }
@@ -471,6 +473,7 @@ pub fn exit_current_task(exit_code: u64) -> ! {
                 crate::debug!("Switching from exited thread to {:?}", next_id);
 
                 // スレッドをキューから削除（コンテキストスイッチ前に削除）
+                crate::syscall::address_wait::remove_waiter(current_id);
                 let kstack_base = with_thread(current_id, |t| t.kernel_stack_base()).unwrap_or(0);
                 remove_thread(current_id);
 
@@ -495,6 +498,7 @@ pub fn exit_current_task(exit_code: u64) -> ! {
         });
 
         // スレッドをキューから削除
+        crate::syscall::address_wait::remove_waiter(current_id);
         if let Some(thread) = remove_thread(current_id) {
             crate::task::retire_current_kernel_stack(thread.kernel_stack_base());
         }

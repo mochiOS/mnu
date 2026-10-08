@@ -1641,7 +1641,7 @@ fn wake_process_exit_waiters(process: ProcessId) {
         }
     }
     for thread in wake.into_iter().take(count).flatten() {
-        crate::task::wake_ipc_waiter(thread);
+        crate::task::wake_registered_waiter(thread);
     }
 }
 

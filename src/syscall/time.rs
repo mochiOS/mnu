@@ -169,7 +169,7 @@ fn wake_due_sleepers_slow(now_tick: u64) -> usize {
     }
 
     for tid in wake_list.iter().take(wake_count).flatten() {
-        crate::task::wake_thread(*tid);
+        crate::task::wake_registered_waiter(*tid);
     }
     wake_count
 }
