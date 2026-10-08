@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{EAGAIN, ECHILD, EFAULT, EINVAL, ENOMEM, ENOSPC, ENOSYS, EPERM, SUCCESS};
+use super::types::{EAGAIN, EFAULT, EINVAL, ENOMEM, ENOSPC, ENOSYS, EPERM, SUCCESS};
 use crate::task::ThreadId;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -531,66 +531,6 @@ pub fn sleep(milliseconds: u64) -> u64 {
     let target = crate::syscall::time::get_ticks().saturating_add(wait_ticks);
     crate::syscall::time::sleep_until(target);
     SUCCESS
-}
-
-/// Waitシステムコール (wait4)
-///
-/// # 引数
-/// - `pid`: 待機するプロセスID (-1 = 任意の子プロセス)
-/// - `status_ptr`: 終了ステータスを書き込むポインタ (0 = 無視)
-/// - `options`: WNOHANG(0x1) = ノンブロッキング
-pub fn wait(_pid: u64, status_ptr: u64, options: u64) -> u64 {
-    const WNOHANG: u64 = 0x1;
-    let pid = _pid as i64;
-    if options & !WNOHANG != 0 {
-        return EINVAL;
-    }
-    if pid < -1 || pid == 0 {
-        return EINVAL;
-    }
-
-    if status_ptr != 0 && !super::validate_user_ptr(status_ptr, 4) {
-        return EFAULT;
-    }
-
-    // 呼び出し元プロセス
-    let current_pid = match current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-    {
-        Some(pid) => pid,
-        None => return ECHILD,
-    };
-
-    let target_pid = if pid == -1 {
-        None
-    } else {
-        Some(crate::task::ProcessId::from_u64(pid as u64))
-    };
-
-    // POSIX互換の待機: ゾンビを回収、存在しなければブロックまたはWNOHANGで0
-    loop {
-        if let Some((reaped_pid, exit_code)) =
-            crate::task::reap_zombie_child_process(current_pid, target_pid)
-        {
-            if status_ptr != 0 {
-                let status = ((exit_code & 0xff) << 8) as i32;
-                if crate::syscall::write_user_i32(status_ptr, status).is_err() {
-                    return EFAULT;
-                }
-            }
-            return reaped_pid.as_u64();
-        }
-
-        if !crate::task::has_child_process(current_pid, target_pid) {
-            return ECHILD;
-        }
-
-        if options & WNOHANG != 0 {
-            return 0;
-        }
-
-        crate::task::yield_now();
-    }
 }
 
 /// page fault を契機に mmap を 1 ページだけ解決する。

@@ -76,7 +76,10 @@ const SYS_EXEC: u64 = mnu_abi::SyscallNumber::Exec as u64;
 const SYS_EXEC_MANIFEST: u64 = mnu_abi::SyscallNumber::ExecManifest as u64;
 const SYS_PROCESS_EXIT: u64 = mnu_abi::SyscallNumber::ProcessExit as u64;
 const SYS_PROCESS_SPAWN: u64 = mnu_abi::SyscallNumber::ProcessSpawn as u64;
-const SYS_PROCESS_WAIT: u64 = mnu_abi::SyscallNumber::ProcessWait as u64;
+const SYS_HANDLE_CLOSE: u64 = mnu_abi::SyscallNumber::HandleClose as u64;
+const SYS_PROCESS_HANDLE_WAIT: u64 = mnu_abi::SyscallNumber::ProcessHandleWait as u64;
+const SYS_PROCESS_HANDLE_OPEN_BY_ID: u64 =
+    mnu_abi::SyscallNumber::ProcessHandleOpenById as u64;
 const SYS_THREAD_CREATE: u64 = mnu_abi::SyscallNumber::ThreadCreate as u64;
 const SYS_THREAD_EXIT: u64 = mnu_abi::SyscallNumber::ThreadExit as u64;
 const SYS_THREAD_YIELD: u64 = mnu_abi::SyscallNumber::ThreadYield as u64;
@@ -309,7 +312,37 @@ pub fn process_spawn(flags: u64, reserved: u64) -> u64 {
 }
 
 pub fn process_wait(pid: u64, status_ptr: u64, flags: u64) -> u64 {
-    unsafe { syscall3(SYS_PROCESS_WAIT, pid, status_ptr, flags) }
+    if flags != 0 || pid == u64::MAX {
+        return mnu_abi::EINVAL;
+    }
+    let handle = unsafe {
+        syscall2(
+            SYS_PROCESS_HANDLE_OPEN_BY_ID,
+            pid,
+            mnu_abi::HANDLE_RIGHT_WAIT,
+        )
+    };
+    if (handle as i64) < 0 {
+        return handle;
+    }
+    let mut process_status = mnu_abi::ProcessStatus::default();
+    let waited = unsafe {
+        syscall3(
+            SYS_PROCESS_HANDLE_WAIT,
+            handle,
+            mnu_abi::PROCESS_WAIT_INFINITE,
+            (&mut process_status as *mut mnu_abi::ProcessStatus) as u64,
+        )
+    };
+    let _ = unsafe { syscall1(SYS_HANDLE_CLOSE, handle) };
+    if (waited as i64) < 0 {
+        return waited;
+    }
+    if status_ptr != 0 {
+        let status = ((process_status.exit_code as i32 & 0xff) << 8) as i32;
+        unsafe { core::ptr::write(status_ptr as *mut i32, status) };
+    }
+    pid
 }
 
 pub fn performance_snapshot(
@@ -609,7 +642,7 @@ fn find_process_by_name(name: &str) -> u64 {
     }
 }
 
-fn launch_plugkit_test_driver() -> Option<u64> {
+fn launch_plugkit_test_driver() -> Option<(u64, u64)> {
     let pid = exec_with_capabilities(
         PLUGKIT_TEST_DRIVER_PATH,
         &["ipc.client", "ipc.server", "fs.read.all", "fs.write.all"],
@@ -620,11 +653,11 @@ fn launch_plugkit_test_driver() -> Option<u64> {
         for _ in 0..100 {
             let tid = find_process_by_name("com.mnu.plugkit.test.null");
             if tid != 0 {
-                return Some(tid);
+                return Some((pid, tid));
             }
             let tid = find_process_by_name(PLUGKIT_TEST_DRIVER_PATH);
             if tid != 0 {
-                return Some(tid);
+                return Some((pid, tid));
             }
             let _ = yield_now();
         }
@@ -808,7 +841,7 @@ fn fileio_self_test() -> bool {
 }
 
 fn plugkit_ipc_self_test() -> bool {
-    let Some(driver_tid) = launch_plugkit_test_driver() else {
+    let Some((driver_pid, driver_tid)) = launch_plugkit_test_driver() else {
         write_line("plugkit-test: driver launch failed");
         return false;
     };
@@ -884,12 +917,12 @@ fn plugkit_ipc_self_test() -> bool {
         }
     }
 
-    match wait_for_any_child() {
-        Ok((_pid, status)) if status == 0 => true,
-        _ => {
-            write_line("plugkit-test: child wait failed");
-            false
-        }
+    let mut status = -1;
+    if process_wait(driver_pid, &mut status as *mut i32 as u64, 0) == driver_pid && status == 0 {
+        true
+    } else {
+        write_line("plugkit-test: child wait failed");
+        false
     }
 }
 
@@ -980,16 +1013,6 @@ pub fn exec_without_caps(path: &str) -> u64 {
     path_buf[path_bytes.len()] = 0;
 
     unsafe { syscall2(SYS_EXEC, path_buf.as_ptr() as u64, 0) }
-}
-
-pub fn wait_for_any_child() -> Result<(u64, i32), u64> {
-    let mut status: i32 = -1;
-    let waited = process_wait(u64::MAX, &mut status as *mut i32 as u64, 0);
-    if waited & (1u64 << 63) == 0 {
-        Ok((waited, status))
-    } else {
-        Err(waited)
-    }
 }
 
 fn signature_db_self_test() -> bool {

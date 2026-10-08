@@ -140,20 +140,6 @@ process_spawn(image_cap: cap_t, args_ptr: ptr, args_len: usize, flags: u64) -> p
 
 実装がまだ存在しない場合は、成功扱いにせず `ENOSYS` を返します。
 
-### process_wait
-
-指定したプロセスの終了を待機します。
-
-```
-process_wait(pid: pid_t, status_ptr: ptr, flags: u64) -> isize
-```
-
-`pid` は待機対象のプロセスIDです。
-
-`status_ptr` には終了ステータスを書き込みます。
-
-`flags` により、ブロッキング待機または非ブロッキング待機を指定できます。
-
 ### thread_create
 
 現在のプロセス内に新しいスレッドを作成します。

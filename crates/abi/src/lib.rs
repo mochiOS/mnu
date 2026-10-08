@@ -62,7 +62,6 @@ pub enum SyscallNumber {
     IpcEndpointOwner = 557,
     ProcessExit = 574,
     ProcessSpawn = 575,
-    ProcessWait = 576,
     ThreadCreate = 577,
     ThreadExit = 578,
     ThreadYield = 579,
