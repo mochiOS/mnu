@@ -352,7 +352,7 @@ mod tests {
                 open_flags: 0,
                 io_options: 0,
             },
-            FileHandleCap::READ.union(FileHandleCap::TRANSFER),
+            FileHandleCap::READ,
         ));
         let mut table = ObjectHandleTable::new_boxed();
         let source = table

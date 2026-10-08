@@ -940,7 +940,6 @@ fn open_userspace_for_pid(
         FileHandleCap::READDIR
             .union(FileHandleCap::STAT)
             .union(FileHandleCap::SEEK)
-            .union(FileHandleCap::TRANSFER)
     } else {
         FileHandleCap::from_open_flags(flags)
     };
@@ -1027,7 +1026,6 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64, mode: u64) -> u
         FileHandleCap::READDIR
             .union(FileHandleCap::STAT)
             .union(FileHandleCap::SEEK)
-            .union(FileHandleCap::TRANSFER)
     } else {
         FileHandleCap::from_open_flags(flags)
     };

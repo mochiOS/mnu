@@ -37,7 +37,6 @@ impl FileHandleCap {
     pub const RENAME: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_RENAME);
     pub const SYNC: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_SYNC);
     pub const TRUNCATE: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_TRUNCATE);
-    pub const TRANSFER: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_TRANSFER);
     pub const ALL: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_ALL);
 
     #[inline]
@@ -66,8 +65,7 @@ impl FileHandleCap {
     pub fn from_open_flags(flags: u64) -> Self {
         let mut cap = Self::STAT
             .union(Self::SEEK)
-            .union(Self::SYNC)
-            .union(Self::TRANSFER);
+            .union(Self::SYNC);
         let acc = flags & 0o3;
         if acc == 0o0 {
             cap = cap.union(Self::READ);
@@ -170,66 +168,19 @@ impl FileHandle {
         }
     }
 
-    /// Duplicates this handle with a subset of its rights for IPC transfer.
-    pub fn duplicate_restricted(&self, requested: FileHandleCap) -> Option<Self> {
-        if !self.cap.contains(FileHandleCap::TRANSFER) || !self.cap.contains(requested) {
-            return None;
-        }
-        Some(Self {
-            open: self.open.clone(),
-            cap: requested,
-        })
-    }
-
-    /// Duplicates a regular-file handle for IPC without sharing its cursor.
-    ///
-    /// `dup(2)` and `fork(2)` intentionally keep sharing the open-file
-    /// description. Document handoff can use this operation so the receiver
-    /// starts at offset zero without changing the sender's cursor.
-    pub fn duplicate_restricted_with_fresh_offset(&self, requested: FileHandleCap) -> Option<Self> {
-        if !self.cap.contains(FileHandleCap::TRANSFER) || !self.cap.contains(requested) {
-            return None;
-        }
-        let open = self.open.lock();
-        if open.pipe_id.is_some()
-            || open.is_remote
-            || open
-                .vnode
-                .as_deref()
-                .is_some_and(|vnode| vnode.is_directory())
-        {
-            return None;
-        }
-        Some(Self::new(
-            OpenFile {
-                data: open.data.clone(),
-                pos: 0,
-                vnode: open.vnode.clone(),
-                is_remote: false,
-                fd_remote: 0,
-                pipe_id: None,
-                pipe_write: false,
-                open_flags: open.open_flags,
-                io_options: open.io_options,
-            },
-            requested,
-        ))
-    }
-
     pub fn new_pipe_read(pipe_id: usize) -> Self {
         Self::new(
             OpenFile::new_pipe(pipe_id, false, 0),
             FileHandleCap::READ
                 .union(FileHandleCap::SEEK)
-                .union(FileHandleCap::STAT)
-                .union(FileHandleCap::TRANSFER),
+                .union(FileHandleCap::STAT),
         )
     }
 
     pub fn new_pipe_write(pipe_id: usize) -> Self {
         Self::new(
             OpenFile::new_pipe(pipe_id, true, 1),
-            FileHandleCap::WRITE.union(FileHandleCap::TRANSFER),
+            FileHandleCap::WRITE,
         )
     }
 
@@ -374,22 +325,7 @@ impl Drop for FdTable {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileHandle, FileHandleCap, OpenFile};
-    use alloc::boxed::Box;
-
-    #[test]
-    fn transferred_rights_must_be_a_subset() {
-        let source = FileHandle::new_pipe_read(usize::MAX);
-        let restricted = source
-            .duplicate_restricted(FileHandleCap::READ.union(FileHandleCap::STAT))
-            .expect("read-only subset should transfer");
-        assert!(restricted.cap.contains(FileHandleCap::READ));
-        assert!(!restricted.cap.contains(FileHandleCap::TRANSFER));
-        assert!(source.duplicate_restricted(FileHandleCap::WRITE).is_none());
-        assert!(restricted
-            .duplicate_restricted(FileHandleCap::READ)
-            .is_none());
-    }
+    use super::{FileHandle, FileHandleCap};
 
     #[test]
     fn close_is_not_a_file_handle_right() {
@@ -406,31 +342,5 @@ mod tests {
             duplicate.open.lock().io_options,
             mnu_abi::HANDLE_OPTION_NONBLOCKING
         );
-    }
-
-    #[test]
-    fn fresh_offset_transfer_does_not_share_the_open_file_description() {
-        let source = FileHandle::new(
-            OpenFile {
-                data: Box::from([1u8, 2, 3]),
-                pos: 2,
-                vnode: None,
-                is_remote: false,
-                fd_remote: 0,
-                pipe_id: None,
-                pipe_write: false,
-                open_flags: 0,
-                io_options: 0,
-            },
-            FileHandleCap::READ
-                .union(FileHandleCap::SEEK)
-                .union(FileHandleCap::TRANSFER),
-        );
-        let transferred = source
-            .duplicate_restricted_with_fresh_offset(FileHandleCap::READ.union(FileHandleCap::SEEK))
-            .expect("regular file should support a fresh offset");
-        assert_eq!(source.open.lock().pos, 2);
-        assert_eq!(transferred.open.lock().pos, 0);
-        assert!(!alloc::sync::Arc::ptr_eq(&source.open, &transferred.open));
     }
 }

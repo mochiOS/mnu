@@ -361,8 +361,6 @@ pub const FILE_HANDLE_RIGHT_REMOVE: u32 = 1 << 7;
 pub const FILE_HANDLE_RIGHT_RENAME: u32 = 1 << 8;
 pub const FILE_HANDLE_RIGHT_SYNC: u32 = 1 << 9;
 pub const FILE_HANDLE_RIGHT_TRUNCATE: u32 = 1 << 10;
-/// Allows the receiving process to attach the handle to another IPC message.
-pub const FILE_HANDLE_RIGHT_TRANSFER: u32 = 1 << 11;
 pub const FILE_HANDLE_RIGHT_ALL: u32 = FILE_HANDLE_RIGHT_READ
     | FILE_HANDLE_RIGHT_WRITE
     | FILE_HANDLE_RIGHT_SEEK
@@ -372,8 +370,7 @@ pub const FILE_HANDLE_RIGHT_ALL: u32 = FILE_HANDLE_RIGHT_READ
     | FILE_HANDLE_RIGHT_REMOVE
     | FILE_HANDLE_RIGHT_RENAME
     | FILE_HANDLE_RIGHT_SYNC
-    | FILE_HANDLE_RIGHT_TRUNCATE
-    | FILE_HANDLE_RIGHT_TRANSFER;
+    | FILE_HANDLE_RIGHT_TRUNCATE;
 
 /// `StorageControl` が受け取る、プラットフォーム固有ストレージ操作の固定長要求です。
 #[repr(C)]
