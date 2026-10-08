@@ -30,8 +30,6 @@ pub enum SyscallNumber {
     RtSigaction = 13,
     RtSigprocmask = 14,
     RtSigreturn = 15,
-    Readv = 19,
-    Writev = 20,
     Execve = 59,
     Kill = 62,
     // Native mnu file syscalls
