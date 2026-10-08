@@ -791,7 +791,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::IpcCreate as u64 => ipc::create(arg0, arg1),
         x if x == SyscallNumber::IpcCreateHandle as u64 => ipc::create_handle(arg0, arg1),
         x if x == SyscallNumber::IpcSend as u64 => ipc::send(arg0, arg1, arg2),
-        x if x == SyscallNumber::IpcSendHandles as u64 => ipc::send_handles(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::IpcSendObjectHandles as u64 => {
             ipc::send_object_handles(arg0, arg1, arg2, arg3)
         }
@@ -799,9 +798,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::IpcRecv as u64 => ipc::recv(arg0, arg1),
         x if x == SyscallNumber::IpcRecvWait as u64 => ipc::recv_blocking(arg0, arg1),
         x if x == SyscallNumber::IpcCall as u64 => ipc::call(arg0, arg1, arg2, arg3, arg4),
-        x if x == SyscallNumber::IpcCallHandles as u64 => {
-            ipc::call_handles(arg0, arg1, arg2, arg3, arg4, arg5)
-        }
         x if x == SyscallNumber::IpcCallObjectHandles as u64 => {
             ipc::call_object_handles(arg0, arg1, arg2, arg3, arg4, arg5)
         }
@@ -810,7 +806,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
             ipc::reply_object_handles(arg0, arg1, arg2, arg3)
         }
         x if x == SyscallNumber::IpcWait as u64 => ipc::wait(arg0, arg1, arg2),
-        x if x == SyscallNumber::IpcRecvHandles as u64 => ipc::recv_handles(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::IpcRecvObjectHandles as u64 => {
             ipc::recv_object_handles(arg0, arg1, arg2, arg3)
         }
@@ -922,9 +917,6 @@ fn is_ipc_syscall(num: u64) -> bool {
         || num == SyscallNumber::IpcRecv as u64
         || num == SyscallNumber::IpcRecvWait as u64
         || num == SyscallNumber::IpcSendPages as u64
-        || num == SyscallNumber::IpcSendHandles as u64
-        || num == SyscallNumber::IpcRecvHandles as u64
-        || num == SyscallNumber::IpcCallHandles as u64
         || num == SyscallNumber::IpcSendObjectHandles as u64
         || num == SyscallNumber::IpcRecvObjectHandles as u64
         || num == SyscallNumber::IpcCallObjectHandles as u64
