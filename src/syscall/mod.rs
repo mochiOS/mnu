@@ -753,7 +753,15 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
             handle::process_terminate(arg0, arg1)
         }
         x if x == SyscallNumber::HandleWaitMany as u64 => handle::wait_many(arg0, arg1, arg2),
-        x if x == SyscallNumber::ContextHandleBind as u64 => handle::context_bind(arg0, arg1),
+        x if x == SyscallNumber::ContextHandleSet as u64 => {
+            handle::context_handle_set(arg0, arg1)
+        }
+        x if x == SyscallNumber::ContextHandleRemove as u64 => {
+            handle::context_handle_remove(arg0)
+        }
+        x if x == SyscallNumber::ContextValueSet as u64 => handle::context_value_set(arg0, arg1),
+        x if x == SyscallNumber::ContextValueRemove as u64 => handle::context_value_remove(arg0),
+        x if x == SyscallNumber::HandleRightsGet as u64 => handle::rights_get(arg0),
         x if x == SyscallNumber::StreamPairCreate as u64 => handle::stream_pair_create(arg0),
         x if x == SyscallNumber::HandleOptionsGet as u64 => handle::options_get(arg0),
         x if x == SyscallNumber::HandleOptionsSet as u64 => handle::options_set(arg0, arg1),

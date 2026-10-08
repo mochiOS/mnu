@@ -153,7 +153,7 @@ pub enum SyscallNumber {
     ProcessHandleResume = 645,
     ProcessHandleTerminate = 646,
     HandleWaitMany = 647,
-    ContextHandleBind = 648,
+    ContextHandleSet = 648,
     StreamPairCreate = 649,
     HandleOptionsGet = 650,
     HandleOptionsSet = 651,
@@ -166,6 +166,10 @@ pub enum SyscallNumber {
     ThreadHandleStatus = 658,
     ProcessHandleOpenById = 659,
     DebugWrite = 660,
+    ContextHandleRemove = 661,
+    ContextValueSet = 662,
+    ContextValueRemove = 663,
+    HandleRightsGet = 664,
     CheckGravityExist = 999,
 }
 
@@ -511,7 +515,7 @@ mod object_handle_tests {
             SyscallNumber::ProcessHandleResume as u64,
             SyscallNumber::ProcessHandleTerminate as u64,
             SyscallNumber::HandleWaitMany as u64,
-            SyscallNumber::ContextHandleBind as u64,
+            SyscallNumber::ContextHandleSet as u64,
             SyscallNumber::StreamPairCreate as u64,
             SyscallNumber::HandleOptionsGet as u64,
             SyscallNumber::HandleOptionsSet as u64,
@@ -524,6 +528,10 @@ mod object_handle_tests {
             SyscallNumber::ThreadHandleStatus as u64,
             SyscallNumber::ProcessHandleOpenById as u64,
             SyscallNumber::DebugWrite as u64,
+            SyscallNumber::ContextHandleRemove as u64,
+            SyscallNumber::ContextValueSet as u64,
+            SyscallNumber::ContextValueRemove as u64,
+            SyscallNumber::HandleRightsGet as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -672,7 +680,11 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::ProcessHandleWait as u64, 643);
         assert_eq!(super::SyscallNumber::ProcessClone as u64, 644);
         assert_eq!(super::SyscallNumber::HandleWaitMany as u64, 647);
-        assert_eq!(super::SyscallNumber::ContextHandleBind as u64, 648);
+        assert_eq!(super::SyscallNumber::ContextHandleSet as u64, 648);
+        assert_eq!(super::SyscallNumber::ContextHandleRemove as u64, 661);
+        assert_eq!(super::SyscallNumber::ContextValueSet as u64, 662);
+        assert_eq!(super::SyscallNumber::ContextValueRemove as u64, 663);
+        assert_eq!(super::SyscallNumber::HandleRightsGet as u64, 664);
         assert_eq!(super::SyscallNumber::StreamPairCreate as u64, 649);
         assert_eq!(super::SyscallNumber::HandleOptionsGet as u64, 650);
         assert_eq!(super::SyscallNumber::HandleOptionsSet as u64, 651);

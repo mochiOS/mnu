@@ -887,9 +887,9 @@ pub fn launch_get(key: u64) -> u64 {
 }
 
 /// Associates one of the caller's existing object handles with an opaque
-/// process-context key. The kernel assigns no meaning to either the key or the
-/// object and never resolves service names on the caller's behalf.
-pub fn context_bind(key: u64, raw: u64) -> u64 {
+/// process-context key, replacing the previous association for that key. The
+/// kernel assigns no meaning to either the key or the object.
+pub fn context_handle_set(key: u64, raw: u64) -> u64 {
     let process_id = match current_process() {
         Ok(process_id) => process_id,
         Err(error) => return error,
@@ -902,13 +902,67 @@ pub fn context_bind(key: u64, raw: u64) -> u64 {
         if process.object_handles().get(handle).is_none() {
             return EBADF;
         }
-        if process.launch_context().get(key).is_some() {
-            return super::EEXIST;
-        }
-        if !process.launch_context_mut().install(key, handle) {
+        if !process.launch_context_mut().set(key, handle) {
             return ENOSPC;
         }
         SUCCESS
+    })
+    .unwrap_or(EINVAL)
+}
+
+pub fn context_handle_remove(key: u64) -> u64 {
+    let process_id = match current_process() {
+        Ok(process_id) => process_id,
+        Err(error) => return error,
+    };
+    crate::task::with_process_mut(process_id, |process| {
+        process.launch_context_mut().take(key);
+        SUCCESS
+    })
+    .unwrap_or(EINVAL)
+}
+
+pub fn context_value_set(key: u64, value: u64) -> u64 {
+    let process_id = match current_process() {
+        Ok(process_id) => process_id,
+        Err(error) => return error,
+    };
+    crate::task::with_process_mut(process_id, |process| {
+        if !process.launch_context_mut().set_value(key, value) {
+            return ENOSPC;
+        }
+        SUCCESS
+    })
+    .unwrap_or(EINVAL)
+}
+
+pub fn context_value_remove(key: u64) -> u64 {
+    let process_id = match current_process() {
+        Ok(process_id) => process_id,
+        Err(error) => return error,
+    };
+    crate::task::with_process_mut(process_id, |process| {
+        process.launch_context_mut().remove_value(key);
+        SUCCESS
+    })
+    .unwrap_or(EINVAL)
+}
+
+pub fn rights_get(raw: u64) -> u64 {
+    let process_id = match current_process() {
+        Ok(process_id) => process_id,
+        Err(error) => return error,
+    };
+    let handle = match decode_handle(raw) {
+        Ok(handle) => handle,
+        Err(error) => return error,
+    };
+    crate::task::with_process(process_id, |process| {
+        process
+            .object_handles()
+            .get(handle)
+            .map(|entry| entry.rights().bits())
+            .unwrap_or(EBADF)
     })
     .unwrap_or(EINVAL)
 }

@@ -36,6 +36,16 @@ impl LaunchContext {
         true
     }
 
+    pub fn set(&mut self, key: u64, handle: ObjectHandle) -> bool {
+        if self.inherited_handles.len() >= PROCESS_MAX_INHERITED_HANDLES
+            && !self.inherited_handles.contains_key(&key)
+        {
+            return false;
+        }
+        self.inherited_handles.insert(key, handle);
+        true
+    }
+
     pub fn take(&mut self, key: u64) -> Option<ObjectHandle> {
         self.inherited_handles.remove(&key)
     }
@@ -57,6 +67,20 @@ impl LaunchContext {
         }
         self.inherited_values.insert(key, value);
         true
+    }
+
+    pub fn set_value(&mut self, key: u64, value: u64) -> bool {
+        if self.inherited_values.len() >= PROCESS_MAX_INHERITED_VALUES
+            && !self.inherited_values.contains_key(&key)
+        {
+            return false;
+        }
+        self.inherited_values.insert(key, value);
+        true
+    }
+
+    pub fn remove_value(&mut self, key: u64) -> Option<u64> {
+        self.inherited_values.remove(&key)
     }
 }
 
@@ -95,5 +119,23 @@ mod tests {
         assert!(context.install_value(7, u64::MAX));
         assert_eq!(context.value(7), Some(u64::MAX));
         assert!(!context.install_value(7, 1));
+    }
+
+    #[test]
+    fn context_entries_can_be_replaced_and_removed_by_opaque_key() {
+        let mut context = LaunchContext::new_boxed();
+        let first = ObjectHandle::from_raw(1).unwrap();
+        let second = ObjectHandle::from_raw(2).unwrap();
+        assert!(context.set(11, first));
+        assert!(context.set(11, second));
+        assert_eq!(context.get(11), Some(second));
+        assert_eq!(context.take(11), Some(second));
+        assert_eq!(context.get(11), None);
+
+        assert!(context.set_value(12, 40));
+        assert!(context.set_value(12, 41));
+        assert_eq!(context.value(12), Some(41));
+        assert_eq!(context.remove_value(12), Some(41));
+        assert_eq!(context.value(12), None);
     }
 }
