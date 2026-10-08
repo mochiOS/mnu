@@ -11,6 +11,7 @@ pub mod process;
 pub mod scheduler;
 pub mod thread;
 pub mod usermode;
+pub(crate) mod memory_range;
 
 pub use context::{switch_context, switch_to_thread, Context};
 pub use fd_table::{FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, PROCESS_MAX_FDS};

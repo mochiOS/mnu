@@ -815,6 +815,22 @@ pub fn is_user_range_mapped_in_table(table_phys: u64, addr: u64, len: u64) -> bo
     is_user_range_accessible_in_table(table_phys, addr, len, false)
 }
 
+/// Placement checks must reject even one resident page in an otherwise empty
+/// range. The all-pages-accessible check above is for user buffer validation.
+pub(crate) fn is_user_range_occupied_in_table(table_phys: u64, addr: u64, len: u64) -> bool {
+    if addr > USER_SPACE_END
+        || addr
+            .checked_add(len.saturating_sub(1))
+            .is_none_or(|end| end > USER_SPACE_END)
+    {
+        return true;
+    }
+    crate::task::memory_range::any_page(addr, len, |page| {
+        user_page_flags_in_table(table_phys, page).is_some()
+    })
+    .unwrap_or(true)
+}
+
 pub fn is_user_range_writable_in_table(table_phys: u64, addr: u64, len: u64) -> bool {
     is_user_range_accessible_in_table(table_phys, addr, len, true)
 }

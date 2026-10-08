@@ -38,3 +38,25 @@ pub(crate) fn cut(region: Range, removal: Range) -> Option<Cut> {
         }),
     })
 }
+
+/// Tests every intersecting page, not whether the whole interval is resident.
+pub(crate) fn any_page(
+    start: u64,
+    len: u64,
+    mut occupied: impl FnMut(u64) -> bool,
+) -> Option<bool> {
+    if len == 0 {
+        return Some(false);
+    }
+    let last = start.checked_add(len - 1)? & !4095;
+    let mut page = start & !4095;
+    loop {
+        if occupied(page) {
+            return Some(true);
+        }
+        if page == last {
+            return Some(false);
+        }
+        page = page.checked_add(4096)?;
+    }
+}
