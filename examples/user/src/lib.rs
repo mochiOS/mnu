@@ -72,7 +72,6 @@ fn alloc_error(_layout: Layout) -> ! {
 
 const SYS_DEBUG_WRITE: u64 = mnu_abi::SyscallNumber::DebugWrite as u64;
 const SYS_GET_SECURITY_CONTEXT: u64 = mnu_abi::SyscallNumber::GetThreadSecurityContext as u64;
-const SYS_EXEC: u64 = mnu_abi::SyscallNumber::Exec as u64;
 const SYS_EXEC_MANIFEST: u64 = mnu_abi::SyscallNumber::ExecManifest as u64;
 const SYS_PROCESS_EXIT: u64 = mnu_abi::SyscallNumber::ProcessExit as u64;
 const SYS_PROCESS_SPAWN: u64 = mnu_abi::SyscallNumber::ProcessSpawn as u64;
@@ -996,18 +995,6 @@ fn thread_has_capability(tid: u64, cap_name: &str) -> bool {
             cap_name.len() as u64,
         ) == 1
     }
-}
-
-pub fn exec_without_caps(path: &str) -> u64 {
-    let mut path_buf = [0u8; 128];
-    let path_bytes = path.as_bytes();
-    if path_bytes.len() + 1 > path_buf.len() {
-        return mnu_abi::EINVAL as u64;
-    }
-    path_buf[..path_bytes.len()].copy_from_slice(path_bytes);
-    path_buf[path_bytes.len()] = 0;
-
-    unsafe { syscall2(SYS_EXEC, path_buf.as_ptr() as u64, 0) }
 }
 
 fn signature_db_self_test() -> bool {

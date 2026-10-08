@@ -39,7 +39,6 @@ pub enum SyscallNumber {
     FileReadDir = 569,
     IpcSend = 514,
     IpcRecv = 515,
-    Exec = 516,
     Sleep = 517,
     FindProcessByName = 518,
     PortIn = 520,
