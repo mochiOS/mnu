@@ -1911,8 +1911,8 @@ pub fn map_and_copy_segment_to(
     Ok(())
 }
 ///
-/// `mprotect` 用の helper で、既存マッピングを維持したまま
-/// WRITABLE / NO_EXECUTE を更新する。W+X は拒否する。
+/// Updates WRITABLE / NO_EXECUTE on an existing native mapping.
+/// Writable and executable access together is rejected.
 pub fn protect_user_range_in_table(
     table_phys: u64,
     addr: u64,

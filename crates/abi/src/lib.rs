@@ -24,6 +24,15 @@ pub mod provider;
 /// Grantで共有するrequest/response ringの固定ABIです。
 pub mod shared_ring;
 
+/// Generic access permissions accepted by [`SyscallNumber::MemoryProtect`].
+///
+/// These are native VM permissions, not POSIX `PROT_*` values. Compatibility
+/// layers must translate their public protection flags before entering mnu.
+pub const MEMORY_ACCESS_READ: u64 = 1 << 0;
+pub const MEMORY_ACCESS_WRITE: u64 = 1 << 1;
+pub const MEMORY_ACCESS_EXECUTE: u64 = 1 << 2;
+pub const MEMORY_ACCESS_ALL: u64 = MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE | MEMORY_ACCESS_EXECUTE;
+
 /// mnu native syscall numbers.
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,6 +397,21 @@ mod object_handle_tests {
         assert_eq!(core::mem::align_of::<IpcObjectHandles>(), 8);
         assert_eq!(core::mem::size_of::<HandleWaitItem>(), 24);
         assert_eq!(core::mem::align_of::<HandleWaitItem>(), 8);
+    }
+
+    #[test]
+    fn native_memory_access_flags_are_disjoint_and_complete() {
+        let access = [
+            MEMORY_ACCESS_READ,
+            MEMORY_ACCESS_WRITE,
+            MEMORY_ACCESS_EXECUTE,
+        ];
+        let mut combined = 0;
+        for flag in access {
+            assert_eq!(combined & flag, 0);
+            combined |= flag;
+        }
+        assert_eq!(combined, MEMORY_ACCESS_ALL);
     }
 
     #[test]

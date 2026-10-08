@@ -1,4 +1,4 @@
-//! プロセスグループ・セッション関連のシステムコール
+//! Generic virtual-memory system calls.
 
 use super::types::{EFAULT, EINVAL, ENOMEM, ESRCH, SUCCESS};
 
@@ -76,11 +76,11 @@ fn protect_memory_pages(
 }
 
 #[inline(never)]
-fn record_mmap_protection(
+fn record_mapping_access(
     process: &mut crate::task::Process,
     start: u64,
     end: u64,
-    prot: u64,
+    access: u64,
 ) -> bool {
     for region in process.mmap_regions_mut() {
         let Some(region_end) = region.end() else {
@@ -89,7 +89,7 @@ fn record_mmap_protection(
         let overlap_start = start.max(region.start());
         let overlap_end = end.min(region_end);
         if overlap_start < overlap_end
-            && !region.set_protection(overlap_start, overlap_end - overlap_start, prot)
+            && !region.set_protection(overlap_start, overlap_end - overlap_start, access)
         {
             return false;
         }
@@ -97,22 +97,17 @@ fn record_mmap_protection(
     true
 }
 
-/// mprotect システムコール
+/// Changes the native access permissions of an existing user mapping.
 ///
-/// x86_64 の現在のユーザー保護モデルでは READ は常に許可単位になるため、
-/// ここでは READ/WRITE/EXEC の組み合わせのうち W+X を拒否しつつ、
-/// 既存マッピングの WRITABLE / NX を更新する。
-pub fn mprotect(addr: u64, len: u64, prot: u64) -> u64 {
-    const PROT_READ: u64 = 0x1;
-    const PROT_WRITE: u64 = 0x2;
-    const PROT_EXEC: u64 = 0x4;
-    const SUPPORTED_MASK: u64 = PROT_READ | PROT_WRITE | PROT_EXEC;
+/// The kernel accepts only the generic `MEMORY_ACCESS_*` ABI. It deliberately
+/// knows nothing about POSIX `mprotect`, `PROT_*`, or their error conventions.
+pub fn protect(addr: u64, len: u64, access: u64) -> u64 {
     const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 
     if len == 0 {
         return SUCCESS;
     }
-    if (prot & !SUPPORTED_MASK) != 0 {
+    if (access & !mnu_abi::MEMORY_ACCESS_ALL) != 0 {
         return EINVAL;
     }
     if addr == 0 || addr > USER_SPACE_END {
@@ -132,9 +127,9 @@ pub fn mprotect(addr: u64, len: u64, prot: u64) -> u64 {
         _ => return EINVAL,
     };
 
-    let present = prot != 0;
-    let writable = (prot & PROT_WRITE) != 0;
-    let executable = (prot & PROT_EXEC) != 0;
+    let present = access != 0;
+    let writable = (access & mnu_abi::MEMORY_ACCESS_WRITE) != 0;
+    let executable = (access & mnu_abi::MEMORY_ACCESS_EXECUTE) != 0;
     if present && writable && executable {
         return EINVAL;
     }
@@ -158,7 +153,7 @@ pub fn mprotect(addr: u64, len: u64, prot: u64) -> u64 {
             writable,
             executable,
         )?;
-        if !record_mmap_protection(process, start, end, prot) {
+        if !record_mapping_access(process, start, end, access) {
             return Err(EFAULT);
         }
         Ok(())
