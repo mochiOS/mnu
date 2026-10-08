@@ -33,11 +33,9 @@ pub enum SyscallNumber {
     RtSigreturn = 15,
     Readv = 19,
     Writev = 20,
-    Nanosleep = 35,
     GetPid = 39,
     Execve = 59,
     Kill = 62,
-    Uname = 63,
     // Native mnu file syscalls
     FileOpen = 560,
     FileOpenAt = 561,
@@ -55,11 +53,8 @@ pub enum SyscallNumber {
     GetTid = 186,
     Tkill = 200,
     Futex = 202,
-    SetTidAddress = 218,
     Tgkill = 234,
     SetRobustList = 273,
-    Prlimit64 = 302,
-    Getrlimit = 97,
 
     IpcSend = 514,
     IpcRecv = 515,
