@@ -33,7 +33,6 @@ pub enum SyscallNumber {
     RtSigreturn = 15,
     Readv = 19,
     Writev = 20,
-    GetPid = 39,
     Execve = 59,
     Kill = 62,
     // Native mnu file syscalls

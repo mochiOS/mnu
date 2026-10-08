@@ -71,7 +71,7 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 const SYS_WRITE: u64 = mnu_abi::SyscallNumber::Write as u64;
-const SYS_GETPID: u64 = mnu_abi::SyscallNumber::GetPid as u64;
+const SYS_GET_SECURITY_CONTEXT: u64 = mnu_abi::SyscallNumber::GetThreadSecurityContext as u64;
 const SYS_GETTID: u64 = mnu_abi::SyscallNumber::GetTid as u64;
 const SYS_EXEC: u64 = mnu_abi::SyscallNumber::Exec as u64;
 const SYS_EXEC_MANIFEST: u64 = mnu_abi::SyscallNumber::ExecManifest as u64;
@@ -871,7 +871,16 @@ fn plugkit_ipc_self_test() -> bool {
 }
 
 pub fn getpid() -> u64 {
-    unsafe { syscall0(SYS_GETPID) }
+    let mut context = mnu_abi::ThreadSecurityContext::default();
+    let result = unsafe {
+        syscall3(
+            SYS_GET_SECURITY_CONTEXT,
+            0,
+            (&mut context as *mut mnu_abi::ThreadSecurityContext) as u64,
+            core::mem::size_of::<mnu_abi::ThreadSecurityContext>() as u64,
+        )
+    };
+    if result == 0 { context.process_id } else { 0 }
 }
 
 pub fn gettid() -> u64 {

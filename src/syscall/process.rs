@@ -20,48 +20,52 @@ fn caller_has_process_spawn_capability() -> bool {
 }
 
 pub fn get_thread_security_context(sender_endpoint: u64, output: u64, output_len: u64) -> u64 {
-    if !crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::CapabilitiesManage,
-        crate::capability::Capability::ProcessInspect,
-    ]) {
-        return EPERM;
-    }
     if output_len < core::mem::size_of::<mnu_abi::ThreadSecurityContext>() as u64 {
         return EINVAL;
     }
-    let Some(thread_id) = crate::syscall::ipc::resolve_sender_thread_id(sender_endpoint) else {
+    let thread_id = if sender_endpoint == 0 {
+        crate::task::current_thread_id().map(|thread_id| thread_id.as_u64())
+    } else {
+        if !crate::syscall::security::caller_has_any_capability(&[
+            crate::capability::Capability::CapabilitiesManage,
+            crate::capability::Capability::ProcessInspect,
+        ]) {
+            return EPERM;
+        }
+        crate::syscall::ipc::resolve_sender_thread_id(sender_endpoint)
+    };
+    let Some(thread_id) = thread_id else {
         return EINVAL;
     };
     let Some(pid) = crate::task::thread_to_process_id(thread_id) else {
         return EINVAL;
     };
     let Some(context) = crate::task::with_process(pid, |process| {
-        let identity = process.application_identity()?;
-        let package = identity.package_id().as_bytes();
-        let developer = identity.developer_id().as_bytes();
-        if package.len() > mnu_abi::APPLICATION_ID_FIELD_LEN
-            || developer.len() > mnu_abi::APPLICATION_ID_FIELD_LEN
-        {
-            return None;
-        }
         let credentials = process.credentials();
         let mut context = mnu_abi::ThreadSecurityContext::default();
         context.process_id = pid.as_u64();
         context.effective_uid = credentials.effective_uid();
         context.effective_gid = credentials.effective_gid();
-        context.provenance = match identity.provenance() {
-            crate::task::process::ApplicationProvenance::BuiltIn => 1,
-            crate::task::process::ApplicationProvenance::VerifiedPackage => 2,
-            crate::task::process::ApplicationProvenance::Development => 3,
-        };
-        context.subject_key_id = *identity.subject_key_id();
-        context.package_id_len = package.len() as u16;
-        context.developer_id_len = developer.len() as u16;
-        context.package_id[..package.len()].copy_from_slice(package);
-        context.developer_id[..developer.len()].copy_from_slice(developer);
-        Some(context)
-    })
-    .flatten() else {
+        if let Some(identity) = process.application_identity() {
+            let package = identity.package_id().as_bytes();
+            let developer = identity.developer_id().as_bytes();
+            if package.len() <= mnu_abi::APPLICATION_ID_FIELD_LEN
+                && developer.len() <= mnu_abi::APPLICATION_ID_FIELD_LEN
+            {
+                context.provenance = match identity.provenance() {
+                    crate::task::process::ApplicationProvenance::BuiltIn => 1,
+                    crate::task::process::ApplicationProvenance::VerifiedPackage => 2,
+                    crate::task::process::ApplicationProvenance::Development => 3,
+                };
+                context.subject_key_id = *identity.subject_key_id();
+                context.package_id_len = package.len() as u16;
+                context.developer_id_len = developer.len() as u16;
+                context.package_id[..package.len()].copy_from_slice(package);
+                context.developer_id[..developer.len()].copy_from_slice(developer);
+            }
+        }
+        context
+    }) else {
         return EINVAL;
     };
     let bytes = unsafe {
@@ -375,20 +379,6 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
     }
 
     written as u64
-}
-
-/// GetPidシステムコール
-///
-/// 現在のプロセスIDを取得する
-///
-/// # 戻り値
-/// プロセスID
-pub fn getpid() -> u64 {
-    if let Some(tid) = current_thread_id() {
-        crate::task::with_thread(tid, |thread| thread.process_id().as_u64()).unwrap_or(0)
-    } else {
-        0
-    }
 }
 
 /// GetTidシステムコール
