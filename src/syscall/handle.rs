@@ -478,7 +478,8 @@ pub fn provider_object_identify(raw: u64) -> u64 {
 pub fn provider_object_signal(object_id: u64, set: u64, clear: u64) -> u64 {
     let supported = mnu_abi::HANDLE_SIGNAL_READABLE
         | mnu_abi::HANDLE_SIGNAL_WRITABLE
-        | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+        | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
+        | mnu_abi::HANDLE_SIGNAL_IDLE;
     if object_id > i64::MAX as u64
         || set & !supported != 0
         || clear & !supported != 0
@@ -828,7 +829,8 @@ fn wait_item_signal(item: &mut mnu_abi::HandleWaitItem) -> Result<(WaitTarget, b
         KernelObject::Provider(provider) => {
             let supported = mnu_abi::HANDLE_SIGNAL_READABLE
                 | mnu_abi::HANDLE_SIGNAL_WRITABLE
-                | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+                | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
+                | mnu_abi::HANDLE_SIGNAL_IDLE;
             if item.interests & !supported != 0 {
                 return Err(EINVAL);
             }

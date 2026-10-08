@@ -236,6 +236,8 @@ pub const HANDLE_SIGNAL_TERMINATED: u64 = 1 << 0;
 pub const HANDLE_SIGNAL_READABLE: u64 = 1 << 1;
 pub const HANDLE_SIGNAL_WRITABLE: u64 = 1 << 2;
 pub const HANDLE_SIGNAL_PEER_CLOSED: u64 = 1 << 3;
+/// The object has no queued or in-flight work that must complete first.
+pub const HANDLE_SIGNAL_IDLE: u64 = 1 << 4;
 pub const HANDLE_WAIT_MANY_MAX_ITEMS: usize = 64;
 
 /// Native result returned by `WaitOnAddress`.
@@ -621,6 +623,15 @@ mod credential_spawn_tests {
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_START));
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_CURRENT));
         assert!(![0, 1, 2].contains(&super::HANDLE_SEEK_END));
+        assert_eq!(super::HANDLE_SIGNAL_IDLE, 1 << 4);
+        assert_eq!(
+            super::HANDLE_SIGNAL_TERMINATED
+                | super::HANDLE_SIGNAL_READABLE
+                | super::HANDLE_SIGNAL_WRITABLE
+                | super::HANDLE_SIGNAL_PEER_CLOSED
+                | super::HANDLE_SIGNAL_IDLE,
+            0x1f
+        );
     }
 }
 

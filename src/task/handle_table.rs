@@ -597,12 +597,16 @@ mod tests {
 
         assert_eq!(provider.signals(), 0);
         provider.update_signals(
-            mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_WRITABLE,
+            mnu_abi::HANDLE_SIGNAL_READABLE
+                | mnu_abi::HANDLE_SIGNAL_WRITABLE
+                | mnu_abi::HANDLE_SIGNAL_IDLE,
             0,
         );
         assert_eq!(
             provider.signals(),
-            mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_WRITABLE
+            mnu_abi::HANDLE_SIGNAL_READABLE
+                | mnu_abi::HANDLE_SIGNAL_WRITABLE
+                | mnu_abi::HANDLE_SIGNAL_IDLE
         );
         provider.update_signals(
             mnu_abi::HANDLE_SIGNAL_PEER_CLOSED,
@@ -610,7 +614,9 @@ mod tests {
         );
         assert_eq!(
             provider.signals(),
-            mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
+            mnu_abi::HANDLE_SIGNAL_READABLE
+                | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
+                | mnu_abi::HANDLE_SIGNAL_IDLE
         );
     }
 }
