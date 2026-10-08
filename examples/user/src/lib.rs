@@ -322,8 +322,14 @@ fn exec_should_be_denied(path: &str, caps: &[&str]) -> bool {
     rc & (1u64 << 63) != 0
 }
 
-pub fn thread_create(entry: u64, stack: u64, arg0: u64) -> u64 {
-    unsafe { syscall3(SYS_THREAD_CREATE, entry, stack, arg0) }
+pub fn thread_create(context: &mnu_abi::ThreadCreateContext) -> u64 {
+    unsafe {
+        syscall2(
+            SYS_THREAD_CREATE,
+            context as *const mnu_abi::ThreadCreateContext as u64,
+            core::mem::size_of::<mnu_abi::ThreadCreateContext>() as u64,
+        )
+    }
 }
 
 pub fn thread_exit(code: u64) -> ! {

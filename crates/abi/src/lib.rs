@@ -194,6 +194,22 @@ pub struct ProcessStatus {
     pub exit_code: u64,
 }
 
+/// Initial userspace register state for a native thread.
+///
+/// This structure contains mechanism only. Language runtimes may use
+/// `thread_local_base` for their own TLS ABI; the kernel does not interpret
+/// the memory it points to.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadCreateContext {
+    pub entry: u64,
+    pub stack_pointer: u64,
+    pub argument: u64,
+    pub thread_local_base: u64,
+    pub flags: u64,
+    pub reserved: [u64; 3],
+}
+
 /// A process-local object handle and the signals a caller wants to observe.
 ///
 /// `observed` is written by `HandleWaitMany`. Signal meanings describe native

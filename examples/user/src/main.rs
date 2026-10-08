@@ -769,7 +769,15 @@ fn run_thread_test() -> bool {
         return false;
     }
     let stack_top = ((stack_base + stack_bytes) & !0xFu64).saturating_sub(24);
-    let tid = user::thread_create(runnable_thread_entry as *const () as u64, stack_top, 0);
+    let context = mnu_abi::ThreadCreateContext {
+        entry: runnable_thread_entry as *const () as u64,
+        stack_pointer: stack_top,
+        argument: 0,
+        thread_local_base: 0,
+        flags: 0,
+        reserved: [0; 3],
+    };
+    let tid = user::thread_create(&context);
     if tid == 0 || is_error(tid) {
         let _ = user::memory_unmap(stack_base, stack_bytes);
         return false;

@@ -161,16 +161,15 @@ process_wait(pid: pid_t, status_ptr: ptr, flags: u64) -> isize
 現在のプロセス内に新しいスレッドを作成します。
 
 ```
-thread_create(entry: ptr, arg: usize, stack: ptr, stack_len: usize, flags: u64) -> tid_t
+thread_create(context: *const ThreadCreateContext, context_len: usize) -> tid_t
 ```
 
-`entry` はスレッド開始関数です。
+`ThreadCreateContext` はスレッド開始関数、初期stack pointer、開始引数、任意の
+thread-local baseを指定するmnu固有の起動コンテキストです。TLS領域の内容や配置は
+language runtimeが管理し、カーネルは解釈しません。
 
-`arg` は開始関数に渡される引数です。
-
-`stack` と `stack_len` はユーザー空間スタックを表します。
-
-不正なentry、stack、stack_lenは `EINVAL` または `EFAULT` とします。
+未知のflags、非zeroのreserved field、不正なentry、stack pointer、thread-local baseは
+`EINVAL` または `EFAULT` とします。
 
 ### thread_exit
 

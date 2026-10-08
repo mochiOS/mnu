@@ -89,11 +89,33 @@ pub fn get_thread_id_by_name(name_ptr: u64, name_len: u64) -> u64 {
 /// thread_create syscall.
 ///
 /// Creates a new usermode thread in the current process. Returns the new TID or an errno.
-pub fn thread_create(entry: u64, stack: u64, arg0: u64) -> u64 {
-    if entry == 0 || stack == 0 {
+pub fn thread_create(context_ptr: u64, context_len: u64) -> u64 {
+    if context_ptr == 0
+        || context_len != core::mem::size_of::<mnu_abi::ThreadCreateContext>() as u64
+    {
         return EINVAL;
     }
-    if !crate::syscall::validate_user_ptr(entry, 1) || !crate::syscall::validate_user_ptr(stack, 16)
+    let mut context = mnu_abi::ThreadCreateContext::default();
+    let context_bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (&mut context as *mut mnu_abi::ThreadCreateContext).cast::<u8>(),
+            core::mem::size_of::<mnu_abi::ThreadCreateContext>(),
+        )
+    };
+    if crate::syscall::copy_from_user(context_ptr, context_bytes).is_err() {
+        return EFAULT;
+    }
+    if context.entry == 0
+        || context.stack_pointer < 16
+        || context.flags != 0
+        || context.reserved != [0; 3]
+    {
+        return EINVAL;
+    }
+    if !crate::syscall::validate_user_ptr(context.entry, 1)
+        || !crate::syscall::validate_user_ptr(context.stack_pointer - 16, 16)
+        || (context.thread_local_base != 0
+            && !crate::syscall::validate_user_ptr(context.thread_local_base, 8))
     {
         return EFAULT;
     }
@@ -121,10 +143,16 @@ pub fn thread_create(entry: u64, stack: u64, arg0: u64) -> u64 {
         None => return ENOMEM,
     };
     let mut thread =
-        crate::task::Thread::new_usermode(pid, "thread", entry, stack, arg0, kstack, kstack_size);
-    if let Some(fs_base) = crate::task::with_thread(current_tid, |t| t.fs_base()) {
-        thread.set_fs_base(fs_base);
-    }
+        crate::task::Thread::new_usermode(
+            pid,
+            "thread",
+            context.entry,
+            context.stack_pointer,
+            context.argument,
+            kstack,
+            kstack_size,
+        );
+    thread.set_fs_base(context.thread_local_base);
     match crate::task::add_thread(thread) {
         Some(tid) => tid.as_u64(),
         None => {
