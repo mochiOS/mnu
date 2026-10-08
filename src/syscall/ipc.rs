@@ -6,9 +6,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-use crate::task::{
-    FileHandle, FileHandleCap, HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry,
-};
+use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
 use super::{EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EMSGSIZE, ENOSPC};
 
@@ -18,7 +16,6 @@ const MESSAGE_CACHE_CAP: usize = MAILBOX_CAP;
 const MAX_MSG_SIZE: usize = crate::config::IPC_MESSAGE_CAPACITY;
 const MAX_EXT_PAGES: usize = 262_144;
 const MAX_INLINE_EXT_PAGES: usize = 16;
-const MAX_FILE_HANDLES: usize = mnu_abi::IPC_MAX_FILE_HANDLES;
 const MAX_OBJECT_HANDLES: usize = mnu_abi::IPC_MAX_OBJECT_HANDLES;
 
 /// endpoint ベース IPC への移行用ハンドル
@@ -437,7 +434,6 @@ pub fn call(
         reply_ptr,
         reply_len,
         None,
-        None,
     );
     #[cfg(feature = "performance-instrumentation")]
     if (result as i64) >= 0 {
@@ -447,72 +443,6 @@ pub fn call(
         );
     }
     result
-}
-
-/// Performs a synchronous IPC call whose request carries rights-restricted
-/// file handles. Replies use the existing byte-only reply path.
-pub fn call_handles(
-    dest_endpoint_handle: u64,
-    req_ptr: u64,
-    req_len: u64,
-    reply_ptr: u64,
-    reply_len: u64,
-    handles_ptr: u64,
-) -> u64 {
-    if !crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::IpcClient,
-        crate::capability::Capability::IpcServer,
-    ]) {
-        return EACCES;
-    }
-    let Some(dest_record) = endpoint_record_from_handle(dest_endpoint_handle) else {
-        return EINVAL;
-    };
-    if !dest_record.rights.contains(EndpointRights::RECV) {
-        return EACCES;
-    }
-    let caller = match crate::task::current_thread_id() {
-        Some(id) => id.as_u64(),
-        None => return EINVAL,
-    };
-    let sender = match ensure_endpoint_for_thread(caller) {
-        Some(handle) => handle,
-        None => return EINVAL,
-    };
-    let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
-    let sent = loop {
-        let attachments = match decode_outgoing_file_handles(handles_ptr) {
-            Ok(handles) => handles,
-            Err(error) => return error,
-        };
-        let status = send_to_thread_id_with_kind(
-            dest_record.thread_id,
-            sender,
-            call_id,
-            req_ptr,
-            req_len,
-            false,
-            true,
-            attachments,
-        );
-        if status != EAGAIN {
-            break status;
-        }
-        crate::task::yield_now();
-    };
-    if sent != 0 {
-        return sent;
-    }
-    recv_blocking_reply_for_thread(
-        caller,
-        caller,
-        dest_endpoint_handle,
-        call_id,
-        reply_ptr,
-        reply_len,
-        None,
-        None,
-    )
 }
 
 /// Performs a synchronous IPC call with rights-restricted generic object
@@ -564,7 +494,6 @@ pub fn call_object_handles(
             req_len,
             false,
             true,
-            FileHandleAttachments::empty(),
             attachments,
         );
         if status != EAGAIN {
@@ -582,7 +511,6 @@ pub fn call_object_handles(
         call_id,
         reply_ptr,
         reply_len,
-        None,
         Some(handles_ptr),
     )
 }
@@ -654,7 +582,6 @@ fn reply_with_attachments(
         len,
         true,
         false,
-        FileHandleAttachments::empty(),
         object_handles,
     );
     if status == 0 {
@@ -675,7 +602,6 @@ fn recv_blocking_reply_for_thread(
     expected_call_id: u64,
     buf_ptr: u64,
     max_len: u64,
-    file_handles_output: Option<u64>,
     object_handles_output: Option<u64>,
 ) -> u64 {
     let (idx, receiver_generation) =
@@ -700,7 +626,6 @@ fn recv_blocking_reply_for_thread(
                 receiver_generation,
                 buf_ptr,
                 max_copy,
-                file_handles_output.is_some(),
                 object_handles_output.is_some(),
             ) {
                 Ok(Some(v)) => Some(v),
@@ -718,7 +643,6 @@ fn recv_blocking_reply_for_thread(
                     receiver_thread_id,
                     buf_ptr,
                     receive,
-                    file_handles_output,
                     object_handles_output,
                 ) {
                     Ok(result) => result,
@@ -737,7 +661,6 @@ fn recv_blocking_reply_for_thread(
                         receiver_generation,
                         buf_ptr,
                         max_copy,
-                        file_handles_output.is_some(),
                         object_handles_output.is_some(),
                     );
                     if let Ok(Some(receive)) = second_try {
@@ -749,7 +672,6 @@ fn recv_blocking_reply_for_thread(
                             receiver_thread_id,
                             buf_ptr,
                             receive,
-                            file_handles_output,
                             object_handles_output,
                         ) {
                             Ok(result) => result,
@@ -788,13 +710,13 @@ pub fn wait(buf_ptr: u64, max_len: u64, blocking: u64) -> u64 {
     };
     let _ = ensure_endpoint_for_thread(current);
     if blocking == 0 {
-        return recv_from_thread_nonblocking(current, current, buf_ptr, max_len, None, None);
+        return recv_from_thread_nonblocking(current, current, buf_ptr, max_len, None);
     }
     let target = match resolve_receive_thread(blocking, current) {
         Ok(thread_id) => thread_id,
         Err(error) => return error,
     };
-    recv_blocking_for_thread(target, current, buf_ptr, max_len, None, None)
+    recv_blocking_for_thread(target, current, buf_ptr, max_len, None)
 }
 
 pub fn send_to_endpoint(endpoint: IpcEndpoint, buf_ptr: u64, len: u64) -> u64 {
@@ -851,93 +773,6 @@ fn record_ipc_copy(bytes: usize) {
         crate::performance::CounterMetric::IpcBytesCopied,
         bytes as u64,
     );
-}
-
-fn decode_outgoing_file_handles(pointer: u64) -> Result<FileHandleAttachments, u64> {
-    if pointer == 0 {
-        return Err(EFAULT);
-    }
-    let mut bytes = [0u8; core::mem::size_of::<mnu_abi::IpcFileHandles>()];
-    crate::syscall::copy_from_user(pointer, &mut bytes)?;
-    let count = u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| EINVAL)?) as usize;
-    let reserved = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| EINVAL)?);
-    if count > MAX_FILE_HANDLES || reserved != 0 {
-        return Err(EINVAL);
-    }
-    let process_id = crate::syscall::security::current_process_id().ok_or(EINVAL)?;
-    let mut attachments = FileHandleAttachments::empty();
-    for index in 0..count {
-        let offset = 8 + index * 8;
-        let fd = i32::from_le_bytes(bytes[offset..offset + 4].try_into().map_err(|_| EINVAL)?);
-        let rights = u32::from_le_bytes(
-            bytes[offset + 4..offset + 8]
-                .try_into()
-                .map_err(|_| EINVAL)?,
-        );
-        if fd < crate::task::FD_BASE as i32 {
-            return Err(EBADF);
-        }
-        let fresh_offset = rights & mnu_abi::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET != 0;
-        let requested_rights = rights & !mnu_abi::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET;
-        let requested = FileHandleCap::from_bits(requested_rights).ok_or(EINVAL)?;
-        let duplicated = crate::task::with_process(process_id, |process| {
-            let source = process.fd_table().get(fd as usize).ok_or(EBADF)?;
-            let duplicate = if fresh_offset {
-                source.duplicate_restricted_with_fresh_offset(requested)
-            } else {
-                source.duplicate_restricted(requested)
-            };
-            duplicate.map(Box::new).ok_or(EACCES)
-        })
-        .ok_or(EBADF)??;
-        attachments.handles[index] = Some(duplicated);
-        attachments.count += 1;
-    }
-    Ok(attachments)
-}
-
-fn install_received_file_handles(
-    receiver_thread_id: u64,
-    mut attachments: FileHandleAttachments,
-    output_pointer: u64,
-) -> Result<(), u64> {
-    let process_id = crate::task::thread_to_process_id(receiver_thread_id).ok_or(EINVAL)?;
-    let mut installed = [0usize; MAX_FILE_HANDLES];
-    let mut rights = [0u32; MAX_FILE_HANDLES];
-    let count = attachments.count;
-    let result = crate::task::with_process_mut(process_id, |process| {
-        for index in 0..count {
-            let handle = attachments.handles[index].take().ok_or(EINVAL)?;
-            rights[index] = handle.cap.bits();
-            let Some(fd) = process.fd_table_mut().alloc(handle, true) else {
-                for installed_fd in installed[..index].iter().copied() {
-                    let _ = process.fd_table_mut().take(installed_fd);
-                }
-                return Err(ENOSPC);
-            };
-            installed[index] = fd;
-        }
-        Ok(())
-    })
-    .ok_or(EINVAL)?;
-    result?;
-
-    let mut output = [0u8; core::mem::size_of::<mnu_abi::IpcFileHandles>()];
-    output[0..4].copy_from_slice(&(count as u32).to_le_bytes());
-    for index in 0..count {
-        let offset = 8 + index * 8;
-        output[offset..offset + 4].copy_from_slice(&(installed[index] as i32).to_le_bytes());
-        output[offset + 4..offset + 8].copy_from_slice(&rights[index].to_le_bytes());
-    }
-    if let Err(error) = crate::syscall::copy_to_user(output_pointer, &output) {
-        let _ = crate::task::with_process_mut(process_id, |process| {
-            for fd in installed[..count].iter().copied() {
-                let _ = process.fd_table_mut().take(fd);
-            }
-        });
-        return Err(error);
-    }
-    Ok(())
 }
 
 fn decode_outgoing_object_handles(pointer: u64) -> Result<ObjectHandleAttachments, u64> {
@@ -1039,11 +874,6 @@ struct ExternalPages {
     inline_pages: [u64; MAX_INLINE_EXT_PAGES],
 }
 
-struct FileHandleAttachments {
-    count: usize,
-    handles: [Option<Box<FileHandle>>; MAX_FILE_HANDLES],
-}
-
 #[derive(Debug)]
 struct ObjectHandleAttachments {
     count: usize,
@@ -1060,28 +890,6 @@ impl ObjectHandleAttachments {
 
     const fn is_empty(&self) -> bool {
         self.count == 0
-    }
-}
-
-impl FileHandleAttachments {
-    const fn empty() -> Self {
-        Self {
-            count: 0,
-            handles: [const { None }; MAX_FILE_HANDLES],
-        }
-    }
-
-    const fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-}
-
-impl core::fmt::Debug for FileHandleAttachments {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("FileHandleAttachments")
-            .field("count", &self.count)
-            .finish_non_exhaustive()
     }
 }
 
@@ -1114,7 +922,6 @@ pub struct Message {
     len: usize,
     data: [u8; MAX_MSG_SIZE],
     ext_pages: ExternalPages,
-    file_handles: FileHandleAttachments,
     object_handles: ObjectHandleAttachments,
 }
 
@@ -1131,7 +938,6 @@ impl Message {
             len: 0,
             data: [0; MAX_MSG_SIZE],
             ext_pages: ExternalPages::empty(),
-            file_handles: FileHandleAttachments::empty(),
             object_handles: ObjectHandleAttachments::empty(),
         }
     }
@@ -1144,7 +950,6 @@ struct UserReceive {
     expects_reply: bool,
     call_id: u64,
     external_header: [u8; 16],
-    file_handles: FileHandleAttachments,
     object_handles: ObjectHandleAttachments,
 }
 
@@ -1335,7 +1140,6 @@ impl Mailbox {
         msg.call_id = call_id;
         msg.len = data.len();
         msg.ext_pages = ExternalPages::empty();
-        msg.file_handles = FileHandleAttachments::empty();
         msg.object_handles = ObjectHandleAttachments::empty();
         if !data.is_empty() {
             msg.data[..data.len()].copy_from_slice(data);
@@ -1355,12 +1159,15 @@ impl Mailbox {
         receiver_generation: u64,
         buf_ptr: u64,
         max_copy: usize,
-        accept_file_handles: bool,
         accept_object_handles: bool,
     ) -> Result<Option<UserReceive>, u64> {
         while self.count > 0 {
             let slot_idx = self.queue[self.head] as usize;
-            let Some(msg) = self.slots.get_mut(slot_idx).and_then(Option::as_deref_mut) else {
+            let Some(msg) = self
+                .slots
+                .get_mut(slot_idx)
+                .and_then(Option::as_deref_mut)
+            else {
                 self.quarantine("ipc mailbox queue points to an empty slot");
                 return Ok(None);
             };
@@ -1373,9 +1180,6 @@ impl Mailbox {
                     return Ok(None);
                 }
                 continue;
-            }
-            if !accept_file_handles && !msg.file_handles.is_empty() {
-                return Err(EMSGSIZE);
             }
             if !accept_object_handles && !msg.object_handles.is_empty() {
                 return Err(EMSGSIZE);
@@ -1403,10 +1207,6 @@ impl Mailbox {
                 expects_reply: msg.expects_reply,
                 call_id: msg.call_id,
                 external_header,
-                file_handles: core::mem::replace(
-                    &mut msg.file_handles,
-                    FileHandleAttachments::empty(),
-                ),
                 object_handles: core::mem::replace(
                     &mut msg.object_handles,
                     ObjectHandleAttachments::empty(),
@@ -1480,7 +1280,6 @@ impl Mailbox {
         receiver_generation: u64,
         buf_ptr: u64,
         max_copy: usize,
-        accept_file_handles: bool,
         accept_object_handles: bool,
     ) -> Result<Option<UserReceive>, u64> {
         if self.count == 0 {
@@ -1492,11 +1291,7 @@ impl Mailbox {
             let Some(slot_idx) = self.dequeue_slot() else {
                 return Ok(None);
             };
-            let Some(msg) = self
-                .slots
-                .get_mut(slot_idx)
-                .and_then(Option::as_deref_mut)
-            else {
+            let Some(msg) = self.slots.get_mut(slot_idx).and_then(Option::as_deref_mut) else {
                 self.quarantine("ipc mailbox queue points to an empty slot");
                 return Ok(None);
             };
@@ -1514,9 +1309,7 @@ impl Mailbox {
                 continue;
             }
 
-            if (!accept_file_handles && !msg.file_handles.is_empty())
-                || (!accept_object_handles && !msg.object_handles.is_empty())
-            {
+            if !accept_object_handles && !msg.object_handles.is_empty() {
                 if !self.free_slot(slot_idx) {
                     return Ok(None);
                 }
@@ -1552,10 +1345,6 @@ impl Mailbox {
                 expects_reply: false,
                 call_id: msg.call_id,
                 external_header,
-                file_handles: core::mem::replace(
-                    &mut msg.file_handles,
-                    FileHandleAttachments::empty(),
-                ),
                 object_handles: core::mem::replace(
                     &mut msg.object_handles,
                     ObjectHandleAttachments::empty(),
@@ -1672,9 +1461,6 @@ impl MessageCache {
 }
 
 fn wipe_message(mut message: Box<Message>) -> Box<Message> {
-    for handle in &mut message.file_handles.handles {
-        drop(handle.take());
-    }
     // The volatile replacement keeps message contents from surviving in a
     // reusable kernel heap allocation after the queue releases them.
     unsafe {
@@ -2130,7 +1916,7 @@ fn send_to_thread_id(dest_thread_id: u64, sender_handle: u64, buf_ptr: u64, len:
         len,
         false,
         false,
-        FileHandleAttachments::empty(),
+        ObjectHandleAttachments::empty(),
     )
 }
 
@@ -2149,7 +1935,7 @@ fn send_call_to_thread_id(
         len,
         false,
         true,
-        FileHandleAttachments::empty(),
+        ObjectHandleAttachments::empty(),
     )
 }
 
@@ -2161,7 +1947,7 @@ fn send_to_thread_id_with_kind(
     len: u64,
     is_reply: bool,
     expects_reply: bool,
-    file_handles: FileHandleAttachments,
+    object_handles: ObjectHandleAttachments,
 ) -> u64 {
     send_to_thread_id_with_attachments(
         dest_thread_id,
@@ -2171,8 +1957,7 @@ fn send_to_thread_id_with_kind(
         len,
         is_reply,
         expects_reply,
-        file_handles,
-        ObjectHandleAttachments::empty(),
+        object_handles,
     )
 }
 
@@ -2185,7 +1970,6 @@ fn send_to_thread_id_with_attachments(
     len: u64,
     is_reply: bool,
     expects_reply: bool,
-    file_handles: FileHandleAttachments,
     object_handles: ObjectHandleAttachments,
 ) -> u64 {
     if dest_thread_id == 0 {
@@ -2230,7 +2014,6 @@ fn send_to_thread_id_with_attachments(
     message.call_id = call_id;
     message.len = len;
     message.ext_pages = ExternalPages::empty();
-    message.file_handles = file_handles;
     message.object_handles = object_handles;
 
     // ユーザー空間から、キューが所有する領域へ直接コピーする。
@@ -2308,48 +2091,6 @@ pub fn send(dest_endpoint_handle: u64, buf_ptr: u64, len: u64) -> u64 {
     send_to_thread_id(dest_thread_id, sender, buf_ptr, len)
 }
 
-/// Sends one IPC message with explicitly attached, rights-restricted file handles.
-pub fn send_handles(dest_endpoint_handle: u64, buf_ptr: u64, len: u64, handles_ptr: u64) -> u64 {
-    if !crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::IpcClient,
-        crate::capability::Capability::IpcServer,
-    ]) {
-        return EACCES;
-    }
-    let Some(dest_record) = endpoint_record_from_handle(dest_endpoint_handle) else {
-        return EINVAL;
-    };
-    if !dest_record.rights.contains(EndpointRights::RECV) {
-        return EACCES;
-    }
-    let sender = match crate::task::current_thread_id() {
-        Some(id) => match ensure_endpoint_for_thread(id.as_u64()) {
-            Some(handle) => handle,
-            None => return EINVAL,
-        },
-        None => return EINVAL,
-    };
-    if let Some(sender_record) = endpoint_record_from_handle(sender) {
-        if !sender_record.rights.contains(EndpointRights::SEND) {
-            return EACCES;
-        }
-    }
-    let file_handles = match decode_outgoing_file_handles(handles_ptr) {
-        Ok(handles) => handles,
-        Err(error) => return error,
-    };
-    send_to_thread_id_with_kind(
-        dest_record.thread_id,
-        sender,
-        0,
-        buf_ptr,
-        len,
-        false,
-        false,
-        file_handles,
-    )
-}
-
 /// Sends one IPC message with rights-restricted process-local object handles.
 pub fn send_object_handles(
     dest_endpoint_handle: u64,
@@ -2388,7 +2129,6 @@ pub fn send_object_handles(
         len,
         false,
         false,
-        FileHandleAttachments::empty(),
         object_handles,
     )
 }
@@ -2646,14 +2386,8 @@ fn finish_user_receive(
     receiver_thread_id: u64,
     buf_ptr: u64,
     mut receive: UserReceive,
-    file_handles_output: Option<u64>,
     object_handles_output: Option<u64>,
 ) -> Result<(u64, usize, bool), u64> {
-    if let Some(output) = file_handles_output {
-        install_received_file_handles(receiver_thread_id, receive.file_handles, output)?;
-    } else if !receive.file_handles.is_empty() {
-        return Err(EMSGSIZE);
-    }
     if let Some(output) = object_handles_output {
         install_received_object_handles(receiver_thread_id, receive.object_handles, output)?;
     } else if !receive.object_handles.is_empty() {
@@ -2688,7 +2422,6 @@ fn recv_from_thread_nonblocking(
     caller_thread_id: u64,
     buf_ptr: u64,
     max_len: u64,
-    file_handles_output: Option<u64>,
     object_handles_output: Option<u64>,
 ) -> u64 {
     let (idx, receiver_generation) =
@@ -2710,7 +2443,6 @@ fn recv_from_thread_nonblocking(
             receiver_generation,
             buf_ptr,
             max_copy,
-            file_handles_output.is_some(),
             object_handles_output.is_some(),
         ) {
             Ok(Some(receive)) => {
@@ -2728,13 +2460,7 @@ fn recv_from_thread_nonblocking(
         }
     };
     let (from, copy_len, _) =
-        match finish_user_receive(
-            receiver_thread_id,
-            buf_ptr,
-            receive,
-            file_handles_output,
-            object_handles_output,
-        ) {
+        match finish_user_receive(receiver_thread_id, buf_ptr, receive, object_handles_output) {
             Ok(result) => result,
             Err(error) => return error,
         };
@@ -2753,7 +2479,6 @@ fn recv_blocking_for_thread(
     caller_thread_id: u64,
     buf_ptr: u64,
     max_len: u64,
-    file_handles_output: Option<u64>,
     object_handles_output: Option<u64>,
 ) -> u64 {
     let (idx, receiver_generation) =
@@ -2776,7 +2501,6 @@ fn recv_blocking_for_thread(
                 receiver_generation,
                 buf_ptr,
                 max_copy,
-                file_handles_output.is_some(),
                 object_handles_output.is_some(),
             ) {
                 Ok(Some(receive)) => {
@@ -2803,7 +2527,6 @@ fn recv_blocking_for_thread(
                     receiver_thread_id,
                     buf_ptr,
                     receive,
-                    file_handles_output,
                     object_handles_output,
                 ) {
                     Ok(result) => result,
@@ -2826,7 +2549,6 @@ fn recv_blocking_for_thread(
                         receiver_generation,
                         buf_ptr,
                         max_copy,
-                        file_handles_output.is_some(),
                         object_handles_output.is_some(),
                     );
                     if let Ok(Some(receive)) = second_try {
@@ -2845,7 +2567,6 @@ fn recv_blocking_for_thread(
                             receiver_thread_id,
                             buf_ptr,
                             receive,
-                            file_handles_output,
                             object_handles_output,
                         ) {
                             Ok(result) => result,
@@ -2904,7 +2625,7 @@ pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
             }
         }
     }
-    recv_from_thread_nonblocking(receiver, receiver, buf_ptr, max_len, None, None)
+    recv_from_thread_nonblocking(receiver, receiver, buf_ptr, max_len, None)
 }
 
 /// IPC受信（ブロッキング版）
@@ -2924,44 +2645,7 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
             }
         }
     }
-    recv_blocking_for_thread(receiver, receiver, buf_ptr, max_len, None, None)
-}
-
-/// Receives a message and installs any attached file handles in this process.
-///
-/// `blocking` follows `ipc_wait`: zero performs a non-blocking receive; a
-/// non-zero endpoint selects the receiving thread and waits for a message.
-pub fn recv_handles(buf_ptr: u64, max_len: u64, handles_ptr: u64, blocking: u64) -> u64 {
-    if handles_ptr == 0 {
-        return EFAULT;
-    }
-    let current = match crate::task::current_thread_id() {
-        Some(id) => id.as_u64(),
-        None => return EINVAL,
-    };
-    let _ = ensure_endpoint_for_thread(current);
-    if blocking == 0 {
-        return recv_from_thread_nonblocking(
-            current,
-            current,
-            buf_ptr,
-            max_len,
-            Some(handles_ptr),
-            None,
-        );
-    }
-    let target = match resolve_receive_thread(blocking, current) {
-        Ok(thread_id) => thread_id,
-        Err(error) => return error,
-    };
-    recv_blocking_for_thread(
-        target,
-        current,
-        buf_ptr,
-        max_len,
-        Some(handles_ptr),
-        None,
-    )
+    recv_blocking_for_thread(receiver, receiver, buf_ptr, max_len, None)
 }
 
 /// Receives one message and installs attached generic object handles.
@@ -2980,27 +2664,13 @@ pub fn recv_object_handles(
     };
     let _ = ensure_endpoint_for_thread(current);
     if blocking == 0 {
-        return recv_from_thread_nonblocking(
-            current,
-            current,
-            buf_ptr,
-            max_len,
-            None,
-            Some(handles_ptr),
-        );
+        return recv_from_thread_nonblocking(current, current, buf_ptr, max_len, Some(handles_ptr));
     }
     let target = match resolve_receive_thread(blocking, current) {
         Ok(thread_id) => thread_id,
         Err(error) => return error,
     };
-    recv_blocking_for_thread(
-        target,
-        current,
-        buf_ptr,
-        max_len,
-        None,
-        Some(handles_ptr),
-    )
+    recv_blocking_for_thread(target, current, buf_ptr, max_len, Some(handles_ptr))
 }
 
 /// カーネル内部から、特定送信元のIPCをノンブロッキング受信する
@@ -3116,10 +2786,8 @@ pub fn recv_blocking_from_sender_for_kernel(
 mod tests {
     use alloc::boxed::Box;
 
-    use super::{
-        FileHandleAttachments, Mailbox, Message, ObjectHandleAttachments, ReplyTarget,
-    };
-    use crate::task::{FileHandle, HandleRights, KernelObject, ObjectHandleEntry};
+    use super::{Mailbox, Message, ObjectHandleAttachments, ReplyTarget};
+    use crate::task::{HandleRights, KernelObject, ObjectHandleEntry};
 
     fn endpoint_entry() -> ObjectHandleEntry {
         ObjectHandleEntry::new(
@@ -3130,33 +2798,6 @@ mod tests {
             },
             HandleRights::SEND,
         )
-    }
-
-    #[test]
-    fn legacy_receive_does_not_consume_attached_handles() {
-        let mut mailbox = Mailbox::new();
-        let mut message = Box::new(Message::empty());
-        message.from = 10;
-        message.to = 20;
-        message.to_slot = 1;
-        message.to_generation = 2;
-        message.file_handles = FileHandleAttachments::empty();
-        message.file_handles.count = 1;
-        message.file_handles.handles[0] = Some(Box::new(FileHandle::new_pipe_read(usize::MAX)));
-        mailbox.enqueue_message(message).unwrap();
-
-        assert!(matches!(
-            mailbox.pop_valid_for_receiver_to_user(20, 1, 2, 0, 0, false, false),
-            Err(error) if error == mnu_abi::EMSGSIZE
-        ));
-        assert_eq!(mailbox.count, 1);
-
-        let received = mailbox
-            .pop_valid_for_receiver_to_user(20, 1, 2, 0, 0, true, false)
-            .unwrap()
-            .expect("attached message should remain queued");
-        assert_eq!(received.file_handles.count, 1);
-        assert_eq!(mailbox.count, 0);
     }
 
     #[test]
@@ -3190,13 +2831,13 @@ mod tests {
 
         assert_eq!(
             mailbox
-                .pop_reply_to_user(11, 200, 20, 1, 2, 0, 0, false, false)
+                .pop_reply_to_user(11, 200, 20, 1, 2, 0, 0, false)
                 .map(|received| received.map(|value| (value.from, value.copy_len))),
             Ok(Some((11, 0)))
         );
         assert_eq!(
             mailbox
-                .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false, false)
+                .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false)
                 .map(|received| received.map(|value| (value.from, value.copy_len))),
             Ok(Some((10, 0)))
         );
@@ -3214,13 +2855,13 @@ mod tests {
 
         assert_eq!(
             mailbox
-                .pop_reply_to_user(10, 101, 20, 1, 2, 0, 0, false, false)
+                .pop_reply_to_user(10, 101, 20, 1, 2, 0, 0, false)
                 .map(|received| received.map(|value| (value.from, value.copy_len))),
             Ok(Some((10, 0)))
         );
         assert_eq!(
             mailbox
-                .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false, false)
+                .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false)
                 .map(|received| received.map(|value| (value.from, value.copy_len))),
             Ok(Some((10, 0)))
         );
@@ -3242,7 +2883,7 @@ mod tests {
         mailbox.enqueue_message(message).unwrap();
 
         let received = mailbox
-            .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false, true)
+            .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, true)
             .unwrap()
             .expect("reply should be received");
         assert_eq!(received.object_handles.count, 1);
@@ -3265,7 +2906,7 @@ mod tests {
         mailbox.enqueue_message(message).unwrap();
 
         assert!(matches!(
-            mailbox.pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false, false),
+            mailbox.pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false),
             Err(error) if error == mnu_abi::EMSGSIZE
         ));
         assert_eq!(mailbox.count, 0);

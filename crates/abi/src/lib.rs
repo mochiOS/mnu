@@ -351,9 +351,6 @@ pub struct IpcObjectHandles {
     pub handles: [IpcObjectHandle; IPC_MAX_OBJECT_HANDLES],
 }
 
-/// Maximum number of file handles carried by one IPC message.
-pub const IPC_MAX_FILE_HANDLES: usize = 4;
-
 pub const FILE_HANDLE_RIGHT_READ: u32 = 1 << 0;
 pub const FILE_HANDLE_RIGHT_WRITE: u32 = 1 << 1;
 pub const FILE_HANDLE_RIGHT_SEEK: u32 = 1 << 2;
@@ -366,11 +363,6 @@ pub const FILE_HANDLE_RIGHT_SYNC: u32 = 1 << 9;
 pub const FILE_HANDLE_RIGHT_TRUNCATE: u32 = 1 << 10;
 /// Allows the receiving process to attach the handle to another IPC message.
 pub const FILE_HANDLE_RIGHT_TRANSFER: u32 = 1 << 11;
-/// Requests a new open-file description whose offset starts at zero.
-///
-/// This is an IPC transfer option, not a capability granted to the receiver.
-/// The kernel strips it before validating and installing the requested rights.
-pub const IPC_FILE_HANDLE_FLAG_FRESH_OFFSET: u32 = 1 << 31;
 pub const FILE_HANDLE_RIGHT_ALL: u32 = FILE_HANDLE_RIGHT_READ
     | FILE_HANDLE_RIGHT_WRITE
     | FILE_HANDLE_RIGHT_SEEK
@@ -382,26 +374,6 @@ pub const FILE_HANDLE_RIGHT_ALL: u32 = FILE_HANDLE_RIGHT_READ
     | FILE_HANDLE_RIGHT_SYNC
     | FILE_HANDLE_RIGHT_TRUNCATE
     | FILE_HANDLE_RIGHT_TRANSFER;
-
-/// One file descriptor and the rights requested for an IPC transfer.
-///
-/// On send, `fd` belongs to the sender. On receive, it is replaced with the
-/// descriptor installed in the receiver.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct IpcFileHandle {
-    pub fd: i32,
-    pub rights: u32,
-}
-
-/// Fixed-size file-handle attachment buffer used by IPC syscalls.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct IpcFileHandles {
-    pub count: u32,
-    pub reserved: u32,
-    pub handles: [IpcFileHandle; IPC_MAX_FILE_HANDLES],
-}
 
 /// `StorageControl` が受け取る、プラットフォーム固有ストレージ操作の固定長要求です。
 #[repr(C)]
@@ -613,17 +585,6 @@ mod credential_spawn_tests {
     #[test]
     fn boot_system_slot_syscall_number_is_stable() {
         assert_eq!(super::SyscallNumber::BootSystemSlot as u64, 618);
-    }
-
-    #[test]
-    fn ipc_file_handle_abi_is_stable() {
-        assert_eq!(core::mem::size_of::<super::IpcFileHandle>(), 8);
-        assert_eq!(core::mem::size_of::<super::IpcFileHandles>(), 40);
-        assert_eq!(super::FILE_HANDLE_RIGHT_ALL & (1 << 4), 0);
-        assert_eq!(
-            super::FILE_HANDLE_RIGHT_ALL & super::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET,
-            0
-        );
     }
 
     #[test]
