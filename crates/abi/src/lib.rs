@@ -141,6 +141,7 @@ pub enum SyscallNumber {
     HandleSameObject = 666,
     ProviderObjectSignal = 667,
     HandleControl = 668,
+    ProcessSuspendCurrent = 669,
     CheckGravityExist = 999,
 }
 
@@ -456,6 +457,7 @@ mod object_handle_tests {
             SyscallNumber::HandleSameObject as u64,
             SyscallNumber::ProviderObjectSignal as u64,
             SyscallNumber::HandleControl as u64,
+            SyscallNumber::ProcessSuspendCurrent as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -598,6 +600,7 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::HandleSameObject as u64, 666);
         assert_eq!(super::SyscallNumber::ProviderObjectSignal as u64, 667);
         assert_eq!(super::SyscallNumber::HandleControl as u64, 668);
+        assert_eq!(super::SyscallNumber::ProcessSuspendCurrent as u64, 669);
         assert_eq!(super::SyscallNumber::StreamPairCreate as u64, 649);
         assert_eq!(super::SyscallNumber::HandleOptionsGet as u64, 650);
         assert_eq!(super::SyscallNumber::HandleOptionsSet as u64, 651);

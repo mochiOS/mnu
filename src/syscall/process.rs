@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{EAGAIN, EFAULT, EINVAL, ENOMEM, ENOSPC, ENOSYS, EPERM, SUCCESS};
+use super::types::{EAGAIN, EFAULT, EINVAL, ENOMEM, ENOSPC, ENOSYS, EPERM, ESRCH, SUCCESS};
 use crate::task::ThreadId;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -446,7 +446,7 @@ fn clone_current_process() -> u64 {
         kstack,
         kstack_size,
     );
-    child_thread.set_state(crate::task::ThreadState::Blocked);
+    child_thread.suspend();
     if crate::task::add_thread(child_thread).is_none() {
         crate::task::free_kernel_stack(kstack);
         let _ = crate::task::with_process_mut(parent_pid, |process| {
@@ -465,6 +465,28 @@ fn clone_current_process() -> u64 {
 /// value from the cloned syscall frame.
 pub fn clone_process() -> u64 {
     clone_current_process()
+}
+
+/// Suspends every thread in the current process until a holder of a process
+/// handle resumes it. This is a native lifecycle primitive; the kernel does
+/// not assign any POSIX signal or job-control meaning to the suspension.
+pub fn suspend_current_process() -> u64 {
+    let Some(process_id) = crate::syscall::security::current_process_id() else {
+        return EINVAL;
+    };
+    let Some(thread_id) = crate::task::current_thread_id() else {
+        return ESRCH;
+    };
+    if crate::task::suspend_process_threads(process_id) == 0 {
+        return ESRCH;
+    }
+    while crate::task::with_thread(thread_id, |thread| thread.is_scheduling_suspended())
+        .unwrap_or(false)
+    {
+        crate::task::yield_now();
+        core::hint::spin_loop();
+    }
+    SUCCESS
 }
 
 /// Sleepシステムコール

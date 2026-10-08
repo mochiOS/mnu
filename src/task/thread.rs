@@ -357,6 +357,8 @@ pub struct Thread {
     name_len: usize,
     /// 現在の状態
     state: ThreadState,
+    /// Excludes this thread from scheduling without changing its wait state.
+    scheduling_suspended: bool,
     /// CPU that owns this thread after its first dispatch.
     cpu_affinity: Option<usize>,
     /// CPUコンテキスト
@@ -843,6 +845,7 @@ impl Thread {
             name: name_buf,
             name_len: len,
             state: ThreadState::Ready,
+            scheduling_suspended: false,
             cpu_affinity: None,
             context,
             kernel_stack,
@@ -965,6 +968,7 @@ impl Thread {
             name: name_buf,
             name_len: len,
             state: ThreadState::Ready,
+            scheduling_suspended: false,
             cpu_affinity: None,
             context,
             kernel_stack,
@@ -1068,6 +1072,7 @@ impl Thread {
             ],
             name_len: 4,
             state: ThreadState::Ready,
+            scheduling_suspended: false,
             cpu_affinity: None,
             context,
             kernel_stack,
@@ -1238,6 +1243,26 @@ impl Thread {
         self.state = state;
     }
 
+    pub fn suspend(&mut self) -> bool {
+        if self.scheduling_suspended || self.state == ThreadState::Terminated {
+            return false;
+        }
+        self.scheduling_suspended = true;
+        true
+    }
+
+    pub fn resume(&mut self) -> bool {
+        if !self.scheduling_suspended {
+            return false;
+        }
+        self.scheduling_suspended = false;
+        true
+    }
+
+    pub fn is_scheduling_suspended(&self) -> bool {
+        self.scheduling_suspended
+    }
+
     pub fn cpu_affinity(&self) -> Option<usize> {
         self.cpu_affinity
     }
@@ -1371,7 +1396,8 @@ impl ThreadQueue {
         }
 
         let id = thread.id();
-        let is_ready = thread.state() == ThreadState::Ready;
+        let is_ready =
+            thread.state() == ThreadState::Ready && !thread.is_scheduling_suspended();
 
         // 空きスロットを探す
         for (idx, slot) in self.threads.iter_mut().enumerate() {
@@ -1531,7 +1557,7 @@ impl ThreadQueue {
             return false;
         };
         thread.set_state(state);
-        if state == ThreadState::Ready {
+        if thread.state() == ThreadState::Ready && !thread.is_scheduling_suspended() {
             self.ready_bitmap |= 1u64 << slot;
         } else {
             self.ready_bitmap &= !(1u64 << slot);
@@ -1555,6 +1581,42 @@ impl ThreadQueue {
             .filter_map(|slot| slot.as_ref())
             .filter(|t| t.state() == state)
             .count()
+    }
+
+    pub fn suspend_process(&mut self, process_id: ProcessId) -> usize {
+        let mut suspended = 0;
+        for (slot, thread) in self.threads.iter_mut().enumerate() {
+            let Some(thread) = thread.as_mut() else {
+                continue;
+            };
+            if thread.process_id() == process_id && thread.suspend() {
+                self.ready_bitmap &= !(1u64 << slot);
+                suspended += 1;
+            }
+        }
+        suspended
+    }
+
+    pub fn resume_process(&mut self, process_id: ProcessId) -> Option<usize> {
+        let mut found = false;
+        let mut resumed = 0;
+        for (slot, thread) in self.threads.iter_mut().enumerate() {
+            let Some(thread) = thread.as_mut() else {
+                continue;
+            };
+            if thread.process_id() != process_id {
+                continue;
+            }
+            found = true;
+            if !thread.resume() {
+                continue;
+            }
+            if thread.state() == ThreadState::Ready && !thread.is_scheduling_suspended() {
+                self.ready_bitmap |= 1u64 << slot;
+            }
+            resumed += 1;
+        }
+        found.then_some(resumed)
     }
 
     /// 指定されたプロセスに属するスレッドを反復処理
@@ -1654,6 +1716,14 @@ pub fn peek_next_thread() -> Option<ThreadId> {
 /// 指定された状態のスレッド数を取得
 pub fn count_threads_by_state(state: ThreadState) -> usize {
     THREAD_QUEUE.lock().count_by_state(state)
+}
+
+pub fn suspend_process_threads(process_id: ProcessId) -> usize {
+    THREAD_QUEUE.lock().suspend_process(process_id)
+}
+
+pub fn resume_process_threads(process_id: ProcessId) -> Option<usize> {
+    THREAD_QUEUE.lock().resume_process(process_id)
 }
 
 /// すべてのスレッドに対して操作を実行

@@ -1040,17 +1040,8 @@ pub fn process_resume(raw: u64) -> u64 {
     if crate::task::with_process(process_id, |_| ()).is_none() {
         return ESRCH;
     }
-    let mut threads = alloc::vec::Vec::new();
-    crate::task::for_each_thread(|thread| {
-        if thread.process_id() == process_id {
-            threads.push(thread.id());
-        }
-    });
-    if threads.is_empty() {
+    if crate::task::resume_process_threads(process_id).is_none() {
         return ESRCH;
-    }
-    for thread in threads {
-        crate::task::wake_thread(thread);
     }
     SUCCESS
 }
