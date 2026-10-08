@@ -27,7 +27,6 @@ pub mod shared_ring;
 pub enum SyscallNumber {
     Read = 0,
     Write = 1,
-    Brk = 12,
     RtSigaction = 13,
     RtSigprocmask = 14,
     RtSigreturn = 15,
