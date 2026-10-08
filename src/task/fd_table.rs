@@ -253,22 +253,6 @@ impl FdTable {
         }
     }
 
-    /// fork 用: 全エントリを複製して新しい FdTable を返す。
-    ///
-    /// POSIX と同様、親子は同じ open file description とファイル位置を共有する。
-    pub fn clone_for_fork(&self) -> Box<FdTable> {
-        let mut new_table = FdTable::new_boxed();
-        for i in 0..PROCESS_MAX_FDS {
-            let Some(fh) = self.entries[i].as_deref() else {
-                continue;
-            };
-            let new_fh = Box::new(fh.duplicate());
-            new_table.entries[i] = Some(new_fh);
-            new_table.flags[i] = self.flags[i];
-        }
-        new_table
-    }
-
     /// FD のフラグを取得する。FD が未使用の場合 `None`。
     pub fn get_flags(&self, fd: usize) -> Option<u8> {
         if fd < FD_BASE || fd >= PROCESS_MAX_FDS {

@@ -1050,11 +1050,6 @@ impl Process {
         Some(self.mmap_regions.remove(idx))
     }
 
-    /// fork 用: FD テーブルをクローンして新しい Box を返す
-    pub fn clone_fd_table_for_fork(&self) -> alloc::boxed::Box<FdTable> {
-        self.fd_table.clone_for_fork()
-    }
-
     pub fn clone_mmap_regions_for_fork(&self) -> alloc::vec::Vec<MmapRegion> {
         self.mmap_regions.clone()
     }
@@ -1219,11 +1214,6 @@ impl Process {
             };
             addr < buf_end && buf.virt_start < end
         })
-    }
-
-    /// FD テーブルを差し替える（fork の子プロセス初期化で使用）
-    pub fn set_fd_table(&mut self, table: alloc::boxed::Box<FdTable>) {
-        self.fd_table = table;
     }
 
     pub fn object_handles(&self) -> &ObjectHandleTable {
