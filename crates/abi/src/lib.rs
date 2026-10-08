@@ -351,27 +351,6 @@ pub struct IpcObjectHandles {
     pub handles: [IpcObjectHandle; IPC_MAX_OBJECT_HANDLES],
 }
 
-pub const FILE_HANDLE_RIGHT_READ: u32 = 1 << 0;
-pub const FILE_HANDLE_RIGHT_WRITE: u32 = 1 << 1;
-pub const FILE_HANDLE_RIGHT_SEEK: u32 = 1 << 2;
-pub const FILE_HANDLE_RIGHT_STAT: u32 = 1 << 3;
-pub const FILE_HANDLE_RIGHT_READDIR: u32 = 1 << 5;
-pub const FILE_HANDLE_RIGHT_CREATE: u32 = 1 << 6;
-pub const FILE_HANDLE_RIGHT_REMOVE: u32 = 1 << 7;
-pub const FILE_HANDLE_RIGHT_RENAME: u32 = 1 << 8;
-pub const FILE_HANDLE_RIGHT_SYNC: u32 = 1 << 9;
-pub const FILE_HANDLE_RIGHT_TRUNCATE: u32 = 1 << 10;
-pub const FILE_HANDLE_RIGHT_ALL: u32 = FILE_HANDLE_RIGHT_READ
-    | FILE_HANDLE_RIGHT_WRITE
-    | FILE_HANDLE_RIGHT_SEEK
-    | FILE_HANDLE_RIGHT_STAT
-    | FILE_HANDLE_RIGHT_READDIR
-    | FILE_HANDLE_RIGHT_CREATE
-    | FILE_HANDLE_RIGHT_REMOVE
-    | FILE_HANDLE_RIGHT_RENAME
-    | FILE_HANDLE_RIGHT_SYNC
-    | FILE_HANDLE_RIGHT_TRUNCATE;
-
 /// `StorageControl` が受け取る、プラットフォーム固有ストレージ操作の固定長要求です。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

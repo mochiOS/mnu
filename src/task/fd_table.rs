@@ -25,19 +25,30 @@ pub struct FileHandleCap(u32);
 
 impl FileHandleCap {
     pub const NONE: Self = Self(0);
-    pub const READ: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_READ);
-    pub const WRITE: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_WRITE);
-    pub const SEEK: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_SEEK);
-    pub const STAT: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_STAT);
+    pub const READ: Self = Self(1 << 0);
+    pub const WRITE: Self = Self(1 << 1);
+    pub const SEEK: Self = Self(1 << 2);
+    pub const STAT: Self = Self(1 << 3);
     // Bit 4 used to represent CLOSE. Closing only discards a descriptor owned
     // by the current process, so it is intentionally not a resource right.
-    pub const READDIR: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_READDIR);
-    pub const CREATE: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_CREATE);
-    pub const REMOVE: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_REMOVE);
-    pub const RENAME: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_RENAME);
-    pub const SYNC: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_SYNC);
-    pub const TRUNCATE: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_TRUNCATE);
-    pub const ALL: Self = Self(mnu_abi::FILE_HANDLE_RIGHT_ALL);
+    pub const READDIR: Self = Self(1 << 5);
+    pub const CREATE: Self = Self(1 << 6);
+    pub const REMOVE: Self = Self(1 << 7);
+    pub const RENAME: Self = Self(1 << 8);
+    pub const SYNC: Self = Self(1 << 9);
+    pub const TRUNCATE: Self = Self(1 << 10);
+    pub const ALL: Self = Self(
+        Self::READ.0
+            | Self::WRITE.0
+            | Self::SEEK.0
+            | Self::STAT.0
+            | Self::READDIR.0
+            | Self::CREATE.0
+            | Self::REMOVE.0
+            | Self::RENAME.0
+            | Self::SYNC.0
+            | Self::TRUNCATE.0,
+    );
 
     #[inline]
     pub const fn bits(self) -> u32 {
