@@ -2,9 +2,10 @@ use crate::task::{
     HandleRights, KernelObject, ObjectHandleEntry, ThreadUpcallError, UserUpcallContext,
 };
 
-use super::{EAGAIN, EBADF, EFAULT, EINVAL, ENOSPC, ESRCH, SUCCESS, SavedSyscallFrame};
+use super::{SavedSyscallFrame, EAGAIN, EBADF, EFAULT, EINVAL, ENOSPC, ESRCH, SUCCESS};
 
-const THREAD_HANDLE_RIGHTS: HandleRights = HandleRights::SIGNAL
+const THREAD_HANDLE_RIGHTS: HandleRights = HandleRights::WAIT
+    .union(HandleRights::SIGNAL)
     .union(HandleRights::DUPLICATE)
     .union(HandleRights::TRANSFER);
 
@@ -95,6 +96,43 @@ pub fn interrupt(handle: u64, payload: u64) -> u64 {
     }
 }
 
+pub fn thread_status(handle: u64, output: u64) -> u64 {
+    if output == 0 {
+        return EINVAL;
+    }
+    let object = match super::handle::object(handle, HandleRights::WAIT) {
+        Ok(object) => object,
+        Err(error) => return error,
+    };
+    let KernelObject::Thread(thread_id) = object else {
+        return EBADF;
+    };
+    let Some(status) = crate::task::with_thread(thread_id, |thread| mnu_abi::ThreadStatus {
+        thread_id: thread.id().as_u64(),
+        process_id: thread.process_id().as_u64(),
+        state: match thread.state() {
+            crate::task::ThreadState::Ready => mnu_abi::THREAD_STATE_READY,
+            crate::task::ThreadState::Running => mnu_abi::THREAD_STATE_RUNNING,
+            crate::task::ThreadState::Blocked => mnu_abi::THREAD_STATE_BLOCKED,
+            crate::task::ThreadState::Sleeping => mnu_abi::THREAD_STATE_SLEEPING,
+            crate::task::ThreadState::Terminated => mnu_abi::THREAD_STATE_TERMINATED,
+        },
+        reserved: 0,
+    }) else {
+        return ESRCH;
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&status as *const mnu_abi::ThreadStatus).cast::<u8>(),
+            core::mem::size_of::<mnu_abi::ThreadStatus>(),
+        )
+    };
+    match super::copy_to_user(output, bytes) {
+        Ok(()) => SUCCESS,
+        Err(error) => error,
+    }
+}
+
 pub fn return_from(token: u64) -> u64 {
     let Some(thread_id) = crate::task::current_thread_id() else {
         return ESRCH;
@@ -112,20 +150,17 @@ pub fn prepare_syscall_return(frame: &mut SavedSyscallFrame) {
     let Some(thread_id) = crate::task::current_thread_id() else {
         return;
     };
-    if let Some(context) = crate::task::with_thread_mut(thread_id, |thread| {
-        thread.take_restored_upcall_context()
-    })
-    .flatten()
+    if let Some(context) =
+        crate::task::with_thread_mut(thread_id, |thread| thread.take_restored_upcall_context())
+            .flatten()
     {
         write_context(frame, context);
         return;
     }
 
     let context = read_context(frame);
-    let Some(delivery) = crate::task::with_thread_mut(thread_id, |thread| {
-        thread.begin_upcall(context)
-    })
-    .flatten()
+    let Some(delivery) =
+        crate::task::with_thread_mut(thread_id, |thread| thread.begin_upcall(context)).flatten()
     else {
         return;
     };

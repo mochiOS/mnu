@@ -166,6 +166,7 @@ pub enum SyscallNumber {
     ThreadUpcallReturn = 655,
     ThreadHandleCreate = 656,
     ThreadInterrupt = 657,
+    ThreadHandleStatus = 658,
     CheckGravityExist = 999,
 }
 
@@ -228,6 +229,21 @@ pub struct ThreadUpcallConfig {
     pub flags: u64,
     pub reserved: [u64; 4],
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadStatus {
+    pub thread_id: u64,
+    pub process_id: u64,
+    pub state: u32,
+    pub reserved: u32,
+}
+
+pub const THREAD_STATE_READY: u32 = 1;
+pub const THREAD_STATE_RUNNING: u32 = 2;
+pub const THREAD_STATE_BLOCKED: u32 = 3;
+pub const THREAD_STATE_SLEEPING: u32 = 4;
+pub const THREAD_STATE_TERMINATED: u32 = 5;
 
 /// A process-local object handle and the signals a caller wants to observe.
 ///
@@ -506,6 +522,7 @@ mod object_handle_tests {
             SyscallNumber::ThreadUpcallReturn as u64,
             SyscallNumber::ThreadHandleCreate as u64,
             SyscallNumber::ThreadInterrupt as u64,
+            SyscallNumber::ThreadHandleStatus as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
@@ -664,7 +681,9 @@ mod credential_spawn_tests {
         assert_eq!(super::SyscallNumber::ThreadUpcallReturn as u64, 655);
         assert_eq!(super::SyscallNumber::ThreadHandleCreate as u64, 656);
         assert_eq!(super::SyscallNumber::ThreadInterrupt as u64, 657);
+        assert_eq!(super::SyscallNumber::ThreadHandleStatus as u64, 658);
         assert_eq!(core::mem::size_of::<super::ThreadUpcallConfig>(), 64);
+        assert_eq!(core::mem::size_of::<super::ThreadStatus>(), 24);
         assert_eq!(
             super::AddressWaitResult::from_raw(2),
             Some(super::AddressWaitResult::DeadlineReached)

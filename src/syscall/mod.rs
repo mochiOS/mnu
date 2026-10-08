@@ -746,12 +746,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::HandleWrite as u64 => handle::write(arg0, arg1, arg2),
         x if x == SyscallNumber::HandleSeek as u64 => handle::seek(arg0, arg1, arg2),
         x if x == SyscallNumber::ProcessHandleOpen as u64 => handle::process_open(arg0, arg1),
-        x if x == SyscallNumber::ProcessHandleStatus as u64 => {
-            handle::process_status(arg0, arg1)
-        }
-        x if x == SyscallNumber::ProcessHandleWait as u64 => {
-            handle::process_wait(arg0, arg1, arg2)
-        }
+        x if x == SyscallNumber::ProcessHandleStatus as u64 => handle::process_status(arg0, arg1),
+        x if x == SyscallNumber::ProcessHandleWait as u64 => handle::process_wait(arg0, arg1, arg2),
         x if x == SyscallNumber::ProcessHandleResume as u64 => handle::process_resume(arg0),
         x if x == SyscallNumber::ProcessHandleTerminate as u64 => {
             handle::process_terminate(arg0, arg1)
@@ -767,6 +763,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ThreadUpcallReturn as u64 => upcall::return_from(arg0),
         x if x == SyscallNumber::ThreadHandleCreate as u64 => upcall::create_thread_handle(),
         x if x == SyscallNumber::ThreadInterrupt as u64 => upcall::interrupt(arg0, arg1),
+        x if x == SyscallNumber::ThreadHandleStatus as u64 => upcall::thread_status(arg0, arg1),
         x if x == SyscallNumber::ProviderObjectCreate as u64 => {
             handle::provider_object_create(arg0, arg1, arg2)
         }
@@ -977,9 +974,7 @@ fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
     use crate::performance::LatencyMetric;
 
     match num {
-        x if x == SyscallNumber::FileOpen as u64
-            || x == SyscallNumber::FileOpenAt as u64 =>
-        {
+        x if x == SyscallNumber::FileOpen as u64 || x == SyscallNumber::FileOpenAt as u64 => {
             Some(LatencyMetric::VfsOpen)
         }
         x if x == SyscallNumber::Read as u64 || x == SyscallNumber::FileRead as u64 => {
@@ -988,9 +983,7 @@ fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
         x if x == SyscallNumber::Write as u64 || x == SyscallNumber::FileWrite as u64 => {
             Some(LatencyMetric::VfsWrite)
         }
-        x if x == SyscallNumber::FileClose as u64 => {
-            Some(LatencyMetric::VfsClose)
-        }
+        x if x == SyscallNumber::FileClose as u64 => Some(LatencyMetric::VfsClose),
         x if x == SyscallNumber::FileStat as u64
             || x == SyscallNumber::FileStatAt as u64
             || x == SyscallNumber::FileFstat as u64 =>
