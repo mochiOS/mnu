@@ -619,9 +619,16 @@ pub fn process_open(endpoint: u64, requested_rights: u64) -> u64 {
         return EACCES;
     }
     let rights = match HandleRights::from_bits(requested_rights) {
-        Some(rights) if PROCESS_HANDLE_RIGHTS.contains(rights) => rights,
+        Some(rights) if PROCESS_ADMIN_HANDLE_RIGHTS.contains(rights) => rights,
         _ => return EINVAL,
     };
+    if rights.contains(HandleRights::SIGNAL)
+        && !crate::syscall::security::caller_has_any_capability(&[
+            crate::capability::Capability::ProcessKill,
+        ])
+    {
+        return EACCES;
+    }
     let Some(thread_id) = crate::syscall::ipc::resolve_endpoint_handle(endpoint) else {
         return EINVAL;
     };
