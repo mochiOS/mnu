@@ -168,6 +168,9 @@ thread_create(context: *const ThreadCreateContext, context_len: usize) -> tid_t
 thread-local baseを指定するmnu固有の起動コンテキストです。TLS領域の内容や配置は
 language runtimeが管理し、カーネルは解釈しません。
 
+作成されるスレッドは常に呼び出し元と同じprocessおよびaddress spaceに属します。
+別processを生成する操作ではないため、process生成用Capabilityは要求しません。
+
 未知のflags、非zeroのreserved field、不正なentry、stack pointer、thread-local baseは
 `EINVAL` または `EFAULT` とします。
 

@@ -1,6 +1,6 @@
 //! タスク関連システムコール
 
-use super::types::{EACCES, EFAULT, EINVAL, ENOMEM, ENOSYS};
+use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS};
 
 pub fn yield_now() -> u64 {
     crate::task::yield_now();
@@ -119,13 +119,6 @@ pub fn thread_create(context_ptr: u64, context_len: u64) -> u64 {
     {
         return EFAULT;
     }
-    if !crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::ProcessSpawn,
-    ]) && !crate::syscall::security::caller_is_core()
-    {
-        return EACCES;
-    }
-
     let current_tid = match crate::task::current_thread_id() {
         Some(tid) => tid,
         None => return ENOSYS,
