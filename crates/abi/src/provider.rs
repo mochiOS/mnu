@@ -11,6 +11,10 @@ pub const OP_WRITE: u16 = 2;
 pub const OP_SEEK: u16 = 3;
 pub const OP_RELEASE: u16 = 4;
 pub const OP_CONTROL: u16 = 5;
+pub const OP_READ_AT: u16 = 6;
+pub const OP_WRITE_AT: u16 = 7;
+pub const OP_SYNC: u16 = 8;
+pub const OP_MEMORY_OBJECT: u16 = 9;
 
 pub const REQUEST_HEADER_LEN: usize = 48;
 pub const RESPONSE_HEADER_LEN: usize = 40;
@@ -157,7 +161,15 @@ impl ResponseHeader {
 const fn valid_opcode(opcode: u16) -> bool {
     matches!(
         opcode,
-        OP_READ | OP_WRITE | OP_SEEK | OP_RELEASE | OP_CONTROL
+        OP_READ
+            | OP_WRITE
+            | OP_SEEK
+            | OP_RELEASE
+            | OP_CONTROL
+            | OP_READ_AT
+            | OP_WRITE_AT
+            | OP_SYNC
+            | OP_MEMORY_OBJECT
     )
 }
 
@@ -194,6 +206,28 @@ const fn valid_request_fields(header: RequestHeader) -> bool {
                 && header.length as usize <= MAX_DATA_LEN
                 && header.data_length as usize <= MAX_DATA_LEN
         }
+        OP_READ_AT => {
+            header.argument == 0
+                && header.data_length == 0
+                && header.length as usize <= MAX_DATA_LEN
+        }
+        OP_WRITE_AT => {
+            header.argument == 0
+                && header.length == header.data_length
+                && header.length as usize <= MAX_DATA_LEN
+        }
+        OP_SYNC => {
+            header.argument == 0
+                && header.basis == 0
+                && header.length == 0
+                && header.data_length == 0
+        }
+        OP_MEMORY_OBJECT => {
+            header.argument == 0
+                && header.basis == 0
+                && header.length == 0
+                && header.data_length == 0
+        }
         _ => false,
     }
 }
@@ -207,8 +241,12 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
         return header.value == 0 && header.data_length == 0;
     }
     match header.opcode {
-        OP_READ | OP_CONTROL => header.value == header.data_length as u64,
-        OP_WRITE | OP_SEEK | OP_RELEASE => header.data_length == 0,
+        OP_READ | OP_READ_AT | OP_CONTROL => header.value == header.data_length as u64,
+        // Positioned providers may return the starting byte offset alongside
+        // a sequential write result, captured by the same operation.
+        OP_WRITE => header.data_length == 0 || header.data_length == 8,
+        OP_WRITE_AT | OP_SEEK | OP_RELEASE | OP_SYNC => header.data_length == 0,
+        OP_MEMORY_OBJECT => header.value != 0 && header.data_length == 0,
         _ => false,
     }
 }
