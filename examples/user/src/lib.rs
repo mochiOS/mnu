@@ -115,7 +115,6 @@ const SYS_LIST_PROCESSES: u64 = mnu_abi::SyscallNumber::ListProcesses as u64;
 const SYS_FIND_PROCESS_BY_NAME: u64 = mnu_abi::SyscallNumber::FindProcessByName as u64;
 const SYS_FILE_OPEN: u64 = mnu_abi::SyscallNumber::FileOpen as u64;
 #[allow(dead_code)]
-const SYS_FILE_OPEN_AT: u64 = mnu_abi::SyscallNumber::FileOpenAt as u64;
 const SYS_FILE_CLOSE: u64 = mnu_abi::SyscallNumber::FileClose as u64;
 const SYS_FILE_READ: u64 = mnu_abi::SyscallNumber::FileRead as u64;
 const SYS_FILE_WRITE: u64 = mnu_abi::SyscallNumber::FileWrite as u64;
@@ -574,20 +573,6 @@ fn file_path_bytes(path: &str) -> [u8; 96] {
 pub fn file_open(path: &str, flags: u64) -> u64 {
     let buf = file_path_bytes(path);
     unsafe { syscall2(SYS_FILE_OPEN, buf.as_ptr() as u64, flags) }
-}
-
-#[allow(dead_code)]
-fn file_open_at(dirfd: i64, path: &str, flags: u64, mode: u64) -> u64 {
-    let buf = file_path_bytes(path);
-    unsafe {
-        syscall4(
-            SYS_FILE_OPEN_AT,
-            dirfd as u64,
-            buf.as_ptr() as u64,
-            flags,
-            mode,
-        )
-    }
 }
 
 pub fn file_close(fd: u64) -> u64 {

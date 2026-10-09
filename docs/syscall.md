@@ -94,7 +94,6 @@ ptr        ユーザー空間ポインタ
 | Time             | sleep                 |
 | I/O              | write                 |
 | Filesystem       | file_open             |
-| Filesystem       | file_open_at          |
 | Filesystem       | file_close            |
 | Filesystem       | file_read             |
 | Filesystem       | file_write            |
@@ -514,12 +513,6 @@ Filesystem は最小カーネルの例外として残します。
 
 ```
 file_open(path: ptr, flags: u64) -> u64
-```
-
-### file_open_at
-
-```
-file_open_at(dirfd: i64, path: ptr, flags: u64, mode: u64) -> u64
 ```
 
 ### file_close

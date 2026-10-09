@@ -1540,60 +1540,6 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
     }
 }
 
-/// Openat システムコール
-///
-/// AT_FDCWD(-100) の場合は CWD 相対の open() と同等。
-/// それ以外の dirfd は fd_table からディレクトリパスを取得してプレフィックスとして使用する。
-pub fn openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
-    const AT_FDCWD: i64 = -100;
-
-    if dirfd == AT_FDCWD {
-        // CWD 相対 → 通常の open() と同じ
-        let pid = match current_process_id_raw() {
-            Some(pid) => pid,
-            None => return EBADF,
-        };
-        let path = match read_cstring(path_ptr) {
-            Ok(path) => resolve_path(pid, &path),
-            Err(errno) => return errno,
-        };
-        return open_resolved_for_pid(pid, &path, flags, mode);
-    }
-
-    // dirfd が示すディレクトリを取得
-    let pid = match current_process_id_raw() {
-        Some(p) => p,
-        None => return EBADF,
-    };
-    let idx = dirfd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
-    let Some(dir_path) = open_file(pid, idx).and_then(|open_file| {
-        open_file
-            .lock()
-            .vnode
-            .as_ref()
-            .filter(|vnode| vnode.is_directory())
-            .map(|vnode| vnode.path().to_string())
-    }) else {
-        return EBADF;
-    };
-
-    // path を dir_path に対して解決する
-    let path = match read_cstring(path_ptr) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let full_path = if path.starts_with('/') {
-        path
-    } else {
-        alloc::format!("{}/{}", dir_path.trim_end_matches('/'), path)
-    };
-
-    open_resolved_for_pid(pid, &normalize_path(&full_path), flags, mode)
-}
-
 /// Getdents64 システムコール
 ///
 /// struct linux_dirent64 形式でエントリをバッファに書き込む。
@@ -1708,10 +1654,6 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
 
 pub fn file_open(path_ptr: u64, flags: u64) -> u64 {
     open(path_ptr, flags)
-}
-
-pub fn file_open_at(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
-    openat(dirfd, path_ptr, flags, mode)
 }
 
 pub fn file_close(fd: u64) -> u64 {
