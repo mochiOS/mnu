@@ -1,0 +1,124 @@
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use super::shared_pages::{PageError, SharedPages, SizeError};
+use crate::interrupt::spinlock::SpinLock;
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+const PAGE_BYTES: u64 = super::vm_object::PAGE_BYTES as u64;
+
+/// Owns anonymous backing storage, not another process's virtual memory.
+pub struct SharedMemory {
+    id: u64,
+    length: u64,
+    pages: SpinLock<SharedPages<OwnedFrame>>,
+}
+
+struct OwnedFrame(u64);
+
+impl Drop for OwnedFrame {
+    fn drop(&mut self) {
+        super::paging::release_user_frame(self.0);
+    }
+}
+
+impl SharedMemory {
+    pub fn new(length: u64, maximum_pages: u64) -> Result<Self, u64> {
+        let pages =
+            SharedPages::new(length, PAGE_BYTES, maximum_pages).map_err(|error| match error {
+                SizeError::Invalid => crate::syscall::EINVAL,
+                SizeError::LimitExceeded => crate::syscall::ENOMEM,
+            })?;
+        let id = NEXT_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| crate::syscall::ENOMEM)?;
+        Ok(Self {
+            id,
+            length: pages.length(),
+            pages: SpinLock::new(pages),
+        })
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+    pub fn contains_range(&self, offset: u64, length: u64) -> bool {
+        self.pages.lock().contains_range(offset, length)
+    }
+
+    fn page(&self, index: u64) -> Result<Arc<OwnedFrame>, u64> {
+        self.pages
+            .lock()
+            .page_or_try_insert(index, || {
+                super::frame::allocate_zeroed_frame()
+                    .map(|frame| OwnedFrame(frame.start_address().as_u64()))
+                    .map_err(|_| crate::syscall::ENOMEM)
+            })
+            .map_err(|error| match error {
+                PageError::OutOfBounds => crate::syscall::EINVAL,
+                PageError::Allocation(error) => error,
+            })
+    }
+
+    /// Retains a frame for the caller; release it with `release_user_frame`.
+    pub fn retain_page(&self, index: u64) -> Result<u64, u64> {
+        let page = self.page(index)?;
+        super::paging::retain_shared_user_frame(page.0).map_err(|_| crate::syscall::ENOMEM)?;
+        Ok(page.0)
+    }
+
+    pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
+        if offset > self.length {
+            return Err(crate::syscall::EINVAL);
+        }
+        let length = output.len().min((self.length - offset) as usize);
+        self.copy(offset, length, |pointer, done, count| {
+            for index in 0..count {
+                // Mapped users may modify the bytes; never form a Rust reference
+                // to storage owned concurrently by a different address space.
+                output[done + index] = unsafe { core::ptr::read_volatile(pointer.add(index)) };
+            }
+        })?;
+        Ok(length)
+    }
+
+    pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
+        if !self.contains_range(offset, input.len() as u64) {
+            return Err(crate::syscall::EINVAL);
+        }
+        self.copy(offset, input.len(), |pointer, done, count| {
+            for index in 0..count {
+                unsafe {
+                    core::ptr::write_volatile(pointer.add(index), input[done + index]);
+                }
+            }
+        })?;
+        Ok(input.len())
+    }
+
+    fn copy(
+        &self,
+        offset: u64,
+        length: usize,
+        mut copy: impl FnMut(*mut u8, usize, usize),
+    ) -> Result<(), u64> {
+        let physical_offset = super::paging::physical_memory_offset().ok_or(crate::syscall::EIO)?;
+        let mut done = 0;
+        while done < length {
+            let current = offset + done as u64;
+            let page = self.page(current / PAGE_BYTES)?;
+            let within = (current % PAGE_BYTES) as usize;
+            let count = (length - done).min(PAGE_BYTES as usize - within);
+            let address = physical_offset
+                .checked_add(page.0)
+                .and_then(|address| address.checked_add(within as u64))
+                .ok_or(crate::syscall::EIO)?;
+            copy(address as *mut u8, done, count);
+            done += count;
+        }
+        Ok(())
+    }
+}

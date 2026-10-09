@@ -23,6 +23,7 @@ struct LowerReadOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ObjectKey {
+    Memory(u64),
     Vnode {
         mount_id: MountId,
         inode_id: InodeId,
@@ -97,6 +98,7 @@ impl Drop for PreparedSharedPage {
 
 #[derive(Clone)]
 enum VmObjectSource {
+    Memory(Arc<super::shared_memory::SharedMemory>),
     Vnode(Arc<Vnode>),
     Provider {
         object: Arc<ProviderObject>,
@@ -105,6 +107,19 @@ enum VmObjectSource {
 }
 
 impl VmObject {
+    pub fn shared_memory(memory: Arc<super::shared_memory::SharedMemory>) -> Self {
+        Self {
+            source: VmObjectSource::Memory(memory),
+        }
+    }
+
+    pub fn memory_length(&self) -> Option<u64> {
+        match &self.source {
+            VmObjectSource::Memory(memory) => Some(memory.length()),
+            _ => None,
+        }
+    }
+
     pub fn file(vnode: Arc<Vnode>) -> Self {
         Self {
             source: VmObjectSource::Vnode(vnode),
@@ -119,6 +134,7 @@ impl VmObject {
 
     fn object_key(&self) -> ObjectKey {
         match &self.source {
+            VmObjectSource::Memory(memory) => ObjectKey::Memory(memory.id()),
             VmObjectSource::Vnode(vnode) => ObjectKey::Vnode {
                 mount_id: vnode.inode.mount_id,
                 inode_id: vnode.inode.inode_id,
@@ -144,6 +160,14 @@ impl VmObject {
     }
 
     fn page_with_len(&self, page_index: u64) -> Result<(Arc<[u8; PAGE_BYTES]>, usize), u64> {
+        if let VmObjectSource::Memory(memory) = &self.source {
+            let offset = page_index
+                .checked_mul(PAGE_BYTES as u64)
+                .ok_or(crate::syscall::EINVAL)?;
+            let mut bytes = [0u8; PAGE_BYTES];
+            let length = memory.read_at(offset, &mut bytes)?;
+            return Ok((Arc::new(bytes), length));
+        }
         let key = self.page_key(page_index);
 
         if let Some(page) = cached_page(key)? {
@@ -236,6 +260,11 @@ impl VmObject {
     }
 
     pub fn prepare_shared_page(&self, page_index: u64) -> Result<PreparedSharedPage, u64> {
+        if let VmObjectSource::Memory(memory) = &self.source {
+            return Ok(PreparedSharedPage {
+                frame_phys: memory.retain_page(page_index)?,
+            });
+        }
         let (loaded, loaded_len) = self.page_with_len(page_index)?;
         let key = self.page_key(page_index);
 
@@ -274,6 +303,13 @@ impl VmObject {
     }
 
     pub fn mark_page_dirty(&self, page_index: u64) -> Result<(), u64> {
+        if let VmObjectSource::Memory(memory) = &self.source {
+            return if page_index < memory.length() / PAGE_BYTES as u64 {
+                Ok(())
+            } else {
+                Err(crate::syscall::EINVAL)
+            };
+        }
         let key = self.page_key(page_index);
 
         let mut cache = PAGE_CACHE.lock();
@@ -297,6 +333,9 @@ impl VmObject {
 
     /// Stages a write in the shared page cache without writing it to storage.
     pub fn stage_write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
+        if let VmObjectSource::Memory(memory) = &self.source {
+            return memory.write_at(offset, input);
+        }
         let input_len = u64::try_from(input.len()).map_err(|_| crate::syscall::EINVAL)?;
 
         offset
@@ -378,6 +417,13 @@ impl VmObject {
 
     /// Writes dirty cache pages intersecting the range back to their vnode.
     pub fn flush_range(&self, offset: u64, length: u64) -> Result<(), u64> {
+        if let VmObjectSource::Memory(memory) = &self.source {
+            return if length == u64::MAX && offset == 0 || memory.contains_range(offset, length) {
+                Ok(())
+            } else {
+                Err(crate::syscall::EINVAL)
+            };
+        }
         if length == 0 {
             return Ok(());
         }
@@ -777,6 +823,7 @@ pub fn truncate_inode(mount_id: MountId, inode_id: InodeId, length: u64) {
 fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> LowerReadOutcome {
     let mut bytes_read = 0usize;
     let io_limit = match source {
+        VmObjectSource::Memory(_) => PAGE_BYTES,
         VmObjectSource::Vnode(vnode) => core::cmp::max(1, vnode.read_io_limit()),
         VmObjectSource::Provider { .. } => mnu_abi::provider::MAX_DATA_LEN,
     };
@@ -807,6 +854,9 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
         let request_len = core::cmp::min(output.len() - bytes_read, io_limit);
 
         let read = match source {
+            VmObjectSource::Memory(memory) => {
+                memory.read_at(current, &mut output[bytes_read..bytes_read + request_len])
+            }
             VmObjectSource::Vnode(vnode) => {
                 vnode.read_at(current, &mut output[bytes_read..bytes_read + request_len])
             }
@@ -863,6 +913,7 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
 
 fn write_lower(source: &VmObjectSource, offset: u64, input: &[u8]) -> Result<usize, u64> {
     match source {
+        VmObjectSource::Memory(memory) => memory.write_at(offset, input),
         VmObjectSource::Vnode(vnode) => vnode.write_at(offset, input),
         VmObjectSource::Provider { object, .. } => {
             crate::syscall::handle::provider_write_at(object, offset, input)

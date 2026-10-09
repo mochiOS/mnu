@@ -42,6 +42,39 @@ fn current_process() -> Result<crate::task::ProcessId, u64> {
     crate::syscall::security::current_process_id().ok_or(EINVAL)
 }
 
+/// Creates backing owned by the caller, not a view into another process.
+/// Existing Handle duplication and IPC attachment paths enforce attenuation.
+pub fn memory_object_create(length: u64, reserved: u64) -> u64 {
+    if reserved != 0 {
+        return EINVAL;
+    }
+    let process_id = match current_process() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    crate::task::with_process_mut(process_id, |process| {
+        let maximum_pages = process.resource_limits().max_mapped_pages as u64;
+        let memory = match crate::mem::shared_memory::SharedMemory::new(length, maximum_pages) {
+            Ok(memory) => Arc::new(memory),
+            Err(error) => return error,
+        };
+        let object = KernelObject::VmObject(Arc::new(
+            crate::mem::vm_object::VmObject::shared_memory(memory),
+        ));
+        let rights = HandleRights::READ
+            .union(HandleRights::WRITE)
+            .union(HandleRights::MAP)
+            .union(HandleRights::DUPLICATE)
+            .union(HandleRights::TRANSFER);
+        process
+            .object_handles_mut()
+            .insert(ObjectHandleEntry::new(object, rights))
+            .map(|handle| handle.raw() as u64)
+            .unwrap_or(ENOSPC)
+    })
+    .unwrap_or(EINVAL)
+}
+
 fn decode_handle(raw: u64) -> Result<ObjectHandle, u64> {
     let raw = u32::try_from(raw).map_err(|_| EBADF)?;
     ObjectHandle::from_raw(raw).ok_or(EBADF)

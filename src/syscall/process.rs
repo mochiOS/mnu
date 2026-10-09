@@ -775,7 +775,8 @@ pub fn memory_map(
                 Ok(result) => result,
                 Err(error) => return error,
             };
-        let max_access = if shared && !granted_rights.contains(crate::task::HandleRights::WRITE) {
+        let mut max_access = if shared && !granted_rights.contains(crate::task::HandleRights::WRITE)
+        {
             mnu_abi::MEMORY_ACCESS_ALL & !mnu_abi::MEMORY_ACCESS_WRITE
         } else {
             mnu_abi::MEMORY_ACCESS_ALL
@@ -785,7 +786,7 @@ pub fn memory_map(
                 let vnode = file.open.lock().vnode.as_ref().cloned();
                 match vnode {
                     Some(vnode) if !vnode.is_directory() => {
-                        crate::mem::vm_object::VmObject::file(vnode)
+                        Arc::new(crate::mem::vm_object::VmObject::file(vnode))
                     }
                     _ => return EINVAL,
                 }
@@ -795,11 +796,30 @@ pub fn memory_map(
                     Ok(identity) => identity,
                     Err(error) => return error,
                 };
-                crate::mem::vm_object::VmObject::provider(provider, identity)
+                Arc::new(crate::mem::vm_object::VmObject::provider(
+                    provider, identity,
+                ))
+            }
+            crate::task::KernelObject::VmObject(object) => {
+                let object_length = match object.memory_length() {
+                    Some(length) => length,
+                    None => return EINVAL,
+                };
+                if !backing_offset
+                    .checked_add(size)
+                    .is_some_and(|end| end <= object_length)
+                {
+                    return EINVAL;
+                }
+                max_access &= !mnu_abi::MEMORY_ACCESS_EXECUTE;
+                if access & !max_access != 0 {
+                    return crate::syscall::EACCES;
+                }
+                object
             }
             _ => return EINVAL,
         };
-        Some((Arc::new(object), backing_offset, max_access))
+        Some((object, backing_offset, max_access))
     };
 
     let result = crate::task::with_process_mut(pid, |process| {

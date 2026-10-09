@@ -158,6 +158,9 @@ pub enum SyscallNumber {
     HandleControl = 668,
     ProcessSuspendCurrent = 669,
     ProcessHandleSuspend = 670,
+    /// Creates page-granular, zero-filled anonymous backing and returns a
+    /// process-local Handle. The second argument is reserved and must be zero.
+    MemoryObjectCreate = 671,
     CheckGravityExist = 999,
 }
 

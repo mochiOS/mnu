@@ -302,7 +302,7 @@ pub enum KernelObject {
     Event(u64),
     Process(Arc<ProcessObject>),
     Thread(super::ids::ThreadId),
-    VmObject(u64),
+    VmObject(Arc<crate::mem::vm_object::VmObject>),
     File(Arc<FileHandle>),
     Provider(Arc<ProviderObject>),
 }
@@ -332,7 +332,7 @@ impl KernelObject {
             (Self::Event(left), Self::Event(right)) => left == right,
             (Self::Process(left), Self::Process(right)) => Arc::ptr_eq(left, right),
             (Self::Thread(left), Self::Thread(right)) => left == right,
-            (Self::VmObject(left), Self::VmObject(right)) => left == right,
+            (Self::VmObject(left), Self::VmObject(right)) => Arc::ptr_eq(left, right),
             (Self::File(left), Self::File(right)) => Arc::ptr_eq(left, right),
             (Self::Provider(left), Self::Provider(right)) => Arc::ptr_eq(left, right),
             _ => false,

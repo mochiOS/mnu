@@ -13,6 +13,7 @@ pub mod paging;
 pub(crate) mod object_io;
 pub(crate) mod range_plan;
 pub(crate) mod shared_pages;
+pub mod shared_memory;
 pub mod tss;
 pub(crate) mod user;
 pub mod vm_object;
