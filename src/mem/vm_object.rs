@@ -203,6 +203,9 @@ impl VmObject {
     }
 
     pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
+        if let VmObjectSource::Memory(memory) = &self.source {
+            return memory.read_at(offset, output);
+        }
         let mut copied = 0usize;
 
         while copied < output.len() {
