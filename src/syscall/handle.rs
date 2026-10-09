@@ -348,41 +348,93 @@ pub(crate) fn provider_memory_object(provider: &ProviderObject) -> Result<u64, u
     Ok(response.value)
 }
 
+fn provider_cache_identity(provider: &ProviderObject) -> Result<Option<u64>, u64> {
+    match provider_memory_object(provider) {
+        Ok(identity) => Ok(Some(identity)),
+        Err(error) if error == ENOTSUP || error == ENOSYS => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The caller retains its backing I/O guard through reading and cache overlay.
+fn provider_read_chunk<'a>(
+    provider: &ProviderObject,
+    identity: Option<u64>,
+    length: usize,
+    storage: &'a mut [u8],
+) -> Result<&'a [u8], u64> {
+    use mnu_abi::provider as wire;
+    let request = wire::RequestHeader {
+        opcode: if identity.is_some() {
+            wire::OP_READ_WITH_POSITION
+        } else {
+            wire::OP_READ
+        },
+        object_id: provider.object_id,
+        argument: 0,
+        basis: 0,
+        length: length as u32,
+        data_length: 0,
+    };
+    let (response, data_len) = provider_call(provider, request, &[], storage)?;
+    let count = usize::try_from(response.value).map_err(|_| EIO)?;
+    if count > length {
+        return Err(EIO);
+    }
+    let data = &mut storage[wire::RESPONSE_HEADER_LEN..wire::RESPONSE_HEADER_LEN + data_len];
+    if let Some(identity) = identity {
+        if data.len() != wire::READ_POSITION_LEN + count {
+            return Err(EIO);
+        }
+        let offset = u64::from_le_bytes(data[..wire::READ_POSITION_LEN].try_into().map_err(|_| EIO)?);
+        let data = &mut data[wire::READ_POSITION_LEN..];
+        crate::mem::vm_object::overlay_provider_range(provider, identity, offset, data)?;
+        Ok(data)
+    } else if count == data.len() {
+        Ok(data)
+    } else {
+        Err(EIO)
+    }
+}
+
 fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
     let length = match usize::try_from(length) {
         Ok(length) => length,
         Err(_) => return EINVAL,
     };
+    if length == 0 {
+        return SUCCESS;
+    }
+    let identity = match provider_cache_identity(provider) {
+        Ok(identity) => identity,
+        Err(error) => return error,
+    };
+    let maximum = if identity.is_some() {
+        mnu_abi::provider::MAX_POSITIONED_READ_LEN
+    } else {
+        mnu_abi::provider::MAX_DATA_LEN
+    };
     let mut total = 0usize;
     let mut response_storage =
         vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + mnu_abi::provider::MAX_DATA_LEN];
     while total < length {
-        let chunk = (length - total).min(mnu_abi::provider::MAX_DATA_LEN);
-        let request = mnu_abi::provider::RequestHeader {
-            opcode: mnu_abi::provider::OP_READ,
-            object_id: provider.object_id,
-            argument: 0,
-            basis: 0,
-            length: chunk as u32,
-            data_length: 0,
-        };
-        let (response, data_len) =
-            match provider_call(provider, request, &[], &mut response_storage) {
-                Ok(response) => response,
+        let chunk = (length - total).min(maximum);
+        let data = {
+            // User-buffer faults may load this same backing object. Release the
+            // I/O guard before copying to user memory to avoid recursive locking.
+            let _io_guard =
+                identity.map(|identity| crate::mem::vm_object::lock_provider_io(provider, identity));
+            match provider_read_chunk(provider, identity, chunk, &mut response_storage) {
+                Ok(data) => data,
                 Err(error) => return if total == 0 { error } else { total as u64 },
-            };
-        if response.value as usize != data_len || data_len > chunk {
-            return if total == 0 { EIO } else { total as u64 };
-        }
+            }
+        };
+        let data_len = data.len();
         let address = match buffer.checked_add(total as u64) {
             Some(address) => address,
             None => return if total == 0 { EINVAL } else { total as u64 },
         };
-        if let Err(error) = crate::syscall::copy_to_user(
-            address,
-            &response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN
-                ..mnu_abi::provider::RESPONSE_HEADER_LEN + data_len],
-        ) {
+        if let Err(error) = crate::syscall::copy_to_user(address, data) {
             return if total == 0 { error } else { total as u64 };
         }
         total += data_len;
@@ -401,9 +453,8 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
     if length == 0 {
         return SUCCESS;
     }
-    let identity = match provider_memory_object(provider) {
-        Ok(identity) => Some(identity),
-        Err(error) if error == ENOTSUP || error == ENOSYS => None,
+    let identity = match provider_cache_identity(provider) {
+        Ok(identity) => identity,
         Err(error) => return error,
     };
     let _io_guard =
@@ -501,6 +552,14 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
     let KernelObject::Provider(provider) = object else {
         return Err(ENOTSUP);
     };
+    let identity = provider_cache_identity(&provider)?;
+    let _io_guard =
+        identity.map(|identity| crate::mem::vm_object::lock_provider_io(&provider, identity));
+    let maximum = if identity.is_some() {
+        mnu_abi::provider::MAX_POSITIONED_READ_LEN
+    } else {
+        mnu_abi::provider::MAX_DATA_LEN
+    };
     let length = provider_seek_result(&provider, 0, crate::syscall::fs::SeekBasis::End)?;
     let length = usize::try_from(length).map_err(|_| EFBIG)?;
     if length > maximum_length {
@@ -514,23 +573,13 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
         mnu_abi::provider::RESPONSE_HEADER_LEN + mnu_abi::provider::MAX_DATA_LEN
     ];
     while offset < output.len() {
-        let chunk = (output.len() - offset).min(mnu_abi::provider::MAX_DATA_LEN);
-        let request = mnu_abi::provider::RequestHeader {
-            opcode: mnu_abi::provider::OP_READ,
-            object_id: provider.object_id,
-            argument: 0,
-            basis: 0,
-            length: chunk as u32,
-            data_length: 0,
-        };
-        let (response, data_len) = provider_call(&provider, request, &[], &mut response_storage)?;
-        if response.value as usize != data_len || data_len == 0 || data_len > chunk {
+        let chunk = (output.len() - offset).min(maximum);
+        let data = provider_read_chunk(&provider, identity, chunk, &mut response_storage)?;
+        let data_len = data.len();
+        if data_len == 0 {
             return Err(EIO);
         }
-        output[offset..offset + data_len].copy_from_slice(
-            &response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN
-                ..mnu_abi::provider::RESPONSE_HEADER_LEN + data_len],
-        );
+        output[offset..offset + data_len].copy_from_slice(data);
         offset += data_len;
     }
     Ok(output)

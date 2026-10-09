@@ -15,10 +15,15 @@ pub const OP_READ_AT: u16 = 6;
 pub const OP_WRITE_AT: u16 = 7;
 pub const OP_SYNC: u16 = 8;
 pub const OP_MEMORY_OBJECT: u16 = 9;
+/// Sequential read with an atomically captured starting byte position.
+/// Successful payloads contain a little-endian u64 position, then `value` bytes.
+pub const OP_READ_WITH_POSITION: u16 = 10;
 
 pub const REQUEST_HEADER_LEN: usize = 48;
 pub const RESPONSE_HEADER_LEN: usize = 40;
 pub const MAX_DATA_LEN: usize = 4096;
+pub const READ_POSITION_LEN: usize = 8;
+pub const MAX_POSITIONED_READ_LEN: usize = MAX_DATA_LEN - READ_POSITION_LEN;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestHeader {
@@ -170,6 +175,7 @@ const fn valid_opcode(opcode: u16) -> bool {
             | OP_WRITE_AT
             | OP_SYNC
             | OP_MEMORY_OBJECT
+            | OP_READ_WITH_POSITION
     )
 }
 
@@ -180,6 +186,12 @@ const fn valid_request_fields(header: RequestHeader) -> bool {
                 && header.basis == 0
                 && header.data_length == 0
                 && header.length as usize <= MAX_DATA_LEN
+        }
+        OP_READ_WITH_POSITION => {
+            header.argument == 0
+                && header.basis == 0
+                && header.data_length == 0
+                && header.length as usize <= MAX_POSITIONED_READ_LEN
         }
         OP_WRITE => {
             header.argument == 0
@@ -242,6 +254,10 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
     }
     match header.opcode {
         OP_READ | OP_READ_AT | OP_CONTROL => header.value == header.data_length as u64,
+        OP_READ_WITH_POSITION => {
+            header.data_length as usize >= READ_POSITION_LEN
+                && header.value == (header.data_length as usize - READ_POSITION_LEN) as u64
+        }
         // Positioned providers may return the starting byte offset alongside
         // a sequential write result, captured by the same operation.
         OP_WRITE => header.data_length == 0 || header.data_length == 8,

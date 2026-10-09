@@ -552,6 +552,43 @@ pub(crate) fn lock_provider_io(object: &ProviderObject, identity: u64) -> super:
     })
 }
 
+/// Overlays resident backing bytes without loading a page or making IPC calls.
+pub(crate) fn overlay_provider_range(
+    object: &ProviderObject,
+    identity: u64,
+    offset: u64,
+    output: &mut [u8],
+) -> Result<(), u64> {
+    let end = offset
+        .checked_add(output.len() as u64)
+        .ok_or(crate::syscall::EIO)?;
+    let key = ObjectKey::Provider {
+        endpoint_thread_id: object.endpoint_thread_id,
+        endpoint_slot: object.endpoint_slot,
+        endpoint_generation: object.endpoint_generation,
+        identity,
+    };
+    let mut cache = PAGE_CACHE.lock();
+    for entry in cache.iter_mut().filter(|entry| entry.key.object == key) {
+        let page_start = entry
+            .key
+            .page_index
+            .checked_mul(PAGE_BYTES as u64)
+            .ok_or(crate::syscall::EIO)?;
+        let page_end = page_start
+            .checked_add(entry.valid_len as u64)
+            .ok_or(crate::syscall::EIO)?;
+        if page_start >= end || page_end <= offset {
+            continue;
+        }
+        let bytes = snapshot_page(entry)?;
+        super::cache_range::copy_overlap(offset, output, page_start, &bytes[..entry.valid_len])
+            .map_err(|_| crate::syscall::EIO)?;
+        entry.last_used = next_cache_access();
+    }
+    Ok(())
+}
+
 fn lock_provider_key(key: ObjectKey) -> super::object_io::IoGuard {
     let gate = PROVIDER_IO.lock().get(key);
     gate.lock(|| {
