@@ -527,12 +527,6 @@ file_close(fd: u64) -> isize
 file_read(fd: u64, buf: ptr, len: usize) -> isize
 ```
 
-### file_write
-
-```
-file_write(fd: u64, buf: ptr, len: usize) -> isize
-```
-
 ### file_seek
 
 ```

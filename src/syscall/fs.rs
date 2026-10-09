@@ -1350,31 +1350,6 @@ fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
     }
 }
 
-/// Write: 開かれたファイルへデータを書き込む
-pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
-    let result = write_impl(fd, buf_ptr, len);
-    crate::performance::record_vfs_write(len, transferred_io_bytes(result));
-    result
-}
-
-fn write_impl(fd: u64, buf_ptr: u64, len: u64) -> u64 {
-    if fd < FD_BASE as u64 {
-        return EBADF;
-    }
-    let pid = match current_process_id_raw() {
-        Some(p) => p,
-        None => return EBADF,
-    };
-    let idx = fd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
-    let Some(handle) = file_handle(pid, idx) else {
-        return EBADF;
-    };
-    write_file_handle(&handle, buf_ptr, len)
-}
-
 pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> u64 {
     if buf_ptr == 0 {
         return EFAULT;
@@ -1662,10 +1637,6 @@ pub fn file_close(fd: u64) -> u64 {
 
 pub fn file_read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     read(fd, buf_ptr, len)
-}
-
-pub fn file_write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
-    write(fd, buf_ptr, len)
 }
 
 pub fn file_seek(fd: u64, offset: i64, whence: u64) -> u64 {
