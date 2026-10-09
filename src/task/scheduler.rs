@@ -315,14 +315,7 @@ pub fn sleep_thread(id: ThreadId) {
 /// Sleeping/Blocked状態のスレッドをReady状態にする。
 /// Ready状態の場合は pending_wakeup フラグを立てて競合を防ぐ。
 pub fn wake_thread(id: ThreadId) {
-    if let Some(current_state) = crate::task::with_thread(id, |t| t.state()) {
-        if current_state == ThreadState::Sleeping || current_state == ThreadState::Blocked {
-            let _ = with_thread_mut(id, |thread| thread.note_interactive_wakeup());
-            set_thread_state(id, ThreadState::Ready);
-        } else if current_state == ThreadState::Ready {
-            with_thread_mut(id, |t| t.set_pending_wakeup());
-        }
-    }
+    wake_waiter(id, false);
 }
 
 /// Wake a thread that has registered itself with a kernel wait queue.
@@ -331,13 +324,32 @@ pub fn wake_thread(id: ThreadId) {
 /// transitions to Sleeping. Latch that wakeup so `sleep_thread_unless_woken`
 /// cannot miss a notification delivered in that interval.
 pub fn wake_registered_waiter(id: ThreadId) {
-    if let Some(current_state) = crate::task::with_thread(id, |thread| thread.state()) {
-        if current_state == ThreadState::Sleeping || current_state == ThreadState::Blocked {
-            let _ = with_thread_mut(id, |thread| thread.note_interactive_wakeup());
-            set_thread_state(id, ThreadState::Ready);
-        } else if current_state == ThreadState::Ready || current_state == ThreadState::Running {
-            with_thread_mut(id, |thread| thread.set_pending_wakeup());
+    wake_waiter(id, true);
+}
+
+/// State, wake latch, and ready bitmap must change under the same queue lock.
+/// Otherwise a concurrently selected thread could be marked Ready while it
+/// is already running, or lose a wakeup between the state check and latch.
+fn wake_waiter(id: ThreadId, latch_running: bool) {
+    let mut queue = THREAD_QUEUE.lock();
+    let Some(slot) = queue.slot_index(id) else {
+        return;
+    };
+    let Some(thread) = queue.get_slot_mut(slot) else {
+        return;
+    };
+    match thread.state() {
+        ThreadState::Sleeping | ThreadState::Blocked => {
+            thread.note_interactive_wakeup();
+            queue.set_state_at_slot(slot, ThreadState::Ready);
         }
+        ThreadState::Ready => {
+            thread.set_pending_wakeup();
+        }
+        ThreadState::Running if latch_running => {
+            thread.set_pending_wakeup();
+        }
+        _ => {}
     }
 }
 
