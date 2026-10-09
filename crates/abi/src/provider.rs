@@ -18,12 +18,18 @@ pub const OP_MEMORY_OBJECT: u16 = 9;
 /// Sequential read with an atomically captured starting byte position.
 /// Successful payloads contain a little-endian u64 position, then `value` bytes.
 pub const OP_READ_WITH_POSITION: u16 = 10;
+/// Sequential read into one IPC-attached MemoryObject. `basis` is the byte
+/// offset within the object, not a pointer or handle number. The receiver must
+/// require READ | WRITE | MAP, validate the mapping bounds, and close the attachment.
+/// Success returns the byte count in `value` and an inline u64 starting position.
+pub const OP_READ_SHARED: u16 = 11;
 
 pub const REQUEST_HEADER_LEN: usize = 48;
 pub const RESPONSE_HEADER_LEN: usize = 40;
 pub const MAX_DATA_LEN: usize = 4096;
 pub const READ_POSITION_LEN: usize = 8;
 pub const MAX_POSITIONED_READ_LEN: usize = MAX_DATA_LEN - READ_POSITION_LEN;
+pub const MAX_SHARED_READ_LEN: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestHeader {
@@ -176,6 +182,7 @@ const fn valid_opcode(opcode: u16) -> bool {
             | OP_SYNC
             | OP_MEMORY_OBJECT
             | OP_READ_WITH_POSITION
+            | OP_READ_SHARED
     )
 }
 
@@ -192,6 +199,13 @@ const fn valid_request_fields(header: RequestHeader) -> bool {
                 && header.basis == 0
                 && header.data_length == 0
                 && header.length as usize <= MAX_POSITIONED_READ_LEN
+        }
+        OP_READ_SHARED => {
+            header.argument == 0
+                && header.data_length == 0
+                && header.length != 0
+                && header.length as usize <= MAX_SHARED_READ_LEN
+                && header.basis.checked_add(header.length as u64).is_some()
         }
         OP_WRITE => {
             header.argument == 0
@@ -257,6 +271,10 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
         OP_READ_WITH_POSITION => {
             header.data_length as usize >= READ_POSITION_LEN
                 && header.value == (header.data_length as usize - READ_POSITION_LEN) as u64
+        }
+        OP_READ_SHARED => {
+            header.data_length as usize == READ_POSITION_LEN
+                && header.value <= MAX_SHARED_READ_LEN as u64
         }
         // Positioned providers may return the starting byte offset alongside
         // a sequential write result, captured by the same operation.
