@@ -2416,7 +2416,10 @@ pub fn map_shared_frame_to_user(
             release_user_frame(frame_phys);
             return Err(Kernel::Memory(Memory::OutOfMemory));
         };
-        unsafe { page_table.map_to(page, frame, flags, allocator) }
+        // The leaf enforces access. Ancestors must permit later dirty-fault
+        // upgrades of an initially read-only shared page.
+        let parent_flags = Flags::PRESENT | Flags::WRITABLE | Flags::USER_ACCESSIBLE;
+        unsafe { page_table.map_to_with_table_flags(page, frame, flags, parent_flags, allocator) }
     };
     match map_result {
         Ok(flush) => {
