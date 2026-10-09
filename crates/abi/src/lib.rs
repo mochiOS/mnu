@@ -33,6 +33,12 @@ pub const MEMORY_ACCESS_WRITE: u64 = 1 << 1;
 pub const MEMORY_ACCESS_EXECUTE: u64 = 1 << 2;
 pub const MEMORY_ACCESS_ALL: u64 = MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE | MEMORY_ACCESS_EXECUTE;
 
+/// Native VM mapping options. A zero backing handle creates anonymous memory;
+/// a nonzero handle names a mappable kernel object.
+pub const MEMORY_MAP_EXACT: u64 = 1 << 0;
+pub const MEMORY_MAP_SHARED: u64 = 1 << 1;
+pub const MEMORY_MAP_OPTIONS_ALL: u64 = MEMORY_MAP_EXACT | MEMORY_MAP_SHARED;
+
 /// mnu native syscall numbers.
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
