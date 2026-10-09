@@ -1001,10 +1001,10 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
 
 /// memory_share システムコール
 ///
-/// 指定領域を共有可能なマッピングとして扱う。
+/// 匿名領域を共有可能なマッピングとして扱う。
+/// ファイルbackingの共有化はHandle権限を検証するMemoryMap経路で行う。
 pub fn memory_share(addr: u64, length: u64, options: u64) -> u64 {
-    let _ = options;
-    if addr == 0 || length == 0 {
+    if options != 0 || addr == 0 || length == 0 || addr & 4095 != 0 {
         return EINVAL;
     }
     let share_len = match page_align_up(length) {
@@ -1034,8 +1034,7 @@ pub fn memory_share(addr: u64, length: u64, options: u64) -> u64 {
         if !region.allows_write_range(region_start, share_len) {
             return false;
         }
-        region.set_shared(true);
-        true
+        region.set_shared(true)
     })
     .unwrap_or(false);
     if ok { SUCCESS } else { EINVAL }

@@ -277,7 +277,14 @@ impl MemoryRegion {
         Some(slice)
     }
 
-    pub fn set_shared(&mut self, shared: bool) {
+    pub fn set_shared(&mut self, shared: bool) -> bool {
+        // A private file mapping may be writable through COW even when its
+        // source handle has no WRITE right. Sharing that mapping would turn
+        // private writes into unauthorized backing writes. File sharing must
+        // be selected by MemoryMap, which validates the source handle rights.
+        if shared && !self.is_shared() && self.backing.file_object().is_some() {
+            return false;
+        }
         if shared {
             self.options |= mnu_abi::MEMORY_MAP_SHARED;
         } else {
@@ -287,6 +294,7 @@ impl MemoryRegion {
             MemoryBacking::Anonymous { shared: s, .. } => *s = shared,
             MemoryBacking::File { shared: s, .. } => *s = shared,
         }
+        true
     }
 
     pub fn set_writable(&mut self, writable: bool) {
