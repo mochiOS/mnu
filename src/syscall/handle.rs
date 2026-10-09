@@ -438,6 +438,108 @@ fn provider_read_chunk<'a>(
     }
 }
 
+struct TemporaryMemoryHandle(u64);
+
+impl Drop for TemporaryMemoryHandle {
+    fn drop(&mut self) {
+        let _ = close(self.0);
+    }
+}
+
+fn provider_read_shared(
+    provider: &ProviderObject,
+    identity: u64,
+    buffer: u64,
+    length: usize,
+) -> u64 {
+    use mnu_abi::provider as wire;
+    let capacity = length.min(wire::MAX_SHARED_READ_LEN);
+    let backing_length = (capacity as u64 + 4095) & !4095;
+    let raw = memory_object_create(backing_length, 0);
+    if (raw as i64) < 0 {
+        return raw;
+    }
+    let _handle = TemporaryMemoryHandle(raw);
+    let object = match object(raw, HandleRights::MAP) {
+        Ok(KernelObject::VmObject(object)) => object,
+        Ok(_) => return EIO,
+        Err(error) => return error,
+    };
+    let handle = match decode_handle(raw) {
+        Ok(handle) => handle,
+        Err(error) => return error,
+    };
+    let requested = HandleRights::READ.union(HandleRights::WRITE).union(HandleRights::MAP);
+    let mut data = vec![0u8; capacity];
+    let mut total = 0usize;
+    while total < length {
+        let chunk = (length - total).min(capacity);
+        let request = wire::RequestHeader {
+            opcode: wire::OP_READ_SHARED,
+            object_id: provider.object_id,
+            argument: 0,
+            basis: 0,
+            length: chunk as u32,
+            data_length: 0,
+        };
+        let mut encoded = [0u8; wire::REQUEST_HEADER_LEN];
+        if request.encode(&[], &mut encoded).is_err() {
+            return EINVAL;
+        }
+        let mut response = [0u8; wire::RESPONSE_HEADER_LEN + wire::READ_POSITION_LEN];
+        let result = (|| -> Result<usize, u64> {
+            let _io_guard = crate::mem::vm_object::lock_provider_io(provider, identity);
+            let reply_length = crate::syscall::ipc::call_provider_with_handle_from_kernel(
+                provider_endpoint(provider),
+                &encoded,
+                &mut response,
+                handle,
+                requested,
+            )?;
+            let (reply, position) = wire::ResponseHeader::decode(
+                response.get(..reply_length).ok_or(EIO)?,
+            )
+            .map_err(|_| EIO)?;
+            if reply.object_id != provider.object_id || reply.opcode != request.opcode {
+                return Err(EIO);
+            }
+            if reply.status != 0 {
+                return Err(reply.status as u64);
+            }
+            let count = usize::try_from(reply.value).map_err(|_| EIO)?;
+            if count > chunk || position.len() != wire::READ_POSITION_LEN {
+                return Err(EIO);
+            }
+            let start = u64::from_le_bytes(position.try_into().map_err(|_| EIO)?);
+            if object.read_at(0, &mut data[..count])? != count {
+                return Err(EIO);
+            }
+            crate::mem::vm_object::overlay_provider_range(
+                provider, identity, start, &mut data[..count],
+            )?;
+            Ok(count)
+        })();
+        let count = match result {
+            Ok(count) => count,
+            Err(error) => return if total == 0 { error } else { total as u64 },
+        };
+        // User-buffer faults can read the same object: never retain its I/O
+        // serialization guard across this copy.
+        let address = match buffer.checked_add(total as u64) {
+            Some(address) => address,
+            None => return if total == 0 { EINVAL } else { total as u64 },
+        };
+        if let Err(error) = crate::syscall::copy_to_user(address, &data[..count]) {
+            return if total == 0 { error } else { total as u64 };
+        }
+        total += count;
+        if count < chunk {
+            break;
+        }
+    }
+    total as u64
+}
+
 fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
     let length = match usize::try_from(length) {
         Ok(length) => length,
@@ -450,6 +552,17 @@ fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         Ok(identity) => identity,
         Err(error) => return error,
     };
+    if let Some(identity) = identity {
+        if length > mnu_abi::provider::MAX_POSITIONED_READ_LEN {
+            let result = provider_read_shared(provider, identity, buffer, length);
+            // Providers can explicitly decline this optional transport without
+            // losing support for ordinary object reads. No POSIX syscall path
+            // is used, and other errors or partial reads are never retried.
+            if result != ENOSYS && result != ENOTSUP {
+                return result;
+            }
+        }
+    }
     let maximum = if identity.is_some() {
         mnu_abi::provider::MAX_POSITIONED_READ_LEN
     } else {
