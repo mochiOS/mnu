@@ -1,6 +1,6 @@
 //! Generic virtual-memory system calls.
 
-use super::types::{EFAULT, EINVAL, ENOMEM, ESRCH, SUCCESS};
+use super::types::{EACCES, EFAULT, EINVAL, ENOMEM, ESRCH, SUCCESS};
 
 #[inline]
 fn current_pid() -> Option<crate::task::ids::ProcessId> {
@@ -32,7 +32,7 @@ fn memory_range_is_mapped(
     while page < end {
         let has_page = crate::mem::paging::has_user_page_entry_in_table(table_phys, page);
         let has_region = process
-            .find_mmap_region(page)
+            .find_memory_region(page)
             .and_then(|region| region.end())
             .is_some_and(|region_end| page + 4096 <= region_end);
         if !has_page && !has_region {
@@ -56,7 +56,7 @@ fn protect_memory_pages(
     let mut page = start;
     while page < end {
         let page_writable = writable
-            && !process.find_mmap_region(page).is_some_and(|region| {
+            && !process.find_memory_region(page).is_some_and(|region| {
                 let page_index = (page - region.start()) / 4096;
                 region.is_shared()
                     && region.backing().file_object().is_some()
@@ -82,14 +82,14 @@ fn record_mapping_access(
     end: u64,
     access: u64,
 ) -> bool {
-    for region in process.mmap_regions_mut() {
+    for region in process.memory_regions_mut() {
         let Some(region_end) = region.end() else {
             return false;
         };
         let overlap_start = start.max(region.start());
         let overlap_end = end.min(region_end);
         if overlap_start < overlap_end
-            && !region.set_protection(overlap_start, overlap_end - overlap_start, access)
+            && !region.set_access(overlap_start, overlap_end - overlap_start, access)
         {
             return false;
         }
@@ -144,14 +144,17 @@ pub fn protect(addr: u64, len: u64, access: u64) -> u64 {
         if !memory_range_is_mapped(process, table_phys, start, end) {
             return Err(EFAULT);
         }
+        // Validate the entire range before changing any page permissions.
+        // A mapping retains the authority of its original backing handle even
+        // after that handle is closed or transferred with fewer rights.
+        for region in process.memory_regions() {
+            let region_end = region.end().ok_or(EFAULT)?;
+            if start < region_end && end > region.start() && !region.permits_access(access) {
+                return Err(EACCES);
+            }
+        }
         protect_memory_pages(
-            process,
-            table_phys,
-            start,
-            end,
-            present,
-            writable,
-            executable,
+            process, table_phys, start, end, present, writable, executable,
         )?;
         if !record_mapping_access(process, start, end, access) {
             return Err(EFAULT);

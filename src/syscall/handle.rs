@@ -4,7 +4,8 @@ use alloc::vec;
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
 use super::{
-    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, ENOSPC, ENOTSUP, ESRCH, SUCCESS,
+    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, ENOSPC, ENOSYS, ENOTSUP, ESRCH,
+    SUCCESS,
 };
 
 pub(crate) fn flush_provider_releases() {
@@ -47,6 +48,13 @@ fn decode_handle(raw: u64) -> Result<ObjectHandle, u64> {
 }
 
 pub(crate) fn object(raw: u64, required_right: HandleRights) -> Result<KernelObject, u64> {
+    object_with_rights(raw, required_right).map(|(object, _)| object)
+}
+
+pub(crate) fn object_with_rights(
+    raw: u64,
+    required_right: HandleRights,
+) -> Result<(KernelObject, HandleRights), u64> {
     let process_id = current_process()?;
     let handle = decode_handle(raw)?;
     crate::task::with_process(process_id, |process| {
@@ -54,7 +62,7 @@ pub(crate) fn object(raw: u64, required_right: HandleRights) -> Result<KernelObj
         if !entry.rights().contains(required_right) {
             return Err(EACCES);
         }
-        Ok(entry.object().clone())
+        Ok((entry.object().clone(), entry.rights()))
     })
     .unwrap_or(Err(EINVAL))
 }
@@ -235,6 +243,111 @@ fn provider_call(
     Ok((response, data.len()))
 }
 
+/// Reads from a provider object without changing its sequential I/O offset.
+/// This is the generic pager-facing operation used by native VM objects.
+pub(crate) fn provider_read_at(
+    provider: &ProviderObject,
+    offset: u64,
+    output: &mut [u8],
+) -> Result<usize, u64> {
+    if output.len() > mnu_abi::provider::MAX_DATA_LEN {
+        return Err(EINVAL);
+    }
+    let request = mnu_abi::provider::RequestHeader {
+        opcode: mnu_abi::provider::OP_READ_AT,
+        object_id: provider.object_id,
+        argument: 0,
+        basis: offset,
+        length: output.len() as u32,
+        data_length: 0,
+    };
+    let mut response_storage = vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + output.len()];
+    let (response, data_len) = provider_call(provider, request, &[], &mut response_storage)?;
+    if response.value as usize != data_len || data_len > output.len() {
+        return Err(EIO);
+    }
+    output[..data_len].copy_from_slice(
+        &response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN
+            ..mnu_abi::provider::RESPONSE_HEADER_LEN + data_len],
+    );
+    Ok(data_len)
+}
+
+/// Writes to a provider object without changing its sequential I/O offset.
+pub(crate) fn provider_write_at(
+    provider: &ProviderObject,
+    offset: u64,
+    input: &[u8],
+) -> Result<usize, u64> {
+    if input.len() > mnu_abi::provider::MAX_DATA_LEN {
+        return Err(EINVAL);
+    }
+    let request = mnu_abi::provider::RequestHeader {
+        opcode: mnu_abi::provider::OP_WRITE_AT,
+        object_id: provider.object_id,
+        argument: 0,
+        basis: offset,
+        length: input.len() as u32,
+        data_length: input.len() as u32,
+    };
+    let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
+    let (response, data_len) = provider_call(provider, request, input, &mut response_storage)?;
+    let written = usize::try_from(response.value).map_err(|_| EIO)?;
+    if data_len != 0 || written > input.len() {
+        return Err(EIO);
+    }
+    Ok(written)
+}
+
+pub(crate) fn provider_sync(provider: &ProviderObject) -> Result<(), u64> {
+    let request = mnu_abi::provider::RequestHeader {
+        opcode: mnu_abi::provider::OP_SYNC,
+        object_id: provider.object_id,
+        argument: 0,
+        basis: 0,
+        length: 0,
+        data_length: 0,
+    };
+    let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
+    let (response, data_len) = provider_call(provider, request, &[], &mut response_storage)?;
+    if response.value != 0 || data_len != 0 {
+        return Err(EIO);
+    }
+    Ok(())
+}
+
+pub(crate) fn provider_memory_object(provider: &ProviderObject) -> Result<u64, u64> {
+    if provider.memory_identity_unavailable() {
+        return Err(ENOTSUP);
+    }
+    if let Some(cached) = provider.memory_identity() {
+        return Ok(cached);
+    }
+    let request = mnu_abi::provider::RequestHeader {
+        opcode: mnu_abi::provider::OP_MEMORY_OBJECT,
+        object_id: provider.object_id,
+        argument: 0,
+        basis: 0,
+        length: 0,
+        data_length: 0,
+    };
+    let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
+    let (response, data_len) = match provider_call(provider, request, &[], &mut response_storage) {
+        Ok(response) => response,
+        Err(error) => {
+            if error == ENOTSUP || error == ENOSYS {
+                provider.set_memory_identity_unavailable();
+            }
+            return Err(error);
+        }
+    };
+    if response.value == 0 || data_len != 0 {
+        return Err(EIO);
+    }
+    provider.set_memory_identity(response.value);
+    Ok(response.value)
+}
+
 fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
     let length = match usize::try_from(length) {
         Ok(length) => length,
@@ -287,7 +400,7 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
     };
     let mut total = 0usize;
     let mut data = vec![0u8; mnu_abi::provider::MAX_DATA_LEN];
-    let mut response_storage = vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
+    let mut response_storage = vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + 8];
     while total < length {
         let chunk = (length - total).min(data.len());
         let address = match buffer.checked_add(total as u64) {
@@ -311,9 +424,24 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
                 Err(error) => return if total == 0 { error } else { total as u64 },
             };
         let written = match usize::try_from(response.value) {
-            Ok(written) if data_len == 0 && written <= chunk => written,
+            Ok(written) if (data_len == 0 || data_len == 8) && written <= chunk => written,
             _ => return if total == 0 { EIO } else { total as u64 },
         };
+        if written != 0 && data_len == 8 {
+            let start = u64::from_le_bytes(
+                response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN..]
+                    .try_into()
+                    .unwrap(),
+            );
+            if let Ok(identity) = provider_memory_object(provider) {
+                crate::mem::vm_object::update_provider_range(
+                    provider,
+                    identity,
+                    start,
+                    &data[..written],
+                );
+            }
+        }
         total += written;
         if written < chunk {
             break;

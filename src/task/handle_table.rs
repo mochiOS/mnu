@@ -16,6 +16,8 @@ pub struct ProviderObject {
     pub object_id: u64,
     registered: AtomicBool,
     io_options: AtomicU64,
+    memory_identity: AtomicU64,
+    memory_identity_unavailable: AtomicBool,
     signal_state: crate::interrupt::spinlock::SpinLock<ProviderSignalState>,
 }
 
@@ -103,6 +105,8 @@ impl ProviderObject {
             object_id,
             registered: AtomicBool::new(false),
             io_options: AtomicU64::new(0),
+            memory_identity: AtomicU64::new(0),
+            memory_identity_unavailable: AtomicBool::new(false),
             signal_state: crate::interrupt::spinlock::SpinLock::new(ProviderSignalState::default()),
         }
     }
@@ -126,6 +130,24 @@ impl ProviderObject {
 
     pub(crate) fn set_io_options(&self, options: u64) {
         self.io_options.store(options, Ordering::Release);
+    }
+
+    pub(crate) fn memory_identity(&self) -> Option<u64> {
+        let identity = self.memory_identity.load(Ordering::Acquire);
+        (identity != 0).then_some(identity)
+    }
+
+    pub(crate) fn set_memory_identity(&self, identity: u64) {
+        self.memory_identity.store(identity, Ordering::Release);
+    }
+
+    pub(crate) fn memory_identity_unavailable(&self) -> bool {
+        self.memory_identity_unavailable.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_memory_identity_unavailable(&self) {
+        self.memory_identity_unavailable
+            .store(true, Ordering::Release);
     }
 
     pub(crate) fn register_waiter(&self, waiter: super::ids::ThreadId) -> bool {

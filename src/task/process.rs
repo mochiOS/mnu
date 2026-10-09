@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crate::capability::{CapabilitySet, KernelAuthority, KernelAuthoritySet, KernelCapability};
 use crate::result::{Kernel, Process as ProcessError, Result};
@@ -43,7 +43,7 @@ impl Default for ResourceLimits {
 }
 
 #[derive(Clone, Debug)]
-pub enum MmapBacking {
+pub enum MemoryBacking {
     Anonymous {
         data: alloc::vec::Vec<u8>,
         writable: bool,
@@ -58,21 +58,22 @@ pub enum MmapBacking {
 }
 
 #[derive(Clone, Debug)]
-pub struct MmapRegion {
+pub struct MemoryRegion {
     start: u64,
     len: u64,
-    prot: u64,
-    protection_ranges: alloc::vec::Vec<MmapProtectionRange>,
-    flags: u64,
-    backing: MmapBacking,
+    access: u64,
+    max_access: u64,
+    access_ranges: alloc::vec::Vec<MemoryAccessRange>,
+    options: u64,
+    backing: MemoryBacking,
     dirty_pages: alloc::vec::Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct MmapProtectionRange {
+struct MemoryAccessRange {
     start: u64,
     end: u64,
-    prot: u64,
+    access: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -159,24 +160,26 @@ impl MmioMapping {
     }
 }
 
-impl MmapRegion {
+impl MemoryRegion {
     pub fn file_backed(
         start: u64,
         len: u64,
-        prot: u64,
-        flags: u64,
+        access: u64,
+        options: u64,
         object: Arc<crate::mem::vm_object::VmObject>,
         offset: u64,
         writable: bool,
         shared: bool,
+        max_access: u64,
     ) -> Self {
         Self {
             start,
             len,
-            prot,
-            protection_ranges: alloc::vec::Vec::new(),
-            flags,
-            backing: MmapBacking::File {
+            access,
+            max_access,
+            access_ranges: alloc::vec::Vec::new(),
+            options,
+            backing: MemoryBacking::File {
                 object,
                 offset,
                 writable,
@@ -189,18 +192,19 @@ impl MmapRegion {
     pub fn anonymous(
         start: u64,
         len: u64,
-        prot: u64,
-        flags: u64,
+        access: u64,
+        options: u64,
         writable: bool,
         shared: bool,
     ) -> Self {
         Self {
             start,
             len,
-            prot,
-            protection_ranges: alloc::vec::Vec::new(),
-            flags,
-            backing: MmapBacking::Anonymous {
+            access,
+            max_access: mnu_abi::MEMORY_ACCESS_ALL,
+            access_ranges: alloc::vec::Vec::new(),
+            options,
+            backing: MemoryBacking::Anonymous {
                 data: alloc::vec::Vec::new(),
                 writable,
                 shared,
@@ -227,30 +231,68 @@ impl MmapRegion {
             .unwrap_or(false)
     }
 
-    pub fn backing(&self) -> &MmapBacking {
+    pub fn backing(&self) -> &MemoryBacking {
         &self.backing
     }
 
-    pub fn backing_mut(&mut self) -> &mut MmapBacking {
+    pub fn backing_mut(&mut self) -> &mut MemoryBacking {
         &mut self.backing
+    }
+
+    /// Retains an aligned subrange without losing its backing authority,
+    /// object offset, dirty-page indices, or access overrides.
+    fn slice(&self, start: u64, end: u64) -> Option<Self> {
+        if start < self.start || end > self.end()? || start >= end {
+            return None;
+        }
+        let delta = start.checked_sub(self.start)?;
+        let mut slice = self.clone();
+        slice.start = start;
+        slice.len = end - start;
+        match &mut slice.backing {
+            MemoryBacking::File { offset, .. } => {
+                *offset = offset.checked_add(delta)?;
+            }
+            MemoryBacking::Anonymous { data, .. } if !data.is_empty() => {
+                let first = usize::try_from(delta).ok()?;
+                let last = usize::try_from(delta.checked_add(slice.len)?).ok()?;
+                *data = data.get(first..last)?.to_vec();
+            }
+            _ => {}
+        }
+        slice.access_ranges.retain_mut(|range| {
+            range.start = range.start.max(start);
+            range.end = range.end.min(end);
+            range.start < range.end
+        });
+        let first_page = delta / 4096;
+        let last_page = first_page.checked_add(slice.len / 4096)?;
+        slice.dirty_pages.retain_mut(|page| {
+            if *page < first_page || *page >= last_page {
+                return false;
+            }
+            *page -= first_page;
+            true
+        });
+        Some(slice)
     }
 
     pub fn set_shared(&mut self, shared: bool) {
         if shared {
-            self.flags |= 0x1;
+            self.options |= mnu_abi::MEMORY_MAP_SHARED;
         } else {
-            self.flags &= !0x1;
+            self.options &= !mnu_abi::MEMORY_MAP_SHARED;
         }
         match &mut self.backing {
-            MmapBacking::Anonymous { shared: s, .. } => *s = shared,
-            MmapBacking::File { shared: s, .. } => *s = shared,
+            MemoryBacking::Anonymous { shared: s, .. } => *s = shared,
+            MemoryBacking::File { shared: s, .. } => *s = shared,
         }
     }
 
     pub fn set_writable(&mut self, writable: bool) {
         match &mut self.backing {
-            MmapBacking::Anonymous { writable: w, .. } => *w = writable,
-            MmapBacking::File { writable: w, .. } => *w = writable,
+            MemoryBacking::Anonymous { writable: w, .. } => *w = writable,
+            MemoryBacking::File { writable: w, .. } => *w = writable,
         }
     }
 
@@ -275,21 +317,21 @@ impl MmapRegion {
     }
 
     pub fn is_writable(&self) -> bool {
-        (self.prot & 0x2) != 0
+        self.access & mnu_abi::MEMORY_ACCESS_WRITE != 0
     }
 
     pub fn allows_read_at(&self, address: u64) -> bool {
-        self.protection_at(address).is_some_and(|prot| prot != 0)
+        self.access_at(address).is_some_and(|access| access != 0)
     }
 
     pub fn allows_write_at(&self, address: u64) -> bool {
-        self.protection_at(address)
-            .is_some_and(|prot| prot & 0x2 != 0)
+        self.access_at(address)
+            .is_some_and(|access| access & mnu_abi::MEMORY_ACCESS_WRITE != 0)
     }
 
     pub fn allows_execute_at(&self, address: u64) -> bool {
-        self.protection_at(address)
-            .is_some_and(|prot| prot & 0x4 != 0)
+        self.access_at(address)
+            .is_some_and(|access| access & mnu_abi::MEMORY_ACCESS_EXECUTE != 0)
     }
 
     #[inline(never)]
@@ -308,7 +350,10 @@ impl MmapRegion {
     }
 
     #[inline(never)]
-    pub fn set_protection(&mut self, start: u64, len: u64, prot: u64) -> bool {
+    pub fn set_access(&mut self, start: u64, len: u64, access: u64) -> bool {
+        if !self.permits_access(access) {
+            return false;
+        }
         let Some(end) = start.checked_add(len) else {
             return false;
         };
@@ -316,7 +361,7 @@ impl MmapRegion {
             return false;
         }
 
-        let previous = core::mem::take(&mut self.protection_ranges);
+        let previous = core::mem::take(&mut self.access_ranges);
         let mut ranges = alloc::vec::Vec::with_capacity(previous.len() + 1);
         for range in previous {
             if range.end <= start || range.start >= end {
@@ -324,78 +369,82 @@ impl MmapRegion {
                 continue;
             }
             if range.start < start {
-                ranges.push(MmapProtectionRange {
+                ranges.push(MemoryAccessRange {
                     end: start,
                     ..range
                 });
             }
             if range.end > end {
-                ranges.push(MmapProtectionRange {
+                ranges.push(MemoryAccessRange {
                     start: end,
                     ..range
                 });
             }
         }
-        if prot != self.prot {
-            ranges.push(MmapProtectionRange { start, end, prot });
+        if access != self.access {
+            ranges.push(MemoryAccessRange { start, end, access });
         }
         ranges.sort_unstable_by_key(|range| range.start);
 
         for range in ranges {
-            if let Some(last) = self.protection_ranges.last_mut() {
-                if last.end == range.start && last.prot == range.prot {
+            if let Some(last) = self.access_ranges.last_mut() {
+                if last.end == range.start && last.access == range.access {
                     last.end = range.end;
                     continue;
                 }
             }
-            self.protection_ranges.push(range);
+            self.access_ranges.push(range);
         }
         true
     }
 
-    fn protection_at(&self, address: u64) -> Option<u64> {
+    fn access_at(&self, address: u64) -> Option<u64> {
         if !self.contains(address) {
             return None;
         }
         Some(
-            self.protection_ranges
+            self.access_ranges
                 .iter()
                 .find(|range| address >= range.start && address < range.end)
-                .map_or(self.prot, |range| range.prot),
+                .map_or(self.access, |range| range.access),
         )
     }
 
+    pub fn permits_access(&self, access: u64) -> bool {
+        access & !self.max_access == 0
+    }
+
     pub fn is_shared(&self) -> bool {
-        (self.flags & 0x1) != 0
+        self.options & mnu_abi::MEMORY_MAP_SHARED != 0
     }
 }
 
-impl MmapBacking {
+impl MemoryBacking {
     pub fn file_object(&self) -> Option<&Arc<crate::mem::vm_object::VmObject>> {
         match self {
-            MmapBacking::Anonymous { .. } => None,
-            MmapBacking::File { object, .. } => Some(object),
+            MemoryBacking::Anonymous { .. } => None,
+            MemoryBacking::File { object, .. } => Some(object),
         }
     }
 
     pub fn file_offset(&self) -> u64 {
         match self {
-            MmapBacking::Anonymous { .. } => 0,
-            MmapBacking::File { offset, .. } => *offset,
+            MemoryBacking::Anonymous { .. } => 0,
+            MemoryBacking::File { offset, .. } => *offset,
         }
     }
 
     pub fn file_writable(&self) -> bool {
         match self {
-            MmapBacking::Anonymous { writable, .. } => *writable,
-            MmapBacking::File { writable, .. } => *writable,
+            MemoryBacking::Anonymous { writable, .. } => *writable,
+            MemoryBacking::File { writable, .. } => *writable,
         }
     }
 
     pub fn file_shared(&self) -> bool {
         match self {
-            MmapBacking::Anonymous { shared, .. } => *shared,
-            MmapBacking::File { shared, .. } => *shared,
+            MemoryBacking::Anonymous { shared, .. } => *shared,
+            MemoryBacking::File { shared, .. } => *shared,
         }
     }
 }
@@ -638,8 +687,8 @@ pub struct Process {
     object_handles: alloc::boxed::Box<ObjectHandleTable>,
     /// Opaque inherited-handle names supplied by the trusted launch path.
     launch_context: alloc::boxed::Box<LaunchContext>,
-    /// file-backed mmap の VMA テーブル
-    mmap_regions: alloc::vec::Vec<MmapRegion>,
+    /// Native anonymous and object-backed virtual-memory regions.
+    memory_regions: alloc::vec::Vec<MemoryRegion>,
     /// 借用 MMIO マッピング
     mmio_mappings: Vec<MmioMapping>,
     /// カーネル管理 DMA バッファ
@@ -707,7 +756,7 @@ impl Process {
             fd_table: FdTable::new_boxed(),
             object_handles: ObjectHandleTable::new_boxed(),
             launch_context: LaunchContext::new_boxed(),
-            mmap_regions: alloc::vec::Vec::new(),
+            memory_regions: alloc::vec::Vec::new(),
             mmio_mappings: Vec::new(),
             dma_buffers: Vec::new(),
             resource_limits: ResourceLimits::default(),
@@ -936,8 +985,8 @@ impl Process {
     pub fn mapped_memory_bytes(&self) -> u64 {
         let heap = self.heap_end.saturating_sub(self.heap_start);
         let stack = self.stack_top.saturating_sub(self.stack_bottom);
-        let mmap = self
-            .mmap_regions
+        let mapped_memory = self
+            .memory_regions
             .iter()
             .fold(0u64, |total, region| total.saturating_add(region.len()));
         let dma = self
@@ -945,7 +994,7 @@ impl Process {
             .iter()
             .fold(0u64, |total, buffer| total.saturating_add(buffer.len()));
         heap.saturating_add(stack)
-            .saturating_add(mmap)
+            .saturating_add(mapped_memory)
             .saturating_add(dma)
     }
     pub fn set_stack_bottom(&mut self, addr: u64) {
@@ -993,21 +1042,21 @@ impl Process {
         self.resource_limits = limits;
     }
 
-    pub fn mmap_regions(&self) -> &[MmapRegion] {
-        &self.mmap_regions
+    pub fn memory_regions(&self) -> &[MemoryRegion] {
+        &self.memory_regions
     }
 
-    pub fn mmap_regions_mut(&mut self) -> &mut alloc::vec::Vec<MmapRegion> {
-        &mut self.mmap_regions
+    pub fn memory_regions_mut(&mut self) -> &mut alloc::vec::Vec<MemoryRegion> {
+        &mut self.memory_regions
     }
 
-    pub fn set_mmap_regions(&mut self, regions: alloc::vec::Vec<MmapRegion>) {
-        self.mmap_regions = regions;
+    pub fn set_memory_regions(&mut self, regions: alloc::vec::Vec<MemoryRegion>) {
+        self.memory_regions = regions;
     }
 
-    pub fn add_mmap_region(&mut self, region: MmapRegion) -> bool {
+    pub fn add_memory_region(&mut self, region: MemoryRegion) -> bool {
         let overlaps = self
-            .mmap_regions
+            .memory_regions
             .iter()
             .any(|existing| regions_overlap(existing, &region));
         if overlaps {
@@ -1025,33 +1074,59 @@ impl Process {
         if mmio_overlap {
             return false;
         }
-        self.mmap_regions.push(region);
+        self.memory_regions.push(region);
         true
     }
 
-    pub fn find_mmap_region(&self, addr: u64) -> Option<&MmapRegion> {
-        self.mmap_regions
+    pub fn find_memory_region(&self, addr: u64) -> Option<&MemoryRegion> {
+        self.memory_regions
             .iter()
             .find(|region| region.contains(addr))
     }
 
-    pub fn find_mmap_region_mut(&mut self, addr: u64) -> Option<&mut MmapRegion> {
-        self.mmap_regions
+    pub fn find_memory_region_mut(&mut self, addr: u64) -> Option<&mut MemoryRegion> {
+        self.memory_regions
             .iter_mut()
             .find(|region| region.contains(addr))
     }
 
-    pub fn remove_mmap_region(&mut self, start: u64, len: u64) -> Option<MmapRegion> {
+    pub fn remove_memory_region(&mut self, start: u64, len: u64) -> Option<MemoryRegion> {
         let end = start.checked_add(len)?;
         let idx = self
-            .mmap_regions
+            .memory_regions
             .iter()
             .position(|region| region.start == start && region.end() == Some(end))?;
-        Some(self.mmap_regions.remove(idx))
+        Some(self.memory_regions.remove(idx))
     }
 
-    pub fn clone_mmap_regions_for_fork(&self) -> alloc::vec::Vec<MmapRegion> {
-        self.mmap_regions.clone()
+    /// Removes every intersection and keeps the surviving pieces. Build the
+    /// replacement before changing state so an invalid slice changes nothing.
+    pub fn remove_memory_range(&mut self, start: u64, len: u64) -> Option<Vec<MemoryRegion>> {
+        let end = start.checked_add(len)?;
+        let mut retained = Vec::new();
+        let mut removed = Vec::new();
+        for region in &self.memory_regions {
+            use super::memory_range::{Range, cut};
+            let pieces = cut(
+                Range {
+                    start: region.start,
+                    end: region.end()?,
+                },
+                Range { start, end },
+            )?;
+            if let Some(range) = pieces.removed {
+                removed.push(region.slice(range.start, range.end)?);
+            }
+            for range in [pieces.before, pieces.after].into_iter().flatten() {
+                retained.push(region.slice(range.start, range.end)?);
+            }
+        }
+        self.memory_regions = retained;
+        Some(removed)
+    }
+
+    pub fn clone_memory_regions_for_fork(&self) -> alloc::vec::Vec<MemoryRegion> {
+        self.memory_regions.clone()
     }
 
     pub fn has_kernel_authority(&self, authority: &KernelAuthority) -> bool {
@@ -1087,13 +1162,13 @@ impl Process {
         if mmio_overlap {
             return false;
         }
-        let mmap_overlap = self.mmap_regions.iter().any(|region| {
+        let memory_overlap = self.memory_regions.iter().any(|region| {
             let Some(region_end) = region.end() else {
                 return true;
             };
             mapping.virt_start() < region_end && region.start() < mapping_end
         });
-        if mmap_overlap {
+        if memory_overlap {
             return false;
         }
         let dma_overlap = self.dma_buffers.iter().any(|existing| {
@@ -1163,13 +1238,13 @@ impl Process {
         if dma_overlap {
             return false;
         }
-        let mmap_overlap = self.mmap_regions.iter().any(|region| {
+        let memory_overlap = self.memory_regions.iter().any(|region| {
             let Some(region_end) = region.end() else {
                 return true;
             };
             buffer.virt_start < region_end && region.start() < buffer_end
         });
-        if mmap_overlap {
+        if memory_overlap {
             return false;
         }
         if self.heap_start != 0
@@ -1251,10 +1326,9 @@ impl Process {
         self.object_handles
             .retain(|handle| launch_context.references_handle(handle));
     }
-
 }
 
-fn regions_overlap(a: &MmapRegion, b: &MmapRegion) -> bool {
+fn regions_overlap(a: &MemoryRegion, b: &MemoryRegion) -> bool {
     let (Some(a_end), Some(b_end)) = (a.end(), b.end()) else {
         return true;
     };
@@ -1535,13 +1609,16 @@ struct ProcessExitWaiter {
 
 static PROCESS_EXIT_WAITERS: SpinLock<[Option<ProcessExitWaiter>; MAX_PROCESS_EXIT_WAITERS]> =
     SpinLock::new([const { None }; MAX_PROCESS_EXIT_WAITERS]);
-static DEFERRED_PROCESS_RECLAIMS: SpinLock<
-    [Option<ProcessId>; ProcessTable::MAX_PROCESSES],
-> = SpinLock::new([None; ProcessTable::MAX_PROCESSES]);
+static DEFERRED_PROCESS_RECLAIMS: SpinLock<[Option<ProcessId>; ProcessTable::MAX_PROCESSES]> =
+    SpinLock::new([None; ProcessTable::MAX_PROCESSES]);
 
 fn defer_process_reclaim(process: ProcessId) {
     let mut deferred = DEFERRED_PROCESS_RECLAIMS.lock();
-    if deferred.iter().flatten().any(|candidate| *candidate == process) {
+    if deferred
+        .iter()
+        .flatten()
+        .any(|candidate| *candidate == process)
+    {
         return;
     }
     if let Some(slot) = deferred.iter_mut().find(|slot| slot.is_none()) {
@@ -1776,9 +1853,7 @@ pub fn flush_deferred_process_reclaims() {
             defer_process_reclaim(process_id);
             continue;
         }
-        let process = PROCESS_TABLE
-            .lock()
-            .take_handle_managed_exited(process_id);
+        let process = PROCESS_TABLE.lock().take_handle_managed_exited(process_id);
         if let Some(process) = process {
             let _ = destroy_exited_process(process);
         }

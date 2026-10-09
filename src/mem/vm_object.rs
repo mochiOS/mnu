@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interrupt::spinlock::SpinLock;
+use crate::task::ProviderObject;
 use crate::vfs::{InodeId, MountId, Vnode};
 
 pub const PAGE_BYTES: usize = 4096;
@@ -21,9 +22,22 @@ struct LowerReadOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObjectKey {
+    Vnode {
+        mount_id: MountId,
+        inode_id: InodeId,
+    },
+    Provider {
+        endpoint_thread_id: u64,
+        endpoint_slot: u16,
+        endpoint_generation: u64,
+        identity: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PageKey {
-    mount_id: MountId,
-    inode_id: InodeId,
+    object: ObjectKey,
     page_index: u64,
 }
 
@@ -50,16 +64,51 @@ static PAGE_CACHE_CLOCK: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct VmObject {
-    vnode: Arc<Vnode>,
+    source: VmObjectSource,
+}
+
+#[derive(Clone)]
+enum VmObjectSource {
+    Vnode(Arc<Vnode>),
+    Provider {
+        object: Arc<ProviderObject>,
+        identity: u64,
+    },
 }
 
 impl VmObject {
     pub fn file(vnode: Arc<Vnode>) -> Self {
-        Self { vnode }
+        Self {
+            source: VmObjectSource::Vnode(vnode),
+        }
     }
 
-    pub fn vnode(&self) -> &Arc<Vnode> {
-        &self.vnode
+    pub fn provider(object: Arc<ProviderObject>, identity: u64) -> Self {
+        Self {
+            source: VmObjectSource::Provider { object, identity },
+        }
+    }
+
+    fn object_key(&self) -> ObjectKey {
+        match &self.source {
+            VmObjectSource::Vnode(vnode) => ObjectKey::Vnode {
+                mount_id: vnode.inode.mount_id,
+                inode_id: vnode.inode.inode_id,
+            },
+            VmObjectSource::Provider { object, identity } => ObjectKey::Provider {
+                endpoint_thread_id: object.endpoint_thread_id,
+                endpoint_slot: object.endpoint_slot,
+                endpoint_generation: object.endpoint_generation,
+                identity: *identity,
+            },
+        }
+    }
+
+    fn page_key(&self, page_index: u64) -> PageKey {
+        PageKey {
+            object: self.object_key(),
+            page_index,
+        }
     }
 
     pub fn page(&self, page_index: u64) -> Result<Arc<[u8; PAGE_BYTES]>, u64> {
@@ -67,11 +116,7 @@ impl VmObject {
     }
 
     fn page_with_len(&self, page_index: u64) -> Result<(Arc<[u8; PAGE_BYTES]>, usize), u64> {
-        let key = PageKey {
-            mount_id: self.vnode.inode.mount_id,
-            inode_id: self.vnode.inode.inode_id,
-            page_index,
-        };
+        let key = self.page_key(page_index);
 
         if let Some(page) = cached_page(key)? {
             return Ok(page);
@@ -83,7 +128,7 @@ impl VmObject {
 
         let epoch = cache_mutation_epoch();
         let mut page = [0u8; PAGE_BYTES];
-        let outcome = read_lower_until(&self.vnode, offset, &mut page);
+        let outcome = read_lower_until(&self.source, offset, &mut page);
 
         if let Some(errno) = outcome.error {
             return Err(errno);
@@ -102,7 +147,7 @@ impl VmObject {
     }
 
     pub fn invalidate(&self) {
-        invalidate_inode(self.vnode.inode.mount_id, self.vnode.inode.inode_id);
+        invalidate_object(self.object_key());
     }
 
     pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
@@ -146,18 +191,13 @@ impl VmObject {
             .checked_add(input_len)
             .ok_or(crate::syscall::EINVAL)?;
 
-        let written = self.vnode.write_at(offset, input)?;
+        let written = write_lower(&self.source, offset, input)?;
 
         if written > input.len() {
             return Err(crate::syscall::EIO);
         }
 
-        update_cached_range(
-            self.vnode.inode.mount_id,
-            self.vnode.inode.inode_id,
-            offset,
-            &input[..written],
-        );
+        update_cached_range(self.object_key(), offset, &input[..written]);
 
         Ok(written)
     }
@@ -171,11 +211,7 @@ impl VmObject {
         executable: bool,
     ) -> Result<(), u64> {
         let (loaded, loaded_len) = self.page_with_len(page_index)?;
-        let key = PageKey {
-            mount_id: self.vnode.inode.mount_id,
-            inode_id: self.vnode.inode.inode_id,
-            page_index,
-        };
+        let key = self.page_key(page_index);
 
         let mut cache = PAGE_CACHE.lock();
         let entry_index = if let Some(index) = cache.iter().position(|entry| entry.key == key) {
@@ -214,11 +250,7 @@ impl VmObject {
     }
 
     pub fn mark_page_dirty(&self, page_index: u64) -> Result<(), u64> {
-        let key = PageKey {
-            mount_id: self.vnode.inode.mount_id,
-            inode_id: self.vnode.inode.inode_id,
-            page_index,
-        };
+        let key = self.page_key(page_index);
 
         let mut cache = PAGE_CACHE.lock();
 
@@ -263,11 +295,7 @@ impl VmObject {
 
             let (loaded, loaded_len) = self.page_with_len(page_index)?;
 
-            let key = PageKey {
-                mount_id: self.vnode.inode.mount_id,
-                inode_id: self.vnode.inode.inode_id,
-                page_index,
-            };
+            let key = self.page_key(page_index);
 
             let mut cache = PAGE_CACHE.lock();
 
@@ -333,10 +361,11 @@ impl VmObject {
         let snapshots = {
             let mut cache = PAGE_CACHE.lock();
             let mut snapshots = Vec::new();
-            for entry in cache.iter_mut().filter(|entry| {
-                entry.key.mount_id == self.vnode.inode.mount_id
-                    && entry.key.inode_id == self.vnode.inode.inode_id
-            }) {
+            let object_key = self.object_key();
+            for entry in cache
+                .iter_mut()
+                .filter(|entry| entry.key.object == object_key)
+            {
                 let page_start = entry.key.page_index.saturating_mul(PAGE_BYTES as u64);
                 let page_end = page_start.saturating_add(PAGE_BYTES as u64);
                 if page_start >= range_end || page_end <= offset {
@@ -365,9 +394,7 @@ impl VmObject {
             let write_offset = page_start
                 .checked_add(dirty_start as u64)
                 .ok_or(crate::syscall::EINVAL)?;
-            let written = self
-                .vnode
-                .write_at(write_offset, &bytes[dirty_start..dirty_end])?;
+            let written = write_lower(&self.source, write_offset, &bytes[dirty_start..dirty_end])?;
             if written != dirty_end - dirty_start {
                 return Err(crate::syscall::EIO);
             }
@@ -386,6 +413,9 @@ impl VmObject {
                 entry.last_used = next_cache_access();
             }
         }
+        if let VmObjectSource::Provider { object, .. } = &self.source {
+            crate::syscall::handle::provider_sync(object)?;
+        }
         Ok(())
     }
 
@@ -398,8 +428,7 @@ impl core::fmt::Debug for VmObject {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("VmObject")
-            .field("mount_id", &self.vnode.inode.mount_id)
-            .field("inode_id", &self.vnode.inode.inode_id)
+            .field("source", &self.object_key())
             .finish()
     }
 }
@@ -459,11 +488,35 @@ fn next_cache_access() -> u64 {
 }
 
 pub fn invalidate_inode(mount_id: MountId, inode_id: InodeId) {
+    invalidate_object(ObjectKey::Vnode {
+        mount_id,
+        inode_id,
+    });
+}
+
+pub(crate) fn update_provider_range(
+    object: &ProviderObject,
+    identity: u64,
+    offset: u64,
+    input: &[u8],
+) {
+    update_cached_range(
+        ObjectKey::Provider {
+            endpoint_thread_id: object.endpoint_thread_id,
+            endpoint_slot: object.endpoint_slot,
+            endpoint_generation: object.endpoint_generation,
+            identity,
+        },
+        offset,
+        input,
+    );
+}
+
+fn invalidate_object(object: ObjectKey) {
     let mut cache = PAGE_CACHE.lock();
 
     cache.retain(|entry| {
-        entry.key.mount_id != mount_id
-            || entry.key.inode_id != inode_id
+        entry.key.object != object
             || entry
                 .frame_phys
                 .is_some_and(crate::mem::paging::user_frame_has_multiple_owners)
@@ -472,7 +525,7 @@ pub fn invalidate_inode(mount_id: MountId, inode_id: InodeId) {
     bump_cache_mutation_epoch();
 }
 
-fn update_cached_range(mount_id: MountId, inode_id: InodeId, offset: u64, input: &[u8]) {
+fn update_cached_range(object: ObjectKey, offset: u64, input: &[u8]) {
     if input.is_empty() {
         return;
     }
@@ -491,7 +544,7 @@ fn update_cached_range(mount_id: MountId, inode_id: InodeId, offset: u64, input:
 
     for entry in cache
         .iter_mut()
-        .filter(|entry| entry.key.mount_id == mount_id && entry.key.inode_id == inode_id)
+        .filter(|entry| entry.key.object == object)
     {
         let page_start = match entry.key.page_index.checked_mul(PAGE_BYTES as u64) {
             Some(value) => value,
@@ -566,12 +619,15 @@ pub fn invalidate_range(mount_id: MountId, inode_id: InodeId, offset: u64, lengt
     let last_offset = offset.checked_add(length - 1).unwrap_or(u64::MAX);
 
     let last_page = last_offset / PAGE_BYTES as u64;
+    let object = ObjectKey::Vnode {
+        mount_id,
+        inode_id,
+    };
 
     let mut cache = PAGE_CACHE.lock();
 
     cache.retain(|entry| {
-        entry.key.mount_id != mount_id
-            || entry.key.inode_id != inode_id
+        entry.key.object != object
             || entry.key.page_index < first_page
             || entry.key.page_index > last_page
             || entry
@@ -584,13 +640,15 @@ pub fn invalidate_range(mount_id: MountId, inode_id: InodeId, offset: u64, lengt
 
 pub fn truncate_inode(mount_id: MountId, inode_id: InodeId, length: u64) {
     let first_invalid_page = length / PAGE_BYTES as u64;
+    let object = ObjectKey::Vnode {
+        mount_id,
+        inode_id,
+    };
 
     let mut cache = PAGE_CACHE.lock();
 
     cache.retain_mut(|entry| {
-        if entry.key.mount_id != mount_id
-            || entry.key.inode_id != inode_id
-            || entry.key.page_index < first_invalid_page
+        if entry.key.object != object || entry.key.page_index < first_invalid_page
         {
             return true;
         }
@@ -632,9 +690,12 @@ pub fn truncate_inode(mount_id: MountId, inode_id: InodeId, length: u64) {
     bump_cache_mutation_epoch();
 }
 
-fn read_lower_until(vnode: &Vnode, offset: u64, output: &mut [u8]) -> LowerReadOutcome {
+fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> LowerReadOutcome {
     let mut bytes_read = 0usize;
-    let io_limit = core::cmp::max(1, vnode.read_io_limit());
+    let io_limit = match source {
+        VmObjectSource::Vnode(vnode) => core::cmp::max(1, vnode.read_io_limit()),
+        VmObjectSource::Provider { .. } => mnu_abi::provider::MAX_DATA_LEN,
+    };
 
     while bytes_read < output.len() {
         let bytes_read_u64 = match u64::try_from(bytes_read) {
@@ -661,7 +722,17 @@ fn read_lower_until(vnode: &Vnode, offset: u64, output: &mut [u8]) -> LowerReadO
 
         let request_len = core::cmp::min(output.len() - bytes_read, io_limit);
 
-        match vnode.read_at(current, &mut output[bytes_read..bytes_read + request_len]) {
+        let read = match source {
+            VmObjectSource::Vnode(vnode) => {
+                vnode.read_at(current, &mut output[bytes_read..bytes_read + request_len])
+            }
+            VmObjectSource::Provider { object, .. } => crate::syscall::handle::provider_read_at(
+                object,
+                current,
+                &mut output[bytes_read..bytes_read + request_len],
+            ),
+        };
+        match read {
             Ok(0) => {
                 return LowerReadOutcome {
                     bytes_read,
@@ -703,6 +774,15 @@ fn read_lower_until(vnode: &Vnode, offset: u64, output: &mut [u8]) -> LowerReadO
         bytes_read,
         eof: false,
         error: None,
+    }
+}
+
+fn write_lower(source: &VmObjectSource, offset: u64, input: &[u8]) -> Result<usize, u64> {
+    match source {
+        VmObjectSource::Vnode(vnode) => vnode.write_at(offset, input),
+        VmObjectSource::Provider { object, .. } => {
+            crate::syscall::handle::provider_write_at(object, offset, input)
+        }
     }
 }
 
@@ -796,8 +876,10 @@ fn contiguous_uncached_pages(
         };
 
         let key = PageKey {
-            mount_id,
-            inode_id,
+            object: ObjectKey::Vnode {
+                mount_id,
+                inode_id,
+            },
             page_index,
         };
 

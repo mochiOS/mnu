@@ -1631,7 +1631,7 @@ fn exec_with_data(
             return errno;
         }
         proc.set_page_table(new_pt_phys);
-        proc.set_mmap_regions(deferred_zero_regions);
+        proc.set_memory_regions(deferred_zero_regions);
         proc.set_stack_bottom(stack_base_vaddr);
         proc.set_stack_top(stack_end_vaddr + 4096);
         proc.set_exe_path(exec_path);
@@ -1835,8 +1835,8 @@ fn replace_current_process_image(
         return mapping_error_errno(error);
     }
     let exec_cfg = crate::config::kernel().exec;
-    let heap_base = exec_cfg.mmap_heap_base_min.saturating_add(
-        aslr_offset_pages(aslr_seed ^ 0x4a11_6b5c, exec_cfg.mmap_heap_aslr_max_pages) * 4096,
+    let heap_base = exec_cfg.memory_map_base_min.saturating_add(
+        aslr_offset_pages(aslr_seed ^ 0x4a11_6b5c, exec_cfg.memory_map_aslr_max_pages) * 4096,
     );
     let heap_map_size: u64 = 4096 * 2;
     if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
@@ -1879,7 +1879,7 @@ fn replace_current_process_image(
         process.set_heap_start(heap_base);
         process.set_heap_end(heap_base + heap_map_size);
         process.set_ipc_mapping_end(0);
-        process.set_mmap_regions(deferred_zero_regions);
+        process.set_memory_regions(deferred_zero_regions);
         process.set_stack_bottom(stack_base_vaddr);
         process.set_stack_top(stack_end_vaddr + 4096);
         process.set_exe_path(identity);

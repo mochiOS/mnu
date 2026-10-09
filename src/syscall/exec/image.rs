@@ -7,15 +7,13 @@ const USER_EXEC_ADDRESS_MIN: u64 = 0x0040_0000;
 const USER_ADDRESS_MAX: u64 = 0x0000_7fff_ffff_ffff;
 const PF_EXECUTE: u32 = 0x1;
 const PF_WRITE: u32 = 0x2;
-const PROT_READ_WRITE: u64 = 0x3;
-const MAP_PRIVATE_ANONYMOUS: u64 = 0x22;
 
 pub(super) struct ElfImageLayout {
     pub(super) entry: u64,
     pub(super) phdr_vaddr: u64,
     pub(super) phentsize: u64,
     pub(super) phnum: u64,
-    pub(super) deferred_zero_regions: Vec<crate::task::MmapRegion>,
+    pub(super) deferred_zero_regions: Vec<crate::task::MemoryRegion>,
 }
 
 fn align_page_up(address: u64) -> Option<u64> {
@@ -181,11 +179,11 @@ pub(super) fn map_elf_image(
         mapped.map_err(mapping_error_errno)?;
 
         if let Some((start, len)) = deferred {
-            deferred_zero_regions.push(crate::task::MmapRegion::anonymous(
+            deferred_zero_regions.push(crate::task::MemoryRegion::anonymous(
                 start,
                 len,
-                PROT_READ_WRITE,
-                MAP_PRIVATE_ANONYMOUS,
+                mnu_abi::MEMORY_ACCESS_READ | mnu_abi::MEMORY_ACCESS_WRITE,
+                0,
                 true,
                 false,
             ));

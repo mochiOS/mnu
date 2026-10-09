@@ -69,7 +69,7 @@ pub fn validate_user_ptr(ptr: u64, len: u64) -> bool {
             let resident =
                 crate::mem::paging::is_user_range_mapped_in_table(table_phys, address, chunk_len);
             if !resident {
-                let valid_region = process.find_mmap_region(address).is_some_and(|region| {
+                let valid_region = process.find_memory_region(address).is_some_and(|region| {
                     region.allows_read_at(address)
                         && region
                             .end()
@@ -524,7 +524,7 @@ fn fault_in_user_range(table_phys: u64, address: u64, len: u64, write: bool) -> 
         } else {
             crate::mem::paging::is_user_range_mapped_in_table(table_phys, page, 1)
         };
-        if !resident && !process::handle_user_mmap_fault(page, write, false) {
+        if !resident && !process::handle_user_memory_fault(page, write, false) {
             return false;
         }
         if page == end_page {
@@ -714,7 +714,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
             SUCCESS
         }
         x if x == SyscallNumber::MemoryMap as u64 => {
-            process::mmap(arg0, arg1, arg2, arg3, arg4, arg5)
+            process::memory_map(arg0, arg1, arg2, arg3, arg4, arg5)
         }
         x if x == SyscallNumber::GetFramebufferInfo as u64 => get_framebuffer_info(arg0),
         x if x == SyscallNumber::MapFramebuffer as u64 => map_framebuffer(arg0, arg1),
@@ -792,7 +792,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         }
         x if x == SyscallNumber::PerformanceSnapshot as u64 => performance::snapshot(arg0, arg1),
         x if x == SyscallNumber::MapPhysicalRange as u64 => map_physical_range(arg0, arg1, arg2),
-        x if x == SyscallNumber::MemoryUnmap as u64 => process::munmap(arg0, arg1),
+        x if x == SyscallNumber::MemoryUnmap as u64 => process::memory_unmap(arg0, arg1),
         x if x == SyscallNumber::MemoryProtect as u64 => memory::protect(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
