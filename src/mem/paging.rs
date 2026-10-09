@@ -561,7 +561,7 @@ pub fn protect_user_page_if_mapped(
     Ok(true)
 }
 
-fn retain_shared_user_frame(phys: u64) -> Result<()> {
+pub(crate) fn retain_shared_user_frame(phys: u64) -> Result<()> {
     SHARED_USER_FRAMES.lock().retain(phys)
 }
 

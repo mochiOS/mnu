@@ -592,12 +592,11 @@ pub fn handle_user_memory_fault(fault_addr: u64, is_write: bool, is_execute: boo
         Ok((
             pt_phys,
             region.start(),
-            region.allows_execute_at(fault_addr),
             shared_file,
             pager,
         ))
     });
-    let Some(Ok((pt_phys, region_start, executable, shared_file, pager))) = plan else {
+    let Some(Ok((pt_phys, region_start, shared_file, pager))) = plan else {
         return false;
     };
 
@@ -609,8 +608,21 @@ pub fn handle_user_memory_fault(fault_addr: u64, is_write: bool, is_execute: boo
         Some(_) => None,
         None => Some(Arc::new([0u8; crate::mem::vm_object::PAGE_BYTES])),
     };
+    // Loading a shared cache page may call provider IPC. Pin it before taking
+    // the process-table lock; the retained frame also prevents cache eviction
+    // between preparation and installation into the revalidated mapping.
+    let shared_page = match pager.as_ref() {
+        Some((object, page_index)) if shared_file => match object.prepare_shared_page(*page_index) {
+            Ok(page) => Some(page),
+            Err(_) => return false,
+        },
+        _ => None,
+    };
 
     let result = crate::task::with_process_mut(pid, |process| {
+        if process.page_table() != Some(pt_phys) {
+            return Err(EINVAL);
+        }
         let region = process.find_memory_region_mut(fault_addr).ok_or(EINVAL)?;
         if region.start() != region_start
             || !region.allows_read_at(fault_addr)
@@ -619,6 +631,23 @@ pub fn handle_user_memory_fault(fault_addr: u64, is_write: bool, is_execute: boo
         {
             return Err(EPERM);
         }
+        let same_backing = match (pager.as_ref(), region.backing().file_object()) {
+            (Some((planned, page_index)), Some(current)) => {
+                Arc::ptr_eq(planned, current)
+                    && region
+                        .backing()
+                        .file_offset()
+                        .checked_add(page_addr - region.start())
+                        .is_some_and(|offset| offset / 4096 == *page_index)
+                    && region.is_shared() == shared_file
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_backing {
+            return Err(EINVAL);
+        }
+        let executable = region.allows_execute_at(fault_addr);
         if crate::mem::paging::is_user_range_mapped_in_table(pt_phys, page_addr, 1) {
             return Ok(());
         }
@@ -626,7 +655,10 @@ pub fn handle_user_memory_fault(fault_addr: u64, is_write: bool, is_execute: boo
             let Some((object, page_index)) = pager.as_ref() else {
                 return Err(EINVAL);
             };
-            object.map_shared_page(pt_phys, page_addr, *page_index, false, executable)?;
+            shared_page
+                .as_ref()
+                .ok_or(EINVAL)?
+                .map_to(pt_phys, page_addr, false, executable)?;
             if is_write {
                 object.mark_page_dirty(*page_index)?;
                 if crate::mem::paging::protect_user_page_if_mapped(

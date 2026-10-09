@@ -69,6 +69,32 @@ pub struct VmObject {
     source: VmObjectSource,
 }
 
+/// Pins a cache frame while a fault resolves its backing outside task locks.
+pub struct PreparedSharedPage {
+    frame_phys: u64,
+}
+
+impl PreparedSharedPage {
+    pub fn map_to(
+        &self,
+        table_phys: u64,
+        virt_addr: u64,
+        writable: bool,
+        executable: bool,
+    ) -> Result<(), u64> {
+        crate::mem::paging::map_shared_frame_to_user(
+            table_phys, virt_addr, self.frame_phys, writable, executable,
+        )
+        .map_err(|_| crate::syscall::ENOMEM)
+    }
+}
+
+impl Drop for PreparedSharedPage {
+    fn drop(&mut self) {
+        crate::mem::paging::release_user_frame(self.frame_phys);
+    }
+}
+
 #[derive(Clone)]
 enum VmObjectSource {
     Vnode(Arc<Vnode>),
@@ -209,14 +235,7 @@ impl VmObject {
         Ok(written)
     }
 
-    pub fn map_shared_page(
-        &self,
-        table_phys: u64,
-        virt_addr: u64,
-        page_index: u64,
-        writable: bool,
-        executable: bool,
-    ) -> Result<(), u64> {
+    pub fn prepare_shared_page(&self, page_index: u64) -> Result<PreparedSharedPage, u64> {
         let (loaded, loaded_len) = self.page_with_len(page_index)?;
         let key = self.page_key(page_index);
 
@@ -248,12 +267,10 @@ impl VmObject {
         let frame_phys = cache[entry_index]
             .frame_phys
             .ok_or(crate::syscall::ENOMEM)?;
-        crate::mem::paging::map_shared_frame_to_user(
-            table_phys, virt_addr, frame_phys, writable, executable,
-        )
-        .map_err(|_| crate::syscall::ENOMEM)?;
+        crate::mem::paging::retain_shared_user_frame(frame_phys)
+            .map_err(|_| crate::syscall::ENOMEM)?;
         cache[entry_index].last_used = next_cache_access();
-        Ok(())
+        Ok(PreparedSharedPage { frame_phys })
     }
 
     pub fn mark_page_dirty(&self, page_index: u64) -> Result<(), u64> {
