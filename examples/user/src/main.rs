@@ -22,7 +22,7 @@ const CAP_PROCESS_SPAWN: &[u8] = b"process.spawn";
 const CAP_IPC_CLIENT: &[u8] = b"ipc.client";
 const CAP_IPC_SERVER: &[u8] = b"ipc.server";
 const CAP_INVALID: &[u8] = b"no.such.capability";
-const MAP_ANONYMOUS_PRIVATE: u64 = 0x22;
+const NATIVE_ANONYMOUS_PRIVATE: u64 = 0;
 const MEMORY_SYNC_TEST_PATH: &[u8] = b"/tmp/init.msync-test";
 const SPAWN_MMAP_TEST_PATH: &str = "/tmp/init.spawn-mmap-test";
 const PASS_LINE: &[u8] = b"USERLAND SELF-TEST PASS\n";
@@ -114,7 +114,7 @@ fn run_memory_tests() -> bool {
     let mut expected = [0u8; PAGE_SIZE as usize];
     let mut read_back = [0u8; PAGE_SIZE as usize];
 
-    let inaccessible = user::memory_map(0, PAGE_SIZE, 0, MAP_ANONYMOUS_PRIVATE, 0);
+    let inaccessible = user::memory_map(0, PAGE_SIZE, 0, NATIVE_ANONYMOUS_PRIVATE, 0);
     if inaccessible == 0 || is_error(inaccessible) {
         write_literal(b"memory: inaccessible mmap failed\n");
         return false;
@@ -134,7 +134,7 @@ fn run_memory_tests() -> bool {
         return false;
     }
 
-    let writable_executable = user::memory_map(0, PAGE_SIZE, 6, MAP_ANONYMOUS_PRIVATE, 0);
+    let writable_executable = user::memory_map(0, PAGE_SIZE, 6, NATIVE_ANONYMOUS_PRIVATE, 0);
     if !is_error(writable_executable) {
         let _ = user::memory_unmap(writable_executable, PAGE_SIZE);
         write_literal(b"memory: writable executable mmap allowed\n");
@@ -145,7 +145,7 @@ fn run_memory_tests() -> bool {
         *byte = (i as u8).wrapping_mul(3).wrapping_add(1);
     }
 
-    let ptr = user::memory_map(0, PAGE_SIZE, 3, MAP_ANONYMOUS_PRIVATE, 0);
+    let ptr = user::memory_map(0, PAGE_SIZE, 3, NATIVE_ANONYMOUS_PRIVATE, 0);
     if ptr == 0 || is_error(ptr) {
         write_literal(b"memory: mmap failed\n");
         return false;
@@ -192,7 +192,7 @@ fn run_memory_tests() -> bool {
     }
     let _ = user::file_seek(fd, 0, 0);
 
-    let file_ptr = user::memory_map(0, PAGE_SIZE, 3, 0x1, fd);
+    let file_ptr = user::memory_map(0, PAGE_SIZE, 3, mnu_abi::MEMORY_MAP_SHARED, fd);
     if file_ptr == 0 || is_error(file_ptr) {
         let _ = user::file_close(fd);
         write_literal(b"memory: sync mmap failed\n");
@@ -207,7 +207,7 @@ fn run_memory_tests() -> bool {
         expected[i] = v;
     }
 
-    let peer_ptr = user::memory_map(0, PAGE_SIZE, 1, 0x1, fd);
+    let peer_ptr = user::memory_map(0, PAGE_SIZE, 1, mnu_abi::MEMORY_MAP_SHARED, fd);
     if peer_ptr == 0 || is_error(peer_ptr) {
         let _ = user::memory_unmap(file_ptr, PAGE_SIZE);
         let _ = user::file_close(fd);
@@ -358,7 +358,7 @@ fn run_ipc_send_recv_tests(endpoint: u64) -> bool {
 }
 
 fn run_ipc_ping_pong(endpoint: u64) -> u64 {
-    let recv_buf_ptr = user::memory_map(0, PAGE_SIZE, 3, MAP_ANONYMOUS_PRIVATE, 0);
+    let recv_buf_ptr = user::memory_map(0, PAGE_SIZE, 3, NATIVE_ANONYMOUS_PRIVATE, 0);
     if recv_buf_ptr == 0 || is_error(recv_buf_ptr) {
         return 60;
     }
@@ -432,7 +432,7 @@ fn run_process_clone_test() -> bool {
         let _ = user::file_close(fd);
         return false;
     }
-    let mapping = user::memory_map(0, PAGE_SIZE, 3, 0x2, fd);
+    let mapping = user::memory_map(0, PAGE_SIZE, 3, 0, fd);
     if mapping == 0 || is_error(mapping) {
         let _ = user::file_close(fd);
         return false;
@@ -469,7 +469,7 @@ fn run_process_clone_test() -> bool {
         return false;
     }
 
-    let shared_mapping = user::memory_map(0, PAGE_SIZE, 3, 0x1, fd);
+    let shared_mapping = user::memory_map(0, PAGE_SIZE, 3, mnu_abi::MEMORY_MAP_SHARED, fd);
     if shared_mapping == 0 || is_error(shared_mapping) {
         let _ = user::file_close(fd);
         return false;
@@ -543,7 +543,7 @@ fn verify_parent_copy_on_write() -> bool {
     const ORIGINAL_BYTE: u8 = 0x42;
     const PARENT_BYTE: u8 = 0x7b;
 
-    let mapping = user::memory_map(0, PAGE_SIZE, 3, MAP_ANONYMOUS_PRIVATE, 0);
+    let mapping = user::memory_map(0, PAGE_SIZE, 3, NATIVE_ANONYMOUS_PRIVATE, 0);
     if mapping == 0 || is_error(mapping) {
         return false;
     }
@@ -758,7 +758,7 @@ fn run_thread_test() -> bool {
     THREAD_TEST_READY.store(false, Ordering::Release);
     THREAD_TEST_RELEASE.store(false, Ordering::Release);
     let stack_bytes = STACK_SIZE + PAGE_SIZE;
-    let stack_base = user::memory_map(0, stack_bytes, 3, MAP_ANONYMOUS_PRIVATE, 0);
+    let stack_base = user::memory_map(0, stack_bytes, 3, NATIVE_ANONYMOUS_PRIVATE, 0);
     if stack_base == 0 || is_error(stack_base) {
         return false;
     }

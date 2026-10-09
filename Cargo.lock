@@ -135,7 +135,28 @@ name = "mnu-time-core"
 version = "0.1.0"
 
 [[package]]
+name = "mochi-user-syscall"
+version = "0.1.0"
+dependencies = [
+ "mnu-abi",
+]
+
+[[package]]
 name = "mochios-filesystem-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "mochios-posix-client"
+version = "0.1.0"
+dependencies = [
+ "mnu-abi",
+ "mochi-user-syscall",
+ "mochios-filesystem-protocol",
+ "mochios-posix-protocol",
+]
+
+[[package]]
+name = "mochios-posix-protocol"
 version = "0.1.0"
 
 [[package]]
@@ -277,6 +298,8 @@ name = "user"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
+ "mochios-posix-client",
+ "mochios-posix-protocol",
 ]
 
 [[package]]

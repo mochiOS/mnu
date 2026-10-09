@@ -7,6 +7,8 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+mod file_options;
+
 const HEAP_SIZE: usize = 256 * 1024;
 
 #[repr(align(16))]
@@ -113,12 +115,6 @@ const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
 const SYS_CHECK_THREAD_CAPABILITY: u64 = mnu_abi::SyscallNumber::CheckThreadCapability as u64;
 const SYS_LIST_PROCESSES: u64 = mnu_abi::SyscallNumber::ListProcesses as u64;
 const SYS_FIND_PROCESS_BY_NAME: u64 = mnu_abi::SyscallNumber::FindProcessByName as u64;
-const SYS_FILE_OPEN: u64 = mnu_abi::SyscallNumber::FileOpen as u64;
-#[allow(dead_code)]
-const SYS_FILE_CLOSE: u64 = mnu_abi::SyscallNumber::FileClose as u64;
-const SYS_FILE_READ: u64 = mnu_abi::SyscallNumber::FileRead as u64;
-const SYS_FILE_WRITE: u64 = mnu_abi::SyscallNumber::FileWrite as u64;
-const SYS_FILE_SEEK: u64 = mnu_abi::SyscallNumber::FileSeek as u64;
 const PLUGKIT_TEST_DRIVER_PATH: &str = "/plugkit/test/entry.elf";
 const INIT_FS_TEST_PATH: &str = "/tmp/init.fs-test";
 const SIGNATURE_DB_PATH: &str = "/policy/execution.allowlist";
@@ -423,32 +419,52 @@ pub fn thread_yield() -> u64 {
     unsafe { syscall0(SYS_THREAD_YIELD) }
 }
 
-pub fn memory_alloc(len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
-    unsafe { syscall6(SYS_MEMORY_MAP, 0, len, prot, flags, fd, offset) }
+pub fn memory_alloc(len: u64, access: u64, options: u64, backing_handle: u64, offset: u64) -> u64 {
+    unsafe {
+        syscall6(
+            SYS_MEMORY_MAP,
+            0,
+            len,
+            access,
+            options,
+            backing_handle,
+            offset,
+        )
+    }
 }
 
 pub fn memory_free(addr: u64, len: u64) -> u64 {
     unsafe { syscall2(SYS_MEMORY_UNMAP, addr, len) }
 }
 
-pub fn memory_map(addr: u64, len: u64, prot: u64, flags: u64, fd: u64) -> u64 {
-    unsafe { syscall5(SYS_MEMORY_MAP, addr, len, prot, flags, fd) }
+pub fn memory_map(addr: u64, len: u64, access: u64, options: u64, backing_handle: u64) -> u64 {
+    unsafe {
+        syscall6(
+            SYS_MEMORY_MAP,
+            addr,
+            len,
+            access,
+            options,
+            backing_handle,
+            0,
+        )
+    }
 }
 
 pub fn memory_unmap(addr: u64, len: u64) -> u64 {
     unsafe { syscall2(SYS_MEMORY_UNMAP, addr, len) }
 }
 
-pub fn memory_protect(addr: u64, len: u64, prot: u64) -> u64 {
-    unsafe { syscall3(SYS_MEMORY_PROTECT, addr, len, prot) }
+pub fn memory_protect(addr: u64, len: u64, access: u64) -> u64 {
+    unsafe { syscall3(SYS_MEMORY_PROTECT, addr, len, access) }
 }
 
-pub fn memory_share(addr: u64, len: u64, flags: u64) -> u64 {
-    unsafe { syscall3(SYS_MEMORY_SHARE, addr, len, flags) }
+pub fn memory_share(addr: u64, len: u64, options: u64) -> u64 {
+    unsafe { syscall3(SYS_MEMORY_SHARE, addr, len, options) }
 }
 
-pub fn memory_sync(addr: u64, len: u64, flags: u64) -> u64 {
-    unsafe { syscall3(SYS_MEMORY_SYNC, addr, len, flags) }
+pub fn memory_sync(addr: u64, len: u64, options: u64) -> u64 {
+    unsafe { syscall3(SYS_MEMORY_SYNC, addr, len, options) }
 }
 
 pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
@@ -561,34 +577,66 @@ pub fn time_now() -> u64 {
     unsafe { syscall0(SYS_TIME_NOW) }
 }
 
-fn file_path_bytes(path: &str) -> [u8; 96] {
-    let mut buf = [0u8; 96];
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(buf.len() - 1);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    buf[len] = 0;
-    buf
-}
-
+/// Opens through the inherited POSIX endpoint and returns a native Handle,
+/// not a POSIX FD. The sample can use it directly as MemoryMap backing.
 pub fn file_open(path: &str, flags: u64) -> u64 {
-    let buf = file_path_bytes(path);
-    unsafe { syscall2(SYS_FILE_OPEN, buf.as_ptr() as u64, flags) }
+    use mochios_posix_client::{Client, ClientError, OpenAtBase};
+    let options = match file_options::open_options(flags) {
+        Ok(options) => options,
+        Err(error) => return error,
+    };
+    let result = Client::from_syscall_launch_context().and_then(|client| {
+        client.open_at(OpenAtBase::ProcessRoot, options, 0o666, path)
+    });
+    match result {
+        Ok(file) => file.handle as u64,
+        Err(ClientError::Transport(error)) => error.raw() as u64,
+        Err(ClientError::Remote(status)) => status as i64 as u64,
+        Err(_) => mnu_abi::EIO,
+    }
 }
 
-pub fn file_close(fd: u64) -> u64 {
-    unsafe { syscall1(SYS_FILE_CLOSE, fd) }
+pub fn file_close(handle: u64) -> u64 {
+    unsafe { syscall1(mnu_abi::SyscallNumber::HandleClose as u64, handle) }
 }
 
-pub fn file_read(fd: u64, buf: &mut [u8]) -> u64 {
-    unsafe { syscall3(SYS_FILE_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) }
+pub fn file_read(handle: u64, buf: &mut [u8]) -> u64 {
+    unsafe {
+        syscall3(
+            mnu_abi::SyscallNumber::HandleRead as u64,
+            handle,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    }
 }
 
-pub fn file_write(fd: u64, buf: &[u8]) -> u64 {
-    unsafe { syscall3(SYS_FILE_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) }
+pub fn file_write(handle: u64, buf: &[u8]) -> u64 {
+    unsafe {
+        syscall3(
+            mnu_abi::SyscallNumber::HandleWrite as u64,
+            handle,
+            buf.as_ptr() as u64,
+            buf.len() as u64,
+        )
+    }
 }
 
-pub fn file_seek(fd: u64, offset: i64, whence: u64) -> u64 {
-    unsafe { syscall3(SYS_FILE_SEEK, fd, offset as u64, whence) }
+pub fn file_seek(handle: u64, offset: i64, whence: u64) -> u64 {
+    let basis = match whence {
+        0 => mnu_abi::HANDLE_SEEK_START,
+        1 => mnu_abi::HANDLE_SEEK_CURRENT,
+        2 => mnu_abi::HANDLE_SEEK_END,
+        _ => return mnu_abi::EINVAL,
+    };
+    unsafe {
+        syscall3(
+            mnu_abi::SyscallNumber::HandleSeek as u64,
+            handle,
+            offset as u64,
+            basis,
+        )
+    }
 }
 
 fn exec_with_capabilities(path: &str, caps: &[&str]) -> u64 {
@@ -1223,7 +1271,7 @@ fn capability_restrict_regression_self_test() -> bool {
 }
 
 fn physical_map_regression_self_test() -> bool {
-    let addr = memory_map(0, 4096, 3, 0x22, 0);
+    let addr = memory_map(0, 4096, 3, 0, 0);
     if addr == 0 || (addr as i64) < 0 {
         write_line("selftest: phys map setup failed");
         return false;
