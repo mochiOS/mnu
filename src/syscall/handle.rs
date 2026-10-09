@@ -457,8 +457,6 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         Ok(identity) => identity,
         Err(error) => return error,
     };
-    let _io_guard =
-        identity.map(|identity| crate::mem::vm_object::lock_provider_io(provider, identity));
     let mut total = 0usize;
     let mut data = vec![0u8; mnu_abi::provider::MAX_DATA_LEN];
     let mut response_storage = vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + 8];
@@ -471,6 +469,10 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         if let Err(error) = crate::syscall::copy_from_user(address, &mut data[..chunk]) {
             return if total == 0 { error } else { total as u64 };
         }
+        // Faulting the source buffer may load this same backing object. Only
+        // serialize the provider operation and resident-page update afterward.
+        let _io_guard =
+            identity.map(|identity| crate::mem::vm_object::lock_provider_io(provider, identity));
         let request = mnu_abi::provider::RequestHeader {
             opcode: mnu_abi::provider::OP_WRITE,
             object_id: provider.object_id,
