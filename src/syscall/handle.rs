@@ -398,6 +398,16 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         Ok(length) => length,
         Err(_) => return EINVAL,
     };
+    if length == 0 {
+        return SUCCESS;
+    }
+    let identity = match provider_memory_object(provider) {
+        Ok(identity) => Some(identity),
+        Err(error) if error == ENOTSUP || error == ENOSYS => None,
+        Err(error) => return error,
+    };
+    let _io_guard =
+        identity.map(|identity| crate::mem::vm_object::lock_provider_io(provider, identity));
     let mut total = 0usize;
     let mut data = vec![0u8; mnu_abi::provider::MAX_DATA_LEN];
     let mut response_storage = vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + 8];
@@ -433,7 +443,7 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
                     .try_into()
                     .unwrap(),
             );
-            if let Ok(identity) = provider_memory_object(provider) {
+            if let Some(identity) = identity {
                 crate::mem::vm_object::update_provider_range(
                     provider,
                     identity,

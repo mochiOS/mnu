@@ -61,6 +61,8 @@ impl Drop for CachedPage {
 
 static PAGE_CACHE: SpinLock<Vec<CachedPage>> = SpinLock::new(Vec::new());
 static PAGE_CACHE_CLOCK: AtomicU64 = AtomicU64::new(1);
+static PROVIDER_IO: SpinLock<super::object_io::Registry<ObjectKey>> =
+    SpinLock::new(super::object_io::Registry::new());
 
 #[derive(Clone)]
 pub struct VmObject {
@@ -191,6 +193,11 @@ impl VmObject {
             .checked_add(input_len)
             .ok_or(crate::syscall::EINVAL)?;
 
+        let _io_guard = if matches!(&self.source, VmObjectSource::Provider { .. }) {
+            Some(lock_provider_key(self.object_key()))
+        } else {
+            None
+        };
         let written = write_lower(&self.source, offset, input)?;
 
         if written > input.len() {
@@ -357,6 +364,13 @@ impl VmObject {
         if length == 0 {
             return Ok(());
         }
+        // Retain ordering through the lower write and cache update. The
+        // registry lock is released before waiting or calling provider IPC.
+        let _io_guard = if matches!(self.source, VmObjectSource::Provider { .. }) {
+            Some(lock_provider_key(self.object_key()))
+        } else {
+            None
+        };
         let range_end = offset.saturating_add(length);
         let snapshots = {
             let mut cache = PAGE_CACHE.lock();
@@ -510,6 +524,22 @@ pub(crate) fn update_provider_range(
         offset,
         input,
     );
+}
+
+pub(crate) fn lock_provider_io(object: &ProviderObject, identity: u64) -> super::object_io::IoGuard {
+    lock_provider_key(ObjectKey::Provider {
+        endpoint_thread_id: object.endpoint_thread_id,
+        endpoint_slot: object.endpoint_slot,
+        endpoint_generation: object.endpoint_generation,
+        identity,
+    })
+}
+
+fn lock_provider_key(key: ObjectKey) -> super::object_io::IoGuard {
+    let gate = PROVIDER_IO.lock().get(key);
+    gate.lock(|| {
+        let _ = crate::task::yield_now();
+    })
 }
 
 fn invalidate_object(object: ObjectKey) {
