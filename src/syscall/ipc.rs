@@ -2104,12 +2104,10 @@ pub fn send_object_handles(
     ]) {
         return EACCES;
     }
-    let Some(dest_record) = endpoint_record_from_handle(dest_endpoint_handle) else {
-        return EINVAL;
+    let (dest_thread_id, _) = match resolve_call_destination(dest_endpoint_handle) {
+        Ok(destination) => destination,
+        Err(error) => return error,
     };
-    if !dest_record.rights.contains(EndpointRights::RECV) {
-        return EACCES;
-    }
     let sender = match crate::task::current_thread_id() {
         Some(id) => match ensure_endpoint_for_thread(id.as_u64()) {
             Some(handle) => handle,
@@ -2122,7 +2120,7 @@ pub fn send_object_handles(
         Err(error) => return error,
     };
     send_to_thread_id_with_attachments(
-        dest_record.thread_id,
+        dest_thread_id,
         sender,
         0,
         buf_ptr,
