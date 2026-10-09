@@ -161,6 +161,8 @@ pub enum SyscallNumber {
     /// Creates page-granular, zero-filled anonymous backing and returns a
     /// process-local Handle. The second argument is reserved and must be zero.
     MemoryObjectCreate = 671,
+    /// Returns the byte length of a process-local MemoryObject with MAP rights.
+    MemoryObjectLength = 672,
     CheckGravityExist = 999,
 }
 

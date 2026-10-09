@@ -8,7 +8,7 @@ use spin::Mutex;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
-use super::{EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EMSGSIZE, ENOSPC};
+use super::{EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EIO, EMSGSIZE, ENOSPC};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
@@ -800,23 +800,31 @@ fn decode_outgoing_object_handles(pointer: u64) -> Result<ObjectHandleAttachment
         }
         let handle = ObjectHandle::from_raw(raw).ok_or(EBADF)?;
         let requested = HandleRights::from_bits(requested_bits).ok_or(EINVAL)?;
-        let exported = crate::task::with_process(process_id, |process| {
-            let source = process.object_handles().get(handle).ok_or(EBADF)?;
-            if !source.rights().contains(HandleRights::TRANSFER)
-                || !source.rights().contains(requested)
-            {
-                return Err(EACCES);
-            }
-            process
-                .object_handles()
-                .export_restricted(handle, requested)
-                .ok_or(EACCES)
-        })
-        .ok_or(EBADF)??;
+        let exported = export_object_handle(process_id, handle, requested)?;
         attachments.handles[index] = Some(exported);
         attachments.count += 1;
     }
     Ok(attachments)
+}
+
+fn export_object_handle(
+    process_id: crate::task::ProcessId,
+    handle: ObjectHandle,
+    requested: HandleRights,
+) -> Result<ObjectHandleEntry, u64> {
+    crate::task::with_process(process_id, |process| {
+        let source = process.object_handles().get(handle).ok_or(EBADF)?;
+        if !source.rights().contains(HandleRights::TRANSFER)
+            || !source.rights().contains(requested)
+        {
+            return Err(EACCES);
+        }
+        process
+            .object_handles()
+            .export_restricted(handle, requested)
+            .ok_or(EACCES)
+    })
+    .ok_or(EBADF)?
 }
 
 fn install_received_object_handles(
@@ -1633,6 +1641,44 @@ fn call_endpoint_from_kernel(
     request: &[u8],
     reply: &mut [u8],
 ) -> Result<usize, u64> {
+    call_endpoint_with_attachments_from_kernel(
+        endpoint,
+        expected_sender,
+        request,
+        reply,
+        ObjectHandleAttachments::empty(),
+    )
+}
+
+/// Attach only handles from the authenticated caller's own table, through the
+/// same attenuation enforcement as user-originated IPC.
+pub(crate) fn call_provider_with_handle_from_kernel(
+    endpoint: IpcEndpoint,
+    request: &[u8],
+    reply: &mut [u8],
+    handle: ObjectHandle,
+    requested: HandleRights,
+) -> Result<usize, u64> {
+    if !endpoint_is_valid(endpoint) {
+        return Err(EINVAL);
+    }
+    let process_id = crate::syscall::security::current_process_id().ok_or(EINVAL)?;
+    let mut attachments = ObjectHandleAttachments::empty();
+    attachments.handles[0] = Some(export_object_handle(process_id, handle, requested)?);
+    attachments.count = 1;
+    let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id).ok_or(EINVAL)?;
+    call_endpoint_with_attachments_from_kernel(
+        endpoint, expected_sender, request, reply, attachments,
+    )
+}
+
+fn call_endpoint_with_attachments_from_kernel(
+    endpoint: IpcEndpoint,
+    expected_sender: u64,
+    request: &[u8],
+    reply: &mut [u8],
+    mut attachments: ObjectHandleAttachments,
+) -> Result<usize, u64> {
     if request.len() > ipc_max_msg_size() || reply.len() > ipc_max_msg_size() {
         return Err(EINVAL);
     }
@@ -1646,19 +1692,36 @@ fn call_endpoint_from_kernel(
             })
             .ok_or(EINVAL)?;
     loop {
+        if !endpoint_is_valid(endpoint) {
+            return Err(EINVAL);
+        }
         let mut mailboxes = lock_mailboxes();
         let mailbox = mailboxes.get_mut(dest_slot).ok_or(EINVAL)?;
-        match mailbox.push_message(
-            sender,
-            endpoint.thread_id,
-            dest_slot as u16,
-            dest_generation,
-            request,
-            false,
-            true,
-            call_id,
-        ) {
-            Ok(()) => {
+        if let Some(slot) = mailbox.alloc_slot() {
+            let Some(message) = mailbox.slots[slot].as_deref_mut() else {
+                mailbox.quarantine("ipc mailbox allocated slot is missing");
+                return Err(EIO);
+            };
+            message.from = sender;
+            message.to = endpoint.thread_id;
+            message.to_slot = dest_slot as u16;
+            message.to_generation = dest_generation;
+            message.is_reply = false;
+            message.ext_pages = ExternalPages::empty();
+            message.expects_reply = true;
+            message.call_id = call_id;
+            message.len = request.len();
+            message.data[..request.len()].copy_from_slice(request);
+            record_ipc_copy(request.len());
+            message.object_handles = attachments;
+            if mailbox.enqueue_slot(slot).is_err() {
+                // Keep ownership while retrying rather than discarding handles.
+                attachments = core::mem::replace(
+                    &mut mailbox.slots[slot].as_deref_mut().ok_or(EIO)?.object_handles,
+                    ObjectHandleAttachments::empty(),
+                );
+                mailbox.free_slot(slot);
+            } else {
                 let waiter = mailbox.take_waiter();
                 drop(mailboxes);
                 if waiter != 0 {
@@ -1666,15 +1729,16 @@ fn call_endpoint_from_kernel(
                 }
                 break;
             }
-            Err(()) => {
-                drop(mailboxes);
-                crate::task::yield_now();
-            }
         }
+        drop(mailboxes);
+        crate::task::yield_now();
     }
     let (caller_slot, caller_generation) =
         crate::task::thread_slot_index_and_generation_by_u64(caller).ok_or(EINVAL)?;
     loop {
+        if !endpoint_is_valid(endpoint) {
+            return Err(EINVAL);
+        }
         let received = {
             let mut mailboxes = lock_mailboxes();
             let mailbox = mailboxes.get_mut(caller_slot).ok_or(EINVAL)?;

@@ -80,6 +80,14 @@ fn decode_handle(raw: u64) -> Result<ObjectHandle, u64> {
     ObjectHandle::from_raw(raw).ok_or(EBADF)
 }
 
+pub fn memory_object_length(raw: u64) -> u64 {
+    match object(raw, HandleRights::MAP) {
+        Ok(KernelObject::VmObject(object)) => object.memory_length().unwrap_or(EINVAL),
+        Ok(_) => EINVAL,
+        Err(error) => error,
+    }
+}
+
 pub(crate) fn object(raw: u64, required_right: HandleRights) -> Result<KernelObject, u64> {
     object_with_rights(raw, required_right).map(|(object, _)| object)
 }

@@ -796,6 +796,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::MemoryProtect as u64 => memory::protect(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryObjectCreate as u64 => handle::memory_object_create(arg0, arg1),
+        x if x == SyscallNumber::MemoryObjectLength as u64 => handle::memory_object_length(arg0),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
         x if x == SyscallNumber::AllocSharedPages as u64 => {
             process::alloc_shared_pages(arg0, arg1, arg2, arg3)
