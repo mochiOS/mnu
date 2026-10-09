@@ -1597,16 +1597,15 @@ pub fn clone_user_page_table(
 
 /// ユーザーページテーブル用のL3/L2/L1階層を指定アドレスまで事前作成
 ///
-/// テンポラリマッピング経由でユーザーL4にアクセスし、必要なL3/L2/L1テーブルを作成
-fn ensure_user_page_table_hierarchy(temp_kern_virt: u64, vaddr: u64, phys_off: u64) -> Result<()> {
+/// 物理メモリ直接マップ経由でユーザーL4にアクセスし、必要なL3/L2/L1テーブルを作成
+fn ensure_user_page_table_hierarchy(l4_virt: u64, vaddr: u64, phys_off: u64) -> Result<()> {
     use x86_64::structures::paging::PageTableFlags as Flags;
 
     let l4_index = ((vaddr >> 39) & 0x1ff) as usize;
     let l3_index = ((vaddr >> 30) & 0x1ff) as usize;
     let l2_index = ((vaddr >> 21) & 0x1ff) as usize;
 
-    // テンポラリマッピング経由でL4にアクセス
-    let l4 = unsafe { &mut *(temp_kern_virt as *mut PageTable) };
+    let l4 = unsafe { &mut *(l4_virt as *mut PageTable) };
 
     // L3テーブルをチェック/作成
     if l4[l4_index].is_unused() {
@@ -1677,8 +1676,8 @@ fn ensure_user_page_table_hierarchy(temp_kern_virt: u64, vaddr: u64, phys_off: u
 
 /// 指定したページテーブル（物理アドレス）にセグメントをマップしてコピーする
 ///
-/// データはカーネルの恒等マッピング（phys = virt）経由で物理フレームに直接書き込む。
-/// フラッシュはカレントCR3に対しては不要なため `.ignore()` を使う。
+/// ページテーブルとデータは物理メモリ直接マップ経由で操作する。
+/// 呼び出し側は対象アドレス空間の変更を直列化する必要がある。
 ///
 /// ## Arguments
 /// - `table_phys`: マップ先のページテーブルの物理アドレス
@@ -1728,78 +1727,23 @@ pub fn map_and_copy_segment_to(
         .checked_add(memsz)
         .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
 
-    // ユーザーL4テーブルをカーネルのページテーブルに一時的にマップ
-    // これにより、新規割り当てのテーブルフレームへのアクセスが可能になる
-    let temp_kern_virt = 0xFFFF_8000_0000_0000u64;
-    crate::debug!(
-        "Attempting temporary kernel map for user L4 at phys {:#x}",
-        table_phys
-    );
-
-    struct TempMapGuard {
-        active: bool,
-    }
-
-    impl Drop for TempMapGuard {
-        fn drop(&mut self) {
-            if !self.active {
-                return;
-            }
-            let temp_page =
-                Page::<Size4KiB>::containing_address(VirtAddr::new(0xFFFF_8000_0000_0000u64));
-            if let Some(kernel_pt) = PAGE_TABLE.lock().as_mut() {
-                if let Ok((_, flush)) = kernel_pt.unmap(temp_page) {
-                    flush.flush();
-                }
-            }
-        }
-    }
-
-    let mut temp_map_guard = TempMapGuard { active: false };
-
-    let mut page_table_lock = PAGE_TABLE.lock();
-    let kernel_pt = page_table_lock
-        .as_mut()
-        .ok_or(Kernel::Memory(Memory::NotMapped))?;
-
-    let temp_page = Page::<Size4KiB>::containing_address(VirtAddr::new(temp_kern_virt));
-    let user_l4_frame = PhysFrame::containing_address(PhysAddr::new(table_phys));
-
-    // カーネルのページテーブルにユーザーL4テーブルをテンポラリマップ
-    unsafe {
-        let mut frame_alloc = frame::lock_allocator();
-        if let Some(alloc_ref) = frame_alloc.as_mut() {
-            match kernel_pt.map_to(
-                temp_page,
-                user_l4_frame,
-                Flags::PRESENT | Flags::WRITABLE | Flags::NO_EXECUTE,
-                alloc_ref,
-            ) {
-                Ok(_) => crate::debug!("Temporary kernel map succeeded for user L4"),
-                Err(e) => {
-                    crate::debug!("Temporary kernel map failed: {:?}", e);
-                    return Err(Kernel::Memory(Memory::InvalidAddress));
-                }
-            }
-        }
-    }
-    temp_map_guard.active = true;
-    drop(page_table_lock);
-    crate::debug!(
-        "Using temp kernel virt {:#x} to access user L4",
-        temp_kern_virt
-    );
+    // A single temporary kernel VA races across CPUs/address spaces. The
+    // permanent direct map addresses this L4 without modifying shared kernel
+    // mappings or invalidating another CPU's translation.
+    let l4_virt = table_phys
+        .checked_add(phys_off)
+        .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
 
     // ヘルパー関数で必要なL3/L2/L1を事前作成
-    ensure_user_page_table_hierarchy(temp_kern_virt, vaddr, phys_off)?;
+    ensure_user_page_table_hierarchy(l4_virt, vaddr, phys_off)?;
 
     // メモリ範囲全体をカバーするために、メモリの終了アドレスもカバー
-    ensure_user_page_table_hierarchy(temp_kern_virt, mem_end - 1, phys_off)?;
+    ensure_user_page_table_hierarchy(l4_virt, mem_end - 1, phys_off)?;
 
     crate::debug!("Page table hierarchy pre-created");
 
     // ユーザーL4/L3/L2/L1テーブルは全て作成済み。ここからページをマップする。
-    // 直接物理ページテーブルを操作（テンポラリマッピング経由）
+    // 物理メモリ直接マップ経由でページテーブルを操作
 
     let mut final_flags = Flags::PRESENT | Flags::USER_ACCESSIBLE;
     if writable {
@@ -1827,12 +1771,12 @@ pub fn map_and_copy_segment_to(
 
         // 指定ページのためにページテーブル階層を確実に作成
         //（セグメントが L2/L1 境界を跨ぐと中間の L1 が作成されていない可能性があるため）
-        ensure_user_page_table_hierarchy(temp_kern_virt, page_addr, phys_off)?;
+        ensure_user_page_table_hierarchy(l4_virt, page_addr, phys_off)?;
 
         let frame = frame::allocate_zeroed_frame()?;
         let mut phys_frame_addr = frame.start_address().as_u64();
 
-        // 直接ページテーブルにエントリを作成（テンポラリマッピング経由で）
+        // 直接ページテーブルにエントリを作成
 
         crate::debug!(
             "Mapping page {:#x} (L4[{}]->L3[{}]->L2[{}]->L1[{}])",
@@ -1843,8 +1787,7 @@ pub fn map_and_copy_segment_to(
             l1_index
         );
 
-        // テンポラリマッピング経由で L4 → L3 → L2 → L1 をたどる
-        let l4 = unsafe { &mut *(temp_kern_virt as *mut PageTable) };
+        let l4 = unsafe { &mut *(l4_virt as *mut PageTable) };
         let l3_phys = l4[l4_index].addr().as_u64();
         if l3_phys == 0 {
             crate::error!("L3 not allocated at L4[{}]", l4_index);
