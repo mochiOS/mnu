@@ -7,6 +7,7 @@ pub mod fd_table;
 pub mod handle_table;
 pub mod ids;
 pub(crate) mod image_origin;
+pub(crate) mod image_transition;
 pub mod launch_context;
 pub mod process;
 pub mod scheduler;

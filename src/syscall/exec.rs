@@ -1650,6 +1650,13 @@ fn replace_current_process_image(
 ) -> u64 {
     use crate::syscall::types::EINVAL;
 
+    let Some(process_id) = crate::syscall::security::current_process_id() else {
+        return EINVAL;
+    };
+    let Some(transition) = crate::task::image_transition::begin_image_replace(process_id) else {
+        return crate::syscall::types::EAGAIN;
+    };
+
     let aslr_seed = next_aslr_seed(identity);
     let new_pt_phys = match crate::mem::paging::create_user_page_table() {
         Ok(page_table) => page_table,
@@ -1736,6 +1743,7 @@ fn replace_current_process_image(
     if !crate::task::remap_kernel_stack_user_table(kernel_stack, new_pt_phys) {
         return crate::syscall::types::ENOMEM;
     }
+    crate::task::scheduler::retire_image_siblings(pid, current_tid);
     crate::task::release_process_mmio_mappings(pid);
     crate::task::release_process_dma_buffers(pid);
     crate::task::with_thread_mut(current_tid, |thread| thread.set_fs_base(initial_fs_base));
@@ -1769,6 +1777,7 @@ fn replace_current_process_image(
     }
     new_pt_guard.disarm();
     measurement.record();
+    drop(transition);
     unsafe {
         crate::mem::paging::switch_page_table(new_pt_phys);
         crate::task::jump_to_usermode(entry, initial_rsp, 0);

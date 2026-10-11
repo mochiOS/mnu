@@ -1146,6 +1146,14 @@ extern "sysv64" fn syscall_interrupt_handler_rust(kstack: *mut u64) -> u64 {
         unsafe { kstack.add(7).read() },  // saved r8  = arg4
         unsafe { kstack.add(6).read() },  // saved r9  = arg5
     );
+    if current_tid.is_some_and(|id| {
+        crate::task::with_thread(id, |thread| {
+            thread.state() == crate::task::ThreadState::Terminated
+        })
+        .unwrap_or(false)
+    }) {
+        crate::task::exit_current_task(0);
+    }
 
     if let Some(slot) = current_slot {
         crate::task::with_thread_at_slot_mut(slot, |t| t.set_in_syscall(false));
@@ -1191,6 +1199,14 @@ extern "C" fn syscall_handler_rust(
     }
 
     let ret = dispatch(num, arg0, arg1, arg2, arg3, arg4, arg5);
+    if current_tid.is_some_and(|id| {
+        crate::task::with_thread(id, |thread| {
+            thread.state() == crate::task::ThreadState::Terminated
+        })
+        .unwrap_or(false)
+    }) {
+        crate::task::exit_current_task(0);
+    }
 
     if let Some(slot) = current_slot {
         crate::task::with_thread_at_slot_mut(slot, |t| t.set_in_syscall(false));

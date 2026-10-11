@@ -127,6 +127,9 @@ pub fn thread_create(context_ptr: u64, context_len: u64) -> u64 {
         Some(pid) => pid,
         None => return ENOSYS,
     };
+    let Some(_creation) = crate::task::image_transition::begin_thread_creation(pid) else {
+        return super::types::EAGAIN;
+    };
     let kstack_size = crate::config::kernel().exec.kernel_thread_stack_size;
     let page_table = crate::task::with_process(pid, |process| process.page_table())
         .flatten()

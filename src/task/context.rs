@@ -232,6 +232,9 @@ pub unsafe fn switch_to_thread_with_slots(
     };
     let (new_context_ptr, next_kstack_top, next_process_id, next_fs_base, _next_in_syscall) =
         if let Some(thread) = resolved_next_slot.and_then(|slot| queue.get_slot(slot)) {
+            if thread.state() == super::ThreadState::Terminated {
+                return;
+            }
             let ptr = thread.context() as *const Context;
             let kstack = thread.kernel_stack_top();
             let saved_rsp = thread.context().rsp;

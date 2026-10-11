@@ -1586,6 +1586,9 @@ impl ThreadQueue {
         let Some(thread) = self.get_slot_mut(slot) else {
             return false;
         };
+        if thread.state() == ThreadState::Terminated && state != ThreadState::Terminated {
+            return false;
+        }
         thread.set_state(state);
         if thread.state() == ThreadState::Ready && !thread.is_scheduling_suspended() {
             self.ready_bitmap |= 1u64 << slot;
@@ -1840,6 +1843,16 @@ pub(super) fn mark_thread_terminated(id: ThreadId) -> Option<bool> {
     let retained = previous == ThreadState::Running
         || crate::percpu::thread_is_cpu_referenced(id.as_u64());
     queue.set_state(id, ThreadState::Terminated).then_some(retained)
+}
+
+pub(super) fn remove_quiescent_terminated_thread(id: ThreadId) -> Option<Thread> {
+    let mut queue = THREAD_QUEUE.lock();
+    if queue.get(id)?.state() != ThreadState::Terminated
+        || crate::percpu::thread_is_cpu_referenced(id.as_u64())
+    {
+        return None;
+    }
+    queue.remove(id)
 }
 
 /// 指定スロットのスレッド状態を更新

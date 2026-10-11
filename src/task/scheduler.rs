@@ -422,6 +422,42 @@ pub fn terminate_thread(id: ThreadId) {
     }
 }
 
+/// The caller owns the image-transition gate and has completed all fallible
+/// image preparation. Do not release the old VM until every sibling has left
+/// its CPU, including an outgoing stack/context handoff.
+pub(crate) fn retire_image_siblings(process: super::ProcessId, owner: ThreadId) {
+    // No allocation may fail after image preparation has completed.
+    let mut siblings = [None; super::thread::ThreadQueue::MAX_THREADS];
+    let mut count = 0;
+    crate::task::for_each_thread(|thread| {
+        if thread.process_id() == process && thread.id() != owner {
+            siblings[count] = Some(thread.id());
+            count += 1;
+        }
+    });
+    for &sibling in siblings.iter().flatten() {
+        terminate_thread(sibling);
+    }
+    loop {
+        for slot in &mut siblings {
+            let Some(id) = *slot else {
+                continue;
+            };
+            if let Some(thread) = super::thread::remove_quiescent_terminated_thread(id) {
+                crate::syscall::address_wait::remove_waiter(id);
+                crate::task::free_kernel_stack(thread.kernel_stack_base());
+                *slot = None;
+            } else if crate::task::with_thread(id, |_| ()).is_none() {
+                *slot = None;
+            }
+        }
+        if siblings.iter().all(Option::is_none) {
+            return;
+        }
+        yield_now();
+    }
+}
+
 /// 現在のタスクを終了させる（exitシステムコール用）
 ///
 /// 現在のスレッドをTerminated状態にして削除し、次のスレッドにスケジューリング
