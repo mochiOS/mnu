@@ -265,6 +265,7 @@ pub fn clone_address_space() -> u64 {
 }
 
 fn clone_current_process(resume_rax: u64) -> u64 {
+    use crate::mem::address_space::{CloneError, CloneSource};
     if !caller_has_process_spawn_capability() {
         return crate::syscall::EPERM;
     }
@@ -292,32 +293,15 @@ fn clone_current_process(resume_rax: u64) -> u64 {
         );
         return EAGAIN;
     }
-    let parent_has_mmio =
-        crate::task::with_process(parent_pid, |p| p.has_mmio_mappings()).unwrap_or(false);
-    if parent_has_mmio {
-        crate::audit::log(
-            crate::audit::AuditEventKind::Policy,
-            "fork rejected while borrowed MMIO mappings are active",
-        );
-        return EPERM;
-    }
-
     let (
         parent_priv,
         parent_priority,
         parent_foreground,
         parent_caps,
-        parent_pt,
-        heap_start,
-        heap_end,
-        ipc_mapping_end,
-        stack_bottom,
-        stack_top,
+        vm_source,
         parent_exe_path,
         parent_security_identity,
         parent_limits,
-        parent_memory_regions,
-        parent_dma_buffers,
         parent_object_handles,
         parent_launch_context,
     ) = match crate::task::with_process(parent_pid, |p| {
@@ -326,17 +310,10 @@ fn clone_current_process(resume_rax: u64) -> u64 {
             p.priority(),
             p.is_foreground(),
             p.capabilities().clone(),
-            p.page_table(),
-            p.heap_start(),
-            p.heap_end(),
-            p.ipc_mapping_end(),
-            p.stack_bottom(),
-            p.stack_top(),
+            CloneSource::capture(p),
             p.exe_path().to_string(),
             p.application_identity().cloned(),
             p.resource_limits(),
-            p.clone_memory_regions_for_fork(),
-            p.dma_buffers().to_vec(),
             p.clone_object_handles(),
             p.clone_launch_context(),
         )
@@ -344,36 +321,10 @@ fn clone_current_process(resume_rax: u64) -> u64 {
         Some(v) => v,
         None => return ENOSYS,
     };
-    let parent_pt = match parent_pt {
-        Some(pt) => pt,
-        None => return ENOSYS,
-    };
-
-    let child_pt = match crate::mem::paging::clone_user_page_table(parent_pt, |vaddr| {
-        if parent_dma_buffers.iter().any(|dma| {
-            dma.end()
-                .is_some_and(|end| vaddr >= dma.virt_start() && vaddr < end)
-        }) {
-            return crate::mem::paging::ForkPagePolicy::Exclude;
-        }
-        if let Some(region) = parent_memory_regions
-            .iter()
-            .find(|region| region.contains(vaddr))
-        {
-            if region.is_shared() {
-                crate::mem::paging::ForkPagePolicy::Shared
-            } else {
-                crate::mem::paging::ForkPagePolicy::PrivateWritable
-            }
-        } else {
-            crate::mem::paging::ForkPagePolicy::Private
-        }
-    }) {
-        Ok(pt) => pt,
-        Err(err) => {
-            crate::warn!("fork: clone_user_page_table failed: {:?}", err);
-            return ENOMEM;
-        }
+    let vm_source = match vm_source {
+        Ok(source) => source,
+        Err(CloneError::BorrowedMapping) => return EPERM,
+        Err(_) => return ENOSYS,
     };
 
     let (user_context, parent_fs) = crate::task::with_thread(parent_tid, |thread| {
@@ -381,31 +332,37 @@ fn clone_current_process(resume_rax: u64) -> u64 {
     })
     .unwrap_or((crate::task::thread::SyscallUserContext::empty(), 0));
     if user_context.rip == 0 || user_context.rsp == 0 {
-        let _ = crate::mem::paging::destroy_user_page_table(child_pt);
         return ENOSYS;
     }
+
+    // Keep VM duplication independent of execution state and native authority.
+    // The image owns all partial setup until it is installed into the empty
+    // execution container below.
+    let vm_image = match vm_source.clone_image() {
+        Ok(image) => image,
+        Err(_) => return ENOMEM,
+    };
 
     let mut child_proc = crate::task::Process::new("clone", parent_priv, parent_priority);
     child_proc.set_foreground(parent_foreground);
     child_proc.set_capabilities_for_exec(parent_caps);
-    child_proc.set_page_table(child_pt);
-    child_proc.set_heap_start(heap_start);
-    child_proc.set_heap_end(heap_end);
-    child_proc.set_ipc_mapping_end(ipc_mapping_end);
-    child_proc.set_stack_bottom(stack_bottom);
-    child_proc.set_stack_top(stack_top);
+    if vm_image.install(&mut child_proc).is_err() {
+        return ENOSYS;
+    }
+    let Some(child_pt) = child_proc.page_table() else {
+        return ENOSYS;
+    };
     child_proc.set_exe_path(&parent_exe_path);
     if let Some(identity) = parent_security_identity {
         child_proc.set_application_identity(identity);
     }
     child_proc.set_resource_limits(parent_limits);
-    child_proc.set_memory_regions(parent_memory_regions);
     child_proc.set_object_handles(parent_object_handles);
     child_proc.set_launch_context(parent_launch_context);
     crate::debug!(
         "[STACK_INIT] FORK child: stack_bottom={:#x}, stack_top={:#x}",
-        stack_bottom,
-        stack_top
+        child_proc.stack_bottom(),
+        child_proc.stack_top()
     );
     let child_pid = child_proc.id();
     let child_object = child_proc.process_object();

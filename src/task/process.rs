@@ -997,10 +997,6 @@ impl Process {
         Some(removed)
     }
 
-    pub fn clone_memory_regions_for_fork(&self) -> alloc::vec::Vec<MemoryRegion> {
-        self.memory_regions.clone()
-    }
-
     pub fn has_kernel_authority(&self, authority: &KernelAuthority) -> bool {
         self.kernel_authorities.implies(authority)
     }
