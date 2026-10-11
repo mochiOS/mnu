@@ -1416,6 +1416,18 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
                 Err(error) => error,
             };
         }
+        // A queued generic upcall cannot run while this syscall keeps waiting
+        // in kernel mode. Registrations and deadlines were cleared above;
+        // report no ready object and return so user-mode delivery can proceed.
+        // The caller decides whether that notification requires another wait.
+        if crate::task::with_thread(current, |thread| thread.has_deliverable_upcall())
+            .unwrap_or(false)
+        {
+            return match copy_wait_items_to_user(items_ptr, &items) {
+                Ok(()) => EAGAIN,
+                Err(error) => error,
+            };
+        }
         if deadline_nanoseconds == mnu_abi::HANDLE_WAIT_POLL
             || (deadline_nanoseconds != mnu_abi::HANDLE_WAIT_INFINITE
                 && crate::syscall::time::monotonic_nanoseconds() >= deadline_nanoseconds)
