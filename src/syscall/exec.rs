@@ -1647,20 +1647,20 @@ fn replace_current_process_image(
     authorization: crate::task::process::PendingExecSecurity,
     startup: mnu_abi::process_image::StartupImage<'_>,
     mut measurement: ExecMeasurement,
-) -> u64 {
+) -> Result<(u64, u64, u64), u64> {
     use crate::syscall::types::EINVAL;
 
     let Some(process_id) = crate::syscall::security::current_process_id() else {
-        return EINVAL;
+        return Err(EINVAL);
     };
     let Some(transition) = crate::task::image_transition::begin_image_replace(process_id) else {
-        return crate::syscall::types::EAGAIN;
+        return Err(crate::syscall::types::EAGAIN);
     };
 
     let aslr_seed = next_aslr_seed(identity);
     let new_pt_phys = match crate::mem::paging::create_user_page_table() {
         Ok(page_table) => page_table,
-        Err(error) => return mapping_error_errno(error),
+        Err(error) => return Err(mapping_error_errno(error)),
     };
     let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
     let ElfImageLayout {
@@ -1671,7 +1671,7 @@ fn replace_current_process_image(
         deferred_zero_regions,
     } = match map_elf_image(data, new_pt_phys, &mut measurement) {
         Ok(layout) => layout,
-        Err(errno) => return errno,
+        Err(errno) => return Err(errno),
     };
     let stack =
         build_relocatable_user_stack(aslr_seed, startup, phdr_vaddr, phentsize, phnum, entry);
@@ -1682,7 +1682,7 @@ fn replace_current_process_image(
         page_data,
     } = match stack {
         Ok(stack) => stack,
-        Err(errno) => return errno,
+        Err(errno) => return Err(errno),
     };
     if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
         new_pt_phys,
@@ -1693,7 +1693,7 @@ fn replace_current_process_image(
         true,
         false,
     ) {
-        return mapping_error_errno(error);
+        return Err(mapping_error_errno(error));
     }
     let top_page_vaddr = stack_end_vaddr - 4096;
     if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
@@ -1705,7 +1705,7 @@ fn replace_current_process_image(
         true,
         false,
     ) {
-        return mapping_error_errno(error);
+        return Err(mapping_error_errno(error));
     }
     let exec_cfg = crate::config::kernel().exec;
     let heap_base = exec_cfg.memory_map_base_min.saturating_add(
@@ -1721,27 +1721,27 @@ fn replace_current_process_image(
         true,
         false,
     ) {
-        return mapping_error_errno(error);
+        return Err(mapping_error_errno(error));
     }
     let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
         Ok(base) => base,
-        Err(errno) => return errno,
+        Err(errno) => return Err(errno),
     };
     let current_tid = match crate::task::current_thread_id() {
         Some(thread) => thread,
-        None => return EINVAL,
+        None => return Err(EINVAL),
     };
     let pid = match crate::task::with_thread(current_tid, |thread| thread.process_id()) {
         Some(process) => process,
-        None => return EINVAL,
+        None => return Err(EINVAL),
     };
     let kernel_stack =
         match crate::task::with_thread(current_tid, |thread| thread.kernel_stack_base()) {
             Some(base) => base,
-            None => return EINVAL,
+            None => return Err(EINVAL),
         };
     if !crate::task::remap_kernel_stack_user_table(kernel_stack, new_pt_phys) {
-        return crate::syscall::types::ENOMEM;
+        return Err(crate::syscall::types::ENOMEM);
     }
     crate::task::scheduler::retire_image_siblings(pid, current_tid);
     crate::task::release_process_mmio_mappings(pid);
@@ -1778,10 +1778,7 @@ fn replace_current_process_image(
     new_pt_guard.disarm();
     measurement.record();
     drop(transition);
-    unsafe {
-        crate::mem::paging::switch_page_table(new_pt_phys);
-        crate::task::jump_to_usermode(entry, initial_rsp, 0);
-    }
+    Ok((new_pt_phys, entry, initial_rsp))
 }
 
 /// Replaces the current process image from an already-authorized object
@@ -1868,13 +1865,26 @@ pub fn process_image_replace_syscall(
         return EACCES;
     }
 
-    replace_current_process_image(
+    let (page_table, entry, stack_pointer) = match replace_current_process_image(
         &executable,
         identity,
         authorization,
         startup,
         ExecMeasurement::start(),
-    )
+    ) {
+        Ok(image) => image,
+        Err(errno) => return errno,
+    };
+    // Entering the image abandons this kernel stack rather than unwinding it.
+    // The preparation frame has returned (dropping page_data and its guards);
+    // release every owning input buffer before the non-returning transition.
+    drop(executable);
+    drop(startup_bytes);
+    drop(identity_bytes);
+    unsafe {
+        crate::mem::paging::switch_page_table(page_table);
+        crate::task::jump_to_usermode(entry, stack_pointer, 0);
+    }
 }
 
 /// Creates a stopped process from an authorized image object. No path lookup,
