@@ -1882,6 +1882,7 @@ pub fn process_image_replace_syscall(
     drop(startup_bytes);
     drop(identity_bytes);
     unsafe {
+        x86_64::instructions::interrupts::disable();
         crate::mem::paging::switch_page_table(page_table);
         crate::task::jump_to_usermode(entry, stack_pointer, 0);
     }

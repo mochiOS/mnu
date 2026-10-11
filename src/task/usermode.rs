@@ -36,6 +36,10 @@ struct ResumeRegisters {
 /// # Safety
 /// `entry` と `user_stack` はユーザー空間の有効な実行/スタックアドレスである必要がある。
 pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64, user_arg0: u64) -> ! {
+    // Pin this CPU's current-thread identity and CR3 until iretq restores IF.
+    // An IRQ after the user CR3 switch still sees a ring-0 frame and cannot
+    // restore that CR3 after scheduling another address space.
+    x86_64::instructions::interrupts::disable();
     let user_cs = gdt::user_code_selector() as u64 | 3; // RPL=3
     let user_ss = gdt::user_data_selector() as u64 | 3; // RPL=3
     let (fs_base, user_cr3) = crate::task::current_thread_id()
@@ -158,6 +162,7 @@ pub unsafe fn resume_usermode(
     rax: u64,
     fs_base: u64,
 ) -> ! {
+    x86_64::instructions::interrupts::disable();
     let user_cs = gdt::user_code_selector() as u64 | 3;
     let user_ss = gdt::user_data_selector() as u64 | 3;
     let user_cr3 = crate::task::current_thread_id()
