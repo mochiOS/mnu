@@ -2,15 +2,17 @@
 //! Handles refer only to the creating process's own handle table.
 
 pub const MAGIC: [u8; 4] = *b"MCRT";
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const HEADER_LEN: usize = 32;
 pub const HANDLE_LEN: usize = 24;
 pub const VALUE_LEN: usize = 16;
 pub const MAX_IDENTITY_BYTES: usize = 256;
+pub const MAX_LABEL_BYTES: usize = 32;
 pub const MAX_HANDLES: usize = 256;
 pub const MAX_VALUES: usize = 256;
 pub const MAX_REQUEST_BYTES: usize = HEADER_LEN
     + MAX_IDENTITY_BYTES
+    + MAX_LABEL_BYTES
     + crate::process_image::HEADER_LEN
     + crate::process_image::MAX_RELOCATIONS * crate::process_image::RELOCATION_LEN
     + crate::process_image::MAX_STACK_BYTES
@@ -35,6 +37,7 @@ pub enum Error {
     Header,
     Length,
     Identity,
+    Label,
     Startup,
     Handle,
     DuplicateKey,
@@ -44,6 +47,8 @@ pub enum Error {
 #[derive(Clone, Copy)]
 pub struct Request<'a> {
     pub identity: &'a str,
+    /// User-supplied diagnostic label, independent of authorization identity.
+    pub label: &'a str,
     pub startup: crate::process_image::StartupImage<'a>,
     handles: &'a [u8],
     values: &'a [u8],
@@ -83,7 +88,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
     if bytes[..4] != MAGIC
         || bytes[4..6] != VERSION.to_le_bytes()
         || bytes[6..8] != (HEADER_LEN as u16).to_le_bytes()
-        || bytes[24..HEADER_LEN].iter().any(|byte| *byte != 0)
+        || bytes[28..HEADER_LEN].iter().any(|byte| *byte != 0)
     {
         return Err(Error::Header);
     }
@@ -91,15 +96,19 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
     let startup_len = u32_at(bytes, 12) as usize;
     let handles = u32_at(bytes, 16) as usize;
     let values = u32_at(bytes, 20) as usize;
+    let label_len = u32_at(bytes, 24) as usize;
     if identity_len == 0
         || identity_len > MAX_IDENTITY_BYTES
         || handles > MAX_HANDLES
         || values > MAX_VALUES
+        || label_len == 0
+        || label_len > MAX_LABEL_BYTES
     {
         return Err(Error::Length);
     }
     let identity_end = HEADER_LEN + identity_len;
-    let startup_end = identity_end.checked_add(startup_len).ok_or(Error::Length)?;
+    let label_end = identity_end.checked_add(label_len).ok_or(Error::Length)?;
+    let startup_end = label_end.checked_add(startup_len).ok_or(Error::Length)?;
     let handles_end = startup_end
         .checked_add(handles * HANDLE_LEN)
         .ok_or(Error::Length)?;
@@ -114,10 +123,15 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
     if identity.as_bytes().contains(&0) {
         return Err(Error::Identity);
     }
-    let startup = crate::process_image::decode(&bytes[identity_end..startup_end])
-        .map_err(|_| Error::Startup)?;
+    let label = core::str::from_utf8(&bytes[identity_end..label_end]).map_err(|_| Error::Label)?;
+    if label.as_bytes().contains(&0) {
+        return Err(Error::Label);
+    }
+    let startup =
+        crate::process_image::decode(&bytes[label_end..startup_end]).map_err(|_| Error::Startup)?;
     let request = Request {
         identity,
+        label,
         startup,
         handles: &bytes[startup_end..handles_end],
         values: &bytes[handles_end..],
@@ -148,6 +162,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
 
 pub fn encode(
     identity: &str,
+    label: &str,
     startup: &[u8],
     handles: &[HandleGrant],
     values: &[Value],
@@ -155,6 +170,8 @@ pub fn encode(
 ) -> Result<usize, Error> {
     if identity.is_empty()
         || identity.len() > MAX_IDENTITY_BYTES
+        || label.is_empty()
+        || label.len() > MAX_LABEL_BYTES
         || handles.len() > MAX_HANDLES
         || values.len() > MAX_VALUES
         || startup.len() > MAX_REQUEST_BYTES
@@ -163,6 +180,7 @@ pub fn encode(
     }
     let length = HEADER_LEN
         + identity.len()
+        + label.len()
         + startup.len()
         + handles.len() * HANDLE_LEN
         + values.len() * VALUE_LEN;
@@ -176,12 +194,15 @@ pub fn encode(
         (12, startup.len()),
         (16, handles.len()),
         (20, values.len()),
+        (24, label.len()),
     ] {
         output[offset..offset + 4].copy_from_slice(&(value as u32).to_le_bytes());
     }
     let mut cursor = HEADER_LEN;
     output[cursor..cursor + identity.len()].copy_from_slice(identity.as_bytes());
     cursor += identity.len();
+    output[cursor..cursor + label.len()].copy_from_slice(label.as_bytes());
+    cursor += label.len();
     output[cursor..cursor + startup.len()].copy_from_slice(startup);
     cursor += startup.len();
     for grant in handles {

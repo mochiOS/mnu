@@ -2113,7 +2113,7 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
     let mut measurement = ExecMeasurement::start();
     let result = exec_with_data(
         &executable,
-        request.identity,
+        request.label,
         request.identity,
         &[],
         &[],
