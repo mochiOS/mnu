@@ -45,6 +45,9 @@ mnu-abi = { path = "crates/abi" }
 mnu-metrics = { path = "crates/metrics" }
 mochios-filesystem-protocol = { path = "../user/crates/filesystem-protocol" }
 
+[patch."https://github.com/mochiOS/mnu"]
+mnu-abi = { path = "crates/abi" }
+
 [features]
 default = ["kernel-bin"]
 kernel-bin = []
