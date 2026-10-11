@@ -1,16 +1,14 @@
 //! ファイルシステム関連のシステムコール
 
 use super::types::{
-    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOSPC, ENOSYS,
-    ENOTDIR, ENOTSUP, EOVERFLOW, EPIPE, EROFS,
+    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOSPC, ENOTSUP, EOVERFLOW,
+    EPIPE,
 };
 use crate::capability::Capability;
 use crate::capability::path::{
     self, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner,
 };
-use crate::task::fd_table::{
-    FileHandle, FileHandleCap, OpenFile,
-};
+use crate::task::fd_table::{FileHandle, FileHandleCap, OpenFile};
 use crate::vfs::{self, FilesystemId, Vnode, VnodeKind};
 use alloc::string::String;
 use alloc::string::ToString;
@@ -28,12 +26,6 @@ pub(crate) enum SeekBasis {
     Start,
     Current,
     End,
-}
-
-fn transferred_io_bytes(result: u64) -> u64 {
-    (result <= MAX_IO_BYTES as u64)
-        .then_some(result)
-        .unwrap_or(0)
 }
 
 struct PipeState {
@@ -147,14 +139,6 @@ pub(crate) fn remove_stream_waiter(stream_id: usize, waiter: crate::task::Thread
     }
 }
 
-
-#[inline]
-fn current_process_id_raw() -> Option<u64> {
-    crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id().as_u64()))
-}
-
-
 fn read_mount_path(ptr: u64, len: u64) -> Result<String, u64> {
     let len = usize::try_from(len).map_err(|_| EINVAL)?;
     if len == 0 || len > mochios_filesystem_protocol::MAX_PATH_LEN {
@@ -215,18 +199,6 @@ pub fn filesystem_mount(
     }
 }
 
-fn resolve_relative_to_cwd(cwd: &str, path: &str) -> String {
-    if path.starts_with('/') {
-        normalize_path(path)
-    } else {
-        normalize_path(&alloc::format!("{}/{}", cwd.trim_end_matches('/'), path))
-    }
-}
-
-pub(crate) fn ensure_fs_path_readable(path: &str) -> Result<(), u64> {
-    ensure_fs_path_access(path, PATH_READ)
-}
-
 pub(crate) fn ensure_fs_path_executable_for_process(
     path: &str,
     pid: crate::task::ids::ProcessId,
@@ -235,44 +207,6 @@ pub(crate) fn ensure_fs_path_executable_for_process(
     ensure_fs_capability_access_for_process(path, PATH_EXEC, pid_raw)?;
     ensure_unix_traversal_for_process(path, pid_raw)?;
     ensure_unix_mode_access_for_process(path, UNIX_EXECUTE, pid_raw)
-}
-
-fn ensure_fs_path_access(path: &str, needed_rights: u32) -> Result<(), u64> {
-    let Some(pid_raw) = current_process_id_raw() else {
-        return Err(EACCES);
-    };
-    ensure_fs_path_access_for_process(path, needed_rights, pid_raw)
-}
-
-fn ensure_fs_path_access_for_process(
-    path: &str,
-    needed_rights: u32,
-    pid_raw: u64,
-) -> Result<(), u64> {
-    let identity_storage = identity_storage_path_allows(path, pid_raw);
-    ensure_fs_capability_access_for_process(path, needed_rights, pid_raw)?;
-    ensure_unix_traversal_for_process(path, pid_raw)?;
-    if identity_storage {
-        return Ok(());
-    }
-    if (needed_rights & (PATH_CREATE | PATH_DELETE)) != 0 {
-        ensure_unix_parent_write_for_process(path, pid_raw)?;
-        if (needed_rights & PATH_DELETE) != 0 {
-            ensure_unix_sticky_delete_for_process(path, pid_raw)?;
-        }
-        Ok(())
-    } else if metadata_rootfs_first(path).is_some() {
-        ensure_unix_mode_access_for_process(path, needed_rights, pid_raw)
-    } else {
-        Ok(())
-    }
-}
-
-fn ensure_fs_capability_access(path: &str, needed_rights: u32) -> Result<(), u64> {
-    let Some(pid_raw) = current_process_id_raw() else {
-        return Err(EACCES);
-    };
-    ensure_fs_capability_access_for_process(path, needed_rights, pid_raw)
 }
 
 fn ensure_fs_capability_access_for_process(
@@ -346,10 +280,6 @@ fn path_relative_to<'a>(normalized: &'a str, root: &str) -> Option<&'a str> {
     normalized.strip_prefix(root)?.strip_prefix('/')
 }
 
-fn current_effective_ids() -> Option<(u32, u32)> {
-    effective_ids_for_process(crate::syscall::security::current_process_id()?.as_u64())
-}
-
 fn effective_ids_for_process(pid_raw: u64) -> Option<(u32, u32)> {
     let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
     crate::task::with_process(pid, |process| {
@@ -383,13 +313,6 @@ fn unix_mode_allows(mode: u16, owner: u32, group: u32, uid: u32, gid: u32, right
     (granted & required) == required
 }
 
-fn ensure_unix_mode_access(path: &str, rights: u32) -> Result<(), u64> {
-    let Some(pid_raw) = current_process_id_raw() else {
-        return Err(EACCES);
-    };
-    ensure_unix_mode_access_for_process(path, rights, pid_raw)
-}
-
 fn ensure_unix_mode_access_for_process(path: &str, rights: u32, pid_raw: u64) -> Result<(), u64> {
     let Some((mode, _, owner, group)) = metadata_rootfs_first(path) else {
         return Ok(());
@@ -402,13 +325,6 @@ fn ensure_unix_mode_access_for_process(path: &str, rights: u32, pid_raw: u64) ->
     } else {
         Err(EACCES)
     }
-}
-
-fn ensure_unix_traversal(path: &str) -> Result<(), u64> {
-    let Some(pid_raw) = current_process_id_raw() else {
-        return Err(EACCES);
-    };
-    ensure_unix_traversal_for_process(path, pid_raw)
 }
 
 fn ensure_unix_traversal_for_process(path: &str, pid_raw: u64) -> Result<(), u64> {
@@ -429,48 +345,6 @@ fn ensure_unix_traversal_for_process(path: &str, pid_raw: u64) -> Result<(), u64
         ensure_unix_mode_access_for_process(&parent, UNIX_EXECUTE, pid_raw)?;
     }
     Ok(())
-}
-
-fn ensure_unix_parent_write_for_process(path: &str, pid_raw: u64) -> Result<(), u64> {
-    let normalized = normalize_path(path);
-    let parent =
-        normalized.rsplit_once('/').map_or(
-            "/",
-            |(parent, _)| if parent.is_empty() { "/" } else { parent },
-        );
-    ensure_unix_mode_access_for_process(parent, PATH_WRITE | UNIX_EXECUTE, pid_raw)
-}
-
-fn sticky_directory_allows_delete(
-    parent_mode: u16,
-    parent_owner: u32,
-    target_owner: u32,
-    uid: u32,
-) -> bool {
-    (parent_mode & 0o1000) == 0 || uid == 0 || uid == parent_owner || uid == target_owner
-}
-
-fn ensure_unix_sticky_delete_for_process(path: &str, pid_raw: u64) -> Result<(), u64> {
-    let normalized = normalize_path(path);
-    let parent =
-        normalized.rsplit_once('/').map_or(
-            "/",
-            |(parent, _)| if parent.is_empty() { "/" } else { parent },
-        );
-    let Some((parent_mode, _, parent_owner, _)) = metadata_rootfs_first(parent) else {
-        return Ok(());
-    };
-    let Some((_, _, target_owner, _)) = metadata_rootfs_first(&normalized) else {
-        return Ok(());
-    };
-    let Some((uid, _)) = effective_ids_for_process(pid_raw) else {
-        return Err(EACCES);
-    };
-    if sticky_directory_allows_delete(parent_mode, parent_owner, target_owner, uid) {
-        Ok(())
-    } else {
-        Err(EACCES)
-    }
 }
 
 fn path_owner_allows(owner: PathOwner, pid_raw: u64) -> bool {
@@ -530,49 +404,6 @@ fn enforce_fs_capabilities_for_process(
         enforce_required_capability(write_capability, Capability::FsWriteAll, pid_raw)?;
     }
     Ok(())
-}
-
-fn open_required_rights(path: &str, flags: u64, is_dir: bool) -> u32 {
-    const O_ACCMODE: u64 = 0o3;
-    const O_WRONLY: u64 = 0o1;
-    const O_RDWR: u64 = 0o2;
-    const O_TRUNC: u64 = 0o1000;
-    const O_APPEND: u64 = 0o2000;
-    let _ = path;
-    let mut rights = if is_dir { PATH_LIST } else { PATH_READ };
-    let acc = flags & O_ACCMODE;
-    if acc == O_WRONLY || acc == O_RDWR || (flags & (O_TRUNC | O_APPEND)) != 0 {
-        rights |= PATH_WRITE;
-    }
-    rights
-}
-
-fn open_path_required_rights(flags: u64, is_dir: bool, exists: bool) -> u32 {
-    if !exists && (flags & O_CREAT) != 0 {
-        PATH_CREATE
-    } else {
-        open_required_rights("", flags, is_dir)
-    }
-}
-
-fn access_mode_rights(mode: u64) -> Option<u32> {
-    const X_OK: u64 = 1;
-    const W_OK: u64 = 2;
-    const R_OK: u64 = 4;
-    if mode & !(R_OK | W_OK | X_OK) != 0 {
-        return None;
-    }
-    let mut rights = 0u32;
-    if (mode & R_OK) != 0 {
-        rights |= PATH_READ;
-    }
-    if (mode & W_OK) != 0 {
-        rights |= PATH_WRITE;
-    }
-    if (mode & X_OK) != 0 {
-        rights |= PATH_EXEC | UNIX_EXECUTE;
-    }
-    Some(rights)
 }
 
 pub(crate) fn close_remote_fd_from_kernel(_fd_remote: u64) {}
@@ -655,11 +486,6 @@ pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64, u32, u32)> 
 }
 
 #[inline]
-pub(crate) fn readdir_rootfs_first(path: &str) -> Option<Vec<String>> {
-    crate::cext::fs::readdir_path(path).or_else(|| crate::init::fs::readdir_path(path))
-}
-
-#[inline]
 pub(crate) fn read_file_range_rootfs_first(
     path: &str,
     offset: u64,
@@ -693,76 +519,11 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
-/// プロセスの CWD を基に相対パスを絶対パスへ解決する
-fn resolve_path(pid_raw: u64, path: &str) -> String {
-    #[cfg(feature = "performance-instrumentation")]
-    let start = crate::performance::timestamp();
-
-    let resolved = if path.starts_with('/') {
-        normalize_path(path)
-    } else {
-        let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
-        let cwd = crate::task::with_process(pid, |p| {
-            let mut s = String::new();
-            s.push_str(p.cwd());
-            s
-        })
-        .unwrap_or_else(|| "/".to_string());
-        normalize_path(&alloc::format!("{}/{}", cwd.trim_end_matches('/'), path))
-    };
-
-    #[cfg(feature = "performance-instrumentation")]
-    crate::performance::record_latency(crate::performance::LatencyMetric::VfsPathLookup, start);
-
-    resolved
-}
-
-const O_ACCMODE: u64 = 0o3;
-const O_WRONLY: u64 = 0o1;
-#[cfg(test)]
-const O_RDWR: u64 = 0o2;
-const O_CREAT: u64 = 0o100;
-const O_EXCL: u64 = 0o200;
-const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
-const O_NONBLOCK: u64 = 0x4000;
-const USERSPACE_DATA_ROUTING: bool = true;
-const EXDEV: u64 = (-18i64) as u64;
-
-fn errno_from_cext(rc: i32) -> u64 {
-    match rc {
-        -2 => ENOENT,
-        -5 => EIO,
-        -17 => EEXIST,
-        -20 => ENOTDIR,
-        -21 => EISDIR,
-        -22 => EINVAL,
-        -27 => EFBIG,
-        -28 => ENOSPC,
-        -30 => EROFS,
-        -38 => ENOSYS,
-        -39 => (-39i64) as u64,
-        -75 => EOVERFLOW,
-        _ => EIO,
-    }
-}
 
 fn userspace_mount(path: &str) -> Option<vfs::ResolvedMount> {
-    if !USERSPACE_DATA_ROUTING {
-        return None;
-    }
     vfs::resolve(path).filter(|mount| vfs::is_userspace_mount(mount.mount_id))
 }
-
-fn vnode_kind_from_protocol(kind: u32) -> VnodeKind {
-    match kind {
-        mochios_filesystem_protocol::NODE_TYPE_DIRECTORY => VnodeKind::Directory,
-        mochios_filesystem_protocol::NODE_TYPE_SYMLINK => VnodeKind::Symlink,
-        mochios_filesystem_protocol::NODE_TYPE_REGULAR => VnodeKind::Regular,
-        _ => VnodeKind::Other,
-    }
-}
-
 
 pub(crate) fn seek_file_handle(handle: &FileHandle, offset: i64, basis: SeekBasis) -> u64 {
     if !handle.cap.contains(FileHandleCap::SEEK) {
@@ -829,7 +590,6 @@ pub(crate) fn set_file_handle_options(handle: &FileHandle, options: u64) -> Resu
     open.io_options = options;
     Ok(())
 }
-
 
 pub(crate) fn read_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> u64 {
     if buf_ptr == 0 {
@@ -1164,14 +924,12 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
     }
 }
 
-
 #[cfg(test)]
 mod unix_mode_tests {
     use super::{
-        O_CREAT, O_RDWR, O_WRONLY, PATH_CREATE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE,
-        PIPE_BUFFER_CAP, PipeState, UNIX_EXECUTE, access_mode_rights,
-        capability_requirement_satisfied, open_path_required_rights, path_is_in_identity_storage,
-        resolve_relative_to_cwd, sticky_directory_allows_delete, unix_mode_allows, userspace_mode,
+        PATH_LIST, PATH_READ, PATH_WRITE, PIPE_BUFFER_CAP, PipeState, UNIX_EXECUTE,
+        capability_requirement_satisfied, path_is_in_identity_storage, unix_mode_allows,
+        userspace_mode,
     };
     use crate::capability::Capability;
 
@@ -1196,10 +954,7 @@ mod unix_mode_tests {
             mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
         );
         stream.readers = 0;
-        assert_eq!(
-            stream.signals(true),
-            mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
-        );
+        assert_eq!(stream.signals(true), mnu_abi::HANDLE_SIGNAL_PEER_CLOSED);
     }
 
     #[test]
@@ -1255,57 +1010,6 @@ mod unix_mode_tests {
             userspace_mode(0o777, mochios_filesystem_protocol::NODE_TYPE_SYMLINK),
             0xA000 | 0o777
         );
-    }
-
-    #[test]
-    fn open_create_checks_existing_file_instead_of_its_parent() {
-        assert_eq!(
-            open_path_required_rights(O_CREAT | O_RDWR, false, true),
-            PATH_READ | PATH_WRITE
-        );
-        assert_eq!(
-            open_path_required_rights(O_CREAT | O_WRONLY, false, false),
-            PATH_CREATE
-        );
-        assert_eq!(open_path_required_rights(O_CREAT, false, true), PATH_READ);
-    }
-
-    #[test]
-    fn relative_at_fdcwd_paths_are_resolved_from_process_cwd() {
-        assert_eq!(
-            resolve_relative_to_cwd("/home/testuser", "hello.txt"),
-            "/home/testuser/hello.txt"
-        );
-        assert_eq!(
-            resolve_relative_to_cwd("/home/testuser/", "Documents/../hello.txt"),
-            "/home/testuser/hello.txt"
-        );
-        assert_eq!(
-            resolve_relative_to_cwd("/home/testuser", "/tmp/hello.txt"),
-            "/tmp/hello.txt"
-        );
-    }
-
-    #[test]
-    fn access_modes_map_to_read_write_and_execute() {
-        assert_eq!(access_mode_rights(0), Some(0));
-        assert_eq!(access_mode_rights(4), Some(PATH_READ));
-        assert_eq!(access_mode_rights(2), Some(PATH_WRITE));
-        assert_eq!(access_mode_rights(1), Some(PATH_EXEC | UNIX_EXECUTE));
-        assert_eq!(
-            access_mode_rights(7),
-            Some(PATH_READ | PATH_WRITE | PATH_EXEC | UNIX_EXECUTE)
-        );
-        assert_eq!(access_mode_rights(8), None);
-    }
-
-    #[test]
-    fn sticky_directory_protects_files_owned_by_other_users() {
-        assert!(sticky_directory_allows_delete(0o777, 0, 1001, 1000));
-        assert!(sticky_directory_allows_delete(0o1777, 0, 1000, 1000));
-        assert!(sticky_directory_allows_delete(0o1777, 1000, 1001, 1000));
-        assert!(sticky_directory_allows_delete(0o1777, 0, 1001, 0));
-        assert!(!sticky_directory_allows_delete(0o1777, 0, 1001, 1000));
     }
 
     #[test]
