@@ -93,13 +93,9 @@ ptr        ユーザー空間ポインタ
 | Time             | time_now              |
 | Time             | sleep                 |
 | I/O              | write                 |
-| Filesystem       | file_open             |
-| Filesystem       | file_close            |
-| Filesystem       | file_read             |
 | Filesystem       | file_write            |
 | Filesystem       | file_stat             |
 | Filesystem       | file_stat_at          |
-| Filesystem       | file_read_dir         |
 | Filesystem       | file_create_dir       |
 | Filesystem       | file_remove           |
 | Filesystem       | file_rename           |
@@ -507,30 +503,6 @@ write(str: &str) -> isize
 Filesystem は最小カーネルの例外として残します。
 高頻度のディスク入出力は cext やサービスに寄せる前提ですが、
 起動初期化や基本的なファイルアクセスのために、以下の syscall は公開します。
-
-### file_open
-
-```
-file_open(path: ptr, flags: u64) -> u64
-```
-
-### file_close
-
-```
-file_close(fd: u64) -> isize
-```
-
-### file_read
-
-```
-file_read(fd: u64, buf: ptr, len: usize) -> isize
-```
-
-### file_read_dir
-
-```
-file_read_dir(fd: u64, buf: ptr, len: usize) -> isize
-```
 
 ### file_create_dir
 

@@ -44,10 +44,6 @@ pub const MEMORY_MAP_OPTIONS_ALL: u64 = MEMORY_MAP_EXACT | MEMORY_MAP_SHARED;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyscallNumber {
     // Native mnu file syscalls
-    FileOpen = 560,
-    FileClose = 562,
-    FileRead = 563,
-    FileReadDir = 569,
     IpcSend = 514,
     IpcRecv = 515,
     Sleep = 517,
