@@ -179,6 +179,9 @@ pub enum SyscallNumber {
 }
 
 pub const PROCESS_STATE_RUNNING: u32 = 1;
+/// Native process inspection record: identity, lifecycle and resource metrics.
+/// POSIX parentage is not part of this kernel ABI.
+pub const PROCESS_INFO_RECORD_SIZE: usize = 104;
 
 /// Native object identities for a caller or authenticated IPC endpoint.
 /// These identifiers grant no authority and carry no uid/gid, parent, session

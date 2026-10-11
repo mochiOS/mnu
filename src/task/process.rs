@@ -582,8 +582,6 @@ pub struct Process {
     capabilities: CapabilitySet,
     /// object-scoped kernel authority
     kernel_authorities: KernelAuthoritySet,
-    /// 親プロセスID（存在する場合）
-    parent_id: Option<ProcessId>,
     /// ページテーブルのアドレス（メモリ空間）。Noneの場合はカーネル空間を共有。
     page_table: Option<u64>,
     /// page_table をこの Process が所有しているかどうか
@@ -630,12 +628,10 @@ impl Process {
     /// # Arguments
     /// * `name` - プロセス名
     /// * `privilege` - 権限レベル
-    /// * `parent_id` - 親プロセスID
     /// * `priority` - プロセスの優先度
     pub fn new(
         name: &str,
         privilege: PrivilegeLevel,
-        parent_id: Option<ProcessId>,
         priority: u8,
     ) -> Self {
         let mut name_buf = [0u8; 32];
@@ -659,7 +655,6 @@ impl Process {
             privilege,
             capabilities: CapabilitySet::empty(),
             kernel_authorities: KernelAuthoritySet::empty(),
-            parent_id,
             page_table: None, // TODO: ページテーブル実装後に設定
             page_table_owned: true,
             heap_start,
@@ -778,11 +773,6 @@ impl Process {
     /// 権限レベルを取得
     pub fn privilege(&self) -> PrivilegeLevel {
         self.privilege
-    }
-
-    /// 親プロセスIDを取得
-    pub fn parent_id(&self) -> Option<ProcessId> {
-        self.parent_id
     }
 
     /// 優先度を取得
@@ -1226,7 +1216,6 @@ impl core::fmt::Debug for Process {
             .field("name", &self.name())
             .field("state", &self.state)
             .field("privilege", &self.privilege)
-            .field("parent_id", &self.parent_id)
             .field("capabilities", &self.capabilities)
             .field("priority", &self.priority)
             .field("exit_code", &self.exit_code);

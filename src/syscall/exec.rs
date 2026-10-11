@@ -936,7 +936,7 @@ fn exec_internal(
     initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     execution_class: ExecutionClass,
-    parent_override: Option<crate::task::ProcessId>,
+    access_process_override: Option<crate::task::ProcessId>,
     application_identity: Option<crate::task::process::ApplicationIdentity>,
     inherited_handles: &[InheritedHandleGrant],
     inherited_values: &[InheritedValueSpec],
@@ -951,7 +951,7 @@ fn exec_internal(
         process_name = alias;
     }
     if enforce_path_access {
-        let access_process = parent_override.or_else(|| {
+        let access_process = access_process_override.or_else(|| {
             crate::task::current_thread_id()
                 .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
         });
@@ -988,7 +988,6 @@ fn exec_internal(
             path,
             args,
             envp,
-            parent_override,
             initial_caps,
             initial_kernel_authorities,
             requested_privilege,
@@ -1255,7 +1254,6 @@ fn exec_with_data(
     exec_path: &str,
     args: &[&str],
     envp: &[&str],
-    parent_override: Option<crate::task::ProcessId>,
     initial_caps: Option<CapabilitySet>,
     initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
@@ -1440,14 +1438,6 @@ fn exec_with_data(
         }
 
         // プロセスを作成してページテーブルをセット
-        let parent_pid = if native_startup.is_some() {
-            None
-        } else {
-            parent_override.or_else(|| {
-                crate::task::current_thread_id()
-                    .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-            })
-        };
         let privilege = resolve_exec_privilege(requested_privilege);
         let is_boot_init = if native_startup.is_some() {
             false
@@ -1459,7 +1449,7 @@ fn exec_with_data(
         };
         const DEFAULT_PROCESS_PRIORITY: u8 = 8;
         let priority = DEFAULT_PROCESS_PRIORITY;
-        let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
+        let mut proc = crate::task::Process::new(process_name, privilege, priority);
         if let Some(identity) = application_identity {
             proc.set_application_identity(identity);
         }
@@ -1930,7 +1920,6 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         request.identity,
         &[],
         &[],
-        None,
         Some(authorization.capabilities),
         Some(authorization.kernel_authorities),
         Some(privilege),

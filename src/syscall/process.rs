@@ -142,7 +142,7 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         return EPERM;
     }
 
-    const RECORD_SIZE: usize = 112;
+    const RECORD_SIZE: usize = mnu_abi::PROCESS_INFO_RECORD_SIZE;
     if buf_ptr == 0 {
         return 0;
     }
@@ -185,16 +185,14 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
             ProcessState::Terminated => 4,
         };
         out_buf[16..24].copy_from_slice(&state_num.to_ne_bytes());
-        let parent = proc.parent_id().map_or(0, |pid| pid.as_u64());
-        out_buf[24..32].copy_from_slice(&parent.to_ne_bytes());
         let (thread_count, cpu_ticks) = thread_metrics
             .iter()
             .find(|(process_id, _, _)| *process_id == proc.id())
             .map(|(_, count, ticks)| (*count, *ticks))
             .unwrap_or((0, 0));
-        out_buf[32..40].copy_from_slice(&cpu_ticks.to_ne_bytes());
-        out_buf[40..48].copy_from_slice(&proc.mapped_memory_bytes().to_ne_bytes());
-        out_buf[48..56].copy_from_slice(&thread_count.to_ne_bytes());
+        out_buf[24..32].copy_from_slice(&cpu_ticks.to_ne_bytes());
+        out_buf[32..40].copy_from_slice(&proc.mapped_memory_bytes().to_ne_bytes());
+        out_buf[40..48].copy_from_slice(&thread_count.to_ne_bytes());
         // Signed applications expose their package identity. Other processes use
         // the explicit name supplied when they were created; the kernel does not
         // infer user-space roles from executable paths or filename conventions.
@@ -202,10 +200,10 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
             .application_identity()
             .map(|identity| identity.package_id())
             .unwrap_or_else(|| proc.name());
-        // name at offset 56; the fixed 112-byte ABI leaves 56 bytes for UTF-8.
+        // Name follows native metrics, with 56 bytes for UTF-8 identity.
         let name_bytes = name.as_bytes();
-        let copy_len = core::cmp::min(RECORD_SIZE - 56, name_bytes.len());
-        out_buf[56..56 + copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        let copy_len = core::cmp::min(RECORD_SIZE - 48, name_bytes.len());
+        out_buf[48..48 + copy_len].copy_from_slice(&name_bytes[..copy_len]);
         records.push(out_buf);
     });
 
@@ -342,7 +340,7 @@ fn clone_current_process() -> u64 {
         return ENOSYS;
     }
 
-    let mut child_proc = crate::task::Process::new("clone", parent_priv, None, parent_priority);
+    let mut child_proc = crate::task::Process::new("clone", parent_priv, parent_priority);
     child_proc.set_foreground(parent_foreground);
     child_proc.set_capabilities_for_exec(parent_caps);
     child_proc.set_page_table(child_pt);

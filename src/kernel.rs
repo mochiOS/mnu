@@ -4,10 +4,9 @@ use crate::util::log::LogLevel;
 use crate::{debug, info};
 use crate::{init::kinit, task, util, BootInfo, Result};
 use core::sync::atomic::Ordering;
-use core::sync::atomic::{AtomicU64, AtomicUsize};
+use core::sync::atomic::AtomicUsize;
 
 const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 8;
-static KERNEL_PROCESS_ID_RAW: AtomicU64 = AtomicU64::new(0);
 static AP_IDLE_THREAD_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(align(16))]
@@ -18,11 +17,6 @@ struct KernelStack {
 static mut KERNEL_THREAD_STACK: KernelStack = KernelStack {
     _bytes: [0; KERNEL_THREAD_STACK_SIZE],
 };
-
-fn kernel_process_id() -> Option<task::ProcessId> {
-    let raw = KERNEL_PROCESS_ID_RAW.load(Ordering::Acquire);
-    (raw != 0).then(|| task::ProcessId::from_u64(raw))
-}
 
 fn ap_idle_loop() -> ! {
     crate::smp::mark_current_ap_boot_stack_released();
@@ -38,8 +32,7 @@ fn spawn_ap_idle_thread() -> Result<(task::ThreadId, usize)> {
         .ok_or(Kernel::Memory(crate::result::Memory::OutOfMemory))?;
     let seq = AP_IDLE_THREAD_SEQ.fetch_add(1, Ordering::AcqRel) + 1;
     let name = alloc::format!("ap-idle-{}", seq);
-    let idle_process =
-        task::Process::new(&name, task::PrivilegeLevel::Core, kernel_process_id(), 0);
+    let idle_process = task::Process::new(&name, task::PrivilegeLevel::Core, 0);
     let idle_pid = idle_process.id();
     if task::add_process(idle_process).is_none() {
         task::free_kernel_stack(kernel_stack);
@@ -256,9 +249,8 @@ pub static SECONDARY_CPU_ENTRY: unsafe extern "sysv64" fn(*const BootInfo, u64) 
 
 /// カーネルメインプロセスの作成
 fn create_kernel_proc() -> Result<()> {
-    let kernel_process = task::Process::new("kernel", task::PrivilegeLevel::Core, None, 0);
+    let kernel_process = task::Process::new("kernel", task::PrivilegeLevel::Core, 0);
     let kernel_pid = kernel_process.id();
-    KERNEL_PROCESS_ID_RAW.store(kernel_pid.as_u64(), Ordering::Release);
 
     if task::add_process(kernel_process).is_none() {
         return Err(Kernel::Process(Process::MaxProcessesReached));
