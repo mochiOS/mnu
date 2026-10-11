@@ -135,6 +135,19 @@ pub fn write(raw: u64, buffer: u64, length: u64) -> u64 {
     }
 }
 
+pub fn stream_read(raw: u64, buffer: u64, length: u64, options: u64) -> u64 {
+    if options & !mnu_abi::STREAM_READ_OPTIONS_ALL != 0 {
+        return EINVAL;
+    }
+    match object(raw, HandleRights::READ) {
+        Ok(KernelObject::File(file)) => {
+            crate::syscall::fs::read_stream_handle(&file, buffer, length, options)
+        }
+        Ok(_) => ENOTSUP,
+        Err(error) => error,
+    }
+}
+
 pub fn stream_write(raw: u64, buffer: u64, length: u64, options: u64) -> u64 {
     if options & !mnu_abi::STREAM_WRITE_OPTIONS_ALL != 0 {
         return EINVAL;

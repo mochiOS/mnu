@@ -182,6 +182,9 @@ pub enum SyscallNumber {
     /// are acquired. Arguments: HandleInfo buffer, record capacity. (0, 0)
     /// queries the current count; an insufficient buffer returns ENOSPC.
     HandleTableRead = 680,
+    /// Reads available stream bytes. Arguments: Handle, destination, length,
+    /// per-call options. STREAM_IO_TRY never changes shared object options.
+    StreamRead = 681,
     CheckGravityExist = 999,
 }
 
@@ -424,7 +427,9 @@ pub const HANDLE_OPTIONS_ALL: u64 = HANDLE_OPTION_NONBLOCKING;
 
 /// Require the entire supplied stream write to fit before committing bytes.
 pub const STREAM_WRITE_COMPLETE: u64 = 1 << 0;
-pub const STREAM_WRITE_OPTIONS_ALL: u64 = STREAM_WRITE_COMPLETE;
+pub const STREAM_IO_TRY: u64 = 1 << 1;
+pub const STREAM_READ_OPTIONS_ALL: u64 = STREAM_IO_TRY;
+pub const STREAM_WRITE_OPTIONS_ALL: u64 = STREAM_WRITE_COMPLETE | STREAM_IO_TRY;
 
 /// One process-local object handle and the rights requested for transfer.
 ///

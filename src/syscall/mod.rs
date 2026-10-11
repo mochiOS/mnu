@@ -802,6 +802,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::HandleReadAt as u64 => handle::read_at(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::HandleWriteAt as u64 => handle::write_at(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::StreamWrite as u64 => handle::stream_write(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::StreamRead as u64 => handle::stream_read(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
         x if x == SyscallNumber::AllocSharedPages as u64 => {
             process::alloc_shared_pages(arg0, arg1, arg2, arg3)

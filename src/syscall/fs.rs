@@ -670,6 +670,12 @@ fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
                 pipe.waiters.push(current);
             }
             drop(table);
+            if crate::task::with_thread(current, |thread| thread.has_deliverable_upcall())
+                .unwrap_or(false)
+            {
+                remove_stream_waiter(pipe_id, current);
+                return EAGAIN;
+            }
             let _ = crate::task::sleep_thread_unless_woken(current);
             crate::task::yield_now();
             continue;
@@ -809,6 +815,38 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
     written as u64
 }
 
+pub(crate) fn read_stream_handle(
+    handle: &FileHandle,
+    buffer: u64,
+    length: u64,
+    options: u64,
+) -> u64 {
+    if !handle.cap.contains(FileHandleCap::READ) {
+        return EACCES;
+    }
+    if length == 0 {
+        return 0;
+    }
+    if buffer == 0 || !crate::syscall::validate_user_ptr(buffer, length) {
+        return EFAULT;
+    }
+    let open = handle.open.lock();
+    let Some(stream_id) = open.pipe_id else {
+        return ENOTSUP;
+    };
+    if open.pipe_write {
+        return EBADF;
+    }
+    let io_options = open.io_options
+        | if options & mnu_abi::STREAM_IO_TRY != 0 {
+            mnu_abi::HANDLE_OPTION_NONBLOCKING
+        } else {
+            0
+        };
+    drop(open);
+    read_pipe(stream_id, io_options, buffer, length)
+}
+
 pub(crate) fn write_stream_handle(
     handle: &FileHandle,
     buffer: u64,
@@ -825,7 +863,12 @@ pub(crate) fn write_stream_handle(
     if !open.pipe_write {
         return EBADF;
     }
-    let io_options = open.io_options;
+    let io_options = open.io_options
+        | if options & mnu_abi::STREAM_IO_TRY != 0 {
+            mnu_abi::HANDLE_OPTION_NONBLOCKING
+        } else {
+            0
+        };
     drop(open);
     write_pipe(
         stream_id,
@@ -883,6 +926,12 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
             pipe.waiters.push(current);
         }
         drop(table);
+        if crate::task::with_thread(current, |thread| thread.has_deliverable_upcall())
+            .unwrap_or(false)
+        {
+            remove_stream_waiter(pipe_id, current);
+            return EAGAIN;
+        }
         let _ = crate::task::sleep_thread_unless_woken(current);
         crate::task::yield_now();
     }
