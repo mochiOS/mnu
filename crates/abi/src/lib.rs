@@ -123,9 +123,6 @@ pub enum SyscallNumber {
     ProcessHandleOpen = 641,
     ProcessHandleStatus = 642,
     ProcessHandleWait = 643,
-    /// Transitional clone backend: arg0 explicitly selects the resumed RAX.
-    /// Returns a process handle to the source; the copy starts suspended.
-    ProcessClone = 644,
     ProcessHandleResume = 645,
     ProcessHandleTerminate = 646,
     HandleWaitMany = 647,
@@ -541,7 +538,6 @@ mod object_handle_tests {
             SyscallNumber::ProcessHandleOpen as u64,
             SyscallNumber::ProcessHandleStatus as u64,
             SyscallNumber::ProcessHandleWait as u64,
-            SyscallNumber::ProcessClone as u64,
             SyscallNumber::ProcessHandleResume as u64,
             SyscallNumber::ProcessHandleTerminate as u64,
             SyscallNumber::HandleWaitMany as u64,
@@ -663,7 +659,6 @@ mod syscall_layout_tests {
         assert_eq!(super::SyscallNumber::ProcessHandleOpen as u64, 641);
         assert_eq!(super::SyscallNumber::ProcessHandleStatus as u64, 642);
         assert_eq!(super::SyscallNumber::ProcessHandleWait as u64, 643);
-        assert_eq!(super::SyscallNumber::ProcessClone as u64, 644);
         assert_eq!(super::SyscallNumber::HandleWaitMany as u64, 647);
         assert_eq!(super::SyscallNumber::ContextHandleSet as u64, 648);
         assert_eq!(super::SyscallNumber::ContextHandleRemove as u64, 661);

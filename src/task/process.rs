@@ -1174,28 +1174,12 @@ impl Process {
         &mut self.object_handles
     }
 
-    pub fn clone_object_handles(&self) -> alloc::boxed::Box<ObjectHandleTable> {
-        alloc::boxed::Box::new((*self.object_handles).clone())
-    }
-
-    pub fn set_object_handles(&mut self, table: alloc::boxed::Box<ObjectHandleTable>) {
-        self.object_handles = table;
-    }
-
     pub fn launch_context(&self) -> &LaunchContext {
         &self.launch_context
     }
 
     pub fn launch_context_mut(&mut self) -> &mut LaunchContext {
         &mut self.launch_context
-    }
-
-    pub fn set_launch_context(&mut self, context: alloc::boxed::Box<LaunchContext>) {
-        self.launch_context = context;
-    }
-
-    pub fn clone_launch_context(&self) -> alloc::boxed::Box<LaunchContext> {
-        alloc::boxed::Box::new((*self.launch_context).clone())
     }
 
     /// Drops object handles which were not explicitly selected for the next

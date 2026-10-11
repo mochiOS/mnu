@@ -24,7 +24,6 @@ const CAP_IPC_SERVER: &[u8] = b"ipc.server";
 const CAP_INVALID: &[u8] = b"no.such.capability";
 const NATIVE_ANONYMOUS_PRIVATE: u64 = 0;
 const MEMORY_SYNC_TEST_PATH: &[u8] = b"/tmp/init.msync-test";
-const SPAWN_MMAP_TEST_PATH: &str = "/tmp/init.spawn-mmap-test";
 const PASS_LINE: &[u8] = b"USERLAND SELF-TEST PASS\n";
 const FAIL_LINE: &[u8] = b"USERLAND SELF-TEST FAIL\n";
 const STAGE_MEMORY: &[u8] = b"stage: memory\n";
@@ -33,7 +32,6 @@ const STAGE_IPC_SR: &[u8] = b"stage: ipc send/recv\n";
 const STAGE_IPC_PP: &[u8] = b"stage: ipc ping/pong\n";
 const STAGE_CAP: &[u8] = b"stage: capability\n";
 const STAGE_THREAD: &[u8] = b"stage: thread\n";
-const STAGE_CLONE: &[u8] = b"stage: process_clone\n";
 const STAGE_FS_BENCH: &[u8] = b"stage: fs bench\n";
 const STAGE_PERFORMANCE: &[u8] = b"stage: performance counters\n";
 const FS_BYTES_LINE: &[u8] = b" bytes, ";
@@ -409,206 +407,6 @@ fn run_ipc_ping_pong(endpoint: u64) -> u64 {
     0
 }
 
-fn run_process_clone_test() -> bool {
-    const EXPECTED_BYTE: u8 = 0xa5;
-    const CHILD_BYTE: u8 = 0x5a;
-    const SHARED_BYTE: u8 = 0x3c;
-
-    let create_fd = user::file_open(SPAWN_MMAP_TEST_PATH, 0o2 | 0o100 | 0o1000);
-    if create_fd == 0 || is_error(create_fd) || user::file_write(create_fd, &[EXPECTED_BYTE]) != 1 {
-        if create_fd != 0 && !is_error(create_fd) {
-            let _ = user::file_close(create_fd);
-        }
-        return false;
-    }
-    let _ = user::file_close(create_fd);
-
-    let fd = user::file_open(SPAWN_MMAP_TEST_PATH, 0);
-    if fd == 0 || is_error(fd) {
-        return false;
-    }
-    let mut persisted = [0u8; 1];
-    if user::file_read(fd, &mut persisted) != 1 || persisted[0] != EXPECTED_BYTE {
-        let _ = user::file_close(fd);
-        return false;
-    }
-    let mapping = user::memory_map(0, PAGE_SIZE, 3, 0, fd);
-    if mapping == 0 || is_error(mapping) {
-        let _ = user::file_close(fd);
-        return false;
-    }
-    if unsafe { core::ptr::read_volatile(mapping as *const u8) } != EXPECTED_BYTE {
-        let _ = user::memory_unmap(mapping, PAGE_SIZE);
-        let _ = user::file_close(fd);
-        return false;
-    }
-    let child = user::process_clone();
-    if is_error(child) {
-        let _ = user::memory_unmap(mapping, PAGE_SIZE);
-        let _ = user::file_close(fd);
-        return false;
-    }
-    if child == 0 {
-        unsafe {
-            core::ptr::write_volatile(mapping as *mut u8, CHILD_BYTE);
-        }
-        let mapped_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
-        user::process_exit(u64::from(mapped_byte));
-    }
-
-    let mut status = 0i32;
-    let waited = user::process_wait_handle(child, (&mut status as *mut i32) as u64);
-    let parent_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
-    let _ = user::memory_unmap(mapping, PAGE_SIZE);
-    if waited != child || status != i32::from(CHILD_BYTE) << 8 || parent_byte != EXPECTED_BYTE {
-        let _ = user::file_close(fd);
-        return false;
-    }
-    if !verify_parent_copy_on_write() {
-        let _ = user::file_close(fd);
-        return false;
-    }
-
-    let shared_mapping = user::memory_map(0, PAGE_SIZE, 3, mnu_abi::MEMORY_MAP_SHARED, fd);
-    if shared_mapping == 0 || is_error(shared_mapping) {
-        let _ = user::file_close(fd);
-        return false;
-    }
-    let _ = unsafe { core::ptr::read_volatile(shared_mapping as *const u8) };
-    let child = user::process_clone();
-    if is_error(child) {
-        let _ = user::memory_unmap(shared_mapping, PAGE_SIZE);
-        let _ = user::file_close(fd);
-        return false;
-    }
-    if child == 0 {
-        unsafe {
-            core::ptr::write_volatile(shared_mapping as *mut u8, SHARED_BYTE);
-        }
-        user::process_exit(u64::from(SHARED_BYTE));
-    }
-    let mut status = 0i32;
-    let waited = user::process_wait_handle(child, (&mut status as *mut i32) as u64);
-    let shared_byte = unsafe { core::ptr::read_volatile(shared_mapping as *const u8) };
-    let _ = user::memory_unmap(shared_mapping, PAGE_SIZE);
-    let _ = user::file_close(fd);
-    if waited != child || status != i32::from(SHARED_BYTE) << 8 || shared_byte != SHARED_BYTE {
-        return false;
-    }
-
-    if !verify_allocated_shared_page_fork() {
-        return false;
-    }
-
-    let mut children = [0u64; 4];
-    for (index, child_slot) in children.iter_mut().enumerate() {
-        let exit_code = index as u64 + 1;
-        let child = user::process_clone();
-        if is_error(child) {
-            return false;
-        }
-        if child == 0 {
-            user::process_exit(exit_code);
-        }
-        *child_slot = child;
-    }
-    for (index, child) in children.into_iter().enumerate() {
-        let exit_code = index as u64 + 1;
-        let mut status = 0i32;
-        if user::process_wait_handle(child, (&mut status as *mut i32) as u64) != child
-            || status != (exit_code as i32) << 8
-        {
-            return false;
-        }
-    }
-    for exit_code in 5u64..=15 {
-        let child = user::process_clone();
-        if is_error(child) {
-            return false;
-        }
-        if child == 0 {
-            user::process_exit(exit_code);
-        }
-        let mut status = 0i32;
-        if user::process_wait_handle(child, (&mut status as *mut i32) as u64) != child
-            || status != (exit_code as i32) << 8
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn verify_parent_copy_on_write() -> bool {
-    const ORIGINAL_BYTE: u8 = 0x42;
-    const PARENT_BYTE: u8 = 0x7b;
-
-    let mapping = user::memory_map(0, PAGE_SIZE, 3, NATIVE_ANONYMOUS_PRIVATE, 0);
-    if mapping == 0 || is_error(mapping) {
-        return false;
-    }
-    unsafe {
-        core::ptr::write_volatile(mapping as *mut u8, ORIGINAL_BYTE);
-    }
-
-    let child = user::process_clone();
-    if is_error(child) {
-        let _ = user::memory_unmap(mapping, PAGE_SIZE);
-        return false;
-    }
-    if child == 0 {
-        let _ = user::sleep(1);
-        let child_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
-        user::process_exit(u64::from(child_byte));
-    }
-
-    unsafe {
-        core::ptr::write_volatile(mapping as *mut u8, PARENT_BYTE);
-    }
-    let mut status = 0i32;
-    let waited = user::process_wait_handle(child, (&mut status as *mut i32) as u64);
-    let parent_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
-    let unmapped = user::memory_unmap(mapping, PAGE_SIZE);
-    waited == child
-        && status == i32::from(ORIGINAL_BYTE) << 8
-        && parent_byte == PARENT_BYTE
-        && expect_success(unmapped)
-}
-
-fn verify_allocated_shared_page_fork() -> bool {
-    const CHILD_BYTE: u8 = 0x6d;
-
-    let mut physical_page = [0u64; 1];
-    let mapping = user::alloc_shared_pages(1, physical_page.as_mut_ptr() as u64, 1, 0);
-    if mapping == 0 || is_error(mapping) || physical_page[0] == 0 {
-        return false;
-    }
-    unsafe {
-        core::ptr::write_volatile(mapping as *mut u8, 0x21);
-    }
-
-    let child = user::process_clone();
-    if is_error(child) {
-        let _ = user::memory_unmap(mapping, PAGE_SIZE);
-        return false;
-    }
-    if child == 0 {
-        unsafe {
-            core::ptr::write_volatile(mapping as *mut u8, CHILD_BYTE);
-        }
-        user::process_exit(u64::from(CHILD_BYTE));
-    }
-
-    let mut status = 0i32;
-    let waited = user::process_wait_handle(child, (&mut status as *mut i32) as u64);
-    let shared_byte = unsafe { core::ptr::read_volatile(mapping as *const u8) };
-    let unmapped = user::memory_unmap(mapping, PAGE_SIZE);
-    waited == child
-        && status == i32::from(CHILD_BYTE) << 8
-        && shared_byte == CHILD_BYTE
-        && expect_success(unmapped)
-}
-
 fn verify_exec_measurements() -> bool {
     use mnu_abi::performance::{
         AllocationSubsystem, CounterMetric, KernelPerformanceSnapshot, LatencyMetric,
@@ -623,24 +421,6 @@ fn verify_exec_measurements() -> bool {
         return false;
     }
 
-    write_literal(b"process.fork: count=");
-    write_decimal(snapshot.process_activity.fork_latency.count);
-    write_literal(b" p50_cycles=");
-    write_decimal(snapshot.process_activity.fork_latency.p50_cycles);
-    write_literal(b" p95_cycles=");
-    write_decimal(snapshot.process_activity.fork_latency.p95_cycles);
-    write_literal(b" p99_cycles=");
-    write_decimal(snapshot.process_activity.fork_latency.p99_cycles);
-    write_literal(b" pages_copied=");
-    write_decimal(snapshot.process_activity.fork_pages_copied);
-    write_literal(b" pages_shared=");
-    write_decimal(snapshot.process_activity.fork_pages_shared);
-    write_literal(b" cow_faults=");
-    write_decimal(snapshot.process_activity.copy_on_write_faults);
-    write_literal(b" cow_copies=");
-    write_decimal(snapshot.process_activity.copy_on_write_pages_copied);
-    write_literal(b"\n");
-
     write_literal(b"process.exec: bytes_read=");
     write_decimal(
         snapshot.counters[CounterMetric::ExecutableBytesRead as usize],
@@ -652,17 +432,10 @@ fn verify_exec_measurements() -> bool {
     );
     write_literal(b"\n");
 
-    let fork_pages = snapshot
-        .process_activity
-        .fork_pages_copied
-        .saturating_add(snapshot.process_activity.fork_pages_shared);
     snapshot.counters[CounterMetric::ExecutableBytesRead as usize] != 0
         && snapshot.latencies[LatencyMetric::ExecParse as usize].count != 0
         && snapshot.latencies[LatencyMetric::ExecLoad as usize].count != 0
         && snapshot.latencies[LatencyMetric::ExecEntry as usize].count != 0
-        && snapshot.process_activity.fork_latency.count != 0
-        && fork_pages != 0
-        && snapshot.process_activity.copy_on_write_faults != 0
 }
 
 fn run_fs_benchmark() -> u64 {
@@ -789,10 +562,10 @@ fn run_thread_test() -> bool {
         THREAD_TEST_RELEASE.store(true, Ordering::Release);
         return false;
     }
-    let fork_result = user::process_clone();
-    if fork_result != mnu_abi::EAGAIN {
-        write_literal(b"thread: fork result=");
-        write_decimal(fork_result);
+    let clone_result = user::clone_address_space();
+    if clone_result != mnu_abi::EAGAIN {
+        write_literal(b"thread: VM snapshot result=");
+        write_decimal(clone_result);
         write_literal(b" expected=");
         write_decimal(mnu_abi::EAGAIN);
         write_literal(b"\n");
@@ -823,10 +596,8 @@ fn run_all_tests() -> u64 {
     if !user::has_capability("process.spawn") {
         return 0;
     }
-    let _ = user::debug_write(STAGE_CLONE.as_ptr() as u64, STAGE_CLONE.len() as u64);
-    if !run_process_clone_test() {
-        return 9;
-    }
+    // POSIX fork/COW/shared-mapping integration is tested by
+    // services/posix/tests/native_clone_cow.c and native_snapshot_continuation.c.
     let _ = user::debug_write(
         STAGE_PERFORMANCE.as_ptr() as u64,
         STAGE_PERFORMANCE.len() as u64,

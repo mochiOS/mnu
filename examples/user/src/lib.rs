@@ -75,10 +75,9 @@ fn alloc_error(_layout: Layout) -> ! {
 const SYS_DEBUG_WRITE: u64 = mnu_abi::SyscallNumber::DebugWrite as u64;
 const SYS_EXEC_MANIFEST: u64 = mnu_abi::SyscallNumber::ExecManifest as u64;
 const SYS_PROCESS_EXIT: u64 = mnu_abi::SyscallNumber::ProcessExit as u64;
-const SYS_PROCESS_CLONE: u64 = mnu_abi::SyscallNumber::ProcessClone as u64;
+const SYS_ADDRESS_SPACE_CLONE: u64 = mnu_abi::SyscallNumber::AddressSpaceClone as u64;
 const SYS_HANDLE_CLOSE: u64 = mnu_abi::SyscallNumber::HandleClose as u64;
 const SYS_PROCESS_HANDLE_WAIT: u64 = mnu_abi::SyscallNumber::ProcessHandleWait as u64;
-const SYS_PROCESS_HANDLE_RESUME: u64 = mnu_abi::SyscallNumber::ProcessHandleResume as u64;
 const SYS_PROCESS_HANDLE_OPEN_BY_ID: u64 =
     mnu_abi::SyscallNumber::ProcessHandleOpenById as u64;
 const SYS_THREAD_CREATE: u64 = mnu_abi::SyscallNumber::ThreadCreate as u64;
@@ -300,19 +299,6 @@ pub fn process_exit(code: u64) -> ! {
     }
 }
 
-pub fn process_clone() -> u64 {
-    let handle = unsafe { syscall1(SYS_PROCESS_CLONE, 0) };
-    if handle == 0 || (handle as i64) < 0 {
-        return handle;
-    }
-    let resumed = unsafe { syscall1(SYS_PROCESS_HANDLE_RESUME, handle) };
-    if (resumed as i64) < 0 {
-        let _ = unsafe { syscall1(SYS_HANDLE_CLOSE, handle) };
-        return resumed;
-    }
-    handle
-}
-
 pub fn process_wait(pid: u64, status_ptr: u64, flags: u64) -> u64 {
     if flags != 0 || pid == u64::MAX {
         return mnu_abi::EINVAL;
@@ -333,6 +319,11 @@ pub fn process_wait(pid: u64, status_ptr: u64, flags: u64) -> u64 {
     } else {
         pid
     }
+}
+
+/// Captures only the current VM image; creates no process or implicit grants.
+pub fn clone_address_space() -> u64 {
+    unsafe { syscall0(SYS_ADDRESS_SPACE_CLONE) }
 }
 
 pub fn process_wait_handle(handle: u64, status_ptr: u64) -> u64 {

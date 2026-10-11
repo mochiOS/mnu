@@ -685,7 +685,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
 
     let result = match num {
         x if x == SyscallNumber::ProcessExit as u64 => process::exit(arg0),
-        x if x == SyscallNumber::ProcessClone as u64 => process::clone_process(arg0),
         x if x == SyscallNumber::AddressSpaceClone as u64 => process::clone_address_space(),
         x if x == SyscallNumber::DmaAlloc as u64 => dma::alloc(arg0, arg1),
         x if x == SyscallNumber::DmaFree as u64 => dma::free(arg0),
@@ -956,7 +955,6 @@ fn is_vfs_syscall(num: u64) -> bool {
 fn is_process_creation_syscall(num: u64) -> bool {
     num == SyscallNumber::ProcessImageReplace as u64
         || num == SyscallNumber::ProcessCreate as u64
-        || num == SyscallNumber::ProcessClone as u64
         || num == SyscallNumber::ExecManifest as u64
 }
 
