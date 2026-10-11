@@ -131,6 +131,16 @@ impl ExecMeasurement {
 
 struct UserPageTableGuard(Option<u64>);
 
+struct CreatedProcessHandle(Option<u64>);
+
+impl Drop for CreatedProcessHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            let _ = crate::syscall::handle::close(handle);
+        }
+    }
+}
+
 impl UserPageTableGuard {
     fn new(table_phys: u64) -> Self {
         Self(Some(table_phys))
@@ -1152,6 +1162,7 @@ fn exec_internal(
             application_identity,
             inherited_handles,
             inherited_values,
+            None,
             &mut measurement,
         );
         measurement.finish(result)
@@ -1419,6 +1430,7 @@ fn exec_with_data(
     application_identity: Option<crate::task::process::ApplicationIdentity>,
     inherited_handles: &[InheritedHandleGrant],
     inherited_values: &[InheritedValueSpec],
+    native_startup: Option<mnu_abi::process_image::StartupImage<'_>>,
     measurement: &mut ExecMeasurement,
 ) -> u64 {
     crate::debug!("exec: name={}", process_name);
@@ -1469,47 +1481,52 @@ fn exec_with_data(
             }
         };
 
-        let base_name = exec_path.rsplit('/').next().unwrap_or(process_name);
-        let argv0 = base_name.strip_suffix(".elf").unwrap_or(base_name);
-        let mut all_args: Vec<&str> = Vec::new();
-        all_args.push(argv0);
-        for a in args {
-            all_args.push(a);
-        }
-        if process_name.ends_with("busybox.elf") {
-            let argv1 = all_args.get(1).copied().unwrap_or("");
-            crate::info!(
-                "busybox argv: argc={}, argv0='{}', argv1='{}'",
-                all_args.len(),
-                argv0,
-                argv1
-            );
-        }
-        let auxv_entries = [
-            (3u64, phdr_vaddr),
-            (4u64, phentsize),
-            (5u64, phnum),
-            (6u64, 4096u64),
-            (7u64, 0u64),
-            (8u64, 0u64),
-            (9u64, entry),
-            (11u64, 0u64),
-            (12u64, 0u64),
-            (13u64, 0u64),
-            (14u64, 0u64),
-            (16u64, 0u64),
-            (17u64, 100u64),
-            (23u64, 0u64),
-            (25u64, 0u64),
-            (31u64, 0u64),
-            (0u64, 0u64),
-        ];
+        let stack = if let Some(startup) = native_startup {
+            build_relocatable_user_stack(aslr_seed, startup, phdr_vaddr, phentsize, phnum, entry)
+        } else {
+            let base_name = exec_path.rsplit('/').next().unwrap_or(process_name);
+            let argv0 = base_name.strip_suffix(".elf").unwrap_or(base_name);
+            let mut all_args: Vec<&str> = Vec::new();
+            all_args.push(argv0);
+            for a in args {
+                all_args.push(a);
+            }
+            if process_name.ends_with("busybox.elf") {
+                let argv1 = all_args.get(1).copied().unwrap_or("");
+                crate::info!(
+                    "busybox argv: argc={}, argv0='{}', argv1='{}'",
+                    all_args.len(),
+                    argv0,
+                    argv1
+                );
+            }
+            let auxv_entries = [
+                (3u64, phdr_vaddr),
+                (4u64, phentsize),
+                (5u64, phnum),
+                (6u64, 4096u64),
+                (7u64, 0u64),
+                (8u64, 0u64),
+                (9u64, entry),
+                (11u64, 0u64),
+                (12u64, 0u64),
+                (13u64, 0u64),
+                (14u64, 0u64),
+                (16u64, 0u64),
+                (17u64, 100u64),
+                (23u64, 0u64),
+                (25u64, 0u64),
+                (31u64, 0u64),
+                (0u64, 0u64),
+            ];
+            build_initial_user_stack(aslr_seed, &all_args, envp, exec_path, &auxv_entries)
+        };
         let InitialUserStack {
             stack_base_vaddr,
             stack_end_vaddr,
             initial_rsp,
             page_data,
-        } = match build_initial_user_stack(aslr_seed, &all_args, envp, exec_path, &auxv_entries) {
+        } = match stack {
             Ok(stack) => stack,
             Err(errno) => {
                 crate::kernel::early_serial("exec: build stack failed\n");
@@ -1591,15 +1608,23 @@ fn exec_with_data(
         }
 
         // プロセスを作成してページテーブルをセット
-        let parent_pid = parent_override.or_else(|| {
-            crate::task::current_thread_id()
-                .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-        });
+        let parent_pid = if native_startup.is_some() {
+            None
+        } else {
+            parent_override.or_else(|| {
+                crate::task::current_thread_id()
+                    .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
+            })
+        };
         let privilege = resolve_exec_privilege(requested_privilege);
-        let boot_init = crate::policy::init_launch();
-        let is_boot_init = privilege == crate::task::PrivilegeLevel::Service
-            && exec_path == boot_init.exec_path
-            && process_name == boot_init.process_name;
+        let is_boot_init = if native_startup.is_some() {
+            false
+        } else {
+            let boot_init = crate::policy::init_launch();
+            privilege == crate::task::PrivilegeLevel::Service
+                && exec_path == boot_init.exec_path
+                && process_name == boot_init.process_name
+        };
         const DEFAULT_PROCESS_PRIORITY: u8 = 8;
         let priority = DEFAULT_PROCESS_PRIORITY;
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, priority);
@@ -1665,6 +1690,15 @@ fn exec_with_data(
             }
         };
         let pid = proc.id();
+        // Allocate the creator's reference before publishing any runnable thread.
+        let mut created_handle = CreatedProcessHandle(if native_startup.is_some() {
+            match crate::syscall::handle::retain_created_process(&proc) {
+                Ok(handle) => Some(handle),
+                Err(errno) => return errno,
+            }
+        } else {
+            None
+        });
         if is_boot_init && !claim_init_pid(pid.as_u64()) {
             crate::kernel::early_serial("exec: init claim failed\n");
             crate::warn!("init is already running, rejecting duplicate launch");
@@ -1688,7 +1722,7 @@ fn exec_with_data(
                     if is_boot_init {
                         let _ = release_init_pid(pid.as_u64());
                     }
-                    let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
+                    // The page-table guard still owns this table on this path.
                     return crate::syscall::types::ENOMEM;
                 }
             };
@@ -1706,6 +1740,9 @@ fn exec_with_data(
             kstack_size,
         );
         thread.set_fs_base(initial_fs_base);
+        if native_startup.is_some() {
+            thread.suspend();
+        }
 
         crate::debug!(
             "exec: loaded '{}', entry={:#x}, pid={:?}",
@@ -1759,9 +1796,9 @@ fn exec_with_data(
             crate::debug!("exec: new_thread_id={:?}", tid);
         }
 
-        // Return the child identifier to the caller before the child can run.
-        // Timer-driven scheduling will pick up the ready thread after the spawn
-        // caller has completed its registration and handshake setup.
+        // Legacy spawn publishes a ready thread and therefore cannot guarantee
+        // that its thread ID is still live when the caller receives it. Native
+        // creation returns a retained object while scheduling remains suspended.
 
         crate::debug!(
             "exec: created usermode process '{}' (pid={:?}, entry={:#x})",
@@ -1770,8 +1807,12 @@ fn exec_with_data(
             entry
         );
 
-        let launched_tid = add_res.expect("add_thread succeeded after non-None check");
-        launched_tid.as_u64()
+        if let Some(handle) = created_handle.0.take() {
+            handle
+        } else {
+            let launched_tid = add_res.expect("add_thread succeeded after non-None check");
+            launched_tid.as_u64()
+        }
     }
 }
 
@@ -1994,4 +2035,98 @@ pub fn process_image_replace_syscall(
         startup,
         ExecMeasurement::start(),
     )
+}
+
+/// Creates a stopped process from an authorized image object. No path lookup,
+/// argv/envp convention, credentials, child relationship, or service discovery
+/// is supplied by this entry point. The caller explicitly resumes the result.
+pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: u64) -> u64 {
+    use crate::syscall::types::{EACCES, EINVAL, EPERM};
+
+    if !caller_has_process_spawn_capability() {
+        return EPERM;
+    }
+    let length = match usize::try_from(request_len) {
+        Ok(length) if length > 0 && length <= mnu_abi::process_create::MAX_REQUEST_BYTES => length,
+        _ => return EINVAL,
+    };
+    let mut bytes = vec![0u8; length];
+    if let Err(errno) = crate::syscall::copy_from_user(request_ptr, &mut bytes) {
+        return errno;
+    }
+    let request = match mnu_abi::process_create::decode(&bytes) {
+        Ok(request) => request,
+        Err(_) => return EINVAL,
+    };
+    let Some(owner) = crate::syscall::security::current_process_id() else {
+        return EACCES;
+    };
+    let Some(thread) = crate::task::current_thread_id() else {
+        return EACCES;
+    };
+    let Some(authorization) = crate::task::with_process_mut(owner, |process| {
+        process.take_exec_authorization(request.identity, thread)
+    })
+    .flatten() else {
+        return EACCES;
+    };
+    if authorization.kind != crate::task::process::PendingExecKind::Spawn {
+        return EACCES;
+    }
+    let executable = match crate::syscall::handle::read_all(image_handle, 64 * 1024 * 1024) {
+        Ok(executable) => executable,
+        Err(errno) => return errno,
+    };
+    let digest: [u8; 32] = Sha256::digest(&executable).into();
+    if digest != authorization.executable_digest {
+        return EACCES;
+    }
+    let mut specs = Vec::new();
+    for grant in request.handles() {
+        let Some(source) = crate::task::ObjectHandle::from_raw(grant.source) else {
+            return EINVAL;
+        };
+        let Some(rights) = crate::task::HandleRights::from_bits(grant.rights) else {
+            return EINVAL;
+        };
+        specs.push(InheritedHandleSpec {
+            key: grant.key,
+            source,
+            rights,
+        });
+    }
+    let grants = match export_inherited_handles(Some(owner), &specs) {
+        Ok(grants) => grants,
+        Err(errno) => return errno,
+    };
+    let values: Vec<_> = request
+        .values()
+        .map(|value| InheritedValueSpec {
+            key: value.key,
+            value: value.value,
+        })
+        .collect();
+    let privilege = match authorization.execution_class {
+        ExecutionClass::Privileged => crate::task::PrivilegeLevel::Service,
+        ExecutionClass::Unprivileged => crate::task::PrivilegeLevel::User,
+    };
+    let mut measurement = ExecMeasurement::start();
+    let result = exec_with_data(
+        &executable,
+        request.identity,
+        request.identity,
+        &[],
+        &[],
+        None,
+        Some(authorization.capabilities),
+        Some(authorization.kernel_authorities),
+        None,
+        Some(privilege),
+        Some(authorization.identity),
+        &grants,
+        &values,
+        Some(request.startup),
+        &mut measurement,
+    );
+    measurement.finish(result)
 }

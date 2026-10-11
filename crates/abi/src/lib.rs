@@ -17,6 +17,7 @@ pub mod performance;
 
 /// Relocatable initial-stack image for native process image replacement.
 pub mod process_image;
+pub mod process_create;
 
 /// Generic user-space-backed object operation protocol.
 pub mod provider;
@@ -165,6 +166,10 @@ pub enum SyscallNumber {
     /// Writes an available prefix to a stream. Arguments: Handle, source,
     /// length, per-call options. STREAM_WRITE_COMPLETE requests all-or-none.
     StreamWrite = 675,
+    /// Creates a stopped process from an authorized image Handle and serialized
+    /// process_create metadata. Returns a retained WAIT/SIGNAL Process Handle.
+    /// Arguments: image Handle, metadata pointer, byte length.
+    ProcessCreate = 676,
     CheckGravityExist = 999,
 }
 
