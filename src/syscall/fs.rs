@@ -1525,7 +1525,7 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
             .filter(|vnode| vnode.is_directory())
             .map(|vnode| vnode.path().to_string())
         else {
-            return EBADF;
+            return ENOTDIR;
         };
         (path, open.pos)
     };
