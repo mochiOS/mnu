@@ -243,7 +243,7 @@ pub fn clone_address_space() -> u64 {
         _ => return ENOSYS,
     };
     let image = match source.clone_image() {
-        Ok(image) => Arc::new(image),
+        Ok(image) => Arc::new(crate::mem::address_space::AddressSpaceObject::new(image)),
         Err(_) => return ENOMEM,
     };
     // CONTROL authorizes eventual image consumption; MAP/READ/WRITE do not

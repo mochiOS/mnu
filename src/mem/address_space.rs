@@ -2,7 +2,55 @@
 
 use alloc::vec::Vec;
 
+use crate::interrupt::spinlock::SpinLock;
 use crate::task::{MemoryRegion, Process};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConsumeError {
+    Consumed,
+    Authorization,
+    Context,
+}
+
+/// All duplicate and transferred Handles share this one-shot ownership cell.
+/// A failed validation leaves the image available; a successful take disarms
+/// every alias before any execution container is published.
+pub struct AddressSpaceObject {
+    image: SpinLock<Option<AddressSpaceImage>>,
+}
+
+impl AddressSpaceObject {
+    pub fn new(image: AddressSpaceImage) -> Self {
+        Self {
+            image: SpinLock::new(Some(image)),
+        }
+    }
+
+    pub fn consume(
+        &self,
+        authorization: &crate::task::process::PendingExecSecurity,
+        context: &mnu_abi::ThreadCreateContext,
+    ) -> Result<AddressSpaceImage, ConsumeError> {
+        let mut slot = self.image.lock();
+        let image = slot.as_ref().ok_or(ConsumeError::Consumed)?;
+        if !image.permits(authorization) {
+            return Err(ConsumeError::Authorization);
+        }
+        let table = image.table.ok_or(ConsumeError::Consumed)?;
+        if !super::paging::is_user_initial_context_in_table(table, context) {
+            return Err(ConsumeError::Context);
+        }
+        slot.take().ok_or(ConsumeError::Consumed)
+    }
+}
+
+impl core::fmt::Debug for AddressSpaceObject {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("AddressSpaceObject")
+            .finish_non_exhaustive()
+    }
+}
 
 pub enum CloneError {
     MissingPageTable,

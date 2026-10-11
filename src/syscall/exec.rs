@@ -1863,12 +1863,6 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         Ok(request) => request,
         Err(_) => return EINVAL,
     };
-    let startup = match request.startup {
-        mnu_abi::process_create::InitialState::Image(startup) => startup,
-        // Snapshot creation is not yet connected. Never interpret a register
-        // context as ELF startup bytes or consume authorization on this path.
-        mnu_abi::process_create::InitialState::Context(_) => return crate::syscall::types::ENOTSUP,
-    };
     let Some(owner) = crate::syscall::security::current_process_id() else {
         return EACCES;
     };
@@ -1882,14 +1876,6 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         return EACCES;
     };
     if authorization.kind != crate::task::process::PendingExecKind::Spawn {
-        return EACCES;
-    }
-    let executable = match crate::syscall::handle::read_all(image_handle, 64 * 1024 * 1024) {
-        Ok(executable) => executable,
-        Err(errno) => return errno,
-    };
-    let digest: [u8; 32] = Sha256::digest(&executable).into();
-    if digest != authorization.executable_digest {
         return EACCES;
     }
     let mut specs = Vec::new();
@@ -1917,6 +1903,22 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
             value: value.value,
         })
         .collect();
+    let startup = match request.startup {
+        mnu_abi::process_create::InitialState::Image(startup) => startup,
+        mnu_abi::process_create::InitialState::Context(context) => {
+            return create_from_address_space(
+                image_handle, &request, context, authorization, &grants, &values,
+            );
+        }
+    };
+    let executable = match crate::syscall::handle::read_all(image_handle, 64 * 1024 * 1024) {
+        Ok(executable) => executable,
+        Err(errno) => return errno,
+    };
+    let digest: [u8; 32] = Sha256::digest(&executable).into();
+    if digest != authorization.executable_digest {
+        return EACCES;
+    }
     let privilege = match authorization.execution_class {
         ExecutionClass::Privileged => crate::task::PrivilegeLevel::Service,
         ExecutionClass::Unprivileged => crate::task::PrivilegeLevel::User,
@@ -1938,4 +1940,105 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         &mut measurement,
     );
     measurement.finish(result)
+}
+
+fn create_from_address_space(
+    image_handle: u64,
+    request: &mnu_abi::process_create::Request<'_>,
+    context: mnu_abi::ThreadCreateContext,
+    authorization: crate::task::process::PendingExecSecurity,
+    grants: &[InheritedHandleGrant],
+    values: &[InheritedValueSpec],
+) -> u64 {
+    use crate::mem::address_space::ConsumeError;
+    use crate::syscall::types::{EACCES, EAGAIN, EFAULT, EINVAL, ENOMEM};
+    let image =
+        match crate::syscall::handle::object(image_handle, crate::task::HandleRights::CONTROL) {
+            Ok(crate::task::KernelObject::AddressSpace(image)) => image,
+            Ok(_) => return EINVAL,
+            Err(errno) => return errno,
+        };
+    let privilege = match authorization.execution_class {
+        ExecutionClass::Privileged => crate::task::PrivilegeLevel::Service,
+        ExecutionClass::Unprivileged => crate::task::PrivilegeLevel::User,
+    };
+    let mut process = crate::task::Process::new(request.label, privilege, 8);
+    // Only the explicit grants are installed. No creator table, relationship,
+    // resource policy, or execution identity is implicitly inherited.
+    if let Err(errno) = install_inherited_handles(&mut process, grants) {
+        return errno;
+    }
+    if let Err(errno) = install_inherited_values(&mut process, values) {
+        return errno;
+    }
+    let image = match image.consume(&authorization, &context) {
+        Ok(image) => image,
+        Err(ConsumeError::Consumed) => return EAGAIN,
+        Err(ConsumeError::Authorization) => return EACCES,
+        Err(ConsumeError::Context) => return EFAULT,
+    };
+    process.set_capabilities_for_exec(authorization.capabilities);
+    process.set_kernel_authorities_for_exec(authorization.kernel_authorities);
+    process.set_application_identity(authorization.identity);
+    process.set_image_digest(authorization.executable_digest);
+    process.set_exe_path(request.identity);
+    if image.install(&mut process).is_err() {
+        return EINVAL;
+    }
+    let Some(table) = process.page_table() else {
+        return EINVAL;
+    };
+    // From installation until publication the guard owns the table. It also
+    // reclaims it on any creator-handle, kernel-stack, or thread failure.
+    let mut table_guard = UserPageTableGuard::new(table);
+    let mut handle = match crate::syscall::handle::retain_created_process(&process) {
+        Ok(handle) => CreatedProcessHandle(Some(handle)),
+        Err(errno) => return errno,
+    };
+    let stack_size = crate::config::kernel().exec.kernel_thread_stack_size;
+    let stack = match crate::task::allocate_kernel_stack_in_table(stack_size, table) {
+        Some(stack) => stack,
+        None => return ENOMEM,
+    };
+    let r = context.registers;
+    let state = crate::task::thread::SyscallUserContext {
+        rip: context.entry,
+        rsp: context.stack_pointer,
+        rflags: 0x202,
+        rdi: context.argument,
+        rsi: r.rsi,
+        rdx: r.rdx,
+        rbp: r.rbp,
+        rbx: r.rbx,
+        rcx: r.rcx,
+        r11: r.r11,
+        r8: r.r8,
+        r9: r.r9,
+        r10: r.r10,
+        r12: r.r12,
+        r13: r.r13,
+        r14: r.r14,
+        r15: r.r15,
+    };
+    let pid = process.id();
+    let mut thread = crate::task::Thread::new_user_resume(
+        pid,
+        state,
+        r.rax,
+        context.thread_local_base,
+        stack,
+        stack_size,
+    );
+    thread.suspend();
+    if crate::task::add_process(process).is_none() {
+        crate::task::free_kernel_stack(stack);
+        return ENOMEM;
+    }
+    if crate::task::add_thread(thread).is_none() {
+        let _ = crate::task::remove_process(pid);
+        crate::task::free_kernel_stack(stack);
+        return ENOMEM;
+    }
+    table_guard.disarm();
+    handle.0.take().unwrap_or(EINVAL)
 }

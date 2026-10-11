@@ -835,6 +835,38 @@ pub fn is_user_range_writable_in_table(table_phys: u64, addr: u64, len: u64) -> 
     is_user_range_accessible_in_table(table_phys, addr, len, true)
 }
 
+/// Checks an initial CPU context against the destination, not the creator's VM.
+/// COW stack pages are logically writable even before their first write fault.
+pub fn is_user_initial_context_in_table(
+    table: u64,
+    context: &mnu_abi::ThreadCreateContext,
+) -> bool {
+    if context.entry == 0
+        || context.entry > USER_SPACE_END
+        || context.stack_pointer < 16
+        || context.stack_pointer > USER_SPACE_END
+        || context.flags != 0
+        || context.reserved != [0; 3]
+    {
+        return false;
+    }
+    let executable = user_page_flags_in_table(table, context.entry & !4095).is_some_and(|flags| {
+        flags.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
+            && !flags.contains(PageTableFlags::NO_EXECUTE)
+    });
+    let stack = crate::task::memory_range::any_page(context.stack_pointer - 16, 16, |page| {
+        !user_page_flags_in_table(table, page).is_some_and(|flags| {
+            flags.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
+                && (flags.contains(PageTableFlags::WRITABLE) || flags.contains(COPY_ON_WRITE))
+        })
+    })
+    .is_some_and(|invalid| !invalid);
+    executable
+        && stack
+        && (context.thread_local_base == 0
+            || is_user_range_mapped_in_table(table, context.thread_local_base, 8))
+}
+
 /// 指定した仮想アドレス範囲にセグメントをマップしてコピーする
 ///
 /// データはカーネルの恒等マッピング（phys = virt）経由で物理フレームに直接書き込む。

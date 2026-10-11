@@ -303,7 +303,7 @@ pub enum KernelObject {
     Process(Arc<ProcessObject>),
     Thread(super::ids::ThreadId),
     VmObject(Arc<crate::mem::vm_object::VmObject>),
-    AddressSpace(Arc<crate::mem::address_space::AddressSpaceImage>),
+    AddressSpace(Arc<crate::mem::address_space::AddressSpaceObject>),
     File(Arc<FileHandle>),
     Provider(Arc<ProviderObject>),
 }
