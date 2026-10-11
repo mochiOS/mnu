@@ -132,6 +132,19 @@ pub fn write(raw: u64, buffer: u64, length: u64) -> u64 {
     }
 }
 
+pub fn stream_write(raw: u64, buffer: u64, length: u64, options: u64) -> u64 {
+    if options & !mnu_abi::STREAM_WRITE_OPTIONS_ALL != 0 {
+        return EINVAL;
+    }
+    match object(raw, HandleRights::WRITE) {
+        Ok(KernelObject::File(file)) => {
+            crate::syscall::fs::write_stream_handle(&file, buffer, length, options)
+        }
+        Ok(_) => ENOTSUP,
+        Err(error) => error,
+    }
+}
+
 pub fn seek(raw: u64, offset: u64, basis: u64) -> u64 {
     let object = match object(raw, HandleRights::SEEK) {
         Ok(object) => object,

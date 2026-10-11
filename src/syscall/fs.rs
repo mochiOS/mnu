@@ -778,7 +778,7 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
         (open.pipe_id, open.io_options)
     };
     if let Some(pipe_id) = pipe_id {
-        return write_pipe(pipe_id, io_options, buf_ptr, len);
+        return write_pipe(pipe_id, io_options, buf_ptr, len, true);
     }
 
     let Ok(len_usize) = usize::try_from(len) else {
@@ -881,14 +881,44 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
     written as u64
 }
 
-fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
+pub(crate) fn write_stream_handle(
+    handle: &FileHandle,
+    buffer: u64,
+    length: u64,
+    options: u64,
+) -> u64 {
+    if !handle.cap.contains(FileHandleCap::WRITE) {
+        return EACCES;
+    }
+    let open = handle.open.lock();
+    let Some(stream_id) = open.pipe_id else {
+        return ENOTSUP;
+    };
+    if !open.pipe_write {
+        return EBADF;
+    }
+    let io_options = open.io_options;
+    drop(open);
+    write_pipe(
+        stream_id,
+        io_options,
+        buffer,
+        length,
+        options & mnu_abi::STREAM_WRITE_COMPLETE != 0,
+    )
+}
+
+fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete: bool) -> u64 {
     let Ok(len_usize) = usize::try_from(len) else {
         return EINVAL;
     };
-    if len_usize > PIPE_BUFFER_CAP {
-        return EAGAIN;
+    if complete && len_usize > PIPE_BUFFER_CAP {
+        return EINVAL;
     }
-    let mut tmp = alloc::vec![0u8; len_usize];
+    if len_usize == 0 {
+        return 0;
+    }
+    let mut tmp = alloc::vec![0u8; len_usize.min(PIPE_BUFFER_CAP)];
     crate::performance::record_vfs_temporary_buffer(tmp.len());
     if let Err(errno) = crate::syscall::copy_from_user(buf_ptr, &mut tmp) {
         return errno;
@@ -904,13 +934,19 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
         if pipe.readers == 0 {
             return EPIPE;
         }
-        if pipe.data.len().saturating_add(tmp.len()) <= PIPE_BUFFER_CAP {
-            pipe.data.extend_from_slice(&tmp);
+        let available = PIPE_BUFFER_CAP.saturating_sub(pipe.data.len());
+        let count = if complete {
+            if available >= tmp.len() { tmp.len() } else { 0 }
+        } else {
+            available.min(tmp.len())
+        };
+        if count != 0 {
+            pipe.data.extend_from_slice(&tmp[..count]);
             pipe.waiters.retain(|waiter| *waiter != current);
             let waiters = core::mem::take(&mut pipe.waiters);
             drop(table);
             wake_stream_waiters(waiters);
-            return len;
+            return count as u64;
         }
         if (io_options & mnu_abi::HANDLE_OPTION_NONBLOCKING) != 0 {
             return EAGAIN;

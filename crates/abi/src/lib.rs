@@ -162,6 +162,9 @@ pub enum SyscallNumber {
     /// Writes bytes at an explicit object offset without moving its cursor.
     /// Arguments: Handle, source, byte length, unsigned object offset.
     HandleWriteAt = 674,
+    /// Writes an available prefix to a stream. Arguments: Handle, source,
+    /// length, per-call options. STREAM_WRITE_COMPLETE requests all-or-none.
+    StreamWrite = 675,
     CheckGravityExist = 999,
 }
 
@@ -355,6 +358,10 @@ pub const HANDLE_SEEK_END: u64 = 0x4d4e_5503;
 /// Return immediately when an object operation would otherwise block.
 pub const HANDLE_OPTION_NONBLOCKING: u64 = 1 << 0;
 pub const HANDLE_OPTIONS_ALL: u64 = HANDLE_OPTION_NONBLOCKING;
+
+/// Require the entire supplied stream write to fit before committing bytes.
+pub const STREAM_WRITE_COMPLETE: u64 = 1 << 0;
+pub const STREAM_WRITE_OPTIONS_ALL: u64 = STREAM_WRITE_COMPLETE;
 
 /// One process-local object handle and the rights requested for transfer.
 ///
