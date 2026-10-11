@@ -169,16 +169,19 @@ pub enum SyscallNumber {
     /// process_create metadata. Returns a retained WAIT/SIGNAL Process Handle.
     /// Arguments: image Handle, metadata pointer, byte length.
     ProcessCreate = 676,
-    /// Reads the calling native execution context, not POSIX credentials.
-    /// Arguments: output pointer and exact ExecutionIdentity byte length.
+    /// Reads native execution identity, not POSIX credentials. Arguments:
+    /// output pointer, exact ExecutionIdentity byte length, optional IPC endpoint.
+    /// Endpoint zero selects the caller; nonzero requires ProcessInspect and
+    /// resolves a generation-checked endpoint, never a caller-supplied PID/TID.
     ExecutionIdentityRead = 677,
     CheckGravityExist = 999,
 }
 
 pub const PROCESS_STATE_RUNNING: u32 = 1;
 
-/// Native object identities for the caller. These identifiers grant no
-/// authority and carry no uid/gid, parent, session or application metadata.
+/// Native object identities for a caller or authenticated IPC endpoint.
+/// These identifiers grant no authority and carry no uid/gid, parent, session
+/// or application metadata.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExecutionIdentity {
