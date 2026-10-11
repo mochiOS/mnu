@@ -797,6 +797,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::MemoryShare as u64 => process::memory_share(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryObjectCreate as u64 => handle::memory_object_create(arg0, arg1),
         x if x == SyscallNumber::MemoryObjectLength as u64 => handle::memory_object_length(arg0),
+        x if x == SyscallNumber::HandleReadAt as u64 => handle::read_at(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::HandleWriteAt as u64 => handle::write_at(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::MemorySync as u64 => process::memory_sync(arg0, arg1, arg2),
         x if x == SyscallNumber::AllocSharedPages as u64 => {
             process::alloc_shared_pages(arg0, arg1, arg2, arg3)
@@ -948,6 +950,8 @@ fn is_vfs_syscall(num: u64) -> bool {
         || num == SyscallNumber::FileReadDir as u64
         || num == SyscallNumber::HandleRead as u64
         || num == SyscallNumber::HandleWrite as u64
+        || num == SyscallNumber::HandleReadAt as u64
+        || num == SyscallNumber::HandleWriteAt as u64
         || num == SyscallNumber::HandleSeek as u64
 }
 

@@ -152,6 +152,103 @@ pub fn seek(raw: u64, offset: u64, basis: u64) -> u64 {
     }
 }
 
+pub fn read_at(raw: u64, buffer: u64, length: u64, offset: u64) -> u64 {
+    positioned_io(raw, buffer, length, offset, false)
+}
+
+pub fn write_at(raw: u64, buffer: u64, length: u64, offset: u64) -> u64 {
+    positioned_io(raw, buffer, length, offset, true)
+}
+
+fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -> u64 {
+    let required = if write { HandleRights::WRITE } else { HandleRights::READ };
+    let object = match object(raw, required) {
+        Ok(object @ (KernelObject::Provider(_) | KernelObject::VmObject(_))) => object,
+        Ok(_) => return ENOTSUP,
+        Err(error) => return error,
+    };
+    if length > isize::MAX as u64 || offset.checked_add(length).is_none() {
+        return EINVAL;
+    }
+    if length == 0 {
+        return SUCCESS;
+    }
+    let identity = if let KernelObject::Provider(provider) = &object {
+        match provider_cache_identity(provider) {
+            Ok(identity) => identity,
+            Err(error) => return error,
+        }
+    } else {
+        None
+    };
+    let capacity = (length as usize).min(mnu_abi::provider::MAX_DATA_LEN);
+    let mut data = alloc::vec::Vec::new();
+    if data.try_reserve_exact(capacity).is_err() {
+        return super::ENOMEM;
+    }
+    data.resize(capacity, 0);
+    let mut done = 0usize;
+    while done < length as usize {
+        let chunk = (length as usize - done).min(capacity);
+        let address = match buffer.checked_add(done as u64) {
+            Some(address) => address,
+            None => return if done == 0 { EFAULT } else { done as u64 },
+        };
+        // A source/destination fault can load the same backing object. User
+        // copies must never execute while its provider I/O guard is held.
+        if write {
+            if let Err(error) = crate::syscall::copy_from_user(address, &mut data[..chunk]) {
+                return if done == 0 { error } else { done as u64 };
+            }
+        }
+        let position = offset + done as u64;
+        let result = match &object {
+            KernelObject::Provider(provider) => {
+                let _guard = identity.map(|identity| {
+                    crate::mem::vm_object::lock_provider_io(provider, identity)
+                });
+                if write {
+                    provider_write_at(provider, position, &data[..chunk]).map(|count| {
+                        if let Some(identity) = identity {
+                            crate::mem::vm_object::update_provider_range(
+                                provider, identity, position, &data[..count],
+                            );
+                        }
+                        count
+                    })
+                } else {
+                    provider_read_at(provider, position, &mut data[..chunk]).and_then(|count| {
+                        if let Some(identity) = identity {
+                            crate::mem::vm_object::overlay_provider_range(
+                                provider, identity, position, &mut data[..count],
+                            )?;
+                        }
+                        Ok(count)
+                    })
+                }
+            }
+            KernelObject::VmObject(object) if write => object.write_at(position, &data[..chunk]),
+            KernelObject::VmObject(object) => object.read_at(position, &mut data[..chunk]),
+            _ => return ENOTSUP,
+        };
+        let count = match result {
+            Ok(count) if count <= chunk => count,
+            Ok(_) => return if done == 0 { EIO } else { done as u64 },
+            Err(error) => return if done == 0 { error } else { done as u64 },
+        };
+        if !write {
+            if let Err(error) = crate::syscall::copy_to_user(address, &data[..count]) {
+                return if done == 0 { error } else { done as u64 };
+            }
+        }
+        done += count;
+        if count < chunk {
+            break;
+        }
+    }
+    done as u64
+}
+
 /// Sends an opaque bounded control request to a user-space-backed object.
 /// The kernel enforces handle rights and memory safety but does not interpret
 /// the provider-owned control code or payload.

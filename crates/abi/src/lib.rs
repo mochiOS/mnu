@@ -161,6 +161,12 @@ pub enum SyscallNumber {
     MemoryObjectCreate = 671,
     /// Returns the byte length of a process-local MemoryObject with MAP rights.
     MemoryObjectLength = 672,
+    /// Reads bytes at an explicit object offset without moving its cursor.
+    /// Arguments: Handle, destination, byte length, unsigned object offset.
+    HandleReadAt = 673,
+    /// Writes bytes at an explicit object offset without moving its cursor.
+    /// Arguments: Handle, source, byte length, unsigned object offset.
+    HandleWriteAt = 674,
     CheckGravityExist = 999,
 }
 
