@@ -693,9 +693,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ExecManifestWithCredentials as u64 => {
             exec::exec_manifest_with_credentials_syscall(arg0, arg1, arg2, arg3, arg4)
         }
-        x if x == SyscallNumber::ExecManifestForRequester as u64 => {
-            exec::exec_manifest_for_requester_syscall(arg0, arg1, arg2, arg3, arg4)
-        }
         x if x == SyscallNumber::AuthorizeExec as u64 => {
             exec::authorize_exec_syscall(arg0, arg1, arg2, arg3, arg4)
         }
@@ -956,7 +953,6 @@ fn is_process_creation_syscall(num: u64) -> bool {
         || num == SyscallNumber::ProcessClone as u64
         || num == SyscallNumber::ExecManifest as u64
         || num == SyscallNumber::ExecManifestWithCredentials as u64
-        || num == SyscallNumber::ExecManifestForRequester as u64
 }
 
 #[cfg(feature = "performance-instrumentation")]

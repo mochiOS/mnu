@@ -93,7 +93,6 @@ pub enum SyscallNumber {
     ExecManifest = 606,
     RandomFill = 607,
     ExecManifestWithCredentials = 608,
-    ExecManifestForRequester = 609,
     PresentFramebuffer = 610,
     StorageControl = 611,
     PerformanceSnapshot = 612,
@@ -542,15 +541,6 @@ pub struct ExecManifestCredentials {
     pub reserved: u64,
 }
 
-/// `ExecManifestForRequester` に渡す固定長の要求元指定。
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ExecManifestRequester {
-    pub execution_class: u64,
-    pub requester_tid: u64,
-    pub reserved: u64,
-}
-
 pub const APPLICATION_ID_FIELD_LEN: usize = 128;
 
 #[repr(C)]
@@ -592,7 +582,7 @@ impl Default for ThreadSecurityContext {
 #[cfg(test)]
 mod credential_spawn_tests {
     use super::{
-        ExecManifestCredentials, ExecManifestRequester, StorageControlRequest,
+        ExecManifestCredentials, StorageControlRequest,
         StorageControlResponse,
     };
 
@@ -600,12 +590,6 @@ mod credential_spawn_tests {
     fn credential_request_layout_is_fixed() {
         assert_eq!(core::mem::size_of::<ExecManifestCredentials>(), 24);
         assert_eq!(core::mem::align_of::<ExecManifestCredentials>(), 8);
-    }
-
-    #[test]
-    fn requester_request_layout_is_fixed() {
-        assert_eq!(core::mem::size_of::<ExecManifestRequester>(), 24);
-        assert_eq!(core::mem::align_of::<ExecManifestRequester>(), 8);
     }
 
     #[test]
