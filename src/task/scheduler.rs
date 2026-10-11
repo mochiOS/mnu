@@ -387,29 +387,6 @@ pub fn sleep_thread_unless_woken(id: ThreadId) -> bool {
     }
 }
 
-/// 子プロセス終了時に親プロセスの先頭スレッドの IPC waiter を起床させる。
-/// IPC recv_blocking でスリープしている親スレッドを叩き起こし、child exit を検知させる。
-fn wake_parent_ipc_waiter(exited_pid: crate::task::ProcessId) {
-    use crate::task::with_process;
-    let parent_pid = match with_process(exited_pid, |p| p.parent_id()) {
-        Some(Some(pid)) => pid,
-        _ => return,
-    };
-
-    // 親プロセスの最初のスレッドを探し、IPC mailbox に積まれた waiter を起床させる
-    let mut parent_tid: Option<ThreadId> = None;
-    crate::task::for_each_thread(|thread| {
-        if parent_tid.is_none() && thread.process_id() == parent_pid {
-            parent_tid = Some(thread.id());
-        }
-    });
-
-    if let Some(tid) = parent_tid {
-        // IPC キューを汚さずに待機中スレッドだけ起こす。
-        crate::task::wake_thread(tid);
-    }
-}
-
 /// スレッドを終了させる
 ///
 /// 指定されたスレッドをTerminated状態にして削除
@@ -469,8 +446,6 @@ pub fn exit_current_task(exit_code: u64) -> ! {
                 crate::task::release_process_mmio_mappings(pid);
                 crate::task::release_process_dma_buffers(pid);
                 crate::task::mark_process_exited(pid, exit_code);
-                // 親プロセスが IPC でブロックしている可能性があるので起床させる
-                wake_parent_ipc_waiter(pid);
             }
         }
 

@@ -1389,53 +1389,10 @@ impl ProcessTable {
             .find(|p| p.name().contains(name))
     }
 
-    fn is_child_match(process: &Process, parent: ProcessId, target: Option<ProcessId>) -> bool {
-        if process.parent_id() != Some(parent) {
-            return false;
-        }
-        if let Some(target_id) = target {
-            process.id() == target_id
-        } else {
-            true
-        }
-    }
-
-    /// 対象に一致する子プロセスが存在するかを返す
-    pub fn has_child(&self, parent: ProcessId, target: Option<ProcessId>) -> bool {
-        self.processes
-            .iter()
-            .filter_map(|slot| slot.as_ref())
-            .any(|p| Self::is_child_match(p, parent, target))
-    }
-
-    /// ゾンビ子プロセスを1つ回収する
-    pub fn reap_zombie_child(
-        &mut self,
-        parent: ProcessId,
-        target: Option<ProcessId>,
-    ) -> Option<Process> {
-        for slot in &mut self.processes {
-            let should_reap = slot.as_ref().is_some_and(|proc| {
-                Self::is_child_match(proc, parent, target) && proc.state() == ProcessState::Zombie
-            });
-            if !should_reap {
-                continue;
-            }
-
-            if let Some(proc) = slot.take() {
-                self.count = self.count.saturating_sub(1);
-                return Some(proc);
-            }
-        }
-        None
-    }
-
-    fn take_handle_managed_exited(&mut self, id: ProcessId) -> Option<Process> {
+    fn take_exited(&mut self, id: ProcessId) -> Option<Process> {
         for slot in &mut self.processes {
             let should_reclaim = slot.as_ref().is_some_and(|process| {
-                process.id() == id
-                    && process.parent_id().is_none()
-                    && process.state() == ProcessState::Zombie
+                process.id() == id && process.state() == ProcessState::Zombie
             });
             if should_reclaim {
                 self.count = self.count.saturating_sub(1);
@@ -1633,32 +1590,15 @@ where
 
 /// プロセスを終了状態（Zombie）へ遷移させる
 pub fn mark_process_exited(id: ProcessId, exit_code: u64) {
-    let handle_managed = {
+    {
         let mut table = PROCESS_TABLE.lock();
         let Some(proc) = table.get_mut(id) else {
             return;
         };
         proc.mark_exited(exit_code);
-        proc.parent_id().is_none()
-    };
-    wake_process_exit_waiters(id);
-    if handle_managed {
-        defer_process_reclaim(id);
     }
-}
-
-/// 一致する子プロセスが存在するか確認する
-pub fn has_child_process(parent: ProcessId, target: Option<ProcessId>) -> bool {
-    PROCESS_TABLE.lock().has_child(parent, target)
-}
-
-/// 一致するゾンビ子プロセスを回収する
-pub fn reap_zombie_child_process(
-    parent: ProcessId,
-    target: Option<ProcessId>,
-) -> Option<(ProcessId, u64)> {
-    let process = PROCESS_TABLE.lock().reap_zombie_child(parent, target)?;
-    Some(destroy_exited_process(process))
+    wake_process_exit_waiters(id);
+    defer_process_reclaim(id);
 }
 
 fn destroy_exited_process(mut process: Process) -> (ProcessId, u64) {
@@ -1709,7 +1649,7 @@ fn destroy_exited_process(mut process: Process) -> (ProcessId, u64) {
     (pid, exit_code)
 }
 
-/// Reclaims exited handle-managed execution records from a context which is
+/// Reclaims exited execution records from a context which is
 /// not running on the reclaimed process's address space. ProcessHandle state
 /// remains available through its shared `ProcessObject`.
 pub fn flush_deferred_process_reclaims() {
@@ -1734,7 +1674,7 @@ pub fn flush_deferred_process_reclaims() {
             defer_process_reclaim(process_id);
             continue;
         }
-        let process = PROCESS_TABLE.lock().take_handle_managed_exited(process_id);
+        let process = PROCESS_TABLE.lock().take_exited(process_id);
         if let Some(process) = process {
             let _ = destroy_exited_process(process);
         }
