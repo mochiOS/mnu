@@ -1177,6 +1177,16 @@ impl Thread {
         self.upcall.install(entry, stack_top)
     }
 
+    /// Image-local addresses, queued payloads and saved return contexts cannot
+    /// survive replacement of the user address space. Keep token sequencing so
+    /// a stale token cannot authorize a return in the new image.
+    pub fn clear_upcall_for_image_replace(&mut self) {
+        self.upcall = ThreadUpcallState {
+            next_token: self.upcall.next_token,
+            ..ThreadUpcallState::new()
+        };
+    }
+
     pub fn enqueue_upcall(&mut self, payload: u64) -> Result<(), ThreadUpcallError> {
         self.upcall.enqueue(payload)
     }

@@ -1757,6 +1757,11 @@ fn replace_current_process_image(
         previous
     })
     .flatten();
+    // The new address space is committed. No old upcall entry, stack or saved
+    // user context may be used when this native thread enters the new image.
+    crate::task::with_thread_mut(current_tid, |thread| {
+        thread.clear_upcall_for_image_replace();
+    });
     if let Some(old) = old_pt_phys {
         if old != new_pt_phys {
             let _ = crate::mem::paging::destroy_user_page_table(old);
