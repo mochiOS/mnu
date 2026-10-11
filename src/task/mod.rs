@@ -23,7 +23,6 @@ pub use ids::{PrivilegeLevel, ProcessId, ProcessState, SchedulingClass, ThreadId
 pub use launch_context::{
     LaunchContext, PROCESS_MAX_INHERITED_HANDLES, PROCESS_MAX_INHERITED_VALUES,
 };
-pub(crate) use process::ProcessCredentials;
 pub use process::{
     add_process, find_process_id_by_name, flush_deferred_process_reclaims, for_each_process,
     has_child_process, mark_process_exited, process_count, process_has_kernel_authority,
