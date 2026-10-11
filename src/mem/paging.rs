@@ -1468,6 +1468,13 @@ pub fn clone_user_page_table(
             let new_l1_phys = new_l1_frame.start_address().as_u64();
             let mut flags = old_flags;
             flags.remove(Flags::HUGE_PAGE);
+            // This is now an intermediate entry, not a supervisor huge leaf.
+            // Permissions belong to the individual copied leaf entries.
+            flags.remove(Flags::NO_EXECUTE);
+            flags |= Flags::PRESENT | Flags::WRITABLE;
+            if user_accessible {
+                flags |= Flags::USER_ACCESSIBLE;
+            }
             l2e.set_addr(PhysAddr::new(new_l1_phys), flags);
         } else if user_accessible && !l2e.flags().contains(Flags::USER_ACCESSIBLE) {
             l2e.set_addr(l2e.addr(), l2e.flags() | Flags::USER_ACCESSIBLE);
