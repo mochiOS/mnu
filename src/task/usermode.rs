@@ -8,6 +8,8 @@ const IA32_FS_BASE: u32 = 0xC000_0100;
 #[repr(C)]
 struct ResumeRegisters {
     rax: u64,
+    rcx: u64,
+    r11: u64,
     rbx: u64,
     rbp: u64,
     r12: u64,
@@ -166,6 +168,8 @@ pub unsafe fn resume_usermode(
     let fs_hi = (fs_base >> 32) as u32;
     let registers = ResumeRegisters {
         rax,
+        rcx: context.rcx,
+        r11: context.r11,
         rbx: context.rbx,
         rbp: context.rbp,
         r12: context.r12,
@@ -211,6 +215,8 @@ pub unsafe fn resume_usermode(
         "mov r8,  [rax + {r8_offset}]",
         "mov r9,  [rax + {r9_offset}]",
         "mov r10, [rax + {r10_offset}]",
+        "mov rcx, [rax + {rcx_offset}]",
+        "mov r11, [rax + {r11_offset}]",
         "mov rsi, [rax + {rsi_offset}]",
         "mov rax, [rax + {rax_offset}]",
         "iretq",
@@ -224,6 +230,8 @@ pub unsafe fn resume_usermode(
         in("eax") fs_lo,
         in("edx") fs_hi,
         rax_offset = const core::mem::offset_of!(ResumeRegisters, rax),
+        rcx_offset = const core::mem::offset_of!(ResumeRegisters, rcx),
+        r11_offset = const core::mem::offset_of!(ResumeRegisters, r11),
         rbx_offset = const core::mem::offset_of!(ResumeRegisters, rbx),
         rbp_offset = const core::mem::offset_of!(ResumeRegisters, rbp),
         r12_offset = const core::mem::offset_of!(ResumeRegisters, r12),

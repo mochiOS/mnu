@@ -770,6 +770,7 @@ fn run_thread_test() -> bool {
         thread_local_base: 0,
         flags: 0,
         reserved: [0; 3],
+        registers: mnu_abi::ThreadInitialRegisters::default(),
     };
     let tid = user::thread_create(&context);
     if tid == 0 || is_error(tid) {

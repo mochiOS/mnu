@@ -135,17 +135,34 @@ pub fn thread_create(context_ptr: u64, context_len: u64) -> u64 {
         Some(a) => a,
         None => return ENOMEM,
     };
-    let mut thread =
-        crate::task::Thread::new_usermode(
-            pid,
-            "thread",
-            context.entry,
-            context.stack_pointer,
-            context.argument,
-            kstack,
-            kstack_size,
-        );
-    thread.set_fs_base(context.thread_local_base);
+    let registers = context.registers;
+    let user_context = crate::task::thread::SyscallUserContext {
+        rip: context.entry,
+        rsp: context.stack_pointer,
+        rflags: 0x202,
+        rdi: context.argument,
+        rsi: registers.rsi,
+        rdx: registers.rdx,
+        r8: registers.r8,
+        r9: registers.r9,
+        r10: registers.r10,
+        rbp: registers.rbp,
+        rbx: registers.rbx,
+        r12: registers.r12,
+        r13: registers.r13,
+        r14: registers.r14,
+        r15: registers.r15,
+        rcx: registers.rcx,
+        r11: registers.r11,
+    };
+    let thread = crate::task::Thread::new_user_resume(
+        pid,
+        user_context,
+        registers.rax,
+        context.thread_local_base,
+        kstack,
+        kstack_size,
+    );
     match crate::task::add_thread(thread) {
         Some(tid) => tid.as_u64(),
         None => {

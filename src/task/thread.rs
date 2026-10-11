@@ -22,6 +22,8 @@ pub struct SyscallUserContext {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
+    pub rcx: u64,
+    pub r11: u64,
 }
 
 impl SyscallUserContext {
@@ -42,6 +44,8 @@ impl SyscallUserContext {
             r13: 0,
             r14: 0,
             r15: 0,
+            rcx: 0,
+            r11: 0,
         }
     }
 }

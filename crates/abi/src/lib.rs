@@ -239,6 +239,29 @@ pub struct ThreadCreateContext {
     pub thread_local_base: u64,
     pub flags: u64,
     pub reserved: [u64; 3],
+    pub registers: ThreadInitialRegisters,
+}
+
+/// Remaining x86-64 general registers at initial entry. RDI is `argument` and
+/// RSP is `stack_pointer`. Segment selectors and privileged flags are not
+/// caller-controlled; new threads start with interrupts enabled and IOPL zero.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadInitialRegisters {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
 }
 
 /// User-space entry point and private stack for a native thread upcall.

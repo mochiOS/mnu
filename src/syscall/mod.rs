@@ -1041,6 +1041,9 @@ pub extern "sysv64" fn save_user_context_for_fork(frame: *const SavedSyscallFram
                 r13: frame.r13,
                 r14: frame.r14,
                 r15: frame.r15,
+                // SYSCALL architecturally clobbers RCX/R11 with RIP/RFLAGS.
+                rcx: frame.user_rip,
+                r11: frame.user_rflags,
             });
         });
     }
