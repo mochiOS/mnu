@@ -73,7 +73,6 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 const SYS_DEBUG_WRITE: u64 = mnu_abi::SyscallNumber::DebugWrite as u64;
-const SYS_GET_SECURITY_CONTEXT: u64 = mnu_abi::SyscallNumber::GetThreadSecurityContext as u64;
 const SYS_EXEC_MANIFEST: u64 = mnu_abi::SyscallNumber::ExecManifest as u64;
 const SYS_PROCESS_EXIT: u64 = mnu_abi::SyscallNumber::ProcessExit as u64;
 const SYS_PROCESS_CLONE: u64 = mnu_abi::SyscallNumber::ProcessClone as u64;
@@ -982,29 +981,15 @@ fn plugkit_ipc_self_test() -> bool {
 }
 
 pub fn getpid() -> u64 {
-    let mut context = mnu_abi::ThreadSecurityContext::default();
-    let result = unsafe {
-        syscall3(
-            SYS_GET_SECURITY_CONTEXT,
-            0,
-            (&mut context as *mut mnu_abi::ThreadSecurityContext) as u64,
-            core::mem::size_of::<mnu_abi::ThreadSecurityContext>() as u64,
-        )
-    };
-    if result == 0 { context.process_id } else { 0 }
+    mochi_user_syscall::execution::identity()
+        .map(|identity| identity.process_id)
+        .unwrap_or(0)
 }
 
 pub fn gettid() -> u64 {
-    let mut context = mnu_abi::ThreadSecurityContext::default();
-    let result = unsafe {
-        syscall3(
-            SYS_GET_SECURITY_CONTEXT,
-            0,
-            (&mut context as *mut mnu_abi::ThreadSecurityContext) as u64,
-            core::mem::size_of::<mnu_abi::ThreadSecurityContext>() as u64,
-        )
-    };
-    if result == 0 { context.thread_id } else { 0 }
+    mochi_user_syscall::execution::identity()
+        .map(|identity| identity.thread_id)
+        .unwrap_or(0)
 }
 
 pub fn yield_now() -> u64 {
