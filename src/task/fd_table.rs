@@ -1,23 +1,10 @@
-//! プロセスごとのファイルディスクリプタテーブル
+//! Shared I/O objects referenced by native kernel Handles.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 use crate::interrupt::spinlock::SpinLock;
 use crate::vfs::Vnode;
-
-/// stdin / stdout / stderr の予約 FD 番号
-pub const FD_BASE: usize = 3;
-
-/// プロセスあたりの最大 FD 数
-pub const PROCESS_MAX_FDS: usize = 256;
-
-/// FD フラグ: exec 時にクローズする
-pub const FD_CLOEXEC: u8 = 0x01;
-
-/// open() フラグ: O_CLOEXEC (Linux: 0o2000000 = 0x80000)
-pub const O_CLOEXEC: u64 = 0x80000;
 
 /// FileHandle に付与する権限
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,29 +29,6 @@ impl FileHandleCap {
     #[inline]
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
-    }
-
-    pub fn from_open_flags(flags: u64) -> Self {
-        let mut cap = Self::STAT
-            .union(Self::SEEK)
-            .union(Self::SYNC);
-        let acc = flags & 0o3;
-        if acc == 0o0 {
-            cap = cap.union(Self::READ);
-        }
-        if acc == 0o1 {
-            cap = cap.union(Self::WRITE).union(Self::TRUNCATE);
-        }
-        if acc == 0o2 {
-            cap = cap
-                .union(Self::READ)
-                .union(Self::WRITE)
-                .union(Self::TRUNCATE);
-        }
-        if (flags & 0o1000) != 0 {
-            cap = cap.union(Self::TRUNCATE);
-        }
-        cap
     }
 }
 
@@ -120,12 +84,12 @@ impl Drop for OpenFile {
     }
 }
 
-/// プロセスの FD table が保持する descriptor。
+/// Native Handle reference to a shared I/O object.
 ///
-/// descriptor 固有の capability と、共有される open file description を分離する。
+/// Per-reference rights are separate from the shared object state.
 pub struct FileHandle {
     pub open: Arc<SpinLock<OpenFile>>,
-    /// この FD に許可された操作
+    /// Operations permitted through this reference.
     pub cap: FileHandleCap,
 }
 
@@ -163,123 +127,6 @@ impl FileHandle {
     pub fn stream_endpoint(&self) -> Option<(usize, bool)> {
         let open = self.open.lock();
         open.pipe_id.map(|stream_id| (stream_id, open.pipe_write))
-    }
-}
-
-/// プロセスごとのファイルディスクリプタテーブル
-///
-/// エントリの所有権はテーブル自身が持つ。
-pub struct FdTable {
-    /// FD ごとのハンドル (`None` = 空き)
-    entries: Box<[Option<Box<FileHandle>>]>,
-    /// FD ごとのフラグ (FD_CLOEXEC など)
-    flags: Box<[u8]>,
-}
-
-impl FdTable {
-    /// 配列本体を直接ヒープへ確保して空のテーブルを作成する。
-    pub fn new_boxed() -> Box<Self> {
-        let entries = core::iter::repeat_with(|| None)
-            .take(PROCESS_MAX_FDS)
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let flags = alloc::vec![0; PROCESS_MAX_FDS].into_boxed_slice();
-        Box::new(Self { entries, flags })
-    }
-
-    /// 新しい FileHandle を割り当て、使用した FD 番号 (>= FD_BASE) を返す。
-    ///
-    /// 空きスロットがない場合は `None`。
-    pub fn alloc(&mut self, handle: Box<FileHandle>, cloexec: bool) -> Option<usize> {
-        for i in FD_BASE..PROCESS_MAX_FDS {
-            if self.entries[i].is_none() {
-                self.entries[i] = Some(handle);
-                self.flags[i] = if cloexec { FD_CLOEXEC } else { 0 };
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// FD に対応する FileHandle の参照を返す。
-    pub fn get(&self, fd: usize) -> Option<&FileHandle> {
-        self.entries.get(fd)?.as_deref()
-    }
-
-    /// FD に対応する FileHandle の可変参照を返す。
-    pub fn get_mut(&mut self, fd: usize) -> Option<&mut FileHandle> {
-        self.entries.get_mut(fd)?.as_deref_mut()
-    }
-
-    /// FD の所有権を取り出す（close に相当）。
-    pub fn take(&mut self, fd: usize) -> Option<Box<FileHandle>> {
-        if fd < FD_BASE || fd >= PROCESS_MAX_FDS {
-            return None;
-        }
-        self.flags[fd] = 0;
-        self.entries[fd].take()
-    }
-
-    /// 指定したFDへハンドルを設定する。既存のハンドルはここで閉じる。
-    pub fn replace(&mut self, fd: usize, handle: Box<FileHandle>, cloexec: bool) -> bool {
-        if fd < FD_BASE || fd >= PROCESS_MAX_FDS {
-            return false;
-        }
-        self.entries[fd] = Some(handle);
-        self.flags[fd] = if cloexec { FD_CLOEXEC } else { 0 };
-        true
-    }
-
-    /// FD を閉じる。閉じた場合 `true`、既に空きの場合 `false`。
-    pub fn close_fd(&mut self, fd: usize) -> bool {
-        self.take(fd).is_some()
-    }
-
-    /// FD_CLOEXEC が設定されているすべての FD を閉じる（execve 時に呼ぶ）。
-    pub fn close_cloexec_fds(&mut self) {
-        for i in FD_BASE..PROCESS_MAX_FDS {
-            if self.entries[i].is_some() && (self.flags[i] & FD_CLOEXEC) != 0 {
-                self.entries[i] = None;
-                self.flags[i] = 0;
-            }
-        }
-    }
-
-    /// すべての FD を閉じる（Drop で自動的に呼ばれる）。
-    pub fn close_all(&mut self) {
-        for i in FD_BASE..PROCESS_MAX_FDS {
-            self.entries[i] = None;
-            self.flags[i] = 0;
-        }
-    }
-
-    /// FD のフラグを取得する。FD が未使用の場合 `None`。
-    pub fn get_flags(&self, fd: usize) -> Option<u8> {
-        if fd < FD_BASE || fd >= PROCESS_MAX_FDS {
-            return None;
-        }
-        if self.entries[fd].is_none() {
-            return None;
-        }
-        Some(self.flags[fd])
-    }
-
-    /// FD のフラグを設定する。FD が有効な場合 `true`。
-    pub fn set_flags(&mut self, fd: usize, flags: u8) -> bool {
-        if fd < FD_BASE || fd >= PROCESS_MAX_FDS {
-            return false;
-        }
-        if self.entries[fd].is_none() {
-            return false;
-        }
-        self.flags[fd] = flags;
-        true
-    }
-}
-
-impl Drop for FdTable {
-    fn drop(&mut self) {
-        self.close_all();
     }
 }
 

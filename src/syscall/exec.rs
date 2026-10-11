@@ -1896,7 +1896,6 @@ fn replace_current_process_image(
         }
     }
     new_pt_guard.disarm();
-    crate::task::with_process_mut(pid, |process| process.fd_table_mut().close_cloexec_fds());
     measurement.record();
     unsafe {
         crate::mem::paging::switch_page_table(new_pt_phys);

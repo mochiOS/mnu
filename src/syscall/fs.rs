@@ -147,7 +147,6 @@ pub(crate) fn remove_stream_waiter(stream_id: usize, waiter: crate::task::Thread
     }
 }
 
-// グローバル FD テーブルは廃止。各プロセスの Process::fd_table を使用する。
 
 #[inline]
 fn current_process_id_raw() -> Option<u64> {

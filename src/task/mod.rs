@@ -14,7 +14,7 @@ pub mod usermode;
 pub(crate) mod memory_range;
 
 pub use context::{switch_context, switch_to_thread, Context};
-pub use fd_table::{FdTable, FileHandle, FileHandleCap, OpenFile, FD_BASE, PROCESS_MAX_FDS};
+pub use fd_table::{FileHandle, FileHandleCap, OpenFile};
 pub use handle_table::{
     HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ObjectHandleTable,
     ProviderObject, PROCESS_MAX_OBJECT_HANDLES,

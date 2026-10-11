@@ -9,7 +9,6 @@ use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use crate::capability::{CapabilitySet, KernelAuthority, KernelAuthoritySet, KernelCapability};
 use crate::result::{Kernel, Process as ProcessError, Result};
 
-use super::fd_table::FdTable;
 use super::handle_table::ObjectHandleTable;
 use super::ids::{PrivilegeLevel, ProcessId, ProcessState};
 use super::launch_context::LaunchContext;
@@ -18,7 +17,6 @@ use super::launch_context::LaunchContext;
 #[derive(Clone, Copy, Debug)]
 pub struct ResourceLimits {
     pub max_threads: usize,
-    pub max_fds: usize,
     pub max_ipc_queue: usize,
     pub max_ipc_bytes: usize,
     pub max_mapped_pages: usize,
@@ -31,7 +29,6 @@ impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
             max_threads: 64,
-            max_fds: super::fd_table::PROCESS_MAX_FDS,
             max_ipc_queue: crate::config::kernel().ipc.mailbox_cap,
             max_ipc_bytes: crate::config::kernel().ipc.max_msg_size,
             max_mapped_pages: 4096,
@@ -689,8 +686,6 @@ pub struct Process {
     foreground: bool,
     /// 終了コード（生存中はNone）
     exit_code: Option<u64>,
-    /// プロセスごとのファイルディスクリプタテーブル — ヒープに置いてスタック消費を抑える
-    fd_table: alloc::boxed::Box<FdTable>,
     /// Process-local references to kernel mechanism objects.
     object_handles: alloc::boxed::Box<ObjectHandleTable>,
     /// Opaque inherited-handle names supplied by the trusted launch path.
@@ -761,7 +756,6 @@ impl Process {
             priority,
             foreground: false,
             exit_code: None,
-            fd_table: FdTable::new_boxed(),
             object_handles: ObjectHandleTable::new_boxed(),
             launch_context: LaunchContext::new_boxed(),
             memory_regions: alloc::vec::Vec::new(),
@@ -1030,16 +1024,6 @@ impl Process {
     pub fn set_exe_path(&mut self, path: &str) {
         self.exe_path.clear();
         self.exe_path.push_str(path);
-    }
-
-    /// FD テーブルへの読み取りアクセス
-    pub fn fd_table(&self) -> &FdTable {
-        &self.fd_table
-    }
-
-    /// FD テーブルへの可変アクセス
-    pub fn fd_table_mut(&mut self) -> &mut FdTable {
-        &mut self.fd_table
     }
 
     pub fn resource_limits(&self) -> ResourceLimits {
