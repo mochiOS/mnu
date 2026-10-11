@@ -169,11 +169,13 @@ pub enum SyscallNumber {
     /// process_create metadata. Returns a retained WAIT/SIGNAL Process Handle.
     /// Arguments: image Handle, metadata pointer, byte length.
     ProcessCreate = 676,
-    /// Reads native execution identity, not POSIX credentials. Arguments:
-    /// output pointer, exact ExecutionIdentity byte length, optional IPC endpoint.
-    /// Endpoint zero selects the caller; nonzero requires ProcessInspect and
-    /// resolves a generation-checked endpoint, never a caller-supplied PID/TID.
+    /// Reads the calling native execution context, not POSIX credentials.
+    /// Arguments: output pointer and exact ExecutionIdentity byte length.
     ExecutionIdentityRead = 677,
+    /// Inspects a generation-checked IPC endpoint, never a supplied PID/TID.
+    /// Requires ProcessInspect. Arguments: output pointer, exact
+    /// ExecutionIdentity byte length, nonzero IPC endpoint.
+    IpcEndpointIdentityRead = 678,
     CheckGravityExist = 999,
 }
 

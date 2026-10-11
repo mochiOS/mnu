@@ -701,7 +701,10 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
             process::get_thread_security_context(arg0, arg1, arg2)
         }
         x if x == SyscallNumber::ExecutionIdentityRead as u64 => {
-            execution::identity_read(arg0, arg1, arg2)
+            execution::identity_read(arg0, arg1)
+        }
+        x if x == SyscallNumber::IpcEndpointIdentityRead as u64 => {
+            execution::endpoint_identity_read(arg0, arg1, arg2)
         }
         x if x == SyscallNumber::FindProcessByName as u64 => {
             process::find_process_by_name(arg0, arg1)

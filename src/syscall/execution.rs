@@ -1,6 +1,17 @@
 //! Identification of native caller or IPC endpoint execution, without policy.
 
-pub fn identity_read(output: u64, length: u64, endpoint: u64) -> u64 {
+pub fn identity_read(output: u64, length: u64) -> u64 {
+    read_selected_identity(output, length, 0)
+}
+
+pub fn endpoint_identity_read(output: u64, length: u64, endpoint: u64) -> u64 {
+    if endpoint == 0 {
+        return super::EINVAL;
+    }
+    read_selected_identity(output, length, endpoint)
+}
+
+fn read_selected_identity(output: u64, length: u64, endpoint: u64) -> u64 {
     if length != core::mem::size_of::<mnu_abi::ExecutionIdentity>() as u64 {
         return super::EINVAL;
     }
