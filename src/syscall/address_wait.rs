@@ -153,9 +153,17 @@ pub fn wait(address: u64, expected: u64, value_size: u64, deadline_nanoseconds: 
     }
 
     loop {
+        // Interrupt delivery needs a return to user mode, not just a scheduler
+        // wakeup. No payload or userspace signal policy is interpreted here.
+        let interrupted =
+            crate::task::with_thread(thread, |thread| thread.has_deliverable_upcall())
+                .unwrap_or(false);
         let result = {
             let mut waiters = WAITERS.lock();
-            if !waiters
+            if interrupted {
+                remove_waiter_locked(&mut waiters, thread);
+                Some(mnu_abi::AddressWaitResult::Awoken)
+            } else if !waiters
                 .iter()
                 .flatten()
                 .any(|waiter| waiter.thread == thread)

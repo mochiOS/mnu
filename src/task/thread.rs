@@ -1169,6 +1169,14 @@ impl Thread {
         self.upcall.enqueue(payload)
     }
 
+    /// Whether returning to user mode can dispatch a queued generic upcall.
+    pub fn has_deliverable_upcall(&self) -> bool {
+        self.upcall.entry != 0
+            && self.upcall.stack_top != 0
+            && self.upcall.pending_len != 0
+            && self.upcall.active_token == 0
+    }
+
     pub fn begin_upcall(
         &mut self,
         context: UserUpcallContext,
