@@ -36,11 +36,15 @@ struct PipeState {
 
 impl PipeState {
     fn signals(&self, write_end: bool) -> u64 {
+        self.signals_with_capacity(write_end, 1)
+    }
+
+    fn signals_with_capacity(&self, write_end: bool, minimum: usize) -> u64 {
         let mut signals = 0;
         if write_end {
             if self.readers == 0 {
                 signals |= mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
-            } else if self.data.len() < PIPE_BUFFER_CAP {
+            } else if PIPE_BUFFER_CAP.saturating_sub(self.data.len()) >= minimum {
                 signals |= mnu_abi::HANDLE_SIGNAL_WRITABLE;
             }
         } else {
@@ -104,14 +108,25 @@ fn wake_stream_waiters(waiters: Vec<crate::task::ThreadId>) {
 }
 
 pub(crate) fn stream_signals(handle: &FileHandle) -> Result<u64, u64> {
+    stream_signals_for_capacity(handle, 0)
+}
+
+pub(crate) fn stream_signals_for_capacity(handle: &FileHandle, minimum: u32) -> Result<u64, u64> {
     let Some((stream_id, write_end)) = handle.stream_endpoint() else {
         return Err(EBADF);
     };
+    if minimum != 0 && (!write_end || minimum as usize > PIPE_BUFFER_CAP) {
+        return Err(EINVAL);
+    }
     let table = PIPE_TABLE.lock();
     let Some(Some(stream)) = table.get(stream_id) else {
         return Err(EBADF);
     };
-    Ok(stream.signals(write_end))
+    Ok(if minimum == 0 {
+        stream.signals(write_end)
+    } else {
+        stream.signals_with_capacity(write_end, minimum as usize)
+    })
 }
 
 pub(crate) fn register_stream_waiter(

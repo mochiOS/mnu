@@ -1270,10 +1270,16 @@ enum WaitTarget {
 }
 
 fn wait_item_signal(item: &mut mnu_abi::HandleWaitItem) -> Result<(WaitTarget, bool), u64> {
-    if item.reserved != 0 || item.interests == 0 {
+    if item.interests == 0 {
         return Err(EINVAL);
     }
     let object = object(u64::from(item.handle), HandleRights::WAIT)?;
+    if item.minimum_write_bytes != 0
+        && (!matches!(&object, KernelObject::File(_))
+            || item.interests & mnu_abi::HANDLE_SIGNAL_WRITABLE == 0)
+    {
+        return Err(EINVAL);
+    }
     match object {
         KernelObject::Process(process) => {
             if item.interests & !mnu_abi::HANDLE_SIGNAL_TERMINATED != 0 {
@@ -1316,7 +1322,8 @@ fn wait_item_signal(item: &mut mnu_abi::HandleWaitItem) -> Result<(WaitTarget, b
             if item.interests & !supported != 0 {
                 return Err(EINVAL);
             }
-            let signals = crate::syscall::fs::stream_signals(&file)?;
+            let signals =
+                crate::syscall::fs::stream_signals_for_capacity(&file, item.minimum_write_bytes)?;
             item.observed = signals & item.interests;
             Ok((WaitTarget::Stream(file), item.observed != 0))
         }

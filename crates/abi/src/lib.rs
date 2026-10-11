@@ -320,7 +320,9 @@ pub const THREAD_STATE_TERMINATED: u32 = 5;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HandleWaitItem {
     pub handle: u32,
-    pub reserved: u32,
+    /// Optional free-byte threshold for a stream WRITABLE interest. Zero uses
+    /// ordinary readiness; other object kinds do not accept this parameter.
+    pub minimum_write_bytes: u32,
     pub interests: u64,
     pub observed: u64,
 }
