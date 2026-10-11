@@ -5,6 +5,7 @@
 use crate::{debug, info, interrupt, MemoryRegion, Result};
 
 pub mod allocator;
+pub mod address_space;
 pub(crate) mod cache_range;
 pub mod frame;
 mod frame_refs;

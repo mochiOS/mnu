@@ -219,6 +219,51 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
     written as u64
 }
 
+/// Creates a VM image, never a process, thread, or inherited authority table.
+pub fn clone_address_space() -> u64 {
+    use crate::mem::address_space::{CloneError, CloneSource};
+    if !caller_has_process_spawn_capability() {
+        return EPERM;
+    }
+    let Some(pid) = crate::syscall::security::current_process_id() else {
+        return ENOSYS;
+    };
+    let mut live_threads = 0usize;
+    crate::task::for_each_thread(|thread| {
+        if thread.process_id() == pid && thread.state() != crate::task::ThreadState::Terminated {
+            live_threads += 1;
+        }
+    });
+    if live_threads != 1 {
+        return EAGAIN;
+    }
+    let source = match crate::task::with_process(pid, CloneSource::capture) {
+        Some(Ok(source)) => source,
+        Some(Err(CloneError::BorrowedMapping)) => return EPERM,
+        _ => return ENOSYS,
+    };
+    let image = match source.clone_image() {
+        Ok(image) => Arc::new(image),
+        Err(_) => return ENOMEM,
+    };
+    // CONTROL authorizes eventual image consumption; MAP/READ/WRITE do not
+    // grant access to these pages through ordinary memory-object operations.
+    let rights = crate::task::HandleRights::CONTROL
+        .union(crate::task::HandleRights::DUPLICATE)
+        .union(crate::task::HandleRights::TRANSFER);
+    crate::task::with_process_mut(pid, |process| {
+        process
+            .object_handles_mut()
+            .insert(crate::task::ObjectHandleEntry::new(
+                crate::task::KernelObject::AddressSpace(image),
+                rights,
+            ))
+            .map(|handle| handle.raw() as u64)
+            .unwrap_or(ENOSPC)
+    })
+    .unwrap_or(ENOSYS)
+}
+
 fn clone_current_process(resume_rax: u64) -> u64 {
     if !caller_has_process_spawn_capability() {
         return crate::syscall::EPERM;

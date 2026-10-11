@@ -303,6 +303,7 @@ pub enum KernelObject {
     Process(Arc<ProcessObject>),
     Thread(super::ids::ThreadId),
     VmObject(Arc<crate::mem::vm_object::VmObject>),
+    AddressSpace(Arc<crate::mem::address_space::AddressSpaceImage>),
     File(Arc<FileHandle>),
     Provider(Arc<ProviderObject>),
 }
@@ -333,6 +334,7 @@ impl KernelObject {
             (Self::Process(left), Self::Process(right)) => Arc::ptr_eq(left, right),
             (Self::Thread(left), Self::Thread(right)) => left == right,
             (Self::VmObject(left), Self::VmObject(right)) => Arc::ptr_eq(left, right),
+            (Self::AddressSpace(left), Self::AddressSpace(right)) => Arc::ptr_eq(left, right),
             (Self::File(left), Self::File(right)) => Arc::ptr_eq(left, right),
             (Self::Provider(left), Self::Provider(right)) => Arc::ptr_eq(left, right),
             _ => false,
@@ -360,6 +362,7 @@ impl core::fmt::Debug for KernelObject {
                 .finish(),
             Self::Thread(thread) => formatter.debug_tuple("Thread").field(thread).finish(),
             Self::VmObject(id) => formatter.debug_tuple("VmObject").field(id).finish(),
+            Self::AddressSpace(image) => formatter.debug_tuple("AddressSpace").field(image).finish(),
             Self::File(file) => formatter
                 .debug_tuple("File")
                 .field(&(Arc::as_ptr(file) as usize))

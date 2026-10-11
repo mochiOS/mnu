@@ -177,6 +177,10 @@ pub enum SyscallNumber {
     /// Requires ProcessInspect. Arguments: output pointer, exact
     /// ExecutionIdentity byte length, nonzero IPC endpoint.
     IpcEndpointIdentityRead = 678,
+    /// Clones only the current address space into a detached image Handle.
+    /// No arguments. Requires process.spawn; no process or thread is created.
+    /// The source must have exactly one live thread and no borrowed MMIO.
+    AddressSpaceClone = 679,
     CheckGravityExist = 999,
 }
 
@@ -526,6 +530,7 @@ mod object_handle_tests {
             SyscallNumber::HandleControl as u64,
             SyscallNumber::ProcessSuspendCurrent as u64,
             SyscallNumber::ProcessHandleSuspend as u64,
+            SyscallNumber::AddressSpaceClone as u64,
         ];
         assert!(numbers.iter().all(|number| *number > 625));
         for (index, number) in numbers.iter().enumerate() {
