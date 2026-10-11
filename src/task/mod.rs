@@ -49,4 +49,4 @@ pub use thread::{
     with_thread, with_thread_at_slot, with_thread_at_slot_mut, with_thread_mut, Thread,
     ThreadQueue, ThreadUpcallDelivery, ThreadUpcallError, UserUpcallContext,
 };
-pub use usermode::{jump_to_usermode, jump_to_usermode_fork_child};
+pub use usermode::{jump_to_usermode, resume_usermode};

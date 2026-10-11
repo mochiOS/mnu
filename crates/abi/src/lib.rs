@@ -123,6 +123,8 @@ pub enum SyscallNumber {
     ProcessHandleOpen = 641,
     ProcessHandleStatus = 642,
     ProcessHandleWait = 643,
+    /// Transitional clone backend: arg0 explicitly selects the resumed RAX.
+    /// Returns a process handle to the source; the copy starts suspended.
     ProcessClone = 644,
     ProcessHandleResume = 645,
     ProcessHandleTerminate = 646,

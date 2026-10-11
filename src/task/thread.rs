@@ -373,13 +373,15 @@ pub struct Thread {
     user_stack: u64,
     /// ユーザーモード初期引数（thread_create 用）
     user_arg0: u64,
+    /// 保存したユーザー文脈への復帰時に設定する RAX。
+    user_resume_rax: u64,
     /// TLS用 FS ベースレジスタ (arch_prctl ARCH_SET_FS で設定)
     fs_base: u64,
     /// 現在システムコールコンテキスト中かどうか
     in_syscall: bool,
     /// KPTI 復帰用のユーザーCR3
     syscall_user_cr3: u64,
-    /// 直近の SYSCALL 入口で保存した fork 復帰用ユーザー文脈
+    /// 直近の SYSCALL 入口で保存したユーザー文脈
     syscall_user_context: SyscallUserContext,
     /// IPC受信などで眠る前に起床要求が来たことを示すフラグ
     pending_wakeup: bool,
@@ -853,6 +855,7 @@ impl Thread {
             user_entry: 0,
             user_stack: 0,
             user_arg0: 0,
+            user_resume_rax: 0,
             fs_base: 0,
             in_syscall: false,
             syscall_user_cr3: 0,
@@ -976,6 +979,7 @@ impl Thread {
             user_entry,
             user_stack,
             user_arg0,
+            user_resume_rax: 0,
             fs_base: 0,
             in_syscall: false,
             syscall_user_cr3: 0,
@@ -1010,12 +1014,11 @@ impl Thread {
         self.fs_base
     }
 
-    /// fork の子プロセス用スレッドを作成
-    ///
-    /// 子スレッドはユーザー空間で fork() の戻り値として 0 を返す
-    pub fn new_fork_child(
+    /// 保存したユーザー文脈と明示的な RAX 値からスレッドを作成する。
+    pub fn new_user_resume(
         process_id: ProcessId,
         user_context: SyscallUserContext,
+        user_resume_rax: u64,
         fs_base: u64,
         kernel_stack: u64,
         kernel_stack_size: usize,
@@ -1030,47 +1033,51 @@ impl Thread {
         context.rsp = stack_ptr;
         context.rbp = stack_top;
 
-        extern "C" fn fork_child_trampoline() -> ! {
+        extern "C" fn user_resume_trampoline() -> ! {
             let tid = match current_thread_id() {
                 Some(t) => t,
                 None => {
-                    crate::warn!("fork_child_trampoline: No current thread");
+                    crate::warn!("user_resume_trampoline: No current thread");
                     crate::audit::log(
                         crate::audit::AuditEventKind::Fault,
-                        "fork_child_trampoline without current thread",
+                        "user_resume_trampoline without current thread",
                     );
                     crate::task::exit_current_task(crate::syscall::EINVAL);
                 }
             };
-            let (user_context, fs_base) = match with_thread(tid, |thread| {
-                (thread.syscall_user_context(), thread.fs_base())
+            let (user_context, rax, fs_base) = match with_thread(tid, |thread| {
+                (
+                    thread.syscall_user_context(),
+                    thread.user_resume_rax,
+                    thread.fs_base(),
+                )
             }) {
                 Some(v) => v,
                 None => {
-                    crate::warn!("fork_child_trampoline: Thread not found");
+                    crate::warn!("user_resume_trampoline: Thread not found");
                     crate::audit::log(
                         crate::audit::AuditEventKind::Fault,
-                        "fork_child_trampoline missing thread metadata",
+                        "user_resume_trampoline missing thread metadata",
                     );
                     crate::task::exit_current_task(crate::syscall::EINVAL);
                 }
             };
             unsafe {
-                crate::task::usermode::jump_to_usermode_fork_child(user_context, fs_base);
+                crate::task::usermode::resume_usermode(user_context, rax, fs_base);
             }
         }
 
-        context.rip = fork_child_trampoline as *const () as u64;
+        context.rip = user_resume_trampoline as *const () as u64;
         context.rflags = 0x202;
 
         Self {
             id: ThreadId::new(),
             process_id,
             name: [
-                b'f', b'o', b'r', b'k', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                b'r', b'e', b's', b'u', b'm', b'e', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0,
             ],
-            name_len: 4,
+            name_len: 6,
             state: ThreadState::Ready,
             scheduling_suspended: false,
             cpu_affinity: None,
@@ -1080,6 +1087,7 @@ impl Thread {
             user_entry: user_context.rip,
             user_stack: user_context.rsp,
             user_arg0: 0,
+            user_resume_rax,
             fs_base,
             in_syscall: false,
             syscall_user_cr3: 0,

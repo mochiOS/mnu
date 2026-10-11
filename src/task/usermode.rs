@@ -6,7 +6,8 @@ use core::arch::asm;
 const IA32_FS_BASE: u32 = 0xC000_0100;
 
 #[repr(C)]
-struct ForkRegisters {
+struct ResumeRegisters {
+    rax: u64,
     rbx: u64,
     rbp: u64,
     r12: u64,
@@ -146,14 +147,13 @@ fn read_gdtr() -> (u64, u16) {
     (base, limit)
 }
 
-/// fork の子プロセスとしてユーザーモードへジャンプする
-///
-/// iretq フレームを構築し、RAX=0 (fork の子側戻り値) でユーザーに復帰する
+/// 保存した syscall 文脈と明示的な RAX 値でユーザーモードへ復帰する。
 ///
 /// # Safety
-/// `context` と `fs_base` は子プロセスの有効な復帰コンテキストである必要がある。
-pub unsafe fn jump_to_usermode_fork_child(
+/// `context` と `fs_base` は現在のプロセスの有効な復帰文脈である必要がある。
+pub unsafe fn resume_usermode(
     context: crate::task::thread::SyscallUserContext,
+    rax: u64,
     fs_base: u64,
 ) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3;
@@ -164,7 +164,8 @@ pub unsafe fn jump_to_usermode_fork_child(
         .unwrap_or(0);
     let fs_lo = fs_base as u32;
     let fs_hi = (fs_base >> 32) as u32;
-    let registers = ForkRegisters {
+    let registers = ResumeRegisters {
+        rax,
         rbx: context.rbx,
         rbp: context.rbp,
         r12: context.r12,
@@ -197,7 +198,7 @@ pub unsafe fn jump_to_usermode_fork_child(
         "push r10",
         "push r11",
         "push rdi",
-        // syscallが保持するレジスタを親の入口時点へ戻す。RAXだけは子の戻り値0にする。
+        // 保存したレジスタを復元する。RAX は呼び出し側の指定値。
         "mov rax, rsi",
         "mov rbx, [rax + {rbx_offset}]",
         "mov rbp, [rax + {rbp_offset}]",
@@ -211,30 +212,30 @@ pub unsafe fn jump_to_usermode_fork_child(
         "mov r9,  [rax + {r9_offset}]",
         "mov r10, [rax + {r10_offset}]",
         "mov rsi, [rax + {rsi_offset}]",
-        // fork 子プロセスは rax=0 を返す
-        "xor eax, eax",
+        "mov rax, [rax + {rax_offset}]",
         "iretq",
         in("r8") user_ss,
         in("r9") context.rsp,
         in("r10") (context.rflags | 0x200),
         in("r11") user_cs,
         in("rdi") context.rip,
-        in("rsi") (&registers as *const ForkRegisters),
+        in("rsi") (&registers as *const ResumeRegisters),
         in("ecx") IA32_FS_BASE,
         in("eax") fs_lo,
         in("edx") fs_hi,
-        rbx_offset = const core::mem::offset_of!(ForkRegisters, rbx),
-        rbp_offset = const core::mem::offset_of!(ForkRegisters, rbp),
-        r12_offset = const core::mem::offset_of!(ForkRegisters, r12),
-        r13_offset = const core::mem::offset_of!(ForkRegisters, r13),
-        r14_offset = const core::mem::offset_of!(ForkRegisters, r14),
-        r15_offset = const core::mem::offset_of!(ForkRegisters, r15),
-        rdi_offset = const core::mem::offset_of!(ForkRegisters, rdi),
-        rsi_offset = const core::mem::offset_of!(ForkRegisters, rsi),
-        rdx_offset = const core::mem::offset_of!(ForkRegisters, rdx),
-        r8_offset = const core::mem::offset_of!(ForkRegisters, r8),
-        r9_offset = const core::mem::offset_of!(ForkRegisters, r9),
-        r10_offset = const core::mem::offset_of!(ForkRegisters, r10),
+        rax_offset = const core::mem::offset_of!(ResumeRegisters, rax),
+        rbx_offset = const core::mem::offset_of!(ResumeRegisters, rbx),
+        rbp_offset = const core::mem::offset_of!(ResumeRegisters, rbp),
+        r12_offset = const core::mem::offset_of!(ResumeRegisters, r12),
+        r13_offset = const core::mem::offset_of!(ResumeRegisters, r13),
+        r14_offset = const core::mem::offset_of!(ResumeRegisters, r14),
+        r15_offset = const core::mem::offset_of!(ResumeRegisters, r15),
+        rdi_offset = const core::mem::offset_of!(ResumeRegisters, rdi),
+        rsi_offset = const core::mem::offset_of!(ResumeRegisters, rsi),
+        rdx_offset = const core::mem::offset_of!(ResumeRegisters, rdx),
+        r8_offset = const core::mem::offset_of!(ResumeRegisters, r8),
+        r9_offset = const core::mem::offset_of!(ResumeRegisters, r9),
+        r10_offset = const core::mem::offset_of!(ResumeRegisters, r10),
         options(noreturn)
     )
 }

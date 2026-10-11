@@ -219,7 +219,7 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
     written as u64
 }
 
-fn clone_current_process() -> u64 {
+fn clone_current_process(resume_rax: u64) -> u64 {
     if !caller_has_process_spawn_capability() {
         return crate::syscall::EPERM;
     }
@@ -403,9 +403,10 @@ fn clone_current_process() -> u64 {
             return ENOMEM;
         }
     };
-    let mut child_thread = crate::task::Thread::new_fork_child(
+    let mut child_thread = crate::task::Thread::new_user_resume(
         child_pid,
         user_context,
+        resume_rax,
         parent_fs,
         kstack,
         kstack_size,
@@ -425,10 +426,10 @@ fn clone_current_process() -> u64 {
 }
 
 /// Clones the current process using native mnu semantics. The parent receives
-/// a process-local handle for the child; the child resumes with a zero return
-/// value from the cloned syscall frame.
-pub fn clone_process() -> u64 {
-    clone_current_process()
+/// a process-local handle for the child; the child resumes with the caller's
+/// explicit RAX value. POSIX return-value policy belongs to userspace.
+pub fn clone_process(resume_rax: u64) -> u64 {
+    clone_current_process(resume_rax)
 }
 
 /// Suspends every thread in the current process until a holder of a process

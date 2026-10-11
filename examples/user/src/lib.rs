@@ -301,7 +301,7 @@ pub fn process_exit(code: u64) -> ! {
 }
 
 pub fn process_clone() -> u64 {
-    let handle = unsafe { syscall0(SYS_PROCESS_CLONE) };
+    let handle = unsafe { syscall1(SYS_PROCESS_CLONE, 0) };
     if handle == 0 || (handle as i64) < 0 {
         return handle;
     }
