@@ -753,7 +753,14 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ProcessHandleTerminate as u64 => {
             handle::process_terminate(arg0, arg1)
         }
-        x if x == SyscallNumber::HandleWaitMany as u64 => handle::wait_many(arg0, arg1, arg2),
+        x if x == SyscallNumber::HandleWaitMany as u64 => handle::wait_many(arg0, arg1, arg2, 0),
+        x if x == SyscallNumber::HandleWaitManyGuarded as u64 => {
+            if arg3 == 0 {
+                EINVAL
+            } else {
+                handle::wait_many(arg0, arg1, arg2, arg3)
+            }
+        }
         x if x == SyscallNumber::ContextHandleSet as u64 => {
             handle::context_handle_set(arg0, arg1)
         }

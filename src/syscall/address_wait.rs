@@ -57,6 +57,11 @@ fn resolve_key(address: u64, value_size: u64) -> Result<AddressKey, u64> {
     })
 }
 
+pub(crate) fn read_guard_value(address: u64) -> Result<u64, u64> {
+    let key = resolve_key(address, 8)?;
+    load_value(key, 8)
+}
+
 fn load_value(key: AddressKey, value_size: u64) -> Result<u64, u64> {
     let physical_offset = crate::mem::paging::physical_memory_offset().ok_or(EFAULT)?;
     let address = key

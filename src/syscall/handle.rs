@@ -1367,7 +1367,26 @@ fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) ->
 /// interested native signal. The return value is the ready item's index.
 /// `deadline_nanoseconds` is an absolute monotonic-clock value; zero polls and
 /// `u64::MAX` waits indefinitely.
-pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
+pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_ptr: u64) -> u64 {
+    let guard = if guard_ptr == 0 {
+        None
+    } else {
+        let Some(expected_ptr) = guard_ptr.checked_add(8) else {
+            return EFAULT;
+        };
+        let address = match super::read_user_u64(guard_ptr) {
+            Ok(address) => address,
+            Err(error) => return error,
+        };
+        let expected = match super::read_user_u64(expected_ptr) {
+            Ok(expected) => expected,
+            Err(error) => return error,
+        };
+        if let Err(error) = super::address_wait::read_guard_value(address) {
+            return error;
+        }
+        Some(mnu_abi::HandleWaitGuard { address, expected })
+    };
     let count = match usize::try_from(count) {
         Ok(count) if count <= mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS => count,
         _ => return EINVAL,
@@ -1420,6 +1439,18 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64) -> u64 {
                 Ok((target, _)) => {
                     targets.push(target);
                 }
+                Err(error) => return error,
+            }
+        }
+        if let Some(guard) = guard {
+            match super::address_wait::read_guard_value(guard.address) {
+                Ok(value) if value != guard.expected => {
+                    return match copy_wait_items_to_user(items_ptr, &items) {
+                        Ok(()) => EAGAIN,
+                        Err(error) => error,
+                    };
+                }
+                Ok(_) => {}
                 Err(error) => return error,
             }
         }

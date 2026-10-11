@@ -185,6 +185,9 @@ pub enum SyscallNumber {
     /// Reads available stream bytes. Arguments: Handle, destination, length,
     /// per-call options. STREAM_IO_TRY never changes shared object options.
     StreamRead = 681,
+    /// Waits on object readiness with an entry precondition. Arguments:
+    /// HandleWaitItem array, count, deadline, nonzero HandleWaitGuard pointer.
+    HandleWaitManyGuarded = 682,
     CheckGravityExist = 999,
 }
 
@@ -320,6 +323,18 @@ pub struct HandleWaitItem {
     pub reserved: u32,
     pub interests: u64,
     pub observed: u64,
+}
+
+/// An entry precondition on a readable, aligned word in the caller's memory.
+/// The wait returns without sleeping when its value differs from `expected`.
+/// This is not an address-change subscription: other-thread writers must also
+/// notify a waited object or interrupt the waiter. Same-thread upcall delivery
+/// cannot race a guard check performed while the syscall is in kernel mode.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HandleWaitGuard {
+    pub address: u64,
+    pub expected: u64,
 }
 
 pub const HANDLE_SIGNAL_TERMINATED: u64 = 1 << 0;
