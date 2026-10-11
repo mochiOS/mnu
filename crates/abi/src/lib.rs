@@ -551,11 +551,10 @@ pub const APPLICATION_ID_FIELD_LEN: usize = 128;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Native execution and authenticated package identity, without POSIX credentials.
 pub struct ThreadSecurityContext {
     pub process_id: u64,
     pub thread_id: u64,
-    pub effective_uid: u32,
-    pub effective_gid: u32,
     pub provenance: u8,
     pub reserved0: [u8; 7],
     pub subject_key_id: [u8; 32],
@@ -571,8 +570,6 @@ impl Default for ThreadSecurityContext {
         Self {
             process_id: 0,
             thread_id: 0,
-            effective_uid: 0,
-            effective_gid: 0,
             provenance: 0,
             reserved0: [0; 7],
             subject_key_id: [0; 32],

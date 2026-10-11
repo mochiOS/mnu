@@ -40,12 +40,9 @@ pub fn get_thread_security_context(sender_endpoint: u64, output: u64, output_len
         return EINVAL;
     };
     let Some(context) = crate::task::with_process(pid, |process| {
-        let credentials = process.credentials();
         let mut context = mnu_abi::ThreadSecurityContext::default();
         context.process_id = pid.as_u64();
         context.thread_id = thread_id;
-        context.effective_uid = credentials.effective_uid();
-        context.effective_gid = credentials.effective_gid();
         if let Some(identity) = process.application_identity() {
             let package = identity.package_id().as_bytes();
             let developer = identity.developer_id().as_bytes();
