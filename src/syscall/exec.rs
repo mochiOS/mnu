@@ -1863,6 +1863,12 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         Ok(request) => request,
         Err(_) => return EINVAL,
     };
+    let startup = match request.startup {
+        mnu_abi::process_create::InitialState::Image(startup) => startup,
+        // Snapshot creation is not yet connected. Never interpret a register
+        // context as ELF startup bytes or consume authorization on this path.
+        mnu_abi::process_create::InitialState::Context(_) => return crate::syscall::types::ENOTSUP,
+    };
     let Some(owner) = crate::syscall::security::current_process_id() else {
         return EACCES;
     };
@@ -1928,7 +1934,7 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         Some(authorization.identity),
         &grants,
         &values,
-        Some(request.startup),
+        Some(startup),
         &mut measurement,
     );
     measurement.finish(result)
