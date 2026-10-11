@@ -71,6 +71,9 @@ fn decode_context(bytes: &[u8]) -> Result<crate::ThreadCreateContext, Error> {
 pub struct HandleGrant {
     pub key: u64,
     pub source: u32,
+    /// Native destination Handle slot; zero selects allocation. This is not an
+    /// FD number and never identifies an existing process or another table.
+    pub target: u32,
     pub rights: u64,
 }
 
@@ -89,6 +92,7 @@ pub enum Error {
     Startup,
     Handle,
     DuplicateKey,
+    DuplicateTarget,
     BufferTooSmall,
 }
 
@@ -117,6 +121,7 @@ impl Request<'_> {
             .map(|record| HandleGrant {
                 key: u64_at(record, 0),
                 source: u32_at(record, 8),
+                target: u32_at(record, 12),
                 rights: u64_at(record, 16),
             })
     }
@@ -191,8 +196,16 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
         values: &bytes[handles_end..],
     };
     for (index, grant) in request.handles().enumerate() {
-        if grant.source == 0 || u32_at(request.handles, index * HANDLE_LEN + 12) != 0 {
+        if grant.source == 0 {
             return Err(Error::Handle);
+        }
+        if grant.target != 0
+            && request
+                .handles()
+                .take(index)
+                .any(|previous| previous.target == grant.target)
+        {
+            return Err(Error::DuplicateTarget);
         }
         if request
             .handles()
@@ -317,6 +330,7 @@ fn encode_state(
     for grant in handles {
         output[cursor..cursor + 8].copy_from_slice(&grant.key.to_le_bytes());
         output[cursor + 8..cursor + 12].copy_from_slice(&grant.source.to_le_bytes());
+        output[cursor + 12..cursor + 16].copy_from_slice(&grant.target.to_le_bytes());
         output[cursor + 16..cursor + 24].copy_from_slice(&grant.rights.to_le_bytes());
         cursor += HANDLE_LEN;
     }

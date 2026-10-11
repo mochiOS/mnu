@@ -29,12 +29,14 @@ static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 struct InheritedHandleSpec {
     key: u64,
     source: crate::task::ObjectHandle,
+    target: u32,
     rights: crate::task::HandleRights,
 }
 
 #[derive(Clone, Debug)]
 struct InheritedHandleGrant {
     key: u64,
+    target: u32,
     entry: crate::task::ObjectHandleEntry,
 }
 
@@ -582,6 +584,7 @@ fn parse_inherited_handle_spec(value: &str) -> Option<InheritedHandleSpec> {
     }
     Some(InheritedHandleSpec {
         key,
+        target: 0,
         source: crate::task::ObjectHandle::from_raw(source)?,
         rights: crate::task::HandleRights::from_bits(rights)?,
     })
@@ -624,6 +627,7 @@ fn export_inherited_handles(
                 .ok_or(EACCES)?;
             grants.push(InheritedHandleGrant {
                 key: spec.key,
+                target: spec.target,
                 entry,
             });
         }
@@ -638,11 +642,28 @@ fn install_inherited_handles(
 ) -> Result<(), u64> {
     use crate::syscall::types::{EINVAL, ENOSPC};
 
-    for grant in grants {
-        let handle = process
-            .object_handles_mut()
-            .insert(grant.entry.clone())
-            .ok_or(ENOSPC)?;
+    // Reserve explicit slots before allocating automatic ones. Wire record
+    // order must not make an automatic allocation collide with a later slot.
+    for grant in grants
+        .iter()
+        .filter(|grant| grant.target != 0)
+        .chain(grants.iter().filter(|grant| grant.target == 0))
+    {
+        let handle = if grant.target == 0 {
+            process
+                .object_handles_mut()
+                .insert(grant.entry.clone())
+                .ok_or(ENOSPC)?
+        } else {
+            let handle = crate::task::ObjectHandle::from_raw(grant.target).ok_or(EINVAL)?;
+            if !process
+                .object_handles_mut()
+                .insert_at(handle, grant.entry.clone())
+            {
+                return Err(EINVAL);
+            }
+            handle
+        };
         if !process.launch_context_mut().install(grant.key, handle) {
             return Err(EINVAL);
         }
@@ -1889,6 +1910,7 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         specs.push(InheritedHandleSpec {
             key: grant.key,
             source,
+            target: grant.target,
             rights,
         });
     }

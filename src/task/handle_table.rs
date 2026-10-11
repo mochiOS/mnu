@@ -440,6 +440,22 @@ impl ObjectHandleTable {
         self.entries.remove(&handle).is_some()
     }
 
+    /// Installs an explicitly transferred object without replacing any entry.
+    /// Only the receiving table is touched; this grants no capture authority.
+    pub fn insert_at(&mut self, handle: ObjectHandle, entry: ObjectHandleEntry) -> bool {
+        if handle.raw() > PROCESS_MAX_OBJECT_HANDLES as u32
+            || self.entries.len() >= PROCESS_MAX_OBJECT_HANDLES
+        {
+            return false;
+        }
+        if let alloc::collections::btree_map::Entry::Vacant(slot) = self.entries.entry(handle) {
+            slot.insert(entry);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn retain(&mut self, mut keep: impl FnMut(ObjectHandle) -> bool) {
         self.entries.retain(|handle, _| keep(*handle));
     }
