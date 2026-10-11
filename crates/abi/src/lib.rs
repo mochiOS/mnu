@@ -92,7 +92,6 @@ pub enum SyscallNumber {
     DmaFree = 605,
     ExecManifest = 606,
     RandomFill = 607,
-    ExecManifestWithCredentials = 608,
     PresentFramebuffer = 610,
     StorageControl = 611,
     PerformanceSnapshot = 612,
@@ -548,16 +547,6 @@ pub const STORAGE_QUERY_DISK: u64 = 0;
 pub const STORAGE_QUERY_PARTITION_GUIDS: u64 = 1;
 pub const STORAGE_QUERY_PARTITION_RANGE: u64 = 2;
 
-/// `ExecManifestWithCredentials` に渡す固定長の資格情報指定。
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ExecManifestCredentials {
-    pub execution_class: u64,
-    pub uid: u32,
-    pub gid: u32,
-    pub reserved: u64,
-}
-
 pub const APPLICATION_ID_FIELD_LEN: usize = 128;
 
 #[repr(C)]
@@ -597,17 +586,8 @@ impl Default for ThreadSecurityContext {
 }
 
 #[cfg(test)]
-mod credential_spawn_tests {
-    use super::{
-        ExecManifestCredentials, StorageControlRequest,
-        StorageControlResponse,
-    };
-
-    #[test]
-    fn credential_request_layout_is_fixed() {
-        assert_eq!(core::mem::size_of::<ExecManifestCredentials>(), 24);
-        assert_eq!(core::mem::align_of::<ExecManifestCredentials>(), 8);
-    }
+mod syscall_layout_tests {
+    use super::{StorageControlRequest, StorageControlResponse};
 
     #[test]
     fn storage_control_layout_is_fixed() {

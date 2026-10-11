@@ -351,78 +351,6 @@ pub fn exec_manifest_syscall(
     caps_total_len: u64,
     execution_class_raw: u64,
 ) -> u64 {
-    exec_manifest_common(
-        path_ptr,
-        args_ptr,
-        caps_ptr,
-        caps_total_len,
-        execution_class_raw,
-        None,
-    )
-}
-
-pub fn exec_manifest_with_credentials_syscall(
-    path_ptr: u64,
-    args_ptr: u64,
-    caps_ptr: u64,
-    caps_total_len: u64,
-    request_ptr: u64,
-) -> u64 {
-    use crate::syscall::types::{EFAULT, EINVAL, EPERM};
-
-    const REQUEST_LEN: u64 = 24;
-    if request_ptr == 0 || !crate::syscall::validate_user_ptr(request_ptr, REQUEST_LEN) {
-        return EFAULT;
-    }
-    let mut request = [0u8; REQUEST_LEN as usize];
-    if let Err(errno) = crate::syscall::copy_from_user(request_ptr, &mut request) {
-        return errno;
-    }
-    let execution_class_raw = u64::from_le_bytes([
-        request[0], request[1], request[2], request[3], request[4], request[5], request[6],
-        request[7],
-    ]);
-    let uid = u32::from_le_bytes([request[8], request[9], request[10], request[11]]);
-    let gid = u32::from_le_bytes([request[12], request[13], request[14], request[15]]);
-    let reserved = u64::from_le_bytes([
-        request[16],
-        request[17],
-        request[18],
-        request[19],
-        request[20],
-        request[21],
-        request[22],
-        request[23],
-    ]);
-    if reserved != 0 {
-        return EINVAL;
-    }
-    if !caller_has_process_spawn_capability()
-        || !crate::syscall::security::caller_has_any_capability(&[
-            crate::capability::Capability::CapabilitiesManage,
-        ])
-    {
-        return EPERM;
-    }
-
-    exec_manifest_common(
-        path_ptr,
-        args_ptr,
-        caps_ptr,
-        caps_total_len,
-        execution_class_raw,
-        Some(crate::task::ProcessCredentials::user(uid, gid)),
-    )
-}
-
-fn exec_manifest_common(
-    path_ptr: u64,
-    args_ptr: u64,
-    caps_ptr: u64,
-    caps_total_len: u64,
-    execution_class_raw: u64,
-    credentials: Option<crate::task::ProcessCredentials>,
-) -> u64 {
     use crate::syscall::types::{EACCES, EINVAL, EPERM};
 
     let Some(execution_class) = parse_execution_class(execution_class_raw) else {
@@ -633,7 +561,6 @@ fn exec_manifest_common(
         &envp,
         Some(caps),
         Some(authorities),
-        credentials,
         requested_privilege,
         execution_class,
         None,
@@ -989,7 +916,6 @@ pub fn exec_kernel_with_name_caps_and_authorities(
         &[],
         Some(initial_caps),
         Some(initial_kernel_authorities),
-        None,
         Some(requested_privilege),
         execution_class,
         None,
@@ -1008,7 +934,6 @@ fn exec_internal(
     envp: &[&str],
     initial_caps: Option<CapabilitySet>,
     initial_kernel_authorities: Option<KernelAuthoritySet>,
-    requested_credentials: Option<crate::task::ProcessCredentials>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     execution_class: ExecutionClass,
     parent_override: Option<crate::task::ProcessId>,
@@ -1066,7 +991,6 @@ fn exec_internal(
             parent_override,
             initial_caps,
             initial_kernel_authorities,
-            requested_credentials,
             requested_privilege,
             application_identity,
             inherited_handles,
@@ -1334,7 +1258,6 @@ fn exec_with_data(
     parent_override: Option<crate::task::ProcessId>,
     initial_caps: Option<CapabilitySet>,
     initial_kernel_authorities: Option<KernelAuthoritySet>,
-    requested_credentials: Option<crate::task::ProcessCredentials>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     application_identity: Option<crate::task::process::ApplicationIdentity>,
     inherited_handles: &[InheritedHandleGrant],
@@ -1543,9 +1466,6 @@ fn exec_with_data(
         if let Some(credentials) =
             parent_pid.and_then(|pid| crate::task::with_process(pid, |parent| parent.credentials()))
         {
-            proc.set_credentials_for_exec(credentials);
-        }
-        if let Some(credentials) = requested_credentials {
             proc.set_credentials_for_exec(credentials);
         }
         proc.set_foreground(false);
@@ -2029,7 +1949,6 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         None,
         Some(authorization.capabilities),
         Some(authorization.kernel_authorities),
-        None,
         Some(privilege),
         Some(authorization.identity),
         &grants,
