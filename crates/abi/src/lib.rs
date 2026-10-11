@@ -169,10 +169,22 @@ pub enum SyscallNumber {
     /// process_create metadata. Returns a retained WAIT/SIGNAL Process Handle.
     /// Arguments: image Handle, metadata pointer, byte length.
     ProcessCreate = 676,
+    /// Reads the calling native execution context, not POSIX credentials.
+    /// Arguments: output pointer and exact ExecutionIdentity byte length.
+    ExecutionIdentityRead = 677,
     CheckGravityExist = 999,
 }
 
 pub const PROCESS_STATE_RUNNING: u32 = 1;
+
+/// Native object identities for the caller. These identifiers grant no
+/// authority and carry no uid/gid, parent, session or application metadata.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExecutionIdentity {
+    pub process_id: u64,
+    pub thread_id: u64,
+}
 pub const PROCESS_STATE_EXITED: u32 = 2;
 /// Poll without sleeping when passed as a `HandleWaitMany` deadline.
 pub const HANDLE_WAIT_POLL: u64 = 0;
