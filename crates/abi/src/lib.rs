@@ -181,6 +181,10 @@ pub enum SyscallNumber {
     /// No arguments. Requires process.spawn; no process or thread is created.
     /// The source must have exactly one live thread and no borrowed MMIO.
     AddressSpaceClone = 679,
+    /// Reads metadata for the caller's own Handle table. No object references
+    /// are acquired. Arguments: HandleInfo buffer, record capacity. (0, 0)
+    /// queries the current count; an insufficient buffer returns ENOSPC.
+    HandleTableRead = 680,
     CheckGravityExist = 999,
 }
 
@@ -240,6 +244,16 @@ pub struct ThreadCreateContext {
     pub flags: u64,
     pub reserved: [u64; 3],
     pub registers: ThreadInitialRegisters,
+}
+
+/// Metadata for an already-owned native Handle. The table may change after
+/// this observation; transfer and creation must revalidate the live reference.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HandleInfo {
+    pub handle: u32,
+    pub reserved: u32,
+    pub rights: u64,
 }
 
 /// Remaining x86-64 general registers at initial entry. RDI is `argument` and

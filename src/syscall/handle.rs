@@ -1,6 +1,9 @@
 use alloc::sync::Arc;
 use alloc::vec;
 
+mod snapshot;
+pub use snapshot::table_read;
+
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
 use super::{

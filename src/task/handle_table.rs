@@ -416,6 +416,18 @@ impl ObjectHandleTable {
         self.entries.get(&handle).cloned()
     }
 
+    /// Metadata only: neither duplicates objects nor makes another table visible.
+    pub fn describe(&self) -> Vec<mnu_abi::HandleInfo> {
+        self.entries
+            .iter()
+            .map(|(handle, entry)| mnu_abi::HandleInfo {
+                handle: handle.raw(),
+                reserved: 0,
+                rights: entry.rights().bits(),
+            })
+            .collect()
+    }
+
     pub fn insert(&mut self, entry: ObjectHandleEntry) -> Option<ObjectHandle> {
         if self.entries.len() >= PROCESS_MAX_OBJECT_HANDLES {
             return None;
