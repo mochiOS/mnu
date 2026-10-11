@@ -103,9 +103,15 @@ fn initial_dummy_context() -> *mut Context {
 /// # Safety
 /// `old_context`/`new_context` は有効な `Context` 領域を指し、呼び出し規約に従って
 /// コンテキスト切替可能な状態である必要がある。
+/// `outgoing_marker` must point to this CPU's live, aligned AtomicU64 handoff
+/// marker, published while holding the thread queue before incoming publication.
 #[unsafe(naked)]
 #[no_mangle]
-pub unsafe extern "C" fn switch_context(old_context: *mut Context, new_context: *const Context) {
+pub unsafe extern "C" fn switch_context(
+    old_context: *mut Context,
+    new_context: *const Context,
+    outgoing_marker: *mut u64,
+) {
     core::arch::naked_asm!(
         "cli",
         // save current (ret address is at [rsp])
@@ -144,6 +150,10 @@ pub unsafe extern "C" fn switch_context(old_context: *mut Context, new_context: 
         "mov rdi, [rsi + 0x38]", // rdi
         "mov rbp, [rsi + 0x08]", // rbp
         "mov rsp, [rsi + 0x00]", // rsp (rsiを最後に使う)
+        // RDX is the third SysV argument. The old context has been saved and
+        // its stack is no longer in use. Publish completion only at this point.
+        "xor ecx, ecx",
+        "xchg [rdx], rcx",
         "mov rsi, [rsi + 0x40]", // rsi (rspセット後、rsiを上書きしてOK)
         // RFLAGSを復元
         "push r11",
@@ -250,11 +260,13 @@ pub unsafe fn switch_to_thread_with_slots(
             return; // 次のスレッドが見つからない
         };
 
-    drop(queue);
-
-    // 実際に切り替える直前に current thread を更新する。
-    // これにより「currentだけ先に更新される競合窓」を避ける。
+    let outgoing_marker = crate::percpu::begin_thread_switch(
+        current_id.map(|id| id.as_u64()).unwrap_or(0),
+    );
+    // Publish the incoming CPU reference while the queue still owns both
+    // contexts, so remote removal cannot miss the selection/handoff window.
     crate::task::set_current_thread(Some(next_id), resolved_next_slot);
+    drop(queue);
     crate::syscall::syscall_entry::switch_to_kernel_page_table();
 
     // TSSのRSP0とSYSCALL用カーネルスタックを更新
@@ -277,7 +289,7 @@ pub unsafe fn switch_to_thread_with_slots(
     // switch_context はカーネル管理領域上の Context とカーネルスタックを読む。
     // ユーザー CR3 に切り替えてから実行すると、KPTI で外した kernel heap 参照が
     // kernel-mode page fault になるため、実際の user CR3 への切替は iretq 直前に行う。
-    switch_context(old_ctx_ptr, new_context_ptr);
+    switch_context(old_ctx_ptr, new_context_ptr, outgoing_marker);
 }
 
 /// カーネルから直接ユーザーモードに入るためのヘルパ（最初のユーザスレッド用）
@@ -394,10 +406,13 @@ pub unsafe fn switch_to_thread_from_isr(
         }
     }
 
-    drop(queue);
-
-    // ISR 経路でも、実際の遷移直前に current thread を更新する。
+    // Keep the outgoing reference conservatively until the next normal stack
+    // handoff. This currently unused ISR entry has no assembly completion ack.
+    let _ = crate::percpu::begin_thread_switch(
+        current_id.map(|id| id.as_u64()).unwrap_or(0),
+    );
     crate::task::set_current_thread(Some(next_id), Some(next_slot));
+    drop(queue);
     crate::syscall::syscall_entry::switch_to_kernel_page_table();
 
     // TSSのRSP0を更新

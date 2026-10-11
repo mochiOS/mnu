@@ -391,9 +391,9 @@ pub fn sleep_thread_unless_woken(id: ThreadId) -> bool {
 ///
 /// 指定されたスレッドをTerminated状態にして削除
 pub fn terminate_thread(id: ThreadId) {
-    let previous_state = super::thread::replace_thread_state(id, ThreadState::Terminated);
+    let cpu_referenced = super::thread::mark_thread_terminated(id);
     let running_elsewhere =
-        Some(id) != current_thread_id() && previous_state == Some(ThreadState::Running);
+        Some(id) != current_thread_id() && cpu_referenced == Some(true);
 
     if Some(id) == current_thread_id() {
         crate::syscall::address_wait::remove_waiter(id);

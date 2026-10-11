@@ -1834,10 +1834,12 @@ pub fn set_thread_state(id: ThreadId, state: ThreadState) -> bool {
     THREAD_QUEUE.lock().set_state(id, state)
 }
 
-pub(super) fn replace_thread_state(id: ThreadId, state: ThreadState) -> Option<ThreadState> {
+pub(super) fn mark_thread_terminated(id: ThreadId) -> Option<bool> {
     let mut queue = THREAD_QUEUE.lock();
     let previous = queue.get(id)?.state();
-    queue.set_state(id, state).then_some(previous)
+    let retained = previous == ThreadState::Running
+        || crate::percpu::thread_is_cpu_referenced(id.as_u64());
+    queue.set_state(id, ThreadState::Terminated).then_some(retained)
 }
 
 /// 指定スロットのスレッド状態を更新

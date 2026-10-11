@@ -19,6 +19,7 @@ struct PerCpuState {
     kernel_cr3: AtomicU64,
     syscall_kernel_rsp: AtomicU64,
     current_thread_id: AtomicU64,
+    switching_from_thread_id: AtomicU64,
     current_thread_slot: AtomicU64,
     syscall_user_rsp_tmp: AtomicU64,
 }
@@ -47,6 +48,7 @@ impl PerCpuState {
             kernel_cr3: AtomicU64::new(0),
             syscall_kernel_rsp: AtomicU64::new(0),
             current_thread_id: AtomicU64::new(0),
+            switching_from_thread_id: AtomicU64::new(0),
             current_thread_slot: AtomicU64::new(u64::MAX),
             syscall_user_rsp_tmp: AtomicU64::new(0),
         }
@@ -284,6 +286,7 @@ pub fn init_current_cpu(syscall_kernel_rsp: u64) {
         .syscall_kernel_rsp
         .store(syscall_kernel_rsp, Ordering::SeqCst);
     state.current_thread_id.store(0, Ordering::SeqCst);
+    state.switching_from_thread_id.store(0, Ordering::SeqCst);
     state.current_thread_slot.store(u64::MAX, Ordering::SeqCst);
     state.syscall_user_rsp_tmp.store(0, Ordering::SeqCst);
     ensure_syscall_shared_region_for_cpu(slot);
@@ -336,6 +339,24 @@ pub fn current_thread_raw_id() -> u64 {
     state_for_current_cpu()
         .current_thread_id
         .load(Ordering::SeqCst)
+}
+
+/// Called under the thread-queue lock before publishing the incoming thread.
+/// The outgoing context remains in use until assembly has switched stacks.
+pub(crate) fn begin_thread_switch(outgoing: u64) -> *mut u64 {
+    let marker = &state_for_current_cpu().switching_from_thread_id;
+    marker.store(outgoing, Ordering::SeqCst);
+    marker.as_ptr()
+}
+
+/// Thread-queue ownership serializes incoming-thread publication with removal.
+/// A nonzero handoff marker also protects the outgoing stack and context after
+/// current_thread_id has already changed to the incoming execution context.
+pub(crate) fn thread_is_cpu_referenced(thread_id: u64) -> bool {
+    thread_id != 0 && CPU_STATES.iter().any(|state| {
+        state.current_thread_id.load(Ordering::SeqCst) == thread_id
+            || state.switching_from_thread_id.load(Ordering::SeqCst) == thread_id
+    })
 }
 
 pub fn set_current_thread_raw_id(id: u64) {
