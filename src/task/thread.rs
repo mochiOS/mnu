@@ -1738,7 +1738,20 @@ where
 
 /// スレッドを削除
 pub fn remove_thread(id: ThreadId) -> Option<Thread> {
-    THREAD_QUEUE.lock().remove(id)
+    let removed = THREAD_QUEUE.lock().remove(id);
+    if removed.is_some() {
+        clear_thread_wait_registrations(id);
+    }
+    removed
+}
+
+// A parked thread may be discarded without returning through its syscall.
+// Release native wait records after dropping the queue lock: their normal
+// registration/wake paths may acquire the thread queue in the other order.
+fn clear_thread_wait_registrations(id: ThreadId) {
+    crate::syscall::address_wait::remove_waiter(id);
+    crate::syscall::time::disarm_thread_deadline(id);
+    super::process::remove_process_exit_waiters(id);
 }
 
 /// 次に実行すべきスレッドIDを取得
@@ -1846,13 +1859,19 @@ pub(super) fn mark_thread_terminated(id: ThreadId) -> Option<bool> {
 }
 
 pub(super) fn remove_quiescent_terminated_thread(id: ThreadId) -> Option<Thread> {
-    let mut queue = THREAD_QUEUE.lock();
-    if queue.get(id)?.state() != ThreadState::Terminated
-        || crate::percpu::thread_is_cpu_referenced(id.as_u64())
-    {
-        return None;
+    let removed = {
+        let mut queue = THREAD_QUEUE.lock();
+        if queue.get(id)?.state() != ThreadState::Terminated
+            || crate::percpu::thread_is_cpu_referenced(id.as_u64())
+        {
+            return None;
+        }
+        queue.remove(id)
+    };
+    if removed.is_some() {
+        clear_thread_wait_registrations(id);
     }
-    queue.remove(id)
+    removed
 }
 
 /// 指定スロットのスレッド状態を更新
