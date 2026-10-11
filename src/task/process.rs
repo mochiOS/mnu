@@ -454,13 +454,6 @@ impl MemoryBacking {
     }
 }
 
-/// プロセスが保持するUnix互換のユーザー資格情報。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ProcessCredentials {
-    effective_uid: u32,
-    effective_gid: u32,
-}
-
 /// Stable native process lifecycle object retained by `ProcessHandle`s after
 /// execution resources leave the process table.
 #[derive(Debug)]
@@ -563,23 +556,6 @@ impl ApplicationIdentity {
     }
 }
 
-impl ProcessCredentials {
-    const fn root() -> Self {
-        Self {
-            effective_uid: 0,
-            effective_gid: 0,
-        }
-    }
-
-    pub(crate) const fn effective_uid(self) -> u32 {
-        self.effective_uid
-    }
-
-    pub(crate) const fn effective_gid(self) -> u32 {
-        self.effective_gid
-    }
-}
-
 /// プロセス構造体
 ///
 /// メモリ空間とリソースを管理する実行単位。
@@ -599,8 +575,6 @@ pub struct Process {
     state: ProcessState,
     /// 権限レベル
     privilege: PrivilegeLevel,
-    /// real/effective UIDおよびGID。新規bootプロセスはrootとして開始する。
-    credentials: ProcessCredentials,
     /// プロセスに付与された capability（カーネルが保持）
     ///
     /// ユーザープロセスが自分で capability を増やせると sandbox を回避できるため、
@@ -686,7 +660,6 @@ impl Process {
             name_len: len,
             state: ProcessState::Running,
             privilege,
-            credentials: ProcessCredentials::root(),
             capabilities: CapabilitySet::empty(),
             kernel_authorities: KernelAuthoritySet::empty(),
             parent_id,
@@ -814,14 +787,6 @@ impl Process {
     /// 権限レベルを取得
     pub fn privilege(&self) -> PrivilegeLevel {
         self.privilege
-    }
-
-    pub(crate) fn credentials(&self) -> ProcessCredentials {
-        self.credentials
-    }
-
-    pub(crate) fn set_credentials_for_exec(&mut self, credentials: ProcessCredentials) {
-        self.credentials = credentials;
     }
 
     /// 親プロセスIDを取得
@@ -1281,7 +1246,6 @@ impl core::fmt::Debug for Process {
             .field("name", &self.name())
             .field("state", &self.state)
             .field("privilege", &self.privilege)
-            .field("credentials", &self.credentials)
             .field("parent_id", &self.parent_id)
             .field("capabilities", &self.capabilities)
             .field("priority", &self.priority)

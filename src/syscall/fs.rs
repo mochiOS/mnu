@@ -19,7 +19,6 @@ const READ_IO_CHUNK_BYTES: usize = 256 * 1024;
 const WRITE_IO_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_PIPES: usize = 64;
 const PIPE_BUFFER_CAP: usize = 64 * 1024;
-const UNIX_EXECUTE: u32 = 1 << 31;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SeekBasis {
@@ -203,10 +202,12 @@ pub(crate) fn ensure_fs_path_executable_for_process(
     path: &str,
     pid: crate::task::ids::ProcessId,
 ) -> Result<(), u64> {
-    let pid_raw = pid.as_u64();
-    ensure_fs_capability_access_for_process(path, PATH_EXEC, pid_raw)?;
-    ensure_unix_traversal_for_process(path, pid_raw)?;
-    ensure_unix_mode_access_for_process(path, UNIX_EXECUTE, pid_raw)
+    // Only native authority is checked here. POSIX credentials and execute
+    // permissions are userspace policy, not kernel process state.
+    if crate::task::with_process(pid, |_| ()).is_none() {
+        return Err(EACCES);
+    }
+    ensure_fs_capability_access_for_process(path, PATH_EXEC, pid.as_u64())
 }
 
 fn ensure_fs_capability_access_for_process(
@@ -280,84 +281,11 @@ fn path_relative_to<'a>(normalized: &'a str, root: &str) -> Option<&'a str> {
     normalized.strip_prefix(root)?.strip_prefix('/')
 }
 
-fn effective_ids_for_process(pid_raw: u64) -> Option<(u32, u32)> {
-    let pid = crate::task::ids::ProcessId::from_u64(pid_raw);
-    crate::task::with_process(pid, |process| {
-        let credentials = process.credentials();
-        (credentials.effective_uid(), credentials.effective_gid())
-    })
-}
-
-fn unix_mode_allows(mode: u16, owner: u32, group: u32, uid: u32, gid: u32, rights: u32) -> bool {
-    if uid == 0 {
-        return true;
-    }
-    let shift = if uid == owner {
-        6
-    } else if gid == group {
-        3
-    } else {
-        0
-    };
-    let granted = ((mode >> shift) & 0o7) as u32;
-    let mut required = 0u32;
-    if (rights & (PATH_READ | PATH_LIST)) != 0 {
-        required |= 0o4;
-    }
-    if (rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) != 0 {
-        required |= 0o2;
-    }
-    if (rights & UNIX_EXECUTE) != 0 || ((rights & PATH_LIST) != 0 && mode_is_directory(mode)) {
-        required |= 0o1;
-    }
-    (granted & required) == required
-}
-
-fn ensure_unix_mode_access_for_process(path: &str, rights: u32, pid_raw: u64) -> Result<(), u64> {
-    let Some((mode, _, owner, group)) = metadata_rootfs_first(path) else {
-        return Ok(());
-    };
-    let Some((uid, gid)) = effective_ids_for_process(pid_raw) else {
-        return Err(EACCES);
-    };
-    if unix_mode_allows(mode, owner, group, uid, gid, rights) {
-        Ok(())
-    } else {
-        Err(EACCES)
-    }
-}
-
-fn ensure_unix_traversal_for_process(path: &str, pid_raw: u64) -> Result<(), u64> {
-    let normalized = normalize_path(path);
-    if normalized != "/" {
-        ensure_unix_mode_access_for_process("/", UNIX_EXECUTE, pid_raw)?;
-    }
-    let mut parent = String::from("/");
-    let mut components = normalized.trim_start_matches('/').split('/').peekable();
-    while let Some(component) = components.next() {
-        if components.peek().is_none() {
-            break;
-        }
-        if parent.len() > 1 {
-            parent.push('/');
-        }
-        parent.push_str(component);
-        ensure_unix_mode_access_for_process(&parent, UNIX_EXECUTE, pid_raw)?;
-    }
-    Ok(())
-}
-
 fn path_owner_allows(owner: PathOwner, pid_raw: u64) -> bool {
     match owner {
         PathOwner::Any => true,
         PathOwner::System => false,
         PathOwner::Service(owner_pid) | PathOwner::Application(owner_pid) => owner_pid == pid_raw,
-        PathOwner::User(owner_uid) => {
-            crate::task::with_process(crate::task::ids::ProcessId::from_u64(pid_raw), |process| {
-                u64::from(process.credentials().effective_uid()) == owner_uid
-            })
-            .is_some_and(|matches| matches)
-        }
     }
 }
 
@@ -963,9 +891,8 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
 #[cfg(test)]
 mod unix_mode_tests {
     use super::{
-        PATH_LIST, PATH_READ, PATH_WRITE, PIPE_BUFFER_CAP, PipeState, UNIX_EXECUTE,
-        capability_requirement_satisfied, path_is_in_identity_storage, unix_mode_allows,
-        userspace_mode,
+        PIPE_BUFFER_CAP, PipeState, capability_requirement_satisfied,
+        path_is_in_identity_storage, userspace_mode,
     };
     use crate::capability::Capability;
 
@@ -991,45 +918,6 @@ mod unix_mode_tests {
         );
         stream.readers = 0;
         assert_eq!(stream.signals(true), mnu_abi::HANDLE_SIGNAL_PEER_CLOSED);
-    }
-
-    #[test]
-    fn root_bypasses_unix_mode_bits() {
-        assert!(unix_mode_allows(
-            0,
-            1000,
-            1000,
-            0,
-            0,
-            PATH_READ | PATH_WRITE
-        ));
-    }
-
-    #[test]
-    fn owner_group_and_other_bits_are_selected_by_identity() {
-        let mode = 0o640;
-        assert!(unix_mode_allows(mode, 1000, 2000, 1000, 3000, PATH_WRITE));
-        assert!(unix_mode_allows(mode, 1000, 2000, 3000, 2000, PATH_READ));
-        assert!(!unix_mode_allows(mode, 1000, 2000, 3000, 3000, PATH_READ));
-    }
-
-    #[test]
-    fn directory_listing_and_traversal_require_execute() {
-        let directory = 0x4000 | 0o740;
-        assert!(unix_mode_allows(
-            directory, 1000, 2000, 1000, 3000, PATH_LIST
-        ));
-        assert!(!unix_mode_allows(
-            directory, 1000, 2000, 3000, 2000, PATH_LIST
-        ));
-        assert!(!unix_mode_allows(
-            directory,
-            1000,
-            2000,
-            3000,
-            2000,
-            UNIX_EXECUTE
-        ));
     }
 
     #[test]

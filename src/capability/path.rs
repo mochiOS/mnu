@@ -30,7 +30,6 @@ pub struct PathCapability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathOwner {
     System,
-    User(u64),
     Service(u64),
     Application(u64),
     Any,
@@ -385,7 +384,6 @@ pub fn rights_to_string(rights: PathRights) -> String {
 pub fn owner_to_string(owner: PathOwner) -> String {
     match owner {
         PathOwner::System => "system".to_string(),
-        PathOwner::User(uid) => alloc::format!("user:{uid}"),
         PathOwner::Service(pid) => alloc::format!("service:{pid:#x}"),
         PathOwner::Application(pid) => alloc::format!("application:{pid:#x}"),
         PathOwner::Any => "any".to_string(),

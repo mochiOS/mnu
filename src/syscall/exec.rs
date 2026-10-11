@@ -1463,11 +1463,6 @@ fn exec_with_data(
         if let Some(identity) = application_identity {
             proc.set_application_identity(identity);
         }
-        if let Some(credentials) =
-            parent_pid.and_then(|pid| crate::task::with_process(pid, |parent| parent.credentials()))
-        {
-            proc.set_credentials_for_exec(credentials);
-        }
         proc.set_foreground(false);
         if let Some(caps) = initial_caps {
             // capability はプロセス開始前にセットする必要がある。

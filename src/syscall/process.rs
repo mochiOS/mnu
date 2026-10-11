@@ -264,7 +264,6 @@ fn clone_current_process() -> u64 {
         parent_priority,
         parent_foreground,
         parent_caps,
-        parent_credentials,
         parent_pt,
         heap_start,
         heap_end,
@@ -284,7 +283,6 @@ fn clone_current_process() -> u64 {
             p.priority(),
             p.is_foreground(),
             p.capabilities().clone(),
-            p.credentials(),
             p.page_table(),
             p.heap_start(),
             p.heap_end(),
@@ -347,7 +345,6 @@ fn clone_current_process() -> u64 {
     let mut child_proc = crate::task::Process::new("clone", parent_priv, None, parent_priority);
     child_proc.set_foreground(parent_foreground);
     child_proc.set_capabilities_for_exec(parent_caps);
-    child_proc.set_credentials_for_exec(parent_credentials);
     child_proc.set_page_table(child_pt);
     child_proc.set_heap_start(heap_start);
     child_proc.set_heap_end(heap_end);
