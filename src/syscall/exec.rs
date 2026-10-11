@@ -1491,17 +1491,6 @@ fn exec_with_data(
             stack_end_vaddr,
             stack_end_vaddr + 4096
         );
-        // 親プロセスの CWD を子プロセスに継承する
-        if let Some(ppid) = parent_pid {
-            let parent_cwd = crate::task::with_process(ppid, |p| {
-                let mut s = String::new();
-                s.push_str(p.cwd());
-                s
-            });
-            if let Some(cwd_str) = parent_cwd {
-                proc.set_cwd(&cwd_str);
-            }
-        }
         if heap_pre_mapped {
             proc.set_heap_start(default_heap_base);
             proc.set_heap_end(default_heap_base + heap_map_size);

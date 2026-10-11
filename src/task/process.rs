@@ -602,9 +602,6 @@ pub struct Process {
     stack_bottom: u64,
     /// ユーザースタックのトップアドレス（初期 RSP 付近）
     stack_top: u64,
-    /// カレントワーキングディレクトリ（固定バッファ、ヒープ確保不要）
-    cwd: [u8; 256],
-    cwd_len: usize,
     /// 実行ファイルのパス
     exe_path: String,
     /// 優先度（0が最高、値が大きいほど低い）
@@ -672,12 +669,6 @@ impl Process {
             ipc_mapping_end: 0,
             stack_bottom: 0,
             stack_top: 0,
-            cwd: {
-                let mut b = [0u8; 256];
-                b[0] = b'/';
-                b
-            },
-            cwd_len: 1,
             exe_path: String::new(),
             priority,
             foreground: false,
@@ -914,17 +905,6 @@ impl Process {
     }
     pub fn set_stack_top(&mut self, addr: u64) {
         self.stack_top = addr;
-    }
-
-    pub fn cwd(&self) -> &str {
-        core::str::from_utf8(&self.cwd[..self.cwd_len]).unwrap_or("/")
-    }
-
-    pub fn set_cwd(&mut self, path: &str) {
-        let bytes = path.as_bytes();
-        let len = bytes.len().min(255);
-        self.cwd[..len].copy_from_slice(&bytes[..len]);
-        self.cwd_len = len;
     }
 
     pub fn exe_path(&self) -> &str {

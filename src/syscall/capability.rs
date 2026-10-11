@@ -210,21 +210,11 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
             return EACCES;
         }
         if let Some((selected_path, rights)) = parse_scoped_path_grant(cap_spec) {
-            let scoped_path = if selected_path.starts_with('/') {
-                selected_path.to_string()
-            } else {
-                let Some(cwd) =
-                    crate::task::with_process(dest_process, |process| process.cwd().to_string())
-                else {
-                    return EACCES;
-                };
-                if cwd == "/" {
-                    alloc::format!("/{selected_path}")
-                } else {
-                    alloc::format!("{cwd}/{selected_path}")
-                }
-            };
-            return match path::grant_scoped_path(dest_process.as_u64(), &scoped_path, rights) {
+            // A native grant is explicit authority, not a POSIX pathname lookup.
+            if !selected_path.starts_with('/') {
+                return EINVAL;
+            }
+            return match path::grant_scoped_path(dest_process.as_u64(), selected_path, rights) {
                 Ok(()) => SUCCESS,
                 Err(_) => EINVAL,
             };
