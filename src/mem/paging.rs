@@ -1580,6 +1580,10 @@ pub fn clone_user_page_table(
                                 shared_flags.remove(Flags::WRITABLE);
                                 shared_flags.insert(COPY_ON_WRITE);
                                 pte.set_addr(pte.addr(), shared_flags);
+                                // Revoke cached write access before sharing the
+                                // frame. Also required when destination setup
+                                // below fails: the source PTE is already COW.
+                                flush_page_if_active(src_table_phys, vaddr);
                             }
                             share_page(dst_l4, vaddr, pte.addr().as_u64(), shared_flags, phys_off)?;
                             shared_pages += 1;
