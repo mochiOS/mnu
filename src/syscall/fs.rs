@@ -1060,32 +1060,6 @@ pub fn close(fd: u64) -> u64 {
     }
 }
 
-/// Seekシステムコール
-pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
-    if fd < FD_BASE as u64 {
-        return ENOSYS;
-    }
-    let pid = match current_process_id_raw() {
-        Some(p) => p,
-        None => return EBADF,
-    };
-    let idx = fd as usize;
-    if idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
-    let Some(handle) = file_handle(pid, idx) else {
-        return EBADF;
-    };
-
-    let basis = match whence {
-        0 => SeekBasis::Start,
-        1 => SeekBasis::Current,
-        2 => SeekBasis::End,
-        _ => return EINVAL,
-    };
-    seek_file_handle(&handle, offset, basis)
-}
-
 pub(crate) fn seek_file_handle(handle: &FileHandle, offset: i64, basis: SeekBasis) -> u64 {
     if !handle.cap.contains(FileHandleCap::SEEK) {
         return EACCES;
@@ -1637,10 +1611,6 @@ pub fn file_close(fd: u64) -> u64 {
 
 pub fn file_read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     read(fd, buf_ptr, len)
-}
-
-pub fn file_seek(fd: u64, offset: i64, whence: u64) -> u64 {
-    seek(fd, offset, whence)
 }
 
 pub fn file_read_dir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {

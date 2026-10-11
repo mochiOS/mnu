@@ -854,7 +854,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::FileOpen as u64 => fs::file_open(arg0, arg1),
         x if x == SyscallNumber::FileClose as u64 => fs::file_close(arg0),
         x if x == SyscallNumber::FileRead as u64 => fs::file_read(arg0, arg1, arg2),
-        x if x == SyscallNumber::FileSeek as u64 => fs::file_seek(arg0, arg1 as i64, arg2),
         x if x == SyscallNumber::FileReadDir as u64 => fs::file_read_dir(arg0, arg1, arg2),
         _ => ENOSYS,
     };
@@ -946,7 +945,6 @@ fn is_vfs_syscall(num: u64) -> bool {
     num == SyscallNumber::FileOpen as u64
         || num == SyscallNumber::FileClose as u64
         || num == SyscallNumber::FileRead as u64
-        || num == SyscallNumber::FileSeek as u64
         || num == SyscallNumber::FileReadDir as u64
         || num == SyscallNumber::HandleRead as u64
         || num == SyscallNumber::HandleWrite as u64
