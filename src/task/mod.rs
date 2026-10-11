@@ -6,6 +6,7 @@ pub mod context;
 pub mod fd_table;
 pub mod handle_table;
 pub mod ids;
+pub(crate) mod image_origin;
 pub mod launch_context;
 pub mod process;
 pub mod scheduler;

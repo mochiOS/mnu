@@ -566,6 +566,8 @@ pub struct Process {
     object: Arc<ProcessObject>,
     /// 検証済みinstall metadataから導出されたapplication identity。
     application_identity: Option<ApplicationIdentity>,
+    /// Measurement of the original loaded bytes, not of mutable runtime pages.
+    image_digest: Option<[u8; 32]>,
     pending_exec_security: Option<PendingExecSecurity>,
     /// プロセス名 (固定長バッファ)
     name: [u8; 32],
@@ -648,6 +650,7 @@ impl Process {
             id,
             object: Arc::new(ProcessObject::new(id)),
             application_identity: None,
+            image_digest: None,
             pending_exec_security: None,
             name: name_buf,
             name_len: len,
@@ -700,6 +703,14 @@ impl Process {
     /// application identityを設定する（信頼済み起動経路専用）。
     pub(crate) fn set_application_identity(&mut self, identity: ApplicationIdentity) {
         self.application_identity = Some(identity);
+    }
+
+    pub(crate) fn image_digest(&self) -> Option<[u8; 32]> {
+        self.image_digest
+    }
+
+    pub(crate) fn set_image_digest(&mut self, digest: [u8; 32]) {
+        self.image_digest = Some(digest);
     }
 
     pub(crate) fn authorize_next_exec(&mut self, authorization: PendingExecSecurity) {

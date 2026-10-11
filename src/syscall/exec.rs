@@ -1450,6 +1450,7 @@ fn exec_with_data(
         const DEFAULT_PROCESS_PRIORITY: u8 = 8;
         let priority = DEFAULT_PROCESS_PRIORITY;
         let mut proc = crate::task::Process::new(process_name, privilege, priority);
+        proc.set_image_digest(Sha256::digest(data).into());
         if let Some(identity) = application_identity {
             proc.set_application_identity(identity);
         }
@@ -1730,6 +1731,7 @@ fn replace_current_process_image(
         process.set_capabilities_for_exec(authorization.capabilities);
         process.set_kernel_authorities_for_exec(crate::capability::KernelAuthoritySet::empty());
         process.set_application_identity(authorization.identity);
+        process.set_image_digest(authorization.executable_digest);
         process.retain_launch_context_handles_for_exec();
         previous
     })

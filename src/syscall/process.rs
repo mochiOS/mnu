@@ -301,6 +301,7 @@ fn clone_current_process(resume_rax: u64) -> u64 {
         vm_source,
         parent_exe_path,
         parent_security_identity,
+        parent_image_digest,
         parent_limits,
         parent_object_handles,
         parent_launch_context,
@@ -313,6 +314,7 @@ fn clone_current_process(resume_rax: u64) -> u64 {
             CloneSource::capture(p),
             p.exe_path().to_string(),
             p.application_identity().cloned(),
+            p.image_digest(),
             p.resource_limits(),
             p.clone_object_handles(),
             p.clone_launch_context(),
@@ -355,6 +357,9 @@ fn clone_current_process(resume_rax: u64) -> u64 {
     child_proc.set_exe_path(&parent_exe_path);
     if let Some(identity) = parent_security_identity {
         child_proc.set_application_identity(identity);
+    }
+    if let Some(digest) = parent_image_digest {
+        child_proc.set_image_digest(digest);
     }
     child_proc.set_resource_limits(parent_limits);
     child_proc.set_object_handles(parent_object_handles);

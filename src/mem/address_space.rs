@@ -1,4 +1,4 @@
-//! Detached address-space images. No execution context or authority is copied.
+//! Detached VM images with immutable origin ceilings, not authority grants.
 
 use alloc::vec::Vec;
 
@@ -21,6 +21,7 @@ pub struct CloneSource {
     ipc_mapping_end: u64,
     stack_bottom: u64,
     stack_top: u64,
+    origin: Option<crate::task::image_origin::ImageOrigin>,
 }
 
 impl CloneSource {
@@ -43,6 +44,7 @@ impl CloneSource {
             ipc_mapping_end: process.ipc_mapping_end(),
             stack_bottom: process.stack_bottom(),
             stack_top: process.stack_top(),
+            origin: crate::task::image_origin::ImageOrigin::capture(process),
         })
     }
 
@@ -71,6 +73,7 @@ impl CloneSource {
             ipc_mapping_end: self.ipc_mapping_end,
             stack_bottom: self.stack_bottom,
             stack_top: self.stack_top,
+            origin: self.origin,
         })
     }
 }
@@ -85,9 +88,19 @@ pub struct AddressSpaceImage {
     ipc_mapping_end: u64,
     stack_bottom: u64,
     stack_top: u64,
+    origin: Option<crate::task::image_origin::ImageOrigin>,
 }
 
 impl AddressSpaceImage {
+    /// An unmeasured or anonymous VM image cannot stand in for an authorized
+    /// executable. The caller must still validate the authorization's owner
+    /// and consume it through the existing native creation path.
+    pub fn permits(&self, authorization: &crate::task::process::PendingExecSecurity) -> bool {
+        self.origin
+            .as_ref()
+            .is_some_and(|origin| origin.permits(authorization))
+    }
+
     /// Moves ownership into an empty, unpublished execution container. Existing
     /// address spaces must not be replaced implicitly by this operation.
     pub fn install(mut self, process: &mut Process) -> Result<(), Self> {
