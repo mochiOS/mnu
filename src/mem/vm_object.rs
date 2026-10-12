@@ -567,13 +567,6 @@ fn next_cache_access() -> u64 {
     PAGE_CACHE_CLOCK.fetch_add(1, Ordering::Relaxed)
 }
 
-pub fn invalidate_inode(mount_id: MountId, inode_id: InodeId) {
-    invalidate_object(ObjectKey::Vnode {
-        mount_id,
-        inode_id,
-    });
-}
-
 pub(crate) fn update_provider_range(
     object: &ProviderObject,
     identity: u64,
@@ -738,87 +731,6 @@ fn update_cached_range(object: ObjectKey, offset: u64, input: &[u8]) {
         entry.version = entry.version.wrapping_add(1);
         entry.last_used = next_cache_access();
     }
-
-    bump_cache_mutation_epoch();
-}
-
-pub fn invalidate_range(mount_id: MountId, inode_id: InodeId, offset: u64, length: u64) {
-    if length == 0 {
-        return;
-    }
-
-    let first_page = offset / PAGE_BYTES as u64;
-
-    let last_offset = offset.checked_add(length - 1).unwrap_or(u64::MAX);
-
-    let last_page = last_offset / PAGE_BYTES as u64;
-    let object = ObjectKey::Vnode {
-        mount_id,
-        inode_id,
-    };
-
-    let mut cache = PAGE_CACHE.lock();
-
-    cache.retain(|entry| {
-        entry.key.object != object
-            || entry.key.page_index < first_page
-            || entry.key.page_index > last_page
-            || entry
-                .frame_phys
-                .is_some_and(crate::mem::paging::user_frame_has_multiple_owners)
-    });
-
-    bump_cache_mutation_epoch();
-}
-
-pub fn truncate_inode(mount_id: MountId, inode_id: InodeId, length: u64) {
-    let first_invalid_page = length / PAGE_BYTES as u64;
-    let object = ObjectKey::Vnode {
-        mount_id,
-        inode_id,
-    };
-
-    let mut cache = PAGE_CACHE.lock();
-
-    cache.retain_mut(|entry| {
-        if entry.key.object != object || entry.key.page_index < first_invalid_page
-        {
-            return true;
-        }
-
-        let Some(frame_phys) = entry.frame_phys else {
-            return false;
-        };
-
-        if !crate::mem::paging::user_frame_has_multiple_owners(frame_phys) {
-            return false;
-        }
-
-        let Some(page_start) = entry.key.page_index.checked_mul(PAGE_BYTES as u64) else {
-            return false;
-        };
-
-        let valid_len = length.saturating_sub(page_start).min(PAGE_BYTES as u64) as usize;
-
-        let mut bytes = snapshot_page(entry)
-            .map(|bytes| *bytes)
-            .unwrap_or([0u8; PAGE_BYTES]);
-
-        bytes[valid_len..].fill(0);
-
-        entry.bytes = Arc::new(bytes);
-
-        let _ = copy_to_frame(frame_phys, valid_len, &bytes[valid_len..]);
-
-        entry.valid_len = valid_len;
-
-        entry.dirty_range = (valid_len != 0).then_some((0, valid_len));
-
-        entry.version = entry.version.wrapping_add(1);
-        entry.last_used = next_cache_access();
-
-        true
-    });
 
     bump_cache_mutation_epoch();
 }
@@ -991,42 +903,4 @@ fn cache_mutation_epoch() -> u64 {
 
 fn bump_cache_mutation_epoch() {
     PAGE_CACHE_MUTATION_EPOCH.fetch_add(1, Ordering::AcqRel);
-}
-
-fn contiguous_uncached_pages(
-    mount_id: MountId,
-    inode_id: InodeId,
-    first_page: u64,
-    max_pages: usize,
-) -> usize {
-    let cache = PAGE_CACHE.lock();
-    let mut count = 0usize;
-
-    while count < max_pages {
-        let delta = match u64::try_from(count) {
-            Ok(value) => value,
-            Err(_) => break,
-        };
-
-        let page_index = match first_page.checked_add(delta) {
-            Some(value) => value,
-            None => break,
-        };
-
-        let key = PageKey {
-            object: ObjectKey::Vnode {
-                mount_id,
-                inode_id,
-            },
-            page_index,
-        };
-
-        if cache.iter().any(|entry| entry.key == key) {
-            break;
-        }
-
-        count += 1;
-    }
-
-    count
 }
