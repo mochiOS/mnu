@@ -1491,6 +1491,26 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                 Err(error) => return error,
             }
         }
+        // Guarded waits also subscribe to address wakeups. Registration checks
+        // the predicate under the same lock as WakeAddress, so notifications
+        // racing with admission cannot strand an otherwise idle object wait.
+        let _guard_waiter = match guard {
+            Some(guard) => match super::address_wait::register_guard(
+                current,
+                guard.address,
+                guard.expected,
+            ) {
+                Ok(waiter) => Some(waiter),
+                Err(EAGAIN) => {
+                    return match copy_wait_items_to_user(items_ptr, &items) {
+                        Ok(()) => EAGAIN,
+                        Err(error) => error,
+                    };
+                }
+                Err(error) => return error,
+            },
+            None => None,
+        };
         if let Some(guard) = guard {
             match super::address_wait::read_guard_value(guard.address) {
                 Ok(value) if value != guard.expected => {

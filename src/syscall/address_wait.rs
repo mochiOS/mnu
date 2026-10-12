@@ -108,6 +108,36 @@ pub(crate) fn remove_waiter(thread: ThreadId) {
     remove_waiter_locked(&mut WAITERS.lock(), thread);
 }
 
+/// Keeps a guarded object wait subscribed to WakeAddress for its predicate.
+/// Ownership stays in the current syscall; every return/retry removes the
+/// subscription, including errors and delivery of a generic upcall.
+pub(crate) struct GuardWaiter {
+    thread: ThreadId,
+}
+
+impl Drop for GuardWaiter {
+    fn drop(&mut self) {
+        remove_waiter(self.thread);
+    }
+}
+
+pub(crate) fn register_guard(
+    thread: ThreadId,
+    address: u64,
+    expected: u64,
+) -> Result<GuardWaiter, u64> {
+    let key = resolve_key(address, 8)?;
+    let mut waiters = WAITERS.lock();
+    if waiters.iter().flatten().any(|waiter| waiter.thread == thread)
+        || load_value(key, 8)? != expected
+    {
+        return Err(EAGAIN);
+    }
+    let slot = waiters.iter_mut().find(|slot| slot.is_none()).ok_or(EAGAIN)?;
+    *slot = Some(AddressWaiter { thread, key });
+    Ok(GuardWaiter { thread })
+}
+
 /// Waits while a naturally aligned 1, 2, 4, or 8-byte value equals
 /// `expected`. `deadline_nanoseconds` is an absolute native monotonic-clock
 /// deadline, or `ADDRESS_WAIT_INFINITE`.
