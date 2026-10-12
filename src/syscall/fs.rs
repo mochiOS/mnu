@@ -357,17 +357,12 @@ fn mode_is_directory(mode: u16) -> bool {
 }
 
 #[inline]
-fn vnode_size(vnode: &Vnode) -> Result<Option<u64>, u64> {
-    if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
-        let node = vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)?;
-        return Ok(Some(node.size));
-    }
-
-    Ok(vnode
+fn vnode_size(vnode: &Vnode) -> Option<u64> {
+    vnode
         .cext_handle_id()
         .and_then(crate::cext::fs::handle_metadata)
         .map(|(_, size, _, _)| size)
-        .or_else(|| file_size_rootfs_first(vnode.path())))
+        .or_else(|| file_size_rootfs_first(vnode.path()))
 }
 
 #[inline]
@@ -380,9 +375,7 @@ fn file_size_rootfs_first(path: &str) -> Option<u64> {
         return Some(size);
     }
     if let Some(mount) = userspace_mount(path) {
-        return vfs::userspace::lookup(mount.mount_id.0, &mount.path)
-            .ok()
-            .map(|node| node.size);
+        return vfs::userspace::lookup_size(mount.mount_id.0, &mount.path).ok();
     }
     crate::cext::fs::file_metadata(path)
         .map(|(_, size, _, _)| size)
@@ -440,11 +433,7 @@ pub(crate) fn seek_file_handle(handle: &FileHandle, offset: i64, basis: SeekBasi
             let open = open_file.lock();
             (open.vnode.clone(), open.data.len() as u64)
         };
-        let size = match vnode.as_deref().map_or(Ok(None), vnode_size) {
-            Ok(Some(size)) => size,
-            Ok(None) => fallback_size,
-            Err(errno) => return errno,
-        };
+        let size = vnode.as_deref().and_then(vnode_size).unwrap_or(fallback_size);
         match i64::try_from(size) {
             Ok(size) => Some(size),
             Err(_) => return EOVERFLOW,
@@ -706,17 +695,11 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
         let Some(vnode) = vnode.as_ref() else {
             return EINVAL;
         };
-        let size = if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
-            vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)
-                .ok()
-                .map(|node| node.size)
-        } else {
-            vnode
-                .cext_handle_id()
-                .and_then(crate::cext::fs::handle_metadata)
-                .or_else(|| crate::cext::fs::file_metadata(vnode.path()))
-                .map(|(_, size, _, _)| size)
-        };
+        let size = vnode
+            .cext_handle_id()
+            .and_then(crate::cext::fs::handle_metadata)
+            .or_else(|| crate::cext::fs::file_metadata(vnode.path()))
+            .map(|(_, size, _, _)| size);
         start_pos = match size.and_then(|size| usize::try_from(size).ok()) {
             Some(size) => size,
             None => return EIO,

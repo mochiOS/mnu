@@ -41,18 +41,13 @@ pub struct Inode {
 
 /// Transitional backend reference used while the path-based CExt ABI is active.
 ///
-/// A userspace filesystem server will replace this with an opaque server handle;
-/// callers already consume a `Vnode` and do not need another FD model change.
+/// User-space files are represented by generic provider objects, not a second
+/// filesystem-specific handle implementation inside this legacy vnode model.
 pub enum VnodeBacking {
     LegacyPath(String),
     CextHandle {
         path: String,
         handle: u64,
-    },
-    UserspaceHandle {
-        path: String,
-        node_id: u64,
-        open_id: u64,
     },
 }
 
@@ -89,32 +84,10 @@ impl Vnode {
         }
     }
 
-    pub fn userspace_handle(
-        mount_id: MountId,
-        inode_id: InodeId,
-        path: String,
-        open_id: u64,
-        kind: VnodeKind,
-    ) -> Self {
-        Self {
-            inode: Arc::new(Inode {
-                mount_id,
-                inode_id,
-                kind,
-            }),
-            backing: VnodeBacking::UserspaceHandle {
-                path,
-                node_id: inode_id.0,
-                open_id,
-            },
-        }
-    }
-
     pub fn path(&self) -> &str {
         match &self.backing {
             VnodeBacking::LegacyPath(path) => path,
             VnodeBacking::CextHandle { path, .. } => path,
-            VnodeBacking::UserspaceHandle { path, .. } => path,
         }
     }
 
@@ -124,24 +97,12 @@ impl Vnode {
 
     pub fn cext_handle_id(&self) -> Option<u64> {
         match &self.backing {
-            VnodeBacking::LegacyPath(_) | VnodeBacking::UserspaceHandle { .. } => None,
+            VnodeBacking::LegacyPath(_) => None,
             VnodeBacking::CextHandle { handle, .. } => Some(*handle),
         }
     }
 
-    pub fn userspace_handle_ids(&self) -> Option<(u64, u64)> {
-        match &self.backing {
-            VnodeBacking::UserspaceHandle {
-                node_id, open_id, ..
-            } => Some((*node_id, *open_id)),
-            VnodeBacking::LegacyPath(_) | VnodeBacking::CextHandle { .. } => None,
-        }
-    }
-
     pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
-        if let Some((_, open_id)) = self.userspace_handle_ids() {
-            return userspace::read(self.inode.mount_id.0, open_id, offset, output);
-        }
         if let Some(handle) = self.cext_handle_id() {
             return crate::cext::fs::read_handle(handle, offset, output).map_err(cext_errno);
         }
@@ -150,9 +111,6 @@ impl Vnode {
     }
 
     pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
-        if let Some((_, open_id)) = self.userspace_handle_ids() {
-            return userspace::write(self.inode.mount_id.0, open_id, offset, input);
-        }
         if let Some(handle) = self.cext_handle_id() {
             return crate::cext::fs::write_handle(handle, offset, input).map_err(cext_errno);
         }
@@ -160,11 +118,7 @@ impl Vnode {
     }
 
     pub fn read_io_limit(&self) -> usize {
-        if self.userspace_handle_ids().is_some() {
-            crate::mem::vm_object::PAGE_BYTES
-        } else {
-            mochios_filesystem_protocol::MAX_IO_LEN
-        }
+        mochios_filesystem_protocol::MAX_IO_LEN
     }
 }
 
@@ -180,11 +134,6 @@ impl Drop for Vnode {
     fn drop(&mut self) {
         if let VnodeBacking::CextHandle { handle, .. } = &self.backing {
             let _ = crate::cext::fs::close_handle(*handle);
-        }
-        if let VnodeBacking::UserspaceHandle { open_id, .. } = &self.backing {
-            if *open_id != 0 {
-                let _ = userspace::close(self.inode.mount_id.0, *open_id);
-            }
         }
     }
 }

@@ -1,4 +1,4 @@
-//! Transitional transport for legacy vnode I/O and size queries.
+//! Transitional size lookup for the legacy mounted-path namespace.
 //! Namespace mutation and POSIX ownership operations belong in user space.
 
 use alloc::vec;
@@ -11,14 +11,7 @@ use crate::syscall::{EINVAL, EIO, ENXIO};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NodeInfo {
-    pub node_id: u64,
-    pub size: u64,
-    pub kind: u32,
-}
-
-pub fn lookup(mount_id: u64, path: &str) -> Result<NodeInfo, u64> {
+pub fn lookup_size(mount_id: u64, path: &str) -> Result<u64, u64> {
     if path.is_empty() || path.len() > protocol::MAX_PATH_LEN {
         return Err(EINVAL);
     }
@@ -32,75 +25,7 @@ pub fn lookup(mount_id: u64, path: &str) -> Result<NodeInfo, u64> {
         path.as_bytes(),
         protocol::HEADER_LEN + protocol::METADATA_LEN,
     )?;
-    node_info(response.header, response.payload())
-}
-
-pub fn close(mount_id: u64, open_id: u64) -> Result<(), u64> {
-    call(
-        protocol::Header {
-            opcode: protocol::OP_CLOSE,
-            mount_id,
-            open_id,
-            ..protocol::Header::default()
-        },
-        &[],
-        protocol::HEADER_LEN,
-    )?;
-    Ok(())
-}
-
-pub fn read(mount_id: u64, open_id: u64, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
-    if output.len() > protocol::MAX_IO_LEN {
-        return Err(EINVAL);
-    }
-    let response = call(
-        protocol::Header {
-            opcode: protocol::OP_READ,
-            mount_id,
-            open_id,
-            offset,
-            flags: output.len() as u32,
-            ..protocol::Header::default()
-        },
-        &[],
-        protocol::HEADER_LEN + output.len(),
-    )?;
-    output[..response.payload().len()].copy_from_slice(response.payload());
-    Ok(response.payload().len())
-}
-
-pub fn write(mount_id: u64, open_id: u64, offset: u64, input: &[u8]) -> Result<usize, u64> {
-    if input.len() > protocol::MAX_IO_LEN {
-        return Err(EINVAL);
-    }
-    let response = call(
-        protocol::Header {
-            opcode: protocol::OP_WRITE,
-            mount_id,
-            open_id,
-            offset,
-            length: input.len() as u32,
-            ..protocol::Header::default()
-        },
-        input,
-        protocol::HEADER_LEN,
-    )?;
-    usize::try_from(response.header.offset).map_err(|_| EIO)
-}
-
-pub fn stat(mount_id: u64, node_id: u64, open_id: u64) -> Result<NodeInfo, u64> {
-    let response = call(
-        protocol::Header {
-            opcode: protocol::OP_STAT,
-            mount_id,
-            node_id,
-            open_id,
-            ..protocol::Header::default()
-        },
-        &[],
-        protocol::HEADER_LEN + protocol::METADATA_LEN,
-    )?;
-    node_info(response.header, response.payload())
+    decode_size(response.header, response.payload())
 }
 
 struct OwnedResponse {
@@ -148,13 +73,9 @@ fn call(
     })
 }
 
-fn node_info(header: protocol::Header, payload: &[u8]) -> Result<NodeInfo, u64> {
+fn decode_size(header: protocol::Header, payload: &[u8]) -> Result<u64, u64> {
     // Validate the transitional response, but do not retain POSIX ownership
     // or access bits in the kernel's object description.
     protocol::decode_metadata(payload).map_err(|_| EIO)?;
-    Ok(NodeInfo {
-        node_id: header.node_id,
-        size: header.offset,
-        kind: header.flags,
-    })
+    Ok(header.offset)
 }
