@@ -249,17 +249,11 @@ pub fn clock_read(clock: u64, instant_ptr: u64) -> u64 {
             let Some(thread_id) = crate::task::current_thread_id() else {
                 return EAGAIN;
             };
-            let Some(process_id) =
-                crate::task::with_thread(thread_id, |thread| thread.process_id())
+            let Some(ticks) = crate::task::with_thread(thread_id, |thread| thread.process_cpu_ticks())
+                .flatten()
             else {
                 return EAGAIN;
             };
-            let mut ticks = 0u64;
-            crate::task::for_each_thread(|thread| {
-                if thread.process_id() == process_id {
-                    ticks = ticks.saturating_add(thread.cpu_ticks());
-                }
-            });
             ticks
         }
         mnu_abi::ClockId::Realtime => 0,

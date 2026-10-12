@@ -151,17 +151,16 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         return 0;
     }
 
-    let mut thread_metrics: Vec<(crate::task::ProcessId, u64, u64)> = Vec::new();
+    let mut thread_metrics: Vec<(crate::task::ProcessId, u64)> = Vec::new();
     crate::task::for_each_thread(|thread| {
         let process_id = thread.process_id();
-        if let Some((_, count, ticks)) = thread_metrics
+        if let Some((_, count)) = thread_metrics
             .iter_mut()
-            .find(|(candidate, _, _)| *candidate == process_id)
+            .find(|(candidate, _)| *candidate == process_id)
         {
             *count = count.saturating_add(1);
-            *ticks = ticks.saturating_add(thread.cpu_ticks());
         } else {
-            thread_metrics.push((process_id, 1, thread.cpu_ticks()));
+            thread_metrics.push((process_id, 1));
         }
     });
 
@@ -184,11 +183,12 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
             ProcessState::Terminated => 4,
         };
         out_buf[16..24].copy_from_slice(&state_num.to_ne_bytes());
-        let (thread_count, cpu_ticks) = thread_metrics
+        let thread_count = thread_metrics
             .iter()
-            .find(|(process_id, _, _)| *process_id == proc.id())
-            .map(|(_, count, ticks)| (*count, *ticks))
-            .unwrap_or((0, 0));
+            .find(|(process_id, _)| *process_id == proc.id())
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        let cpu_ticks = proc.process_object().cpu_ticks();
         out_buf[24..32].copy_from_slice(&cpu_ticks.to_ne_bytes());
         out_buf[32..40].copy_from_slice(&proc.mapped_memory_bytes().to_ne_bytes());
         out_buf[40..48].copy_from_slice(&thread_count.to_ne_bytes());

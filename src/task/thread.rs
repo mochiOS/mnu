@@ -355,6 +355,8 @@ pub struct Thread {
     id: ThreadId,
     /// 所属するプロセスID
     process_id: ProcessId,
+    /// Shared native execution accounting; no process-table lock on timer ticks.
+    process_object: Option<alloc::sync::Arc<super::process::ProcessObject>>,
     /// スレッド名 (固定長バッファ)
     name: [u8; 32],
     /// 有効な名前の長さ
@@ -848,6 +850,7 @@ impl Thread {
         Self {
             id: ThreadId::new(),
             process_id,
+            process_object: None,
             name: name_buf,
             name_len: len,
             state: ThreadState::Ready,
@@ -972,6 +975,7 @@ impl Thread {
         Self {
             id: ThreadId::new(),
             process_id,
+            process_object: None,
             name: name_buf,
             name_len: len,
             state: ThreadState::Ready,
@@ -1077,6 +1081,7 @@ impl Thread {
         Self {
             id: ThreadId::new(),
             process_id,
+            process_object: None,
             name: [
                 b'r', b'e', b's', b'u', b'm', b'e', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0,
@@ -1123,6 +1128,13 @@ impl Thread {
 
     pub fn note_cpu_tick(&mut self) {
         self.cpu_ticks = self.cpu_ticks.saturating_add(1);
+        if let Some(process) = &self.process_object {
+            process.note_cpu_tick();
+        }
+    }
+
+    pub fn process_cpu_ticks(&self) -> Option<u64> {
+        self.process_object.as_ref().map(|process| process.cpu_ticks())
     }
 
     pub fn set_in_syscall(&mut self, in_syscall: bool) {
@@ -1405,13 +1417,14 @@ impl ThreadQueue {
     ///
     /// # Returns
     /// 成功時はスレッドIDを返す。キューが満杯の場合はNone
-    pub fn push(&mut self, thread: Thread) -> Option<ThreadId> {
+    pub fn push(&mut self, mut thread: Thread) -> Option<ThreadId> {
         if self.count >= Self::MAX_THREADS {
             return None;
         }
 
-        if let Some(limits) =
-            crate::task::with_process(thread.process_id(), |p| p.resource_limits())
+        if let Some((limits, object)) = crate::task::with_process(thread.process_id(), |p| {
+            (p.resource_limits(), p.process_object())
+        })
         {
             let current_threads = self
                 .threads
@@ -1423,6 +1436,7 @@ impl ThreadQueue {
                 crate::audit::log(crate::audit::AuditEventKind::Fault, "thread limit exceeded");
                 return None;
             }
+            thread.process_object = Some(object);
         }
 
         let id = thread.id();

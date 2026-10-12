@@ -461,6 +461,7 @@ pub struct ProcessObject {
     id: ProcessId,
     state: AtomicU8,
     exit_code: AtomicU64,
+    cpu_ticks: AtomicU64,
 }
 
 impl ProcessObject {
@@ -469,11 +470,23 @@ impl ProcessObject {
             id,
             state: AtomicU8::new(mnu_abi::PROCESS_STATE_RUNNING as u8),
             exit_code: AtomicU64::new(0),
+            cpu_ticks: AtomicU64::new(0),
         }
     }
 
     pub const fn id(&self) -> ProcessId {
         self.id
+    }
+
+    /// Cumulative execution ticks, including threads which have been reclaimed.
+    pub fn cpu_ticks(&self) -> u64 {
+        self.cpu_ticks.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn note_cpu_tick(&self) {
+        let _ = self.cpu_ticks.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ticks| {
+            Some(ticks.saturating_add(1))
+        });
     }
 
     pub fn is_exited(&self) -> bool {
