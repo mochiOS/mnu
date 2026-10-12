@@ -14,10 +14,7 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 pub struct NodeInfo {
     pub node_id: u64,
     pub size: u64,
-    pub mode: u32,
     pub kind: u32,
-    pub uid: u32,
-    pub gid: u32,
 }
 
 pub struct DirectoryBatch {
@@ -396,13 +393,12 @@ fn call(
 }
 
 fn node_info(header: protocol::Header, payload: &[u8]) -> Result<NodeInfo, u64> {
-    let metadata = protocol::decode_metadata(payload).map_err(|_| EIO)?;
+    // Validate the transitional response, but do not retain POSIX ownership
+    // or access bits in the kernel's object description.
+    protocol::decode_metadata(payload).map_err(|_| EIO)?;
     Ok(NodeInfo {
         node_id: header.node_id,
         size: header.offset,
-        mode: header.mode,
         kind: header.flags,
-        uid: metadata.uid,
-        gid: metadata.gid,
     })
 }

@@ -357,75 +357,36 @@ fn mode_is_directory(mode: u16) -> bool {
 }
 
 #[inline]
-fn userspace_mode(mode: u32, kind: u32) -> u16 {
-    const FILE_TYPE_MASK: u32 = 0xF000;
-    const REGULAR_FILE: u32 = 0x8000;
-    const DIRECTORY: u32 = 0x4000;
-    const SYMBOLIC_LINK: u32 = 0xA000;
-
-    let file_type = match kind {
-        mochios_filesystem_protocol::NODE_TYPE_REGULAR => REGULAR_FILE,
-        mochios_filesystem_protocol::NODE_TYPE_DIRECTORY => DIRECTORY,
-        mochios_filesystem_protocol::NODE_TYPE_SYMLINK => SYMBOLIC_LINK,
-        _ => mode & FILE_TYPE_MASK,
-    };
-    ((mode & !FILE_TYPE_MASK) | file_type) as u16
-}
-
-#[derive(Clone, Copy)]
-struct FileMetadata {
-    mode: u16,
-    size: u64,
-    uid: u32,
-    gid: u32,
-}
-
-fn vnode_metadata(vnode: &Vnode) -> Result<Option<FileMetadata>, u64> {
+fn vnode_size(vnode: &Vnode) -> Result<Option<u64>, u64> {
     if let Some((node_id, open_id)) = vnode.userspace_handle_ids() {
         let node = vfs::userspace::stat(vnode.inode.mount_id.0, node_id, open_id)?;
-        return Ok(Some(FileMetadata {
-            mode: userspace_mode(node.mode, node.kind),
-            size: node.size,
-            uid: node.uid,
-            gid: node.gid,
-        }));
+        return Ok(Some(node.size));
     }
 
     Ok(vnode
         .cext_handle_id()
         .and_then(crate::cext::fs::handle_metadata)
-        .or_else(|| metadata_rootfs_first(vnode.path()))
-        .map(|(mode, size, uid, gid)| FileMetadata {
-            mode,
-            size,
-            uid,
-            gid,
-        }))
+        .map(|(_, size, _, _)| size)
+        .or_else(|| file_size_rootfs_first(vnode.path())))
 }
 
 #[inline]
-pub(crate) fn metadata_rootfs_first(path: &str) -> Option<(u16, u64, u32, u32)> {
+fn file_size_rootfs_first(path: &str) -> Option<u64> {
     crate::performance::record_vfs_metadata_query();
     // initfs is one authenticated boot generation. If it contains a path, its
     // metadata and contents must shadow a mounted filesystem from another
     // generation. Paths absent from initfs continue to use the runtime disk.
-    if let Some((mode, size)) = crate::init::fs::initfs_file_metadata(path) {
-        return Some((mode, size, 0, 0));
+    if let Some((_, size)) = crate::init::fs::initfs_file_metadata(path) {
+        return Some(size);
     }
     if let Some(mount) = userspace_mount(path) {
         return vfs::userspace::lookup(mount.mount_id.0, &mount.path)
             .ok()
-            .map(|node| {
-                (
-                    userspace_mode(node.mode, node.kind),
-                    node.size,
-                    node.uid,
-                    node.gid,
-                )
-            });
+            .map(|node| node.size);
     }
     crate::cext::fs::file_metadata(path)
-        .or_else(|| crate::init::fs::file_metadata(path).map(|(mode, size)| (mode, size, 0, 0)))
+        .map(|(_, size, _, _)| size)
+        .or_else(|| crate::init::fs::file_metadata(path).map(|(_, size)| size))
 }
 
 #[inline]
@@ -479,8 +440,8 @@ pub(crate) fn seek_file_handle(handle: &FileHandle, offset: i64, basis: SeekBasi
             let open = open_file.lock();
             (open.vnode.clone(), open.data.len() as u64)
         };
-        let size = match vnode.as_deref().map_or(Ok(None), vnode_metadata) {
-            Ok(Some(metadata)) => metadata.size,
+        let size = match vnode.as_deref().map_or(Ok(None), vnode_size) {
+            Ok(Some(size)) => size,
             Ok(None) => fallback_size,
             Err(errno) => return errno,
         };
@@ -956,7 +917,7 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
 mod unix_mode_tests {
     use super::{
         PIPE_BUFFER_CAP, PipeState, capability_requirement_satisfied,
-        path_is_in_identity_storage, userspace_mode,
+        path_is_in_identity_storage,
     };
     use crate::capability::Capability;
 
@@ -982,22 +943,6 @@ mod unix_mode_tests {
         );
         stream.readers = 0;
         assert_eq!(stream.signals(true), mnu_abi::HANDLE_SIGNAL_PEER_CLOSED);
-    }
-
-    #[test]
-    fn userspace_node_kind_restores_posix_file_type() {
-        assert_eq!(
-            userspace_mode(0o775, mochios_filesystem_protocol::NODE_TYPE_DIRECTORY),
-            0x4000 | 0o775
-        );
-        assert_eq!(
-            userspace_mode(0o644, mochios_filesystem_protocol::NODE_TYPE_REGULAR),
-            0x8000 | 0o644
-        );
-        assert_eq!(
-            userspace_mode(0o777, mochios_filesystem_protocol::NODE_TYPE_SYMLINK),
-            0xA000 | 0o777
-        );
     }
 
     #[test]
