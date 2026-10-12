@@ -349,8 +349,6 @@ fn enforce_fs_capabilities_for_process(
     Ok(())
 }
 
-pub(crate) fn close_remote_fd_from_kernel(_fd_remote: u64) {}
-
 #[inline]
 fn mode_is_directory(mode: u16) -> bool {
     (mode & 0xF000) == 0x4000

@@ -583,8 +583,6 @@ mod tests {
                 data: Box::new([]),
                 pos: 0,
                 vnode: None,
-                is_remote: false,
-                fd_remote: 0,
                 pipe_id: None,
                 pipe_write: false,
                 open_flags: 0,

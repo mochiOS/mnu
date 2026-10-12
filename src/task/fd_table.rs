@@ -43,10 +43,6 @@ pub struct OpenFile {
     pub pos: usize,
     /// 解決済みfilesystem object。pipeや匿名一時ファイルではNone。
     pub vnode: Option<Arc<Vnode>>,
-    /// true の場合、データはリモート FD バックエンドで管理される（fd_remote 値を参照）
-    pub is_remote: bool,
-    /// リモートバックエンド側のファイルディスクリプタ（is_remote=true のとき有効）
-    pub fd_remote: u64,
     /// Some(id) であればパイプ fd（グローバル PIPE_TABLE のインデックス）
     pub pipe_id: Option<usize>,
     /// パイプの書き込み端の場合 true
@@ -63,8 +59,6 @@ impl OpenFile {
             data: Box::new([]),
             pos: 0,
             vnode: None,
-            is_remote: false,
-            fd_remote: 0,
             pipe_id: Some(pipe_id),
             pipe_write,
             open_flags,
@@ -77,9 +71,6 @@ impl Drop for OpenFile {
     fn drop(&mut self) {
         if let Some(pipe_id) = self.pipe_id {
             crate::syscall::fs::close_pipe_endpoint_from_kernel(pipe_id, self.pipe_write);
-        }
-        if self.is_remote {
-            crate::syscall::fs::close_remote_fd_from_kernel(self.fd_remote);
         }
     }
 }
