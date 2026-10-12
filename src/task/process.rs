@@ -461,7 +461,8 @@ pub struct ProcessObject {
     id: ProcessId,
     state: AtomicU8,
     exit_code: AtomicU64,
-    cpu_ticks: AtomicU64,
+    user_cpu_ticks: AtomicU64,
+    kernel_cpu_ticks: AtomicU64,
 }
 
 impl ProcessObject {
@@ -470,7 +471,8 @@ impl ProcessObject {
             id,
             state: AtomicU8::new(mnu_abi::PROCESS_STATE_RUNNING as u8),
             exit_code: AtomicU64::new(0),
-            cpu_ticks: AtomicU64::new(0),
+            user_cpu_ticks: AtomicU64::new(0),
+            kernel_cpu_ticks: AtomicU64::new(0),
         }
     }
 
@@ -480,11 +482,24 @@ impl ProcessObject {
 
     /// Cumulative execution ticks, including threads which have been reclaimed.
     pub fn cpu_ticks(&self) -> u64 {
-        self.cpu_ticks.load(Ordering::Relaxed)
+        self.user_cpu_ticks().saturating_add(self.kernel_cpu_ticks())
     }
 
-    pub(super) fn note_cpu_tick(&self) {
-        let _ = self.cpu_ticks.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ticks| {
+    pub fn user_cpu_ticks(&self) -> u64 {
+        self.user_cpu_ticks.load(Ordering::Relaxed)
+    }
+
+    pub fn kernel_cpu_ticks(&self) -> u64 {
+        self.kernel_cpu_ticks.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn note_cpu_tick(&self, user_mode: bool) {
+        let counter = if user_mode {
+            &self.user_cpu_ticks
+        } else {
+            &self.kernel_cpu_ticks
+        };
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ticks| {
             Some(ticks.saturating_add(1))
         });
     }

@@ -28,15 +28,14 @@ fn advance_clock() {
 /// - `_stack_frame`: 割り込み発生時のスタックフレーム
 pub extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
     crate::performance::increment(crate::performance::CounterMetric::TimerInterrupts, 1);
-    let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(
-        stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3,
-    );
+    let user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
+    let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(user_mode);
     normalize_user_iret_frame(&mut stack_frame);
 
     advance_clock();
 
     // スケジューラのティックを実行
-    let should_schedule = crate::task::scheduler_tick();
+    let should_schedule = crate::task::scheduler_tick(user_mode);
 
     // End of Interrupt (EOI) 信号をPICに送信
     super::send_eoi(32);
@@ -55,9 +54,8 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: Interrupt
 /// Per-CPU timer; the bootstrap CPU also supplies timekeeping in a PV guest.
 pub extern "x86-interrupt" fn local_timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
     crate::performance::increment(crate::performance::CounterMetric::TimerInterrupts, 1);
-    let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(
-        stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3,
-    );
+    let user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
+    let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(user_mode);
     normalize_user_iret_frame(&mut stack_frame);
 
     // PV guests have no PIT. Advance shared time on the bootstrap CPU only,
@@ -66,7 +64,7 @@ pub extern "x86-interrupt" fn local_timer_interrupt_handler(mut stack_frame: Int
         advance_clock();
     }
 
-    let should_schedule = crate::task::scheduler_tick();
+    let should_schedule = crate::task::scheduler_tick(user_mode);
     crate::smp::local_apic_eoi();
     if should_schedule {
         crate::task::schedule_and_switch();

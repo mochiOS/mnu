@@ -1126,10 +1126,10 @@ impl Thread {
         self.cpu_ticks
     }
 
-    pub fn note_cpu_tick(&mut self) {
+    pub fn note_cpu_tick(&mut self, user_mode: bool) {
         self.cpu_ticks = self.cpu_ticks.saturating_add(1);
         if let Some(process) = &self.process_object {
-            process.note_cpu_tick();
+            process.note_cpu_tick(user_mode);
         }
     }
 
