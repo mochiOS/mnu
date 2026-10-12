@@ -188,6 +188,10 @@ pub enum SyscallNumber {
     /// Waits on object readiness with an entry precondition. Arguments:
     /// HandleWaitItem array, count, deadline, nonzero HandleWaitGuard pointer.
     HandleWaitManyGuarded = 682,
+    /// Reads native CPU execution accounting. Arguments: Process Handle (zero
+    /// selects only the caller), output pointer, exact ProcessExecutionUsage
+    /// byte length. A nonzero handle must grant WAIT; no PID is accepted.
+    ProcessExecutionRead = 683,
     CheckGravityExist = 999,
 }
 
@@ -204,6 +208,17 @@ pub const PROCESS_INFO_RECORD_SIZE: usize = 104;
 pub struct ExecutionIdentity {
     pub process_id: u64,
     pub thread_id: u64,
+}
+
+/// Native execution domains and their sampling rate. No parent/child, uid,
+/// process group, POSIX clock units, or policy-layer aggregation is included.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcessExecutionUsage {
+    pub user_ticks: u64,
+    pub kernel_ticks: u64,
+    pub ticks_per_second: u64,
+    pub reserved: u64,
 }
 pub const PROCESS_STATE_EXITED: u32 = 2;
 /// Poll without sleeping when passed as a `HandleWaitMany` deadline.

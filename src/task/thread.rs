@@ -1864,6 +1864,13 @@ pub fn set_thread_state(id: ThreadId, state: ThreadState) -> bool {
     THREAD_QUEUE.lock().set_state(id, state)
 }
 
+/// CPU tick writers hold this queue lock, so both domains are sampled at the
+/// same point without holding the process table or any userspace policy lock.
+pub fn process_execution_ticks(process: &super::process::ProcessObject) -> (u64, u64) {
+    let _queue = THREAD_QUEUE.lock();
+    (process.user_cpu_ticks(), process.kernel_cpu_ticks())
+}
+
 pub(super) fn mark_thread_terminated(id: ThreadId) -> Option<bool> {
     let mut queue = THREAD_QUEUE.lock();
     let previous = queue.get(id)?.state();

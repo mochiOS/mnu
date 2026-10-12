@@ -1190,6 +1190,48 @@ pub fn process_status(raw: u64, output: u64) -> u64 {
     }
 }
 
+fn process_execution_usage_for(raw: u64) -> Result<mnu_abi::ProcessExecutionUsage, u64> {
+    let process = if raw == 0 {
+        let caller = current_process()?;
+        crate::task::with_process(caller, |process| process.process_object()).ok_or(ESRCH)?
+    } else {
+        let KernelObject::Process(process) = object(raw, HandleRights::WAIT)? else {
+            return Err(EBADF);
+        };
+        process
+    };
+    let ticks_per_second = crate::interrupt::timer::ticks_per_second();
+    if ticks_per_second == 0 {
+        return Err(EAGAIN);
+    }
+    let (user_ticks, kernel_ticks) = crate::task::thread::process_execution_ticks(&process);
+    Ok(mnu_abi::ProcessExecutionUsage {
+        user_ticks,
+        kernel_ticks,
+        ticks_per_second,
+        reserved: 0,
+    })
+}
+
+pub fn process_execution_read(raw: u64, output: u64, length: u64) -> u64 {
+    if length != core::mem::size_of::<mnu_abi::ProcessExecutionUsage>() as u64 {
+        return EINVAL;
+    }
+    let usage = match process_execution_usage_for(raw) {
+        Ok(usage) => usage,
+        Err(error) => return error,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&usage as *const mnu_abi::ProcessExecutionUsage).cast::<u8>(),
+            core::mem::size_of::<mnu_abi::ProcessExecutionUsage>(),
+        )
+    };
+    crate::syscall::copy_to_user(output, bytes)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(|error| error)
+}
+
 /// Waits until the process exits. `deadline_nanoseconds` is an absolute
 /// monotonic-clock value; zero polls and `u64::MAX` waits indefinitely.
 pub fn process_wait(raw: u64, deadline_nanoseconds: u64, output: u64) -> u64 {
