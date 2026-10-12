@@ -779,6 +779,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::HandleOptionsGet as u64 => handle::options_get(arg0),
         x if x == SyscallNumber::HandleOptionsSet as u64 => handle::options_set(arg0, arg1),
         x if x == SyscallNumber::WaitOnAddress as u64 => address_wait::wait(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::WaitOnAddressGuarded as u64 => {
+            address_wait::wait_guarded(arg0, arg1, arg2, arg3, arg4)
+        }
         x if x == SyscallNumber::WakeAddress as u64 => address_wait::wake(arg0, arg1),
         x if x == SyscallNumber::ThreadUpcallInstall as u64 => upcall::install(arg0, arg1),
         x if x == SyscallNumber::ThreadUpcallReturn as u64 => upcall::return_from(arg0),

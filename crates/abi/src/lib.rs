@@ -192,6 +192,11 @@ pub enum SyscallNumber {
     /// selects only the caller), output pointer, exact ProcessExecutionUsage
     /// byte length. A nonzero handle must grant WAIT; no PID is accepted.
     ProcessExecutionRead = 683,
+    /// Waits on a memory value with a second 64-bit entry precondition.
+    /// Arguments: address, expected, value size, monotonic deadline,
+    /// nonzero AddressWaitGuard pointer. WakeAddress on either value releases
+    /// the same waiter. Neither value carries kernel-interpreted policy.
+    WaitOnAddressGuarded = 684,
     CheckGravityExist = 999,
 }
 
@@ -344,15 +349,19 @@ pub struct HandleWaitItem {
 
 /// An entry precondition on a readable, aligned word in the caller's memory.
 /// The wait returns without sleeping when its value differs from `expected`.
-/// This is not an address-change subscription: other-thread writers must also
-/// notify a waited object or interrupt the waiter. Same-thread upcall delivery
-/// cannot race a guard check performed while the syscall is in kernel mode.
+/// Writers must call WakeAddress after publishing a changed value. Guard
+/// admission and wakeups share the address wait queue, so a notification
+/// racing with admission cannot be lost.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HandleWaitGuard {
     pub address: u64,
     pub expected: u64,
 }
+
+/// A 64-bit memory precondition, shared by address and object waits.
+/// Writers must call WakeAddress after publishing a changed value.
+pub type AddressWaitGuard = HandleWaitGuard;
 
 pub const HANDLE_SIGNAL_TERMINATED: u64 = 1 << 0;
 pub const HANDLE_SIGNAL_READABLE: u64 = 1 << 1;
@@ -583,6 +592,7 @@ mod object_handle_tests {
             SyscallNumber::HandleOptionsGet as u64,
             SyscallNumber::HandleOptionsSet as u64,
             SyscallNumber::WaitOnAddress as u64,
+            SyscallNumber::WaitOnAddressGuarded as u64,
             SyscallNumber::WakeAddress as u64,
             SyscallNumber::ThreadUpcallInstall as u64,
             SyscallNumber::ThreadUpcallReturn as u64,

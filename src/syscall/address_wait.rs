@@ -27,6 +27,7 @@ impl AddressKey {
 struct AddressWaiter {
     thread: ThreadId,
     key: AddressKey,
+    guard: Option<AddressKey>,
 }
 
 const MAX_WAITERS: usize = crate::task::ThreadQueue::MAX_THREADS;
@@ -134,7 +135,11 @@ pub(crate) fn register_guard(
         return Err(EAGAIN);
     }
     let slot = waiters.iter_mut().find(|slot| slot.is_none()).ok_or(EAGAIN)?;
-    *slot = Some(AddressWaiter { thread, key });
+    *slot = Some(AddressWaiter {
+        thread,
+        key,
+        guard: None,
+    });
     Ok(GuardWaiter { thread })
 }
 
@@ -142,6 +147,53 @@ pub(crate) fn register_guard(
 /// `expected`. `deadline_nanoseconds` is an absolute native monotonic-clock
 /// deadline, or `ADDRESS_WAIT_INFINITE`.
 pub fn wait(address: u64, expected: u64, value_size: u64, deadline_nanoseconds: u64) -> u64 {
+    wait_inner(address, expected, value_size, deadline_nanoseconds, None)
+}
+
+/// A generic memory precondition and the primary address share one wait
+/// subscription. This permits user-defined state machines to observe either
+/// notification without polling, pointer publication, or extra kernel objects.
+pub fn wait_guarded(
+    address: u64,
+    expected: u64,
+    value_size: u64,
+    deadline_nanoseconds: u64,
+    guard_ptr: u64,
+) -> u64 {
+    if guard_ptr == 0 {
+        return EFAULT;
+    }
+    let Some(expected_ptr) = guard_ptr.checked_add(8) else {
+        return EFAULT;
+    };
+    let guard_address = match super::read_user_u64(guard_ptr) {
+        Ok(address) => address,
+        Err(error) => return error,
+    };
+    let guard_expected = match super::read_user_u64(expected_ptr) {
+        Ok(expected) => expected,
+        Err(error) => return error,
+    };
+    let key = match resolve_key(guard_address, 8) {
+        Ok(key) => key,
+        Err(error) => return error,
+    };
+    wait_inner(
+        address,
+        expected,
+        value_size,
+        deadline_nanoseconds,
+        Some((key, guard_expected)),
+    )
+}
+
+fn wait_inner(
+    address: u64,
+    expected: u64,
+    value_size: u64,
+    deadline_nanoseconds: u64,
+    guard: Option<(AddressKey, u64)>,
+) -> u64 {
     let key = match resolve_key(address, value_size) {
         Ok(key) => key,
         Err(error) => return error,
@@ -168,6 +220,13 @@ pub fn wait(address: u64, expected: u64, value_size: u64, deadline_nanoseconds: 
         if current != expected {
             return mnu_abi::AddressWaitResult::ValueChanged as u64;
         }
+        if let Some((key, expected)) = guard {
+            match load_value(key, 8) {
+                Ok(current) if current == expected => {}
+                Ok(_) => return mnu_abi::AddressWaitResult::ValueChanged as u64,
+                Err(error) => return error,
+            }
+        }
         if deadline_nanoseconds != mnu_abi::ADDRESS_WAIT_INFINITE
             && crate::syscall::time::monotonic_nanoseconds() >= deadline_nanoseconds
         {
@@ -176,7 +235,11 @@ pub fn wait(address: u64, expected: u64, value_size: u64, deadline_nanoseconds: 
         let Some(slot) = waiters.iter_mut().find(|slot| slot.is_none()) else {
             return EAGAIN;
         };
-        *slot = Some(AddressWaiter { thread, key });
+        *slot = Some(AddressWaiter {
+            thread,
+            key,
+            guard: guard.map(|(key, _)| key),
+        });
     }
 
     if deadline_nanoseconds != mnu_abi::ADDRESS_WAIT_INFINITE {
@@ -243,7 +306,9 @@ pub fn wake(address: u64, maximum_count: u64) -> u64 {
             if wake_count == maximum_count {
                 break;
             }
-            if slot.is_some_and(|waiter| waiter.key.matches(key)) {
+            if slot.is_some_and(|waiter| {
+                waiter.key.matches(key) || waiter.guard.is_some_and(|guard| guard.matches(key))
+            }) {
                 if let Some(waiter) = slot.take() {
                     wake_list[wake_count] = Some(waiter.thread);
                     wake_count += 1;
