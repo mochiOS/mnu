@@ -1,10 +1,8 @@
 //! Shared I/O objects referenced by native kernel Handles.
 
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use crate::interrupt::spinlock::SpinLock;
-use crate::vfs::Vnode;
 
 /// FileHandle に付与する権限
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,13 +11,6 @@ pub struct FileHandleCap(u32);
 impl FileHandleCap {
     pub const READ: Self = Self(1 << 0);
     pub const WRITE: Self = Self(1 << 1);
-    pub const SEEK: Self = Self(1 << 2);
-    pub const STAT: Self = Self(1 << 3);
-    // Bit 4 used to represent CLOSE. Closing only discards a descriptor owned
-    // by the current process, so it is intentionally not a resource right.
-    pub const READDIR: Self = Self(1 << 5);
-    pub const SYNC: Self = Self(1 << 9);
-    pub const TRUNCATE: Self = Self(1 << 10);
 
     #[inline]
     pub const fn contains(self, other: Self) -> bool {
@@ -32,36 +23,21 @@ impl FileHandleCap {
     }
 }
 
-/// `open(2)` が生成する open file description。
-///
-/// `dup(2)` と `fork(2)` はこのオブジェクトを共有するため、ファイル位置と
-/// status flags は複製後も同じ状態を参照する。
+/// Shared native byte-stream endpoint state, independent of POSIX descriptors.
 pub struct OpenFile {
-    /// ファイル内容（initfs からロード済み、パイプの場合は空）
-    pub data: Box<[u8]>,
-    /// 現在の読み取り/書き込み位置（パイプの場合はエントリインデックス兼用）
-    pub pos: usize,
-    /// 解決済みfilesystem object。pipeや匿名一時ファイルではNone。
-    pub vnode: Option<Arc<Vnode>>,
-    /// Some(id) であればパイプ fd（グローバル PIPE_TABLE のインデックス）
+    /// Native stream identity in the global stream table.
     pub pipe_id: Option<usize>,
     /// パイプの書き込み端の場合 true
     pub pipe_write: bool,
-    /// open()/openat() のファイル状態フラグ（F_GETFL/F_SETFL 用）
-    pub open_flags: u64,
     /// Native object behavior flags. These are independent of any POSIX ABI.
     pub io_options: u64,
 }
 
 impl OpenFile {
-    fn new_pipe(pipe_id: usize, pipe_write: bool, open_flags: u64) -> Self {
+    fn new_pipe(pipe_id: usize, pipe_write: bool) -> Self {
         Self {
-            data: Box::new([]),
-            pos: 0,
-            vnode: None,
             pipe_id: Some(pipe_id),
             pipe_write,
-            open_flags,
             io_options: 0,
         }
     }
@@ -101,16 +77,14 @@ impl FileHandle {
 
     pub fn new_pipe_read(pipe_id: usize) -> Self {
         Self::new(
-            OpenFile::new_pipe(pipe_id, false, 0),
-            FileHandleCap::READ
-                .union(FileHandleCap::SEEK)
-                .union(FileHandleCap::STAT),
+            OpenFile::new_pipe(pipe_id, false),
+            FileHandleCap::READ,
         )
     }
 
     pub fn new_pipe_write(pipe_id: usize) -> Self {
         Self::new(
-            OpenFile::new_pipe(pipe_id, true, 1),
+            OpenFile::new_pipe(pipe_id, true),
             FileHandleCap::WRITE,
         )
     }

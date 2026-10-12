@@ -1,22 +1,19 @@
 //! ファイルシステム関連のシステムコール
 
 use super::types::{
-    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOSPC, ENOTSUP, EOVERFLOW,
-    EPIPE,
+    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EINVAL, ENOTSUP, EPIPE,
 };
 use crate::capability::Capability;
 use crate::capability::path::{
     self, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner,
 };
-use crate::task::fd_table::{FileHandle, FileHandleCap, OpenFile};
-use crate::vfs::{self, FilesystemId, Vnode, VnodeKind};
+use crate::task::fd_table::{FileHandle, FileHandleCap};
+use crate::vfs::{self, FilesystemId};
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
 const MAX_IO_BYTES: usize = 128 * 1024 * 1024;
-const READ_IO_CHUNK_BYTES: usize = 256 * 1024;
-const WRITE_IO_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_PIPES: usize = 64;
 const PIPE_BUFFER_CAP: usize = 64 * 1024;
 
@@ -349,54 +346,6 @@ fn enforce_fs_capabilities_for_process(
     Ok(())
 }
 
-#[inline]
-fn mode_is_directory(mode: u16) -> bool {
-    (mode & 0xF000) == 0x4000
-}
-
-#[inline]
-fn vnode_size(vnode: &Vnode) -> Result<Option<u64>, u64> {
-    if let Some(handle) = vnode.cext_handle_id() {
-        // An open object must never be replaced by re-resolving its old name.
-        return crate::cext::fs::handle_metadata(handle)
-            .map(|(_, size, _, _)| Some(size))
-            .map_err(|error| (error as i64) as u64);
-    }
-    Ok(file_size_rootfs_first(vnode.path()))
-}
-
-#[inline]
-fn file_size_rootfs_first(path: &str) -> Option<u64> {
-    crate::performance::record_vfs_metadata_query();
-    // initfs is one authenticated boot generation. If it contains a path, its
-    // metadata and contents must shadow a mounted filesystem from another
-    // generation. Paths absent from initfs continue to use the runtime disk.
-    if let Some((_, size)) = crate::init::fs::initfs_file_metadata(path) {
-        return Some(size);
-    }
-    if let Some(mount) = userspace_mount(path) {
-        return vfs::userspace::lookup_size(mount.mount_id.0, &mount.path).ok();
-    }
-    crate::cext::fs::file_metadata(path)
-        .map(|(_, size, _, _)| size)
-        .or_else(|| crate::init::fs::file_metadata(path).map(|(_, size)| size))
-}
-
-#[inline]
-pub(crate) fn read_file_range_rootfs_first(
-    path: &str,
-    offset: u64,
-    buf: &mut [u8],
-) -> Option<usize> {
-    crate::performance::record_vfs_read_range();
-    if let Some(read) = crate::init::fs::read_range_initfs(path, offset, buf) {
-        return Some(read);
-    }
-    crate::cext::fs::read_range(path, offset, buf)
-        .or_else(|| crate::init::fs::read_range_rootfs(path, offset, buf))
-        .or_else(|| crate::init::fs::read_range(path, offset, buf))
-}
-
 /// パスを正規化する（`.` / `..` を解決し重複スラッシュを除去）
 fn normalize_path(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
@@ -413,58 +362,6 @@ fn normalize_path(path: &str) -> String {
         "/".to_string()
     } else {
         alloc::format!("/{}", parts.join("/"))
-    }
-}
-
-const O_APPEND: u64 = 0o2000;
-
-fn userspace_mount(path: &str) -> Option<vfs::ResolvedMount> {
-    vfs::resolve(path).filter(|mount| vfs::is_userspace_mount(mount.mount_id))
-}
-
-pub(crate) fn seek_file_handle(handle: &FileHandle, offset: i64, basis: SeekBasis) -> u64 {
-    if !handle.cap.contains(FileHandleCap::SEEK) {
-        return EACCES;
-    }
-    let open_file = handle.open.clone();
-
-    let end_position = if basis == SeekBasis::End {
-        let (vnode, fallback_size) = {
-            let open = open_file.lock();
-            (open.vnode.clone(), open.data.len() as u64)
-        };
-        let size = match vnode.as_deref().map_or(Ok(None), vnode_size) {
-            Ok(Some(size)) => size,
-            Ok(None) => fallback_size,
-            Err(error) => return error,
-        };
-        match i64::try_from(size) {
-            Ok(size) => Some(size),
-            Err(_) => return EOVERFLOW,
-        }
-    } else {
-        None
-    };
-
-    let mut open = open_file.lock();
-    let base = match basis {
-        SeekBasis::Start => 0,
-        SeekBasis::Current => match i64::try_from(open.pos) {
-            Ok(position) => position,
-            Err(_) => return EOVERFLOW,
-        },
-        SeekBasis::End => end_position.unwrap_or(0),
-    };
-    let Some(new_position) = base.checked_add(offset) else {
-        return EOVERFLOW;
-    };
-    let Ok(new_position) = usize::try_from(new_position) else {
-        return EINVAL;
-    };
-    open.pos = new_position;
-    match u64::try_from(new_position) {
-        Ok(position) => position,
-        Err(_) => EOVERFLOW,
     }
 }
 
@@ -501,118 +398,13 @@ pub(crate) fn read_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> u
     if !handle.cap.contains(FileHandleCap::READ) {
         return EACCES;
     }
-    let open_file = handle.open.clone();
-
-    let (pipe_id, io_options) = {
-        let open = open_file.lock();
-        (open.pipe_id, open.io_options)
+    let open = handle.open.lock();
+    let Some(pipe_id) = open.pipe_id else {
+        return ENOTSUP;
     };
-
-    if let Some(pipe_id) = pipe_id {
-        return read_pipe(pipe_id, io_options, buf_ptr, len);
-    }
-
-    let to_copy = match usize::try_from(len) {
-        Ok(v) => v.min(MAX_IO_BYTES),
-        Err(_) => MAX_IO_BYTES,
-    };
-
-    let mut written = 0usize;
-
-    let mut tmp = alloc::vec![0u8; core::cmp::min(READ_IO_CHUNK_BYTES, to_copy)];
-
-    crate::performance::record_vfs_temporary_buffer(tmp.len());
-
-    while written < to_copy {
-        let chunk_len = core::cmp::min(READ_IO_CHUNK_BYTES, to_copy - written)
-            .min(mochios_filesystem_protocol::MAX_IO_LEN);
-
-        let read_len = {
-            let (vnode, pos) = {
-                let open = open_file.lock();
-                (open.vnode.clone(), open.pos)
-            };
-
-            if let Some(vnode) = vnode {
-                let object = crate::mem::vm_object::VmObject::file(vnode);
-
-                let pos_u64 = match u64::try_from(pos) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        return if written != 0 { written as u64 } else { EINVAL };
-                    }
-                };
-
-                let read = match object.read_at(pos_u64, &mut tmp[..chunk_len]) {
-                    Ok(read) => read,
-
-                    Err(errno) => {
-                        return if written != 0 { written as u64 } else { errno };
-                    }
-                };
-
-                let mut open = open_file.lock();
-
-                if open.pos != pos {
-                    continue;
-                }
-
-                open.pos = match open.pos.checked_add(read) {
-                    Some(position) => position,
-
-                    None => {
-                        return if written != 0 { written as u64 } else { EINVAL };
-                    }
-                };
-
-                read
-            } else {
-                let mut open = open_file.lock();
-
-                let avail = open.data.len().saturating_sub(open.pos);
-
-                let take = core::cmp::min(avail, chunk_len);
-
-                if take == 0 {
-                    return written as u64;
-                }
-
-                tmp[..take].copy_from_slice(&open.data[open.pos..open.pos + take]);
-
-                open.pos += take;
-
-                take
-            }
-        };
-
-        if read_len == 0 {
-            break;
-        }
-
-        let written_u64 = match u64::try_from(written) {
-            Ok(value) => value,
-
-            Err(_) => {
-                return if written != 0 { written as u64 } else { EINVAL };
-            }
-        };
-
-        let destination = match buf_ptr.checked_add(written_u64) {
-            Some(value) => value,
-
-            None => {
-                return if written != 0 { written as u64 } else { EFAULT };
-            }
-        };
-
-        if crate::syscall::copy_to_user(destination, &tmp[..read_len]).is_err() {
-            return if written != 0 { written as u64 } else { EFAULT };
-        }
-
-        written += read_len;
-    }
-
-    written as u64
+    let io_options = open.io_options;
+    drop(open);
+    read_pipe(pipe_id, io_options, buf_ptr, len)
 }
 
 fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
@@ -675,110 +467,13 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
     if !handle.cap.contains(FileHandleCap::WRITE) {
         return EACCES;
     }
-    let open_file = handle.open.clone();
-    let (pipe_id, io_options) = {
-        let open = open_file.lock();
-        (open.pipe_id, open.io_options)
+    let open = handle.open.lock();
+    let Some(pipe_id) = open.pipe_id else {
+        return ENOTSUP;
     };
-    if let Some(pipe_id) = pipe_id {
-        return write_pipe(pipe_id, io_options, buf_ptr, len, true);
-    }
-
-    let Ok(len_usize) = usize::try_from(len) else {
-        return EINVAL;
-    };
-    if len_usize > MAX_IO_BYTES {
-        return ENOSPC;
-    }
-
-    let (mut start_pos, vnode, open_flags) = {
-        let open = open_file.lock();
-        (open.pos, open.vnode.clone(), open.open_flags)
-    };
-    if (open_flags & O_APPEND) != 0 {
-        let Some(vnode) = vnode.as_ref() else {
-            return EINVAL;
-        };
-        let size = match vnode.cext_handle_id() {
-            Some(handle) => match crate::cext::fs::handle_metadata(handle) {
-                Ok(metadata) => Some(metadata),
-                Err(error) => return (error as i64) as u64,
-            },
-            None => crate::cext::fs::file_metadata(vnode.path()),
-        }
-        .map(|(_, size, _, _)| size);
-        start_pos = match size.and_then(|size| usize::try_from(size).ok()) {
-            Some(size) => size,
-            None => return EIO,
-        };
-    }
-    let mut written = 0usize;
-    let mut tmp = alloc::vec![0u8; core::cmp::min(WRITE_IO_CHUNK_BYTES, len_usize)];
-    crate::performance::record_vfs_temporary_buffer(tmp.len());
-
-    while written < len_usize {
-        let chunk_len = core::cmp::min(WRITE_IO_CHUNK_BYTES, len_usize - written)
-            .min(mochios_filesystem_protocol::MAX_IO_LEN);
-        if let Err(errno) =
-            crate::syscall::copy_from_user(buf_ptr + written as u64, &mut tmp[..chunk_len])
-        {
-            return errno;
-        }
-
-        if let Some(vnode) = vnode.as_ref() {
-            crate::performance::record_vfs_write_range();
-            let write_offset = match start_pos.checked_add(written) {
-                Some(value) => value as u64,
-                None => return if written == 0 { EFBIG } else { written as u64 },
-            };
-            let object = crate::mem::vm_object::VmObject::file(vnode.clone());
-            let result = object.write_at(write_offset, &tmp[..chunk_len]);
-            match result {
-                Ok(0) => return written as u64,
-                Ok(wrote_chunk) => {
-                    let end = match start_pos.checked_add(written + wrote_chunk) {
-                        Some(value) => value,
-                        None => return if written == 0 { EFBIG } else { written as u64 },
-                    };
-                    {
-                        let mut open = open_file.lock();
-                        if (open.open_flags & O_APPEND) != 0 || open.pos == start_pos + written {
-                            open.pos = end;
-                        }
-                    }
-                    written += wrote_chunk;
-                    if wrote_chunk != chunk_len {
-                        return written as u64;
-                    }
-                    continue;
-                }
-                Err(errno) => {
-                    return if written == 0 { errno } else { written as u64 };
-                }
-            }
-        }
-
-        let wrote = (|| {
-            let mut open = open_file.lock();
-            let end = start_pos.checked_add(written + chunk_len).ok_or(EINVAL)?;
-            let mut data = open.data.to_vec();
-            if end > data.len() {
-                data.resize(end, 0);
-            }
-            data[start_pos + written..end].copy_from_slice(&tmp[..chunk_len]);
-            open.data = data.into_boxed_slice();
-            open.pos = end;
-            Ok::<(), u64>(())
-        })();
-        match wrote {
-            Ok(()) => {}
-            Err(errno) => return errno,
-        }
-
-        written += chunk_len;
-    }
-
-    written as u64
+    let io_options = open.io_options;
+    drop(open);
+    write_pipe(pipe_id, io_options, buf_ptr, len, true)
 }
 
 pub(crate) fn read_stream_handle(

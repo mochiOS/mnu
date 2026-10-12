@@ -1,4 +1,4 @@
-//! VM objects and a bounded vnode page cache.
+//! VM objects and a bounded object page cache.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -6,7 +6,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ProviderObject;
-use crate::vfs::{InodeId, MountId, Vnode};
 
 pub const PAGE_BYTES: usize = 4096;
 const MAX_CACHED_PAGES: usize = 256;
@@ -24,10 +23,6 @@ struct LowerReadOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ObjectKey {
     Memory(u64),
-    Vnode {
-        mount_id: MountId,
-        inode_id: InodeId,
-    },
     Provider {
         endpoint_thread_id: u64,
         endpoint_slot: u16,
@@ -99,7 +94,6 @@ impl Drop for PreparedSharedPage {
 #[derive(Clone)]
 enum VmObjectSource {
     Memory(Arc<super::shared_memory::SharedMemory>),
-    Vnode(Arc<Vnode>),
     Provider {
         object: Arc<ProviderObject>,
         identity: u64,
@@ -120,12 +114,6 @@ impl VmObject {
         }
     }
 
-    pub fn file(vnode: Arc<Vnode>) -> Self {
-        Self {
-            source: VmObjectSource::Vnode(vnode),
-        }
-    }
-
     pub fn provider(object: Arc<ProviderObject>, identity: u64) -> Self {
         Self {
             source: VmObjectSource::Provider { object, identity },
@@ -135,10 +123,6 @@ impl VmObject {
     fn object_key(&self) -> ObjectKey {
         match &self.source {
             VmObjectSource::Memory(memory) => ObjectKey::Memory(memory.id()),
-            VmObjectSource::Vnode(vnode) => ObjectKey::Vnode {
-                mount_id: vnode.inode.mount_id,
-                inode_id: vnode.inode.inode_id,
-            },
             VmObjectSource::Provider { object, identity } => ObjectKey::Provider {
                 endpoint_thread_id: object.endpoint_thread_id,
                 endpoint_slot: object.endpoint_slot,
@@ -418,7 +402,7 @@ impl VmObject {
         Ok(staged)
     }
 
-    /// Writes dirty cache pages intersecting the range back to their vnode.
+    /// Writes dirty cache pages intersecting the range back to their object.
     pub fn flush_range(&self, offset: u64, length: u64) -> Result<(), u64> {
         if let VmObjectSource::Memory(memory) = &self.source {
             return if length == u64::MAX && offset == 0 || memory.contains_range(offset, length) {
@@ -739,7 +723,6 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
     let mut bytes_read = 0usize;
     let io_limit = match source {
         VmObjectSource::Memory(_) => PAGE_BYTES,
-        VmObjectSource::Vnode(vnode) => core::cmp::max(1, vnode.read_io_limit()),
         VmObjectSource::Provider { .. } => mnu_abi::provider::MAX_DATA_LEN,
     };
 
@@ -771,9 +754,6 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
         let read = match source {
             VmObjectSource::Memory(memory) => {
                 memory.read_at(current, &mut output[bytes_read..bytes_read + request_len])
-            }
-            VmObjectSource::Vnode(vnode) => {
-                vnode.read_at(current, &mut output[bytes_read..bytes_read + request_len])
             }
             VmObjectSource::Provider { object, .. } => crate::syscall::handle::provider_read_at(
                 object,
@@ -829,7 +809,6 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
 fn write_lower(source: &VmObjectSource, offset: u64, input: &[u8]) -> Result<usize, u64> {
     match source {
         VmObjectSource::Memory(memory) => memory.write_at(offset, input),
-        VmObjectSource::Vnode(vnode) => vnode.write_at(offset, input),
         VmObjectSource::Provider { object, .. } => {
             crate::syscall::handle::provider_write_at(object, offset, input)
         }

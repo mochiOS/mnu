@@ -606,15 +606,6 @@ pub fn memory_map(
             mnu_abi::MEMORY_ACCESS_ALL
         };
         let object = match object {
-            crate::task::KernelObject::File(file) => {
-                let vnode = file.open.lock().vnode.as_ref().cloned();
-                match vnode {
-                    Some(vnode) if !vnode.is_directory() => {
-                        Arc::new(crate::mem::vm_object::VmObject::file(vnode))
-                    }
-                    _ => return EINVAL,
-                }
-            }
             crate::task::KernelObject::Provider(provider) => {
                 let identity = match crate::syscall::handle::provider_memory_object(&provider) {
                     Ok(identity) => identity,

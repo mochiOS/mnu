@@ -580,12 +580,8 @@ mod tests {
     fn duplicated_file_handles_share_the_same_open_file_description() {
         let file = Arc::new(FileHandle::new(
             OpenFile {
-                data: Box::new([]),
-                pos: 0,
-                vnode: None,
                 pipe_id: None,
                 pipe_write: false,
-                open_flags: 0,
                 io_options: 0,
             },
             FileHandleCap::READ,

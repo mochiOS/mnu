@@ -1,8 +1,7 @@
-//! Filesystem object model shared by file descriptors and filesystem backends.
+//! Transitional filesystem registration and mount table.
 
 use alloc::string::String;
 use alloc::string::ToString;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -19,124 +18,6 @@ pub struct MountId(pub u64);
 pub struct FilesystemId(pub u64);
 
 pub const ROOT_FILESYSTEM_ID: FilesystemId = FilesystemId(1);
-
-/// Identifies an inode inside a mounted filesystem.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct InodeId(pub u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VnodeKind {
-    Regular,
-    Directory,
-    Symlink,
-    Other,
-}
-
-/// Filesystem-stable object identity. Backends own metadata and file contents.
-pub struct Inode {
-    pub mount_id: MountId,
-    pub inode_id: InodeId,
-    pub kind: VnodeKind,
-}
-
-/// Transitional backend reference used while the path-based CExt ABI is active.
-///
-/// User-space files are represented by generic provider objects, not a second
-/// filesystem-specific handle implementation inside this legacy vnode model.
-pub enum VnodeBacking {
-    LegacyPath(String),
-    CextHandle {
-        path: String,
-        handle: u64,
-    },
-}
-
-/// A resolved filesystem object kept alive independently of a descriptor number.
-pub struct Vnode {
-    pub inode: Arc<Inode>,
-    backing: VnodeBacking,
-}
-
-impl Vnode {
-    pub fn legacy_path(path: String, kind: VnodeKind) -> Self {
-        Self::legacy_path_on(MountId(1), path, kind)
-    }
-
-    pub fn legacy_path_on(mount_id: MountId, path: String, kind: VnodeKind) -> Self {
-        Self {
-            inode: Arc::new(Inode {
-                mount_id,
-                inode_id: InodeId(legacy_inode_id(&path)),
-                kind,
-            }),
-            backing: VnodeBacking::LegacyPath(path),
-        }
-    }
-
-    pub fn cext_handle(mount_id: MountId, path: String, handle: u64, kind: VnodeKind) -> Self {
-        Self {
-            inode: Arc::new(Inode {
-                mount_id,
-                inode_id: InodeId(legacy_inode_id(&path)),
-                kind,
-            }),
-            backing: VnodeBacking::CextHandle { path, handle },
-        }
-    }
-
-    pub fn path(&self) -> &str {
-        match &self.backing {
-            VnodeBacking::LegacyPath(path) => path,
-            VnodeBacking::CextHandle { path, .. } => path,
-        }
-    }
-
-    pub fn is_directory(&self) -> bool {
-        self.inode.kind == VnodeKind::Directory
-    }
-
-    pub fn cext_handle_id(&self) -> Option<u64> {
-        match &self.backing {
-            VnodeBacking::LegacyPath(_) => None,
-            VnodeBacking::CextHandle { handle, .. } => Some(*handle),
-        }
-    }
-
-    pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
-        if let Some(handle) = self.cext_handle_id() {
-            return crate::cext::fs::read_handle(handle, offset, output).map_err(cext_errno);
-        }
-        crate::syscall::fs::read_file_range_rootfs_first(self.path(), offset, output)
-            .ok_or(crate::syscall::EIO)
-    }
-
-    pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
-        if let Some(handle) = self.cext_handle_id() {
-            return crate::cext::fs::write_handle(handle, offset, input).map_err(cext_errno);
-        }
-        crate::cext::fs::write_all(self.path(), offset, input).map_err(cext_errno)
-    }
-
-    pub fn read_io_limit(&self) -> usize {
-        mochios_filesystem_protocol::MAX_IO_LEN
-    }
-}
-
-fn cext_errno(error: i32) -> u64 {
-    if error < 0 {
-        (error as i64) as u64
-    } else {
-        crate::syscall::EIO
-    }
-}
-
-impl Drop for Vnode {
-    fn drop(&mut self) {
-        if let VnodeBacking::CextHandle { handle, .. } = &self.backing {
-            let _ = crate::cext::fs::close_handle(*handle);
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mount {
@@ -300,15 +181,4 @@ fn normalize_mount_path(path: &str) -> String {
     } else {
         normalized
     }
-}
-
-fn legacy_inode_id(path: &str) -> u64 {
-    // FNV-1a is only a transitional identity for the path-based backend. The
-    // userspace filesystem protocol supplies the real filesystem inode ID.
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in path.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
 }

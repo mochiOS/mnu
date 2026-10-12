@@ -173,9 +173,7 @@ pub fn seek(raw: u64, offset: u64, basis: u64) -> u64 {
         _ => return EINVAL,
     };
     match object {
-        KernelObject::File(file) => {
-            crate::syscall::fs::seek_file_handle(&file, offset as i64, basis)
-        }
+        KernelObject::File(_) => ENOTSUP,
         KernelObject::Provider(provider) => provider_seek(&provider, offset as i64, basis),
         _ => EBADF,
     }
