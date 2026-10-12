@@ -357,12 +357,14 @@ fn mode_is_directory(mode: u16) -> bool {
 }
 
 #[inline]
-fn vnode_size(vnode: &Vnode) -> Option<u64> {
-    vnode
-        .cext_handle_id()
-        .and_then(crate::cext::fs::handle_metadata)
-        .map(|(_, size, _, _)| size)
-        .or_else(|| file_size_rootfs_first(vnode.path()))
+fn vnode_size(vnode: &Vnode) -> Result<Option<u64>, u64> {
+    if let Some(handle) = vnode.cext_handle_id() {
+        // An open object must never be replaced by re-resolving its old name.
+        return crate::cext::fs::handle_metadata(handle)
+            .map(|(_, size, _, _)| Some(size))
+            .map_err(|error| (error as i64) as u64);
+    }
+    Ok(file_size_rootfs_first(vnode.path()))
 }
 
 #[inline]
@@ -433,7 +435,11 @@ pub(crate) fn seek_file_handle(handle: &FileHandle, offset: i64, basis: SeekBasi
             let open = open_file.lock();
             (open.vnode.clone(), open.data.len() as u64)
         };
-        let size = vnode.as_deref().and_then(vnode_size).unwrap_or(fallback_size);
+        let size = match vnode.as_deref().map_or(Ok(None), vnode_size) {
+            Ok(Some(size)) => size,
+            Ok(None) => fallback_size,
+            Err(error) => return error,
+        };
         match i64::try_from(size) {
             Ok(size) => Some(size),
             Err(_) => return EOVERFLOW,
@@ -695,11 +701,14 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
         let Some(vnode) = vnode.as_ref() else {
             return EINVAL;
         };
-        let size = vnode
-            .cext_handle_id()
-            .and_then(crate::cext::fs::handle_metadata)
-            .or_else(|| crate::cext::fs::file_metadata(vnode.path()))
-            .map(|(_, size, _, _)| size);
+        let size = match vnode.cext_handle_id() {
+            Some(handle) => match crate::cext::fs::handle_metadata(handle) {
+                Ok(metadata) => Some(metadata),
+                Err(error) => return (error as i64) as u64,
+            },
+            None => crate::cext::fs::file_metadata(vnode.path()),
+        }
+        .map(|(_, size, _, _)| size);
         start_pos = match size.and_then(|size| usize::try_from(size).ok()) {
             Some(size) => size,
             None => return EIO,

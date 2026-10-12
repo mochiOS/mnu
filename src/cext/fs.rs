@@ -189,10 +189,10 @@ pub fn read_handle(handle: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i3
     }
 }
 
-pub fn handle_metadata(handle: u64) -> Option<(u16, u64, u32, u32)> {
+pub fn handle_metadata(handle: u64) -> Result<(u16, u64, u32, u32), i32> {
     let ops = ops_ptr();
     if ops.is_null() || !MOUNTED.load(Ordering::Acquire) {
-        return None;
+        return Err(-38);
     }
     let mut mode = 0u16;
     let mut size = 0u64;
@@ -201,7 +201,11 @@ pub fn handle_metadata(handle: u64) -> Option<(u16, u64, u32, u32)> {
     let rc = unsafe {
         ((*ops).stat_handle)(handle, &mut mode, &mut size, &mut uid, &mut gid)
     };
-    (rc == 0).then_some((mode, size, uid, gid))
+    if rc == 0 {
+        Ok((mode, size, uid, gid))
+    } else {
+        Err(if rc < 0 { rc } else { -5 })
+    }
 }
 
 pub fn write_handle(handle: u64, offset: u64, data: &[u8]) -> Result<usize, i32> {
