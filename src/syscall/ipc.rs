@@ -375,17 +375,21 @@ pub(crate) fn resolve_provider_endpoint(raw: u64) -> Result<(u64, u16, u64), u64
     ))
 }
 
-fn resolve_call_destination(raw: u64) -> Result<(u64, u64), u64> {
+fn resolve_call_destination(raw: u64) -> Result<(u64, u64, u32), u64> {
     if raw <= crate::task::PROCESS_MAX_OBJECT_HANDLES as u64 {
         let endpoint = process_local_endpoint(raw, HandleRights::SEND)?;
         let sender_identity = ensure_endpoint_for_thread(endpoint.thread_id).ok_or(EINVAL)?;
-        return Ok((endpoint.thread_id, sender_identity));
+        return Ok((
+            endpoint.thread_id,
+            sender_identity,
+            mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE,
+        ));
     }
     let record = endpoint_record_from_handle(raw).ok_or(EINVAL)?;
     if !record.rights.contains(EndpointRights::RECV) {
         return Err(EACCES);
     }
-    Ok((record.thread_id, raw))
+    Ok((record.thread_id, raw, 0))
 }
 
 fn resolve_receive_thread(raw: u64, current_thread_id: u64) -> Result<u64, u64> {
@@ -417,10 +421,11 @@ pub fn call(
     ]) {
         return EACCES;
     }
-    let (dest_thread_id, expected_sender) = match resolve_call_destination(dest_endpoint_handle) {
-        Ok(destination) => destination,
-        Err(error) => return error,
-    };
+    let (dest_thread_id, expected_sender, delivery_flags) =
+        match resolve_call_destination(dest_endpoint_handle) {
+            Ok(destination) => destination,
+            Err(error) => return error,
+        };
     let caller = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
         None => return EINVAL,
@@ -433,7 +438,9 @@ pub fn call(
     #[cfg(feature = "performance-instrumentation")]
     let round_trip_start = crate::performance::timestamp();
     let sent = loop {
-        let status = send_call_to_thread_id(dest_thread_id, sender, call_id, req_ptr, req_len);
+        let status = send_call_to_thread_id(
+            dest_thread_id, sender, call_id, req_ptr, req_len, delivery_flags,
+        );
         if status != EAGAIN {
             break status;
         }
@@ -484,10 +491,11 @@ pub fn call_object_handles(
     ]) {
         return EACCES;
     }
-    let (dest_thread_id, expected_sender) = match resolve_call_destination(dest_endpoint_handle) {
-        Ok(destination) => destination,
-        Err(error) => return error,
-    };
+    let (dest_thread_id, expected_sender, delivery_flags) =
+        match resolve_call_destination(dest_endpoint_handle) {
+            Ok(destination) => destination,
+            Err(error) => return error,
+        };
     let caller = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
         None => return EINVAL,
@@ -498,10 +506,11 @@ pub fn call_object_handles(
     };
     let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let sent = loop {
-        let attachments = match decode_outgoing_object_handles(handles_ptr) {
+        let mut attachments = match decode_outgoing_object_handles(handles_ptr) {
             Ok(handles) => handles,
             Err(error) => return error,
         };
+        attachments.delivery_flags = delivery_flags;
         let status = send_to_thread_id_with_attachments(
             dest_thread_id,
             sender,
@@ -798,8 +807,8 @@ fn decode_outgoing_object_handles(pointer: u64) -> Result<ObjectHandleAttachment
     let mut bytes = [0u8; core::mem::size_of::<mnu_abi::IpcObjectHandles>()];
     crate::syscall::copy_from_user(pointer, &mut bytes)?;
     let count = u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| EINVAL)?) as usize;
-    let reserved = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| EINVAL)?);
-    if count > MAX_OBJECT_HANDLES || reserved != 0 {
+    let delivery_flags = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| EINVAL)?);
+    if count > MAX_OBJECT_HANDLES || delivery_flags != 0 {
         return Err(EINVAL);
     }
     let process_id = crate::syscall::security::current_process_id().ok_or(EINVAL)?;
@@ -871,6 +880,7 @@ fn install_received_object_handles(
 
     let mut output = [0u8; core::mem::size_of::<mnu_abi::IpcObjectHandles>()];
     output[0..4].copy_from_slice(&(count as u32).to_le_bytes());
+    output[4..8].copy_from_slice(&attachments.delivery_flags.to_le_bytes());
     for index in 0..count {
         let offset = 8 + index * 16;
         let raw = installed[index].ok_or(EINVAL)?.raw();
@@ -901,6 +911,7 @@ struct ExternalPages {
 #[derive(Debug)]
 struct ObjectHandleAttachments {
     count: usize,
+    delivery_flags: u32,
     handles: [Option<ObjectHandleEntry>; MAX_OBJECT_HANDLES],
 }
 
@@ -908,6 +919,7 @@ impl ObjectHandleAttachments {
     const fn empty() -> Self {
         Self {
             count: 0,
+            delivery_flags: 0,
             handles: [const { None }; MAX_OBJECT_HANDLES],
         }
     }
@@ -1143,6 +1155,7 @@ impl Mailbox {
         is_reply: bool,
         expects_reply: bool,
         call_id: u64,
+        delivery_flags: u32,
     ) -> Result<(), ()> {
         if data.len() > ipc_max_msg_size() {
             return Err(());
@@ -1165,6 +1178,7 @@ impl Mailbox {
         msg.len = data.len();
         msg.ext_pages = ExternalPages::empty();
         msg.object_handles = ObjectHandleAttachments::empty();
+        msg.object_handles.delivery_flags = delivery_flags;
         if !data.is_empty() {
             msg.data[..data.len()].copy_from_slice(data);
             record_ipc_copy(data.len());
@@ -1563,6 +1577,7 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
                 false,
                 false,
                 0,
+                0,
             )
             .is_ok()
         {
@@ -1599,6 +1614,7 @@ pub(crate) fn send_provider_from_kernel(endpoint: IpcEndpoint, data: &[u8]) -> b
             false,
             false,
             0,
+            mnu_abi::IPC_DELIVERY_NATIVE_OBJECT,
         )
         .is_err()
     {
@@ -1648,7 +1664,9 @@ pub(crate) fn call_provider_from_kernel(
         return Err(EINVAL);
     }
     let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id).ok_or(EINVAL)?;
-    call_endpoint_from_kernel(endpoint, expected_sender, request, reply)
+    let mut attachments = ObjectHandleAttachments::empty();
+    attachments.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    call_endpoint_with_attachments_from_kernel(endpoint, expected_sender, request, reply, attachments)
 }
 
 fn call_endpoint_from_kernel(
@@ -1682,6 +1700,7 @@ pub(crate) fn call_provider_with_handle_from_kernel(
     let mut attachments = ObjectHandleAttachments::empty();
     attachments.handles[0] = Some(export_object_handle(process_id, handle, requested)?);
     attachments.count = 1;
+    attachments.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
     let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id).ok_or(EINVAL)?;
     call_endpoint_with_attachments_from_kernel(
         endpoint, expected_sender, request, reply, attachments,
@@ -2006,7 +2025,10 @@ fn send_call_to_thread_id(
     call_id: u64,
     buf_ptr: u64,
     len: u64,
+    delivery_flags: u32,
 ) -> u64 {
+    let mut attachments = ObjectHandleAttachments::empty();
+    attachments.delivery_flags = delivery_flags;
     send_to_thread_id_with_kind(
         dest_thread_id,
         sender_handle,
@@ -2015,7 +2037,7 @@ fn send_call_to_thread_id(
         len,
         false,
         true,
-        ObjectHandleAttachments::empty(),
+        attachments,
     )
 }
 
@@ -2184,7 +2206,7 @@ pub fn send_object_handles(
     ]) {
         return EACCES;
     }
-    let (dest_thread_id, _) = match resolve_call_destination(dest_endpoint_handle) {
+    let (dest_thread_id, _, delivery_flags) = match resolve_call_destination(dest_endpoint_handle) {
         Ok(destination) => destination,
         Err(error) => return error,
     };
@@ -2195,10 +2217,11 @@ pub fn send_object_handles(
         },
         None => return EINVAL,
     };
-    let object_handles = match decode_outgoing_object_handles(handles_ptr) {
+    let mut object_handles = match decode_outgoing_object_handles(handles_ptr) {
         Ok(handles) => handles,
         Err(error) => return error,
     };
+    object_handles.delivery_flags = delivery_flags;
     send_to_thread_id_with_attachments(
         dest_thread_id,
         sender,
@@ -2901,10 +2924,10 @@ mod tests {
     fn synchronous_call_only_consumes_its_servers_reply() {
         let mut mailbox = Mailbox::new();
         mailbox
-            .push_message(10, 20, 1, 2, &[], true, false, 100)
+            .push_message(10, 20, 1, 2, &[], true, false, 100, 0)
             .unwrap();
         mailbox
-            .push_message(11, 20, 1, 2, &[], true, false, 200)
+            .push_message(11, 20, 1, 2, &[], true, false, 200, 0)
             .unwrap();
 
         assert_eq!(
@@ -2925,10 +2948,10 @@ mod tests {
     fn synchronous_call_keeps_stale_reply_from_the_same_server_queued() {
         let mut mailbox = Mailbox::new();
         mailbox
-            .push_message(10, 20, 1, 2, &[], true, false, 100)
+            .push_message(10, 20, 1, 2, &[], true, false, 100, 0)
             .unwrap();
         mailbox
-            .push_message(10, 20, 1, 2, &[], true, false, 101)
+            .push_message(10, 20, 1, 2, &[], true, false, 101, 0)
             .unwrap();
 
         assert_eq!(
