@@ -195,6 +195,9 @@ pub enum SyscallNumber {
     /// nonzero AddressWaitGuard pointer. WakeAddress on either value releases
     /// the same waiter. Neither value carries kernel-interpreted policy.
     WaitOnAddressGuarded = 684,
+    /// Describes one native clock without reading its timestamp. Arguments:
+    /// ClockId, ClockInfo output pointer, exact ClockInfo byte length.
+    ClockDescribe = 685,
     CheckGravityExist = 999,
 }
 
@@ -423,6 +426,14 @@ pub struct ClockInstant {
     pub seconds: u64,
     pub nanoseconds: u32,
     pub reserved: u32,
+}
+
+/// Smallest representable increment of a native clock, not scheduling latency
+/// or wall-clock accuracy. Metadata grants no timestamp or clock-write authority.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClockInfo {
+    pub quantum_nanoseconds: u64,
 }
 
 /// Maximum number of generic kernel object handles carried by one IPC message.

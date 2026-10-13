@@ -204,10 +204,31 @@ pub(crate) fn monotonic_deadline_tick(deadline_nanoseconds: u64) -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-/// Reads one native mnu clock into a fixed-layout `ClockInstant`.
-///
-/// POSIX clock identifiers and `timespec` layout are deliberately translated
-/// in user space rather than exposed by this syscall.
+/// Describes the clock's source quantum without reading a protected timestamp.
+pub fn clock_describe(clock: u64, info_ptr: u64, info_len: u64) -> u64 {
+    if mnu_abi::ClockId::from_raw(clock).is_none()
+        || info_len != core::mem::size_of::<mnu_abi::ClockInfo>() as u64
+    {
+        return EINVAL;
+    }
+    if info_ptr == 0 {
+        return EFAULT;
+    }
+    // All current native clocks advance in timer ticks, including realtime
+    // interpolation and execution sampling. Query the source, not a POSIX ID.
+    let Some(quantum) = crate::interrupt::timer::tick_ms().checked_mul(1_000_000)
+        .filter(|quantum| *quantum != 0)
+    else {
+        return EAGAIN;
+    };
+    match crate::syscall::copy_to_user(info_ptr, &quantum.to_le_bytes()) {
+        Ok(()) => SUCCESS,
+        Err(error) => error,
+    }
+}
+
+/// Reads a native `ClockInstant`; POSIX clock IDs and timespec stay in userspace.
+/// Realtime still requires SystemTimeRead.
 pub fn clock_read(clock: u64, instant_ptr: u64) -> u64 {
     let Some(clock) = mnu_abi::ClockId::from_raw(clock) else {
         return EINVAL;
