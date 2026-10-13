@@ -1999,6 +1999,26 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
     measurement.finish(result)
 }
 
+fn consume_address_space_for_create(
+    image: &crate::mem::address_space::AddressSpaceObject,
+    authorization: &crate::task::process::PendingExecSecurity,
+    context: &mnu_abi::ThreadCreateContext,
+) -> Result<crate::mem::address_space::AddressSpaceImage, u64> {
+    use crate::mem::address_space::ConsumeError;
+    use crate::syscall::types::{EACCES, EAGAIN, EFAULT};
+    let pid = crate::syscall::security::current_process_id().ok_or(EACCES)?;
+    // Detached roots are pinned by the image, but resize may still revoke
+    // their PTEs. Follow PROC -> image lock order through context validation
+    // and one-shot ownership transfer, then prepare the new container outside.
+    crate::task::with_process(pid, |_| image.consume(authorization, context))
+        .ok_or(EACCES)?
+        .map_err(|error| match error {
+            ConsumeError::Consumed => EAGAIN,
+            ConsumeError::Authorization => EACCES,
+            ConsumeError::Context => EFAULT,
+        })
+}
+
 fn create_from_address_space(
     image_handle: u64,
     request: &mnu_abi::process_create::Request<'_>,
@@ -2007,8 +2027,7 @@ fn create_from_address_space(
     grants: &[InheritedHandleGrant],
     values: &[InheritedValueSpec],
 ) -> u64 {
-    use crate::mem::address_space::ConsumeError;
-    use crate::syscall::types::{EACCES, EAGAIN, EFAULT, EINVAL, ENOMEM};
+    use crate::syscall::types::{EACCES, EINVAL, ENOMEM};
     let image =
         match crate::syscall::handle::object(image_handle, crate::task::HandleRights::CONTROL) {
             Ok(crate::task::KernelObject::AddressSpace(image)) => image,
@@ -2028,11 +2047,9 @@ fn create_from_address_space(
     if let Err(errno) = install_inherited_values(&mut process, values) {
         return errno;
     }
-    let image = match image.consume(&authorization, &context) {
+    let image = match consume_address_space_for_create(&image, &authorization, &context) {
         Ok(image) => image,
-        Err(ConsumeError::Consumed) => return EAGAIN,
-        Err(ConsumeError::Authorization) => return EACCES,
-        Err(ConsumeError::Context) => return EFAULT,
+        Err(errno) => return errno,
     };
     process.set_capabilities_for_exec(authorization.capabilities);
     process.set_kernel_authorities_for_exec(authorization.kernel_authorities);
