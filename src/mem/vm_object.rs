@@ -128,6 +128,29 @@ impl VmObject {
         }
     }
 
+    pub(crate) fn memory_generation(&self) -> Option<u64> {
+        match &self.source {
+            VmObjectSource::Memory(memory) => Some(memory.generation()),
+            _ => None,
+        }
+    }
+
+    /// Validate a snapshot taken before loading private page bytes, and keep
+    /// RAM backing stable throughout the final PTE installation.
+    pub(crate) fn with_memory_generation<T>(
+        &self,
+        generation: Option<u64>,
+        install: impl FnOnce() -> Result<T, u64>,
+    ) -> Result<T, u64> {
+        match (&self.source, generation) {
+            (VmObjectSource::Memory(memory), Some(generation)) => {
+                memory.with_generation(generation, install)
+            }
+            (VmObjectSource::Provider { .. }, None) => install(),
+            _ => Err(crate::syscall::EINVAL),
+        }
+    }
+
     pub fn provider(object: Arc<ProviderObject>, identity: u64) -> Self {
         Self {
             source: VmObjectSource::Provider { object, identity },
@@ -162,6 +185,11 @@ impl VmObject {
             let offset = page_index
                 .checked_mul(PAGE_BYTES as u64)
                 .ok_or(crate::syscall::EINVAL)?;
+            // Ordinary read_at may return EOF, but a pager must not manufacture
+            // an accessible zero-filled private page beyond its RAM extent.
+            if offset >= memory.length() {
+                return Err(crate::syscall::EINVAL);
+            }
             let mut bytes = [0u8; PAGE_BYTES];
             let length = memory.read_at(offset, &mut bytes)?;
             return Ok((Arc::new(bytes), length));

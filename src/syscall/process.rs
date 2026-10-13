@@ -413,21 +413,25 @@ pub fn handle_user_memory_fault(fault_addr: u64, is_write: bool, is_execute: boo
             None => None,
         };
         let shared_file = region.is_shared() && pager.is_some();
+        let generation = pager
+            .as_ref()
+            .and_then(|(object, _)| object.memory_generation());
         Ok((
             pt_phys,
             region.start(),
             shared_file,
             pager,
+            generation,
         ))
     });
-    let Some(Ok((pt_phys, region_start, shared_file, pager))) = plan else {
+    let Some(Ok((pt_phys, region_start, shared_file, pager, generation))) = plan else {
         return false;
     };
 
     let page = match pager.as_ref() {
         Some((object, page_index)) if !shared_file => match object.page(*page_index) {
             Ok(page) => Some(page),
-            Err(_) => return false,
+            Err(_) => return object.memory_generation() != generation,
         },
         Some(_) => None,
         None => Some(Arc::new([0u8; crate::mem::vm_object::PAGE_BYTES])),
@@ -495,22 +499,21 @@ pub fn handle_user_memory_fault(fault_addr: u64, is_write: bool, is_execute: boo
             }
         } else {
             let page = page.as_ref().ok_or(EINVAL)?;
-            if crate::mem::paging::map_and_copy_segment_to(
-                pt_phys,
-                page_addr,
-                crate::mem::vm_object::PAGE_BYTES as u64,
-                4096,
-                page.as_slice(),
-                is_write && region.allows_write_at(fault_addr),
-                executable,
-            )
-            .is_err()
-            {
-                crate::debug!(
-                    "[MEMORY_FAULT] map_and_copy_segment_to failed for {:#x}",
-                    page_addr
-                );
-                return Err(ENOMEM);
+            let install = || {
+                crate::mem::paging::map_and_copy_segment_to(
+                    pt_phys,
+                    page_addr,
+                    crate::mem::vm_object::PAGE_BYTES as u64,
+                    4096,
+                    page.as_slice(),
+                    is_write && region.allows_write_at(fault_addr),
+                    executable,
+                )
+                .map_err(|_| ENOMEM)
+            };
+            match pager.as_ref() {
+                Some((object, _)) => object.with_memory_generation(generation, install)?,
+                None => install()?,
             }
         }
         if is_write {

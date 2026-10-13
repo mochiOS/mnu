@@ -76,6 +76,12 @@ impl SharedMemory {
         Ok((page.0, generation))
     }
 
+    /// Capture the serialized epoch before loading private page bytes.
+    pub(crate) fn generation(&self) -> u64 {
+        let _pages = self.pages.lock();
+        self.generation.load(Ordering::Relaxed)
+    }
+
     /// Keep size/epoch stable through the final PTE installation. This prevents
     /// an old prepared page from being installed after shrink and regrowth.
     pub(crate) fn with_generation<T>(
