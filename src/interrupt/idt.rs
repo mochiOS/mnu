@@ -756,13 +756,27 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     warn!("{:#?}", stack_frame);
 
     if is_user_mode {
-        // Dump detailed virtual->physical diagnostics using the active CR3
-        dump_invalid_opcode_diagnostics(&stack_frame);
+        // Match the invalid-opcode path: user register values must not select
+        // unrestricted physical-memory reads through the active kernel CR3.
+        error!("User-mode protection diagnostics are redacted in this path");
         error!("Terminating faulting user process");
         crate::task::scheduler::exit_current_process(-1);
     } else {
         halt_cpu();
     }
+}
+
+fn translate_current_user_fault(expected_root: u64, address: u64) -> Option<u64> {
+    let pid = crate::syscall::security::current_process_id()?;
+    crate::task::with_process(pid, |process| {
+        if process.page_table() != Some(expected_root) {
+            return None;
+        }
+        // Keep the root and its page-table hierarchy alive until translation
+        // completes. No physical-frame reference escapes into log formatting.
+        crate::mem::paging::virt_to_phys_in_table(expected_root, address)
+    })
+    .flatten()
 }
 
 /// ページフォルト例外ハンドラ
@@ -851,9 +865,7 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let translated = if is_user_mode {
         user_page_table
-            .and_then(|table| {
-                crate::mem::paging::virt_to_phys_in_table(table, faulting_addr.as_u64())
-            })
+            .and_then(|table| translate_current_user_fault(table, faulting_addr.as_u64()))
             .map(PhysAddr::new)
     } else {
         crate::mem::paging::translate_addr(faulting_addr)
