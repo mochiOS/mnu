@@ -175,44 +175,50 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
     if !has_mmio_device && !crate::task::process_has_kernel_authority(pid, &requested_authority) {
         return EACCES;
     }
-    let pt_phys = match crate::task::with_process(pid, |proc| proc.page_table()).flatten() {
-        Some(pt) => pt,
-        None => return ENOMEM,
-    };
-
     let writable = true;
     let mapping = crate::task::MmioMapping::new(virt_addr, size, phys_addr, writable);
-    let admitted = crate::task::with_process_mut(pid, |proc| {
+    let outcome = crate::task::with_process_mut(pid, |proc| {
+        use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
+        let pt_phys = proc.page_table().ok_or(ENOMEM)?;
         if proc.mmio_mapping_count() >= proc.resource_limits().max_mmio_ranges {
             return Err(ENOMEM);
+        }
+        if crate::mem::paging::is_user_range_occupied_in_table(pt_phys, virt_addr, size) {
+            return Err(EINVAL);
         }
         if !proc.add_mmio_mapping(mapping.clone()) {
             return Err(EINVAL);
         }
+        if crate::mem::paging::map_physical_range_to_user(
+            pt_phys,
+            virt_addr,
+            phys_addr,
+            size,
+            crate::mem::paging::MappingCache::Uncached,
+        )
+        .is_err()
+        {
+            // Keep the root alive and exclude faults/clone/resize throughout
+            // rollback. MMIO frames are borrowed: detach only after TLB ack.
+            let mut backend = unsafe { Native::for_process(proc, false) };
+            transaction::revoke([(pt_phys, virt_addr, virt_addr + size)], &mut backend)
+                .map_err(|error| match error {
+                    transaction::Error::InvalidRange => EINVAL,
+                    transaction::Error::Allocation => ENOMEM,
+                    transaction::Error::Backend(error) => error,
+                })?;
+            // If revocation fails, retain metadata for the restored partial
+            // mapping. Never leave live PTEs without an ownership record.
+            proc.remove_mmio_mapping(virt_addr, size);
+            return Err(ENOMEM);
+        }
         Ok(())
     });
-    match admitted {
-        Some(Ok(())) => {}
-        Some(Err(errno)) => return errno,
-        None => return ENOMEM,
+    match outcome {
+        Some(Ok(())) => SUCCESS,
+        Some(Err(errno)) => errno,
+        None => ENOMEM,
     }
-
-    if crate::mem::paging::map_physical_range_to_user(
-        pt_phys,
-        virt_addr,
-        phys_addr,
-        size,
-        crate::mem::paging::MappingCache::Uncached,
-    )
-    .is_err()
-    {
-        let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(pt_phys, virt_addr, size);
-        let _ =
-            crate::task::with_process_mut(pid, |proc| proc.remove_mmio_mapping(virt_addr, size));
-        return ENOMEM;
-    }
-
-    SUCCESS
 }
 
 pub fn get_physical_addr(virt_addr: u64) -> u64 {
