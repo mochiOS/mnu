@@ -50,20 +50,80 @@ fn randomized_dma_base(pid: ProcessId) -> u64 {
     DMA_VA_BASE_MIN.saturating_add((aslr_mix64(seed) % DMA_VA_ASLR_MAX_PAGES) * 4096)
 }
 
-fn allocate_dma_virtual_range(pid: ProcessId, size: u64) -> Result<(u64, u64), u64> {
-    crate::task::with_process_mut(pid, |process| {
-        if process.dma_end() == 0 {
-            let base = randomized_dma_base(pid);
-            process.set_dma_start(base);
-            process.set_dma_end(base);
+fn allocate_dma_virtual_range(
+    process: &mut crate::task::Process,
+    pid: ProcessId,
+    size: u64,
+) -> Result<(u64, u64), u64> {
+    if process.dma_end() == 0 {
+        let base = randomized_dma_base(pid);
+        process.set_dma_start(base);
+        process.set_dma_end(base);
+    }
+    let old_dma_end = process.dma_end();
+    let map_start = page_align_up(old_dma_end).ok_or(EINVAL)?;
+    let new_heap_end = map_start.checked_add(size).ok_or(EINVAL)?;
+    if !crate::syscall::is_canonical_user_range(map_start, size) {
+        return Err(EINVAL);
+    }
+    process.set_dma_end(new_heap_end);
+    Ok((map_start, old_dma_end))
+}
+
+enum InstallError {
+    Unpublished(u64),
+    Retained(u64),
+}
+
+/// Called only under PROCESS_TABLE. Retained failures leave the DMA record
+/// owning storage that could not safely be unmapped; the caller must not free it.
+fn install_dma_buffer(
+    process: &mut crate::task::Process,
+    pid: ProcessId,
+    pt_phys: u64,
+    handle: u64,
+    phys_start: u64,
+    size: u64,
+    page_count: usize,
+) -> Result<u64, InstallError> {
+    use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
+    if process.page_table() != Some(pt_phys) {
+        return Err(InstallError::Unpublished(EINVAL));
+    }
+    let (virt_start, old_dma_end) =
+        allocate_dma_virtual_range(process, pid, size).map_err(InstallError::Unpublished)?;
+    let buffer = DmaBuffer::new(handle, virt_start, size, phys_start, page_count);
+    if process
+        .find_mmio_mapping_by_addr(virt_start, size)
+        .is_some()
+        || crate::mem::paging::is_user_range_occupied_in_table(pt_phys, virt_start, size)
+        || !process.add_dma_buffer(buffer)
+    {
+        process.set_dma_end(old_dma_end);
+        return Err(InstallError::Unpublished(EINVAL));
+    }
+    for idx in 0..page_count {
+        let virt = virt_start + idx as u64 * 4096;
+        let phys = phys_start + idx as u64 * 4096;
+        if crate::mem::paging::map_page_in_table(pt_phys, virt, phys, true, true).is_err() {
+            // SAFETY: the same process-table guard covers admission, PTE edits
+            // and acknowledgements. DMA owns frames separately from its PTEs.
+            let mut backend = unsafe { Native::for_process(process, false) };
+            transaction::revoke([(pt_phys, virt_start, virt_start + size)], &mut backend).map_err(
+                |error| {
+                    InstallError::Retained(match error {
+                        transaction::Error::InvalidRange => EINVAL,
+                        transaction::Error::Allocation => ENOMEM,
+                        transaction::Error::Backend(error) => error,
+                    })
+                },
+            )?;
+            process.remove_dma_buffer(handle);
+            process.set_dma_end(old_dma_end);
+            return Err(InstallError::Unpublished(ENOMEM));
         }
-        let old_dma_end = process.dma_end();
-        let map_start = page_align_up(old_dma_end).ok_or(EINVAL)?;
-        let new_heap_end = map_start.checked_add(size).ok_or(EINVAL)?;
-        process.set_dma_end(new_heap_end);
-        Ok((map_start, old_dma_end))
-    })
-    .unwrap_or(Err(ENOMEM))
+    }
+    Ok(virt_start)
 }
 
 pub fn alloc(length: u64, out_ptr: u64) -> u64 {
@@ -106,45 +166,21 @@ pub fn alloc(length: u64, out_ptr: u64) -> u64 {
     crate::performance::record_frame_zero(zero_started, size as usize);
     let handle = NEXT_DMA_HANDLE.fetch_add(1, Ordering::Relaxed);
 
-    let (virt_start, old_dma_end) = match allocate_dma_virtual_range(pid, size) {
-        Ok(v) => v,
-        Err(errno) => {
+    let outcome = crate::task::with_process_mut(pid, |process| {
+        install_dma_buffer(process, pid, pt_phys, handle, phys_start, size, page_count)
+    });
+    let virt_start = match outcome {
+        Some(Ok(start)) => start,
+        Some(Err(InstallError::Retained(error))) => return error,
+        Some(Err(InstallError::Unpublished(error))) => {
             release_dma_frames(phys_start, page_count);
-            return errno;
+            return error;
         }
-    };
-
-    let buffer = DmaBuffer::new(handle, virt_start, size, phys_start, page_count);
-    let reserved = crate::task::with_process_mut(pid, |process| process.add_dma_buffer(buffer))
-        .unwrap_or(false);
-    if !reserved {
-        let _ = crate::task::with_process_mut(pid, |process| process.set_dma_end(old_dma_end));
-        release_dma_frames(phys_start, page_count);
-        return EINVAL;
-    }
-
-    let mut mapped_pages = 0usize;
-    for idx in 0..page_count {
-        let virt = virt_start + (idx as u64) * 4096;
-        let phys = phys_start + (idx as u64) * 4096;
-        if crate::mem::paging::map_page_in_table(pt_phys, virt, phys, true, true).is_err() {
-            let rollback_len = (mapped_pages as u64) * 4096;
-            if rollback_len != 0 {
-                let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
-                    pt_phys,
-                    virt_start,
-                    rollback_len,
-                );
-            }
-            let _ = crate::task::with_process_mut(pid, |process| {
-                let _ = process.remove_dma_buffer(handle);
-                process.set_dma_end(old_dma_end);
-            });
+        None => {
             release_dma_frames(phys_start, page_count);
             return ENOMEM;
         }
-        mapped_pages += 1;
-    }
+    };
 
     let info = DmaAllocation {
         handle,
