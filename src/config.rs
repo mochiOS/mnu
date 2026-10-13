@@ -52,7 +52,6 @@ impl SchedulerConfig {
 pub struct IpcConfig {
     pub mailbox_cap: usize,
     pub max_msg_size: usize,
-    pub max_external_pages: usize,
 }
 
 #[derive(Clone)]
@@ -150,7 +149,6 @@ impl Default for KernelConfig {
             ipc: IpcConfig {
                 mailbox_cap: 64,
                 max_msg_size: IPC_MESSAGE_CAPACITY,
-                max_external_pages: 262_144,
             },
             fs: FsConfig {
                 service_retry_count: 3,
@@ -323,11 +321,6 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
         "ipc.max_msg_size" => {
             if let Some(v) = parse_usize(value) {
                 config.ipc.max_msg_size = v;
-            }
-        }
-        "ipc.max_external_pages" => {
-            if let Some(v) = parse_usize(value) {
-                config.ipc.max_external_pages = v;
             }
         }
         "fs.service_retry_count" => {

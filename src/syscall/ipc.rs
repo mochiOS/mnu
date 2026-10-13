@@ -14,8 +14,6 @@ const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
 const MESSAGE_CACHE_CAP: usize = MAILBOX_CAP;
 const MAX_MSG_SIZE: usize = crate::config::IPC_MESSAGE_CAPACITY;
-const MAX_EXT_PAGES: usize = 262_144;
-const MAX_INLINE_EXT_PAGES: usize = 16;
 const MAX_OBJECT_HANDLES: usize = mnu_abi::IPC_MAX_OBJECT_HANDLES;
 
 /// endpoint ベース IPC への移行用ハンドル
@@ -666,7 +664,6 @@ fn recv_blocking_reply_for_thread(
             Some(receive) => {
                 let (from, copy_len, _) = match finish_user_receive(
                     receiver_thread_id,
-                    buf_ptr,
                     receive,
                     object_handles_output,
                 ) {
@@ -695,7 +692,6 @@ fn recv_blocking_reply_for_thread(
                         drop(boxes);
                         let (from, copy_len, _) = match finish_user_receive(
                             receiver_thread_id,
-                            buf_ptr,
                             receive,
                             object_handles_output,
                         ) {
@@ -751,25 +747,6 @@ pub fn send_to_endpoint(endpoint: IpcEndpoint, buf_ptr: u64, len: u64) -> u64 {
     send(endpoint.thread_id, buf_ptr, len)
 }
 
-pub fn send_pages_to_endpoint(
-    endpoint: IpcEndpoint,
-    map_start: u64,
-    total: u64,
-    pages: &[u64],
-) -> bool {
-    if !endpoint_is_valid(endpoint) {
-        return false;
-    }
-    send_pages_from_kernel(endpoint.thread_id, map_start, total, pages)
-}
-
-pub fn send_map_header_to_endpoint(endpoint: IpcEndpoint, map_start: u64, total: u64) -> bool {
-    if !endpoint_is_valid(endpoint) {
-        return false;
-    }
-    send_map_header_from_kernel(endpoint.thread_id, map_start, total)
-}
-
 #[inline]
 fn ipc_mailbox_cap() -> usize {
     // At least one ordinary message and one synchronous reply must fit.
@@ -782,14 +759,6 @@ fn ipc_mailbox_cap() -> usize {
 #[inline]
 fn ipc_max_msg_size() -> usize {
     crate::config::kernel().ipc.max_msg_size.min(MAX_MSG_SIZE)
-}
-
-#[inline]
-fn ipc_max_external_pages() -> usize {
-    crate::config::kernel()
-        .ipc
-        .max_external_pages
-        .min(MAX_EXT_PAGES)
 }
 
 #[inline]
@@ -898,14 +867,6 @@ fn install_received_object_handles(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ExternalPages {
-    count: u32,
-    total: u64,
-    inline_pages_count: u16,
-    inline_pages: [u64; MAX_INLINE_EXT_PAGES],
-}
-
 #[derive(Debug)]
 struct ObjectHandleAttachments {
     count: usize,
@@ -927,21 +888,6 @@ impl ObjectHandleAttachments {
     }
 }
 
-impl ExternalPages {
-    const fn empty() -> Self {
-        Self {
-            count: 0,
-            total: 0,
-            inline_pages_count: 0,
-            inline_pages: [0; MAX_INLINE_EXT_PAGES],
-        }
-    }
-
-    const fn is_empty(self) -> bool {
-        self.count == 0
-    }
-}
-
 #[derive(Debug)]
 pub struct Message {
     from: u64,
@@ -953,7 +899,6 @@ pub struct Message {
     call_id: u64,
     len: usize,
     data: [u8; MAX_MSG_SIZE],
-    ext_pages: ExternalPages,
     object_handles: ObjectHandleAttachments,
 }
 
@@ -969,7 +914,6 @@ impl Message {
             call_id: 0,
             len: 0,
             data: [0; MAX_MSG_SIZE],
-            ext_pages: ExternalPages::empty(),
             object_handles: ObjectHandleAttachments::empty(),
         }
     }
@@ -978,10 +922,8 @@ impl Message {
 struct UserReceive {
     from: u64,
     copy_len: usize,
-    ext_pages: ExternalPages,
     expects_reply: bool,
     call_id: u64,
-    external_header: [u8; 16],
     object_handles: ObjectHandleAttachments,
 }
 
@@ -1172,7 +1114,6 @@ impl Mailbox {
         msg.expects_reply = expects_reply;
         msg.call_id = call_id;
         msg.len = data.len();
-        msg.ext_pages = ExternalPages::empty();
         msg.object_handles = ObjectHandleAttachments::empty();
         msg.object_handles.delivery_flags = delivery_flags;
         if !data.is_empty() {
@@ -1220,27 +1161,16 @@ impl Mailbox {
             }
 
             let copy_len = core::cmp::min(msg.len, max_copy);
-            let mut external_header = [0u8; 16];
-            if msg.ext_pages.is_empty() {
-                if copy_len > 0 && buf_ptr != 0 {
-                    crate::syscall::copy_to_user(buf_ptr, &msg.data[..copy_len])?;
-                    record_ipc_copy(copy_len);
-                }
-            } else {
-                if copy_len < external_header.len() {
-                    return Err(EFAULT);
-                }
-                external_header.copy_from_slice(&msg.data[..16]);
-                record_ipc_copy(16);
+            if copy_len > 0 && buf_ptr != 0 {
+                crate::syscall::copy_to_user(buf_ptr, &msg.data[..copy_len])?;
+                record_ipc_copy(copy_len);
             }
 
             let receive = UserReceive {
                 from: msg.from,
                 copy_len,
-                ext_pages: msg.ext_pages,
                 expects_reply: msg.expects_reply,
                 call_id: msg.call_id,
-                external_header,
                 object_handles: core::mem::replace(
                     &mut msg.object_handles,
                     ObjectHandleAttachments::empty(),
@@ -1351,34 +1281,20 @@ impl Mailbox {
             }
 
             let copy_len = core::cmp::min(msg.len, max_copy);
-            let mut external_header = [0u8; 16];
-            if msg.ext_pages.is_empty() {
-                if copy_len > 0 && buf_ptr != 0 {
-                    if let Err(error) = crate::syscall::copy_to_user(buf_ptr, &msg.data[..copy_len]) {
-                        if self.enqueue_slot(slot_idx).is_err() {
-                            let _ = self.free_slot(slot_idx);
-                        }
-                        return Err(error);
+            if copy_len > 0 && buf_ptr != 0 {
+                if let Err(error) = crate::syscall::copy_to_user(buf_ptr, &msg.data[..copy_len]) {
+                    if self.enqueue_slot(slot_idx).is_err() {
+                        let _ = self.free_slot(slot_idx);
                     }
-                    record_ipc_copy(copy_len);
+                    return Err(error);
                 }
-            } else {
-                if copy_len < external_header.len() {
-                    if !self.free_slot(slot_idx) {
-                        return Ok(None);
-                    }
-                    return Err(EFAULT);
-                }
-                external_header.copy_from_slice(&msg.data[..16]);
-                record_ipc_copy(16);
+                record_ipc_copy(copy_len);
             }
             let receive = UserReceive {
                 from: msg.from,
                 copy_len,
-                ext_pages: msg.ext_pages,
                 expects_reply: false,
                 call_id: msg.call_id,
-                external_header,
                 object_handles: core::mem::replace(
                     &mut msg.object_handles,
                     ObjectHandleAttachments::empty(),
@@ -1738,7 +1654,6 @@ fn call_endpoint_with_attachments_from_kernel(
             message.to_slot = dest_slot as u16;
             message.to_generation = dest_generation;
             message.is_reply = false;
-            message.ext_pages = ExternalPages::empty();
             message.expects_reply = true;
             message.call_id = call_id;
             message.len = request.len();
@@ -1798,142 +1713,6 @@ fn call_endpoint_with_attachments_from_kernel(
             }
         }
     }
-}
-
-/// Kernel -> recipient: send a message that carries explicit physical page frame addresses.
-pub fn send_pages_from_kernel(
-    dest_thread_id: u64,
-    map_start: u64,
-    total: u64,
-    pages: &[u64],
-) -> bool {
-    if pages.len() > MAX_INLINE_EXT_PAGES || pages.len() > ipc_max_external_pages() {
-        return false;
-    }
-    let (idx, dest_generation) =
-        match crate::task::thread_slot_index_and_generation_by_u64(dest_thread_id) {
-            Some(v) => v,
-            None => return false,
-        };
-    if idx >= MAX_THREADS {
-        return false;
-    }
-    let sender = crate::task::current_thread_id()
-        .and_then(|t| ensure_endpoint_for_thread(t.as_u64()))
-        .unwrap_or(0);
-    let mut boxes = lock_mailboxes();
-    boxes.get_mut(idx).map_or(false, |mb| {
-        if 16 > ipc_max_msg_size() {
-            return false;
-        }
-        if let Some(slot_idx) = mb.alloc_slot() {
-            let Some(msg) = mb.slots[slot_idx].as_deref_mut() else {
-                mb.quarantine("ipc mailbox allocated slot is missing");
-                return false;
-            };
-            msg.from = sender;
-            msg.to = dest_thread_id;
-            msg.to_slot = idx as u16;
-            msg.to_generation = dest_generation;
-            msg.is_reply = false;
-            msg.expects_reply = false;
-            // serialize map_start, total only.
-            // 物理ページ配列は data に露出させず ext_pages 側だけに保持する。
-            msg.data[0..8].copy_from_slice(&map_start.to_le_bytes());
-            msg.data[8..16].copy_from_slice(&total.to_le_bytes());
-            msg.len = 16;
-            msg.ext_pages = ExternalPages::empty();
-            msg.ext_pages.count = pages.len() as u32;
-            msg.ext_pages.total = total;
-            msg.ext_pages.inline_pages_count = pages.len() as u16;
-            for (index, page) in pages.iter().enumerate() {
-                msg.ext_pages.inline_pages[index] = *page;
-            }
-            // enqueue
-            if mb.enqueue_slot(slot_idx).is_err() {
-                let _ = mb.free_slot(slot_idx);
-                return false;
-            }
-            let waiter = mb.take_waiter();
-            if waiter != 0 {
-                crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(waiter));
-            }
-            true
-        } else {
-            false
-        }
-    })
-}
-
-
-// New: Kernel -> recipient: send a map header only (magic + map_start + total) without page list
-pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u64) -> bool {
-    const MAP_HEADER_MAGIC: u32 = 0xABCD_DCBAu32;
-    let (idx, dest_generation) =
-        match crate::task::thread_slot_index_and_generation_by_u64(dest_thread_id) {
-            Some(v) => v,
-            None => return false,
-        };
-    if idx >= MAX_THREADS {
-        return false;
-    }
-    let sender = crate::task::current_thread_id()
-        .map(|t| t.as_u64())
-        .unwrap_or(0);
-    let mut boxes = lock_mailboxes();
-    boxes.get_mut(idx).map_or(false, |mb| {
-        if 20 > ipc_max_msg_size() {
-            return false;
-        }
-        if let Some(slot_idx) = mb.alloc_slot() {
-            let Some(msg) = mb.slots[slot_idx].as_deref_mut() else {
-                mb.quarantine("ipc mailbox allocated slot is missing");
-                return false;
-            };
-            msg.from = sender;
-            msg.to = dest_thread_id;
-            msg.to_slot = idx as u16;
-            msg.to_generation = dest_generation;
-            msg.is_reply = false;
-            msg.expects_reply = false;
-            // New format: [magic:u32][map_start:u64][total:u64] (20 bytes)
-            let mut off = 0usize;
-            msg.data[off..off + 4].copy_from_slice(&MAP_HEADER_MAGIC.to_le_bytes());
-            off += 4;
-            msg.data[off..off + 8].copy_from_slice(&map_start.to_le_bytes());
-            off += 8;
-            msg.data[off..off + 8].copy_from_slice(&(total).to_le_bytes());
-            off += 8;
-            crate::debug!(
-                "[IPC KERN] map_header: magic={:#x} map_start={:#x} total={} len={}",
-                MAP_HEADER_MAGIC,
-                map_start,
-                total,
-                off
-            );
-            crate::info!(
-                "[IPC KERN] send_map_header dest={} map_start=0x{:x} total={} len={}",
-                dest_thread_id,
-                map_start,
-                total,
-                off
-            );
-            msg.len = off;
-            msg.ext_pages = ExternalPages::empty();
-            // enqueue
-            if mb.enqueue_slot(slot_idx).is_err() {
-                let _ = mb.free_slot(slot_idx);
-                return false;
-            }
-            let waiter = mb.take_waiter();
-            if waiter != 0 {
-                crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(waiter));
-            }
-            true
-        } else {
-            false
-        }
-    })
 }
 
 fn send_to_thread_id(dest_thread_id: u64, sender_handle: u64, buf_ptr: u64, len: u64) -> u64 {
@@ -2045,7 +1824,6 @@ fn send_to_thread_id_with_attachments(
     message.expects_reply = expects_reply;
     message.call_id = call_id;
     message.len = len;
-    message.ext_pages = ExternalPages::empty();
     message.object_handles = object_handles;
 
     // ユーザー空間から、キューが所有する領域へ直接コピーする。
@@ -2165,161 +1943,9 @@ pub fn send_object_handles(
 }
 
 
-fn map_external_pages_for_receiver(
-    receiver_tid: u64,
-    map_start_hint: u64,
-    total: u64,
-    ext_pages: ExternalPages,
-) -> Result<ExternalPageMapping, u64> {
-    if ext_pages.count == 0 || ext_pages.count as usize > ipc_max_external_pages() {
-        return Err(EINVAL);
-    }
-    if ext_pages.inline_pages_count == 0
-        || ext_pages.inline_pages_count as u32 != ext_pages.count
-        || ext_pages.inline_pages_count as usize > MAX_INLINE_EXT_PAGES
-    {
-        return Err(EINVAL);
-    }
-    if total == 0 {
-        return Err(EINVAL);
-    }
-    if ext_pages.total != 0 && total > ext_pages.total {
-        return Err(EINVAL);
-    }
-    let max_bytes = (ext_pages.count as u64).saturating_mul(0x1000);
-    if total > max_bytes {
-        return Err(EINVAL);
-    }
-
-    let target_pid = crate::task::thread_to_process_id(receiver_tid).ok_or(EINVAL)?;
-    let page_span = (ext_pages.count as u64).saturating_mul(0x1000);
-
-    let _ = map_start_hint; // 受信側の安全のためヒントは無視して自動配置する
-    let (virt_addr, page_table, reserved_mapping_old, reserved_mapping_new) =
-        match crate::task::with_process_mut(target_pid, |p| {
-            let base = if p.ipc_mapping_end() < 0x7100_0000_0000u64 {
-                0x7100_0000_0000u64
-            } else {
-                p.ipc_mapping_end()
-            };
-            let virt_addr = base
-                .checked_add(0xfff)
-                .map(|v| v & !0xfffu64)
-                .ok_or(EINVAL)?;
-            let new_end = virt_addr.checked_add(page_span).ok_or(EINVAL)?;
-            let pt = p.page_table().ok_or(EINVAL)?;
-            let old_end = p.ipc_mapping_end();
-            p.set_ipc_mapping_end(new_end);
-            Ok((virt_addr, pt, old_end, new_end))
-        }) {
-            Some(Ok(v)) => (v.0, v.1, Some(v.2), Some(v.3)),
-            Some(Err(e)) => return Err(e),
-            None => return Err(EINVAL),
-        };
-
-    for i in 0..(ext_pages.count as usize) {
-        let target_virt = virt_addr + (i as u64 * 0x1000);
-        let phys_addr = ext_pages.inline_pages[i];
-        if crate::mem::paging::map_page_in_table(page_table, target_virt, phys_addr, true, true)
-            .is_err()
-        {
-            for j in 0..i {
-                let rollback_virt = virt_addr + (j as u64 * 0x1000);
-                let _ = crate::mem::paging::unmap_page_in_table(page_table, rollback_virt);
-            }
-            if let (Some(old_end), Some(new_end)) = (reserved_mapping_old, reserved_mapping_new) {
-                let _ = crate::task::with_process_mut(target_pid, |p| {
-                    if p.ipc_mapping_end() == new_end {
-                        p.set_ipc_mapping_end(old_end);
-                    }
-                });
-            }
-            return Err(EFAULT);
-        }
-    }
-
-    Ok(ExternalPageMapping {
-        target_pid,
-        page_table,
-        virt_addr,
-        old_end: reserved_mapping_old.unwrap_or(0),
-        new_end: reserved_mapping_new.unwrap_or(0),
-        page_count: ext_pages.count as usize,
-    })
-}
-
-struct ExternalPageMapping {
-    target_pid: crate::task::ProcessId,
-    page_table: u64,
-    virt_addr: u64,
-    old_end: u64,
-    new_end: u64,
-    page_count: usize,
-}
-
-impl ExternalPageMapping {
-    fn rollback(&self) {
-        for i in 0..self.page_count {
-            let rollback_virt = self.virt_addr + (i as u64 * 0x1000);
-            let _ = crate::mem::paging::unmap_page_in_table(self.page_table, rollback_virt);
-        }
-        let _ = crate::task::with_process_mut(self.target_pid, |p| {
-            if p.ipc_mapping_end() == self.new_end {
-                p.set_ipc_mapping_end(self.old_end);
-            }
-        });
-    }
-}
-
-fn prepare_external_pages_for_user(
-    receiver_tid: u64,
-    recv_buf: &mut [u8],
-    copy_len: usize,
-    ext_pages: ExternalPages,
-) -> Result<(usize, Option<ExternalPageMapping>), u64> {
-    if ext_pages.is_empty() {
-        return Ok((copy_len, None));
-    }
-    crate::debug!(
-        "[IPC RCV] prepare_external_pages_for_user receiver={} copy_len={} ext_pages_count={}",
-        receiver_tid,
-        copy_len,
-        ext_pages.count
-    );
-    if copy_len < 16 || recv_buf.len() < 16 {
-        return Err(EFAULT);
-    }
-    let map_start_hint = u64::from_le_bytes([
-        recv_buf[0],
-        recv_buf[1],
-        recv_buf[2],
-        recv_buf[3],
-        recv_buf[4],
-        recv_buf[5],
-        recv_buf[6],
-        recv_buf[7],
-    ]);
-    let total = u64::from_le_bytes([
-        recv_buf[8],
-        recv_buf[9],
-        recv_buf[10],
-        recv_buf[11],
-        recv_buf[12],
-        recv_buf[13],
-        recv_buf[14],
-        recv_buf[15],
-    ]);
-    let mapped_addr =
-        map_external_pages_for_receiver(receiver_tid, map_start_hint, total, ext_pages)?;
-    recv_buf[0..8].copy_from_slice(&mapped_addr.virt_addr.to_le_bytes());
-    recv_buf[8..16].copy_from_slice(&total.to_le_bytes());
-    Ok((16, Some(mapped_addr)))
-}
-
 fn finish_user_receive(
     receiver_thread_id: u64,
-    buf_ptr: u64,
-    mut receive: UserReceive,
+    receive: UserReceive,
     object_handles_output: Option<u64>,
 ) -> Result<(u64, usize, bool), u64> {
     if let Some(output) = object_handles_output {
@@ -2327,28 +1953,7 @@ fn finish_user_receive(
     } else if !receive.object_handles.is_empty() {
         return Err(EMSGSIZE);
     }
-    if receive.ext_pages.is_empty() {
-        return Ok((receive.from, receive.copy_len, receive.expects_reply));
-    }
-
-    let (copy_len, mapping) = prepare_external_pages_for_user(
-        receiver_thread_id,
-        &mut receive.external_header,
-        receive.copy_len,
-        receive.ext_pages,
-    )?;
-    if copy_len > 0 && buf_ptr != 0 {
-        if let Err(error) =
-            crate::syscall::copy_to_user(buf_ptr, &receive.external_header[..copy_len])
-        {
-            if let Some(mapping) = mapping.as_ref() {
-                mapping.rollback();
-            }
-            return Err(error);
-        }
-        record_ipc_copy(copy_len);
-    }
-    Ok((receive.from, copy_len, receive.expects_reply))
+    Ok((receive.from, receive.copy_len, receive.expects_reply))
 }
 
 fn recv_from_thread_nonblocking(
@@ -2394,7 +1999,7 @@ fn recv_from_thread_nonblocking(
         }
     };
     let (from, copy_len, _) =
-        match finish_user_receive(receiver_thread_id, buf_ptr, receive, object_handles_output) {
+        match finish_user_receive(receiver_thread_id, receive, object_handles_output) {
             Ok(result) => result,
             Err(error) => return error,
         };
@@ -2459,7 +2064,6 @@ fn recv_blocking_for_thread(
             Some(receive) => {
                 let (from, copy_len, _) = match finish_user_receive(
                     receiver_thread_id,
-                    buf_ptr,
                     receive,
                     object_handles_output,
                 ) {
@@ -2499,7 +2103,6 @@ fn recv_blocking_for_thread(
                         drop(boxes);
                         let (from, copy_len, _) = match finish_user_receive(
                             receiver_thread_id,
-                            buf_ptr,
                             receive,
                             object_handles_output,
                         ) {
