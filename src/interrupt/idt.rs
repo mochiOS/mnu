@@ -927,55 +927,49 @@ fn try_grow_user_stack(fault_addr: u64) -> bool {
         Some(p) => p,
         None => return false,
     };
-    let (stack_bottom, stack_top, page_table) =
-        match crate::task::with_process(pid, |p| (p.stack_bottom(), p.stack_top(), p.page_table()))
-        {
-            Some(v) => v,
-            None => return false,
+    // Capture, admission, PTE edits and metadata publication share the VM
+    // writer lock with faults/unmap/resize. A reservation is not stack space,
+    // even when its backing is absent and its PTEs are currently unused.
+    crate::task::with_process_mut(pid, |process| {
+        let stack_bottom = process.stack_bottom();
+        let stack_top = process.stack_top();
+        let Some(page_table) = process.page_table() else {
+            return false;
         };
-    let page_table = match page_table {
-        Some(pt) => pt,
-        None => return false,
-    };
-    if stack_bottom == 0 || stack_top == 0 {
-        crate::error!("[STACK_GROW] FAILED: uninitialized stack - pid={}, stack_bottom={:#x}, stack_top={:#x}", pid.as_u64(), stack_bottom, stack_top);
-        return false;
-    }
-    // フォルトアドレスは現在のスタック下端より下でなければならない
-    if fault_addr >= stack_bottom {
-        return false;
-    }
-    // 最大スタックサイズを超えて伸ばさない
-    let min_allowed = stack_bottom.saturating_sub(MAX_STACK_SIZE);
-    if fault_addr < min_allowed {
-        crate::error!(
-            "Stack overflow: fault at {:#x}, stack_bottom={:#x}, min allowed {:#x}",
-            fault_addr,
-            stack_bottom,
-            min_allowed
-        );
-        return false;
-    }
-    // フォルトページから現在の下端まで一括マップ（通常は1ページだけ）
-    let new_page = (fault_addr / 4096) * 4096;
-    let map_size = stack_bottom - new_page;
-    if crate::mem::paging::map_and_copy_segment_to(
-        page_table,
-        new_page,
-        0,
-        map_size,
-        &[],
-        true,
-        false,
-    )
-    .is_ok()
-    {
-        crate::task::with_process_mut(pid, |p| p.set_stack_bottom(new_page));
-        crate::debug!("Stack grown: {:#x} -> {:#x}", stack_bottom, new_page);
+        if stack_bottom == 0 || stack_top == 0 || fault_addr >= stack_bottom {
+            return false;
+        }
+        // The total limit is relative to the fixed top, not the moving bottom.
+        if fault_addr < stack_top.saturating_sub(MAX_STACK_SIZE) {
+            return false;
+        }
+        let new_page = fault_addr & !4095;
+        let map_size = stack_bottom - new_page;
+        let reserved = process.memory_regions().iter().any(|region| {
+            region
+                .end()
+                .is_none_or(|end| new_page < end && region.start() < stack_bottom)
+        });
+        if reserved
+            || process.find_mmio_mapping_by_addr(new_page, map_size).is_some()
+            || process.find_dma_buffer_by_addr(new_page, map_size).is_some()
+            || crate::mem::paging::is_user_range_occupied_in_table(
+                page_table, new_page, map_size,
+            )
+        {
+            return false;
+        }
+        if crate::mem::paging::map_and_copy_segment_to(
+            page_table, new_page, 0, map_size, &[], true, false,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        process.set_stack_bottom(new_page);
         true
-    } else {
-        false
-    }
+    })
+    .unwrap_or(false)
 }
 
 /// x87浮動小数点例外ハンドラ
