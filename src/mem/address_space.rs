@@ -1,5 +1,6 @@
 //! Detached VM images with immutable origin ceilings, not authority grants.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::interrupt::spinlock::SpinLock;
@@ -114,8 +115,11 @@ impl CloneSource {
             }
         })
         .map_err(|_| CloneError::Allocation)?;
+        let root = super::detached_roots::Root::new(table, &self.regions)
+            .map_err(|_| CloneError::Allocation)?;
         Ok(AddressSpaceImage {
             table: Some(table),
+            root,
             regions: self.regions,
             heap_start: self.heap_start,
             heap_end: self.heap_end,
@@ -131,6 +135,7 @@ impl CloneSource {
 /// final Handle releases them even if no process was ever created from it.
 pub struct AddressSpaceImage {
     table: Option<u64>,
+    root: Arc<super::detached_roots::Root>,
     regions: Vec<MemoryRegion>,
     heap_start: u64,
     heap_end: u64,
@@ -160,6 +165,7 @@ impl AddressSpaceImage {
             return Err(self);
         };
         process.set_page_table(table);
+        process.set_pending_image_root(self.root.clone());
         process.set_memory_regions(core::mem::take(&mut self.regions));
         process.set_heap_start(self.heap_start);
         process.set_heap_end(self.heap_end);
@@ -175,15 +181,5 @@ impl core::fmt::Debug for AddressSpaceImage {
         formatter
             .debug_struct("AddressSpaceImage")
             .finish_non_exhaustive()
-    }
-}
-
-impl Drop for AddressSpaceImage {
-    fn drop(&mut self) {
-        if let Some(table) = self.table {
-            if let Err(error) = super::paging::destroy_user_page_table(table) {
-                crate::warn!("Failed to release detached address space: {:?}", error);
-            }
-        }
     }
 }

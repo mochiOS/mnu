@@ -616,6 +616,7 @@ pub struct Process {
     page_table: Option<u64>,
     /// page_table をこの Process が所有しているかどうか
     page_table_owned: bool,
+    pending_image_root: Option<Arc<crate::mem::detached_roots::Root>>,
     /// ヒープ開始アドレス
     heap_start: u64,
     /// 現在のヒープ終了アドレス (program break)
@@ -688,6 +689,7 @@ impl Process {
             kernel_authorities: KernelAuthoritySet::empty(),
             page_table: None, // TODO: ページテーブル実装後に設定
             page_table_owned: true,
+            pending_image_root: None,
             heap_start,
             heap_end: heap_start,
             dma_start: 0,
@@ -858,6 +860,17 @@ impl Process {
 
     pub fn page_table_owned(&self) -> bool {
         self.page_table_owned
+    }
+
+    pub(crate) fn set_pending_image_root(
+        &mut self,
+        root: Arc<crate::mem::detached_roots::Root>,
+    ) {
+        self.pending_image_root = Some(root);
+    }
+
+    pub(crate) fn pending_image_root(&self) -> Option<&Arc<crate::mem::detached_roots::Root>> {
+        self.pending_image_root.as_ref()
     }
 
     /// ヒープ終了アドレスを取得
@@ -1287,7 +1300,7 @@ impl ProcessTable {
     ///
     /// # Returns
     /// 成功時はプロセスIDを返す。テーブルが満杯の場合はNone
-    pub fn add(&mut self, process: Process) -> Option<ProcessId> {
+    pub fn add(&mut self, mut process: Process) -> Option<ProcessId> {
         if self.count >= Self::MAX_PROCESSES {
             return None;
         }
@@ -1297,6 +1310,9 @@ impl ProcessTable {
         // 空きスロットを探す
         for slot in &mut self.processes {
             if slot.is_none() {
+                if let Some(root) = process.pending_image_root.take() {
+                    root.publish();
+                }
                 *slot = Some(process);
                 self.count += 1;
                 return Some(id);
@@ -1622,7 +1638,28 @@ pub(crate) unsafe fn resize_shared_memory(
     use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
     let table = PROCESS_TABLE.lock();
     memory.resize_with(length, |start, end| {
+        let roots = crate::mem::detached_roots::snapshot().map_err(|_| crate::syscall::ENOMEM)?;
         let mut ranges = Vec::new();
+        for root in &roots {
+            for mapping in root
+                .mappings()
+                .iter()
+                .filter(|mapping| mapping.identity == memory.id())
+            {
+                if let Some((low, high)) = transaction::virtual_overlap(
+                    mapping.start,
+                    mapping.length,
+                    mapping.offset,
+                    start,
+                    end,
+                )
+                .map_err(|_| crate::syscall::EINVAL)?
+                {
+                    ranges.try_reserve(1).map_err(|_| crate::syscall::ENOMEM)?;
+                    ranges.push((root.table(), low, high));
+                }
+            }
+        }
         for process in table.iter() {
             let Some(page_table) = process.page_table() else {
                 continue;
@@ -1652,7 +1689,7 @@ pub(crate) unsafe fn resize_shared_memory(
         }
         // SAFETY: the caller's writer exclusion plus the retained table guard
         // keeps every selected PTE and page-table hierarchy stable.
-        transaction::revoke(ranges, &mut unsafe { Native::new(&table) })
+        transaction::revoke(ranges, &mut unsafe { Native::with_detached(&table, &roots) })
             .map_err(|error| match error {
                 transaction::Error::InvalidRange => crate::syscall::EINVAL,
                 transaction::Error::Allocation => crate::syscall::ENOMEM,

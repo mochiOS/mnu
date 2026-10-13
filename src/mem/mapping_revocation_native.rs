@@ -8,7 +8,10 @@ pub(crate) struct Native<'a> {
 }
 
 enum Roots<'a> {
-    All(&'a crate::task::process::ProcessTable),
+    All(
+        &'a crate::task::process::ProcessTable,
+        &'a [alloc::sync::Arc<super::detached_roots::Root>],
+    ),
     One(&'a crate::task::process::Process),
 }
 
@@ -18,7 +21,20 @@ impl<'a> Native<'a> {
     /// every PTE writer until the complete transaction has restored/released.
     pub(crate) unsafe fn new(table: &'a crate::task::process::ProcessTable) -> Self {
         Self {
-            roots: Roots::All(table),
+            roots: Roots::All(table, &[]),
+            release_frames: true,
+        }
+    }
+
+    /// # Safety
+    /// Same lock/lifetime requirements as new. Pins retain unpublished roots
+    /// until every suspended PTE has been restored or released.
+    pub(crate) unsafe fn with_detached(
+        table: &'a crate::task::process::ProcessTable,
+        roots: &'a [alloc::sync::Arc<super::detached_roots::Root>],
+    ) -> Self {
+        Self {
+            roots: Roots::All(table, roots),
             release_frames: true,
         }
     }
@@ -45,9 +61,14 @@ impl Backend for Native<'_> {
         // Never walk an arbitrary physical address supplied in a plan. It must
         // belong to an address space retained in this locked process table.
         let owned = match self.roots {
-            Roots::All(table_guard) => table_guard
-                .iter()
-                .any(|process| process.page_table() == Some(table)),
+            Roots::All(table_guard, roots) => {
+                table_guard
+                    .iter()
+                    .any(|process| process.page_table() == Some(table))
+                    || roots
+                        .iter()
+                        .any(|root| !root.published() && root.table() == table)
+            }
             Roots::One(process) => process.page_table() == Some(table),
         };
         if !owned {

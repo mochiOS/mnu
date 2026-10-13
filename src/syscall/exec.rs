@@ -5,6 +5,7 @@ use crate::policy::{
     caller_can_grant_capabilities_on_exec, claim_init_pid, release_init_pid, resolve_exec_privilege,
 };
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -131,7 +132,11 @@ impl ExecMeasurement {
     }
 }
 
-struct UserPageTableGuard(Option<u64>);
+enum GuardedTable {
+    Raw(u64),
+    Image(Arc<crate::mem::detached_roots::Root>),
+}
+struct UserPageTableGuard(Option<GuardedTable>);
 
 struct CreatedProcessHandle(Option<u64>);
 
@@ -145,7 +150,11 @@ impl Drop for CreatedProcessHandle {
 
 impl UserPageTableGuard {
     fn new(table_phys: u64) -> Self {
-        Self(Some(table_phys))
+        Self(Some(GuardedTable::Raw(table_phys)))
+    }
+
+    fn for_image(root: Arc<crate::mem::detached_roots::Root>) -> Self {
+        Self(Some(GuardedTable::Image(root)))
     }
 
     fn disarm(&mut self) {
@@ -155,8 +164,15 @@ impl UserPageTableGuard {
 
 impl Drop for UserPageTableGuard {
     fn drop(&mut self) {
-        if let Some(table_phys) = self.0.take() {
-            let _ = crate::mem::paging::destroy_user_page_table(table_phys);
+        match self.0.take() {
+            Some(GuardedTable::Raw(table)) => {
+                let _ = crate::mem::paging::destroy_user_page_table(table);
+            }
+            Some(GuardedTable::Image(root)) if root.published() => {
+                let _ = crate::mem::paging::destroy_user_page_table(root.table());
+            }
+            // Before publication, Root's final owning reference does cleanup.
+            _ => {}
         }
     }
 }
@@ -2032,7 +2048,10 @@ fn create_from_address_space(
     };
     // From installation until publication the guard owns the table. It also
     // reclaims it on any creator-handle, kernel-stack, or thread failure.
-    let mut table_guard = UserPageTableGuard::new(table);
+    let Some(root) = process.pending_image_root().cloned() else {
+        return EINVAL;
+    };
+    let mut table_guard = UserPageTableGuard::for_image(root);
     let mut handle = match crate::syscall::handle::retain_created_process(&process) {
         Ok(handle) => CreatedProcessHandle(Some(handle)),
         Err(errno) => return errno,

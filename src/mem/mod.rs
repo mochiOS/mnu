@@ -22,6 +22,7 @@ pub(crate) mod tlb_rendezvous;
 pub(crate) mod tlb_shootdown;
 pub(crate) mod mapping_revocation;
 pub(crate) mod mapping_revocation_native;
+pub(crate) mod detached_roots;
 
 /// メモリの初期化
 ///
