@@ -2236,7 +2236,7 @@ pub fn send_object_handles(
 
 pub fn send_pages(
     dest_endpoint_handle: u64,
-    phys_pages_ptr: u64,
+    reserved: u64,
     page_count_raw: u64,
     local_base: u64,
 ) -> u64 {
@@ -2245,6 +2245,12 @@ pub fn send_pages(
         crate::capability::Capability::IpcServer,
     ]) {
         return EACCES;
+    }
+    // Users must not manufacture authority by naming physical frames. The
+    // remaining legacy operation accepts only a caller-local virtual range;
+    // explicit object sharing uses attenuated IPC Handle attachments.
+    if reserved != 0 {
+        return EINVAL;
     }
     let dest_thread_id =
         if crate::task::thread_slot_index_and_generation_by_u64(dest_endpoint_handle).is_some() {
@@ -2270,52 +2276,27 @@ pub fn send_pages(
         Some(v) => v,
         None => return EINVAL,
     };
-    if phys_pages_ptr == 0 {
-        if (local_base & 0xfff) != 0 {
-            return EINVAL;
-        }
-        let source_page_table = match crate::syscall::security::current_process_id()
-            .and_then(|pid| crate::task::with_process(pid, |process| process.page_table()))
-            .flatten()
-        {
-            Some(pt) => pt,
-            None => return EFAULT,
-        };
-        if send_virtual_pages_from_kernel(
-            dest_thread_id,
-            local_base,
-            total,
-            page_count,
-            source_page_table,
-            local_base,
-        ) {
-            return 0;
-        }
-        return EAGAIN;
-    } else {
-        if page_count > MAX_INLINE_EXT_PAGES {
-            return EINVAL;
-        }
-        let mut pages = [0u64; MAX_INLINE_EXT_PAGES];
-        let bytes_len = match page_count_raw.checked_mul(8) {
-            Some(v) => v,
-            None => return EINVAL,
-        };
-        if !crate::syscall::validate_user_ptr(phys_pages_ptr, bytes_len) {
-            return EFAULT;
-        }
-        let pages_bytes = unsafe {
-            core::slice::from_raw_parts_mut(pages.as_mut_ptr().cast::<u8>(), page_count * 8)
-        };
-        if let Err(errno) = crate::syscall::copy_from_user(phys_pages_ptr, pages_bytes) {
-            return errno;
-        }
-        if send_pages_from_kernel(dest_thread_id, local_base, total, &pages[..page_count]) {
-            0
-        } else {
-            EAGAIN
-        }
+    if (local_base & 0xfff) != 0 {
+        return EINVAL;
     }
+    let source_page_table = match crate::syscall::security::current_process_id()
+        .and_then(|pid| crate::task::with_process(pid, |process| process.page_table()))
+        .flatten()
+    {
+        Some(pt) => pt,
+        None => return EFAULT,
+    };
+    if send_virtual_pages_from_kernel(
+        dest_thread_id,
+        local_base,
+        total,
+        page_count,
+        source_page_table,
+        local_base,
+    ) {
+        return 0;
+    }
+    EAGAIN
 }
 
 fn map_external_pages_for_receiver(
