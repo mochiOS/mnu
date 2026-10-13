@@ -177,17 +177,37 @@ pub fn free(handle: u64) -> u64 {
         Some(v) => v,
         None => return ENOMEM,
     };
-    let buffer =
-        match crate::task::with_process_mut(pid, |process| process.remove_dma_buffer(handle)) {
-            Some(Some(buffer)) => buffer,
-            Some(None) => return EINVAL,
-            None => return ENOMEM,
-        };
-    let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
-        pt_phys,
-        buffer.virt_start(),
-        buffer.len(),
-    );
+    let outcome = crate::task::with_process_mut(pid, |process| {
+        use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
+        if process.page_table() != Some(pt_phys) {
+            return Err(EINVAL);
+        }
+        let buffer = process
+            .dma_buffers()
+            .iter()
+            .find(|buffer| buffer.handle() == handle)
+            .cloned()
+            .ok_or(EINVAL)?;
+        let end = buffer.end().ok_or(EINVAL)?;
+        // SAFETY: PROCESS_TABLE holds the root and PTE hierarchy stable.
+        // DMA storage is owned by the buffer, not by the PTE frame ledger.
+        let mut backend = unsafe { Native::for_process(process, false) };
+        transaction::revoke([(pt_phys, buffer.virt_start(), end)], &mut backend).map_err(
+            |error| match error {
+                transaction::Error::InvalidRange => EINVAL,
+                transaction::Error::Allocation => ENOMEM,
+                transaction::Error::Backend(error) => error,
+            },
+        )?;
+        // Failure above restores mappings and retains their ownership record.
+        process.remove_dma_buffer(handle).ok_or(EINVAL)
+    });
+    let buffer = match outcome {
+        Some(Ok(buffer)) => buffer,
+        Some(Err(error)) => return error,
+        None => return ENOMEM,
+    };
+    // Recycle physical storage only after every CPU acknowledged revocation.
     release_dma_frames(buffer.phys_start(), buffer.page_count());
     SUCCESS
 }
