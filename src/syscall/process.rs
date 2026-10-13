@@ -520,7 +520,9 @@ pub fn handle_user_memory_fault(fault_addr: u64, is_write: bool, is_execute: boo
         Ok(())
     });
 
-    matches!(result, Some(Ok(())))
+    // A backing resize invalidated the prepared page. Retry the instruction
+    // and fault again to prepare current backing; never install the stale pin.
+    matches!(result, Some(Ok(())) | Some(Err(EAGAIN)))
 }
 
 /// Maps anonymous memory or a mappable kernel object into the current address

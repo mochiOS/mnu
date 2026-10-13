@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::shared_pages::{PageError, SharedPages, SizeError};
+use super::shared_pages::{PageError, ResizeError, SharedPages, SizeError};
 use crate::interrupt::spinlock::SpinLock;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -10,7 +10,7 @@ const PAGE_BYTES: u64 = super::vm_object::PAGE_BYTES as u64;
 /// Owns anonymous backing storage, not another process's virtual memory.
 pub struct SharedMemory {
     id: u64,
-    length: u64,
+    generation: AtomicU64,
     pages: SpinLock<SharedPages<OwnedFrame>>,
 }
 
@@ -34,7 +34,7 @@ impl SharedMemory {
             .map_err(|_| crate::syscall::ENOMEM)?;
         Ok(Self {
             id,
-            length: pages.length(),
+            generation: AtomicU64::new(0),
             pages: SpinLock::new(pages),
         })
     }
@@ -43,15 +43,15 @@ impl SharedMemory {
         self.id
     }
     pub fn length(&self) -> u64 {
-        self.length
+        self.pages.lock().length()
     }
     pub fn contains_range(&self, offset: u64, length: u64) -> bool {
         self.pages.lock().contains_range(offset, length)
     }
 
-    fn page(&self, index: u64) -> Result<Arc<OwnedFrame>, u64> {
-        self.pages
-            .lock()
+    fn page(&self, index: u64) -> Result<(Arc<OwnedFrame>, u64), u64> {
+        let mut pages = self.pages.lock();
+        let page = pages
             .page_or_try_insert(index, || {
                 super::frame::allocate_zeroed_frame()
                     .map(|frame| OwnedFrame(frame.start_address().as_u64()))
@@ -60,21 +60,69 @@ impl SharedMemory {
             .map_err(|error| match error {
                 PageError::OutOfBounds => crate::syscall::EINVAL,
                 PageError::Allocation(error) => error,
-            })
+            })?;
+        Ok((page, self.generation.load(Ordering::Relaxed)))
     }
 
     /// Retains a frame for the caller; release it with `release_user_frame`.
     pub fn retain_page(&self, index: u64) -> Result<u64, u64> {
-        let page = self.page(index)?;
+        self.prepare_page(index).map(|(frame, _)| frame)
+    }
+
+    /// The retained frame and generation come from one serialized population.
+    pub(crate) fn prepare_page(&self, index: u64) -> Result<(u64, u64), u64> {
+        let (page, generation) = self.page(index)?;
         super::paging::retain_shared_user_frame(page.0).map_err(|_| crate::syscall::ENOMEM)?;
-        Ok(page.0)
+        Ok((page.0, generation))
+    }
+
+    /// Keep size/epoch stable through the final PTE installation. This prevents
+    /// an old prepared page from being installed after shrink and regrowth.
+    pub(crate) fn with_generation<T>(
+        &self,
+        generation: u64,
+        install: impl FnOnce() -> Result<T, u64>,
+    ) -> Result<T, u64> {
+        let _pages = self.pages.lock();
+        if self.generation.load(Ordering::Relaxed) != generation {
+            return Err(crate::syscall::EAGAIN);
+        }
+        install()
+    }
+
+    /// The VM coordinator must exclude mapping changes, revoke the shrinking
+    /// range and complete remote TLB invalidation in `revoke` before it returns.
+    pub(crate) fn resize_with(
+        &self,
+        length: u64,
+        revoke: impl FnOnce(u64, u64) -> Result<(), u64>,
+    ) -> Result<(), u64> {
+        let mut pages = self.pages.lock();
+        if pages.length() == length {
+            return Ok(());
+        }
+        let next = self
+            .generation
+            .load(Ordering::Relaxed)
+            .checked_add(1)
+            .ok_or(crate::syscall::ENOMEM)?;
+        pages
+            .resize_with(length, revoke)
+            .map_err(|error| match error {
+                ResizeError::Size(SizeError::Invalid) => crate::syscall::EINVAL,
+                ResizeError::Size(SizeError::LimitExceeded) => crate::syscall::ENOMEM,
+                ResizeError::Revocation(error) => error,
+            })?;
+        self.generation.store(next, Ordering::Release);
+        Ok(())
     }
 
     pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
-        if offset > self.length {
+        let backing_length = self.length();
+        if offset > backing_length {
             return Err(crate::syscall::EINVAL);
         }
-        let length = output.len().min((self.length - offset) as usize);
+        let length = output.len().min((backing_length - offset) as usize);
         self.copy(offset, length, |pointer, done, count| {
             for index in 0..count {
                 // Mapped users may modify the bytes; never form a Rust reference
@@ -109,7 +157,7 @@ impl SharedMemory {
         let mut done = 0;
         while done < length {
             let current = offset + done as u64;
-            let page = self.page(current / PAGE_BYTES)?;
+            let (page, _) = self.page(current / PAGE_BYTES)?;
             let within = (current % PAGE_BYTES) as usize;
             let count = (length - done).min(PAGE_BYTES as usize - within);
             let address = physical_offset

@@ -68,6 +68,7 @@ pub struct VmObject {
 /// Pins a cache frame while a fault resolves its backing outside task locks.
 pub struct PreparedSharedPage {
     frame_phys: u64,
+    memory_generation: Option<(Arc<super::shared_memory::SharedMemory>, u64)>,
 }
 
 impl PreparedSharedPage {
@@ -78,10 +79,16 @@ impl PreparedSharedPage {
         writable: bool,
         executable: bool,
     ) -> Result<(), u64> {
-        crate::mem::paging::map_shared_frame_to_user(
-            table_phys, virt_addr, self.frame_phys, writable, executable,
-        )
-        .map_err(|_| crate::syscall::ENOMEM)
+        let install = || {
+            crate::mem::paging::map_shared_frame_to_user(
+                table_phys, virt_addr, self.frame_phys, writable, executable,
+            )
+            .map_err(|_| crate::syscall::ENOMEM)
+        };
+        match &self.memory_generation {
+            Some((memory, generation)) => memory.with_generation(*generation, install),
+            None => install(),
+        }
     }
 }
 
@@ -248,8 +255,10 @@ impl VmObject {
 
     pub fn prepare_shared_page(&self, page_index: u64) -> Result<PreparedSharedPage, u64> {
         if let VmObjectSource::Memory(memory) = &self.source {
+            let (frame_phys, generation) = memory.prepare_page(page_index)?;
             return Ok(PreparedSharedPage {
-                frame_phys: memory.retain_page(page_index)?,
+                frame_phys,
+                memory_generation: Some((memory.clone(), generation)),
             });
         }
         let (loaded, loaded_len) = self.page_with_len(page_index)?;
@@ -286,7 +295,10 @@ impl VmObject {
         crate::mem::paging::retain_shared_user_frame(frame_phys)
             .map_err(|_| crate::syscall::ENOMEM)?;
         cache[entry_index].last_used = next_cache_access();
-        Ok(PreparedSharedPage { frame_phys })
+        Ok(PreparedSharedPage {
+            frame_phys,
+            memory_generation: None,
+        })
     }
 
     pub fn mark_page_dirty(&self, page_index: u64) -> Result<(), u64> {
