@@ -47,15 +47,22 @@ fn resolve_key(address: u64, value_size: u64) -> Result<AddressKey, u64> {
     let mut resident = [0u8; 8];
     super::copy_from_user(address, &mut resident[..value_size as usize])?;
 
-    let page_table = super::current_user_page_table().ok_or(EFAULT)?;
-    let (physical, _) =
-        crate::mem::paging::translate_addr_in_table(page_table, VirtAddr::new(address))
-            .ok_or(EFAULT)?;
-    Ok(AddressKey {
-        page_table,
-        virtual_address: address,
-        physical_address: physical.as_u64(),
+    let pid = super::security::current_process_id().ok_or(EFAULT)?;
+    crate::task::with_process(pid, |process| {
+        let page_table = process.page_table().ok_or(EFAULT)?;
+        if !crate::mem::paging::is_user_range_mapped_in_table(page_table, address, value_size) {
+            return Err(EFAULT);
+        }
+        let (physical, _) =
+            crate::mem::paging::translate_addr_in_table(page_table, VirtAddr::new(address))
+                .ok_or(EFAULT)?;
+        Ok(AddressKey {
+            page_table,
+            virtual_address: address,
+            physical_address: physical.as_u64(),
+        })
     })
+    .unwrap_or(Err(EFAULT))
 }
 
 pub(crate) fn read_guard_value(address: u64) -> Result<u64, u64> {
@@ -64,6 +71,37 @@ pub(crate) fn read_guard_value(address: u64) -> Result<u64, u64> {
 }
 
 fn load_value(key: AddressKey, value_size: u64) -> Result<u64, u64> {
+    if !matches!(value_size, 1 | 2 | 4 | 8) || key.virtual_address & (value_size - 1) != 0 {
+        return Err(EINVAL);
+    }
+    let pid = super::security::current_process_id().ok_or(EFAULT)?;
+    // The cached physical identity is not a frame lease. Revalidate it and
+    // keep PROCESS_TABLE held through the atomic read to exclude reclamation.
+    crate::task::with_process(pid, |process| {
+        if process.page_table() != Some(key.page_table)
+            || !crate::mem::paging::is_user_range_mapped_in_table(
+                key.page_table,
+                key.virtual_address,
+                value_size,
+            )
+        {
+            return Err(EFAULT);
+        }
+        let (physical, _) = crate::mem::paging::translate_addr_in_table(
+            key.page_table,
+            VirtAddr::new(key.virtual_address),
+        )
+        .ok_or(EFAULT)?;
+        if physical.as_u64() != key.physical_address {
+            return Err(EFAULT);
+        }
+        load_resident_value(key, value_size)
+    })
+    .unwrap_or(Err(EFAULT))
+}
+
+/// Caller retains the validated root and frame through PROCESS_TABLE.
+fn load_resident_value(key: AddressKey, value_size: u64) -> Result<u64, u64> {
     let physical_offset = crate::mem::paging::physical_memory_offset().ok_or(EFAULT)?;
     let address = key
         .physical_address
