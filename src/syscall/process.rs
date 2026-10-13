@@ -580,7 +580,6 @@ pub fn memory_map(
         return EINVAL;
     }
 
-    const MAX_MEMORY_BACKING_BYTES: u64 = 256 * 1024 * 1024;
     let anonymous = backing_handle == 0;
     if (anonymous && backing_offset != 0) || (!anonymous && backing_offset & 4095 != 0) {
         return EINVAL;
@@ -600,14 +599,6 @@ pub fn memory_map(
         Some(v) if v > 0 => v,
         _ => return EINVAL,
     };
-    if size > MAX_MEMORY_BACKING_BYTES {
-        crate::warn!(
-            "process::memory_map refusing oversized mapping length={:#x} aligned={:#x}",
-            length,
-            size
-        );
-        return ENOMEM;
-    }
     if !anonymous && backing_offset.checked_add(size).is_none() {
         return EINVAL;
     }
