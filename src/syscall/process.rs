@@ -630,16 +630,13 @@ pub fn memory_map(
                 ))
             }
             crate::task::KernelObject::VmObject(object) => {
-                let object_length = match object.memory_length() {
-                    Some(length) => length,
-                    None => return EINVAL,
-                };
-                if !backing_offset
-                    .checked_add(size)
-                    .is_some_and(|end| end <= object_length)
-                {
+                if object.memory_identity().is_none() {
                     return EINVAL;
                 }
+                // Reserve virtual space independently of the current extent.
+                // A resizable object can populate it later. RAM page faults
+                // enforce the live extent and generation before installing a
+                // PTE; reserving a range grants no access to absent storage.
                 max_access &= !mnu_abi::MEMORY_ACCESS_EXECUTE;
                 if access & !max_access != 0 {
                     return crate::syscall::EACCES;

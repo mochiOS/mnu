@@ -451,8 +451,11 @@ impl VmObject {
 
     /// Writes dirty cache pages intersecting the range back to their object.
     pub fn flush_range(&self, offset: u64, length: u64) -> Result<(), u64> {
-        if let VmObjectSource::Memory(memory) = &self.source {
-            return if length == u64::MAX && offset == 0 || memory.contains_range(offset, length) {
+        if let VmObjectSource::Memory(_) = &self.source {
+            // RAM stores are already visible to aliases; there is no lower
+            // writeback target. Reservations can exceed the live extent, and
+            // shrink must not make their eventual unmap/sync fail.
+            return if length == u64::MAX && offset == 0 || offset.checked_add(length).is_some() {
                 Ok(())
             } else {
                 Err(crate::syscall::EINVAL)
