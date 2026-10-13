@@ -18,6 +18,7 @@ pub mod shared_memory;
 pub mod tss;
 pub(crate) mod user;
 pub mod vm_object;
+pub(crate) mod tlb_rendezvous;
 
 /// メモリの初期化
 ///
