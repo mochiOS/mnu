@@ -59,7 +59,8 @@ pub enum CloneError {
 }
 
 /// Captured while the source's execution is quiescent. The caller must keep it
-/// quiescent until cloning completes; remote TLB invalidation is not available.
+/// quiescent until cloning completes, exclude mapping/backing revocation while
+/// editing source PTEs, and acknowledge remote TLB invalidation before return.
 pub struct CloneSource {
     table: u64,
     regions: Vec<MemoryRegion>,

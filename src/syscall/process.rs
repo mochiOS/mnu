@@ -236,21 +236,30 @@ pub fn clone_address_space() -> u64 {
     if live_threads != 1 {
         return EAGAIN;
     }
-    let source = match crate::task::with_process(pid, CloneSource::capture) {
-        Some(Ok(source)) => source,
-        Some(Err(CloneError::BorrowedMapping)) => return EPERM,
-        _ => return ENOSYS,
-    };
-    let image = match source.clone_image() {
-        Ok(image) => Arc::new(crate::mem::address_space::AddressSpaceObject::new(image)),
-        Err(_) => return ENOMEM,
-    };
     // CONTROL authorizes eventual image consumption; MAP/READ/WRITE do not
     // grant access to these pages through ordinary memory-object operations.
     let rights = crate::task::HandleRights::CONTROL
         .union(crate::task::HandleRights::DUPLICATE)
         .union(crate::task::HandleRights::TRANSFER);
     crate::task::with_process_mut(pid, |process| {
+        // Capture, COW source-PTE edits and Handle publication share the VM
+        // lock with faults/unmap/resize. Do not expose a detached source table
+        // to a concurrent backing revocation between capture and cloning.
+        let source = match CloneSource::capture(process) {
+            Ok(source) => source,
+            Err(CloneError::BorrowedMapping) => return EPERM,
+            Err(_) => return ENOSYS,
+        };
+        let cloned = source.clone_image();
+        // Failed cloning may also have write-protected some source PTEs.
+        // Retain every image/frame reference until remote invalidation ends.
+        if crate::mem::tlb_shootdown::invalidate_all().is_err() {
+            return crate::syscall::EIO;
+        }
+        let image = match cloned {
+            Ok(image) => Arc::new(crate::mem::address_space::AddressSpaceObject::new(image)),
+            Err(_) => return ENOMEM,
+        };
         process
             .object_handles_mut()
             .insert(crate::task::ObjectHandleEntry::new(
