@@ -963,10 +963,15 @@ pub(crate) fn is_user_range_occupied_in_table(table_phys: u64, addr: u64, len: u
     {
         return true;
     }
-    crate::task::memory_range::any_page(addr, len, |page| {
-        user_page_flags_in_table(table_phys, page).is_some()
-    })
-    .unwrap_or(true)
+    if len == 0 {
+        return false;
+    }
+    let start = addr & !4095;
+    let end = ((addr + len - 1) & !4095) + 4096;
+    // Placement callers retain the target root under PROC. A non-present
+    // user leaf still owns storage and must not be overwritten by a new map.
+    unsafe { next_user_page_entry(table_phys, start, end) }
+        .map_or(true, |page| page.is_some())
 }
 
 pub fn is_user_range_writable_in_table(table_phys: u64, addr: u64, len: u64) -> bool {

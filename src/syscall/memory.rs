@@ -28,19 +28,12 @@ fn memory_range_is_mapped(
     start: u64,
     end: u64,
 ) -> bool {
-    let mut page = start;
-    while page < end {
-        let has_page = crate::mem::paging::has_user_page_entry_in_table(table_phys, page);
-        let has_region = process
-            .find_memory_region(page)
-            .and_then(|region| region.end())
-            .is_some_and(|region_end| page + 4096 <= region_end);
-        if !has_page && !has_region {
-            return false;
-        }
-        page += 4096;
-    }
-    true
+    crate::task::memory_range::covers_pages(
+        start,
+        end,
+        |page| process.find_memory_region(page).and_then(|region| region.end()),
+        |page| crate::mem::paging::has_user_page_entry_in_table(table_phys, page),
+    )
 }
 
 #[inline(never)]
@@ -55,6 +48,15 @@ fn protect_memory_pages(
 ) -> Result<(), u64> {
     let mut page = start;
     while page < end {
+        // The caller holds PROC, retaining this root and excluding native VM
+        // writers. Include allocated non-present leaves, skip absent subtrees.
+        let resident = unsafe {
+            crate::mem::paging::next_user_page_entry(table_phys, page, end)
+        };
+        let Some(resident) = resident.map_err(memory_protection_error)? else {
+            break;
+        };
+        page = resident;
         let page_writable = writable
             && !process.find_memory_region(page).is_some_and(|region| {
                 let page_index = (page - region.start()) / 4096;

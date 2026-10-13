@@ -60,3 +60,29 @@ pub(crate) fn any_page(
         page = page.checked_add(4096)?;
     }
 }
+
+/// Validate reserved-or-resident coverage without inspecting every page in a
+/// reservation. A region end is usable only for complete pages; gaps still
+/// require individually retained leaves (for example an ELF image or stack).
+pub(crate) fn covers_pages(
+    start: u64,
+    end: u64,
+    mut region_end: impl FnMut(u64) -> Option<u64>,
+    mut retained: impl FnMut(u64) -> bool,
+) -> bool {
+    if start > end || start & 4095 != 0 || end & 4095 != 0 {
+        return false;
+    }
+    let mut page = start;
+    while page < end {
+        let next = page + 4096;
+        if let Some(limit) = region_end(page).filter(|&limit| limit >= next) {
+            page = (limit & !4095).min(end);
+        } else if retained(page) {
+            page = next;
+        } else {
+            return false;
+        }
+    }
+    true
+}
