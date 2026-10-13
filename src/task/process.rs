@@ -1013,6 +1013,18 @@ impl Process {
     /// Removes every intersection and keeps the surviving pieces. Build the
     /// replacement before changing state so an invalid slice changes nothing.
     pub fn remove_memory_range(&mut self, start: u64, len: u64) -> Option<Vec<MemoryRegion>> {
+        let (retained, removed) = self.prepare_remove_memory_range(start, len)?;
+        self.memory_regions = retained;
+        Some(removed)
+    }
+
+    /// Prepare both surviving metadata and writeback references before editing
+    /// PTEs. The caller commits retained metadata only after VM revocation.
+    pub(crate) fn prepare_remove_memory_range(
+        &self,
+        start: u64,
+        len: u64,
+    ) -> Option<(Vec<MemoryRegion>, Vec<MemoryRegion>)> {
         let end = start.checked_add(len)?;
         let mut retained = Vec::new();
         let mut removed = Vec::new();
@@ -1032,8 +1044,7 @@ impl Process {
                 retained.push(region.slice(range.start, range.end)?);
             }
         }
-        self.memory_regions = retained;
-        Some(removed)
+        Some((retained, removed))
     }
 
     pub fn has_kernel_authority(&self, authority: &KernelAuthority) -> bool {

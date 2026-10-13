@@ -804,57 +804,56 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
         Some(p) => p,
         None => return ENOSYS,
     };
-    let pt_phys = match crate::task::with_process(pid, |p| p.page_table()).flatten() {
-        Some(p) => p,
-        None => return ENOSYS,
-    };
-
-    let overlaps_dma = crate::task::with_process(pid, |process| {
-        process
+    let outcome = crate::task::with_process_mut(pid, |process| {
+        use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
+        let table = process.page_table().ok_or(ENOSYS)?;
+        if process
             .find_dma_buffer_by_addr(unmap_start, unmap_len)
             .is_some()
-    })
-    .unwrap_or(false);
-    if overlaps_dma {
-        return EPERM;
-    }
-
-    let mmio_mapping = crate::task::with_process_mut(pid, |process| {
-        process.remove_mmio_mapping(unmap_start, unmap_len)
-    })
-    .flatten();
-    if let Some(_mapping) = mmio_mapping {
-        return match crate::mem::paging::unmap_range_in_table_preserve_frames(
-            pt_phys,
-            unmap_start,
-            unmap_len,
-        ) {
-            Ok(()) => SUCCESS,
-            Err(_) => EINVAL,
+        {
+            return Err(EPERM);
+        }
+        let mmio = process.find_mmio_mapping_by_addr(unmap_start, unmap_len);
+        if let Some(mapping) = mmio {
+            if mapping.virt_start() != unmap_start || mapping.len() != unmap_len {
+                return Err(EINVAL);
+            }
+        }
+        let owns_frames = mmio.is_none();
+        let metadata = if owns_frames {
+            Some(
+                process
+                    .prepare_remove_memory_range(unmap_start, unmap_len)
+                    .ok_or(EINVAL)?,
+            )
+        } else {
+            None
         };
-    }
-
-    let overlaps_mmio = crate::task::with_process(pid, |process| {
-        process
-            .find_mmio_mapping_by_addr(unmap_start, unmap_len)
-            .is_some()
-    })
-    .unwrap_or(false);
-    if overlaps_mmio {
-        return EINVAL;
-    }
-
-    let removed = match crate::task::with_process_mut(pid, |process| {
-        process.remove_memory_range(unmap_start, unmap_len)
-    })
-    .flatten()
-    {
-        Some(removed) => removed,
-        None => return EINVAL,
+        // SAFETY: PROCESS_TABLE stays locked across all PTE edits and remote
+        // acknowledgements. A fault cannot reinstall a suspended page here.
+        let mut backend = unsafe { Native::for_process(process, owns_frames) };
+        transaction::revoke([(table, unmap_start, unmap_end)], &mut backend)
+            .map_err(|error| match error {
+                transaction::Error::InvalidRange => EINVAL,
+                transaction::Error::Allocation => ENOMEM,
+                transaction::Error::Backend(error) => error,
+            })?;
+        // Metadata is committed only after successful revocation. Failure
+        // restores PTEs and leaves the original ranges/frame ownership intact.
+        if let Some((retained, removed)) = metadata {
+            process.set_memory_regions(retained);
+            Ok(removed)
+        } else {
+            process.remove_mmio_mapping(unmap_start, unmap_len);
+            Ok(Vec::new())
+        }
+    });
+    let removed = match outcome {
+        Some(Ok(removed)) => removed,
+        Some(Err(error)) => return error,
+        None => return ENOSYS,
     };
-    if crate::mem::paging::unmap_range_in_table(pt_phys, unmap_start, unmap_len).is_err() {
-        return EINVAL;
-    }
+    // Provider writeback may do IPC: never perform it under PROCESS_TABLE.
     for region in removed {
         if region.is_shared() && region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE) {
             if let Some(object) = region.backing().file_object() {
@@ -978,7 +977,14 @@ pub fn alloc_shared_pages(
         };
         let phys = frame.start_address().as_u64();
         let virt = virt_start + (index as u64) * 4096;
-        if crate::mem::paging::map_page_in_table(pt_phys, virt, phys, true, true).is_err() {
+        let installed = crate::task::with_process_mut(pid, |process| {
+            if process.page_table() != Some(pt_phys) {
+                return Err(EINVAL);
+            }
+            crate::mem::paging::map_page_in_table(pt_phys, virt, phys, true, true)
+                .map_err(|_| ENOMEM)
+        });
+        if !matches!(installed, Some(Ok(()))) {
             let _ = crate::mem::frame::deallocate_frame(frame);
             rollback(mapped);
             return ENOMEM;
@@ -1039,13 +1045,27 @@ fn rollback_shared_pages(
     old_heap_end: u64,
     mapped: usize,
 ) {
-    if mapped != 0 {
-        let _ =
-            crate::mem::paging::unmap_range_in_table(pt_phys, virt_start, (mapped as u64) * 4096);
-    }
     let _ = crate::task::with_process_mut(pid, |process| {
+        if process.page_table() != Some(pt_phys) {
+            return;
+        }
+        if mapped != 0 {
+            use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
+            // SAFETY: retain the process/mapping lock throughout suspension,
+            // remote TLB acknowledgement and rollback of this reserved range.
+            let mut backend = unsafe { Native::for_process(process, true) };
+            if transaction::revoke(
+                [(pt_phys, virt_start, virt_start + (mapped as u64) * 4096)],
+                &mut backend,
+            )
+            .is_err()
+            {
+                return;
+            }
+        }
         process.remove_memory_region(virt_start, map_len);
-        if process.heap_end() >= virt_start {
+        // Do not rewind later allocations made by another thread.
+        if process.heap_end() == virt_start + map_len {
             process.set_heap_end(old_heap_end);
         }
     });

@@ -550,11 +550,21 @@ impl SuspendedUserPage {
     /// As for restore, and all CPUs have acknowledged invalidation after the
     /// suspension. Only then may the mapping's physical-frame reference drop.
     pub(crate) unsafe fn release(self) {
+        let frame = self.original.addr().as_u64();
+        unsafe {
+            self.detach();
+        }
+        release_user_frame(frame);
+    }
+
+    /// # Safety
+    /// Same synchronization/lifetime requirements as release. The physical
+    /// resource remains owned externally (for example a device MMIO aperture).
+    pub(crate) unsafe fn detach(self) {
         let _smap_guard = crate::cpu::SmapSmepGuard::new();
         unsafe {
             (*self.entry).set_unused();
         }
-        release_user_frame(self.original.addr().as_u64());
     }
 }
 
