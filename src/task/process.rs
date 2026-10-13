@@ -1596,6 +1596,60 @@ where
     }
 }
 
+/// Resizes owned RAM backing while excluding all address-space writers.
+/// No names, POSIX descriptors or caller process identities select mappings.
+/// This remains internal until every mapping mutation uses the same lock scope.
+///
+/// # Safety
+/// All page-table mutation paths must serialize with PROCESS_TABLE. Existing
+/// unmap paths still mutate PTEs outside that lock, so this must not be exposed
+/// or called concurrently with those paths until their lock scopes are fixed.
+pub(crate) unsafe fn resize_shared_memory(
+    memory: &crate::mem::shared_memory::SharedMemory,
+    length: u64,
+) -> core::result::Result<(), u64> {
+    use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
+    let table = PROCESS_TABLE.lock();
+    memory.resize_with(length, |start, end| {
+        let mut ranges = Vec::new();
+        for process in table.iter() {
+            let Some(page_table) = process.page_table() else {
+                continue;
+            };
+            for region in process.memory_regions() {
+                if region
+                    .backing()
+                    .file_object()
+                    .and_then(|object| object.memory_identity())
+                    != Some(memory.id())
+                {
+                    continue;
+                }
+                let overlap = transaction::virtual_overlap(
+                    region.start(),
+                    region.len(),
+                    region.backing().file_offset(),
+                    start,
+                    end,
+                )
+                .map_err(|_| crate::syscall::EINVAL)?;
+                if let Some((low, high)) = overlap {
+                    ranges.try_reserve(1).map_err(|_| crate::syscall::ENOMEM)?;
+                    ranges.push((page_table, low, high));
+                }
+            }
+        }
+        // SAFETY: the caller's writer exclusion plus the retained table guard
+        // keeps every selected PTE and page-table hierarchy stable.
+        transaction::revoke(ranges, &mut unsafe { Native::new(&table) })
+            .map_err(|error| match error {
+                transaction::Error::InvalidRange => crate::syscall::EINVAL,
+                transaction::Error::Allocation => crate::syscall::ENOMEM,
+                transaction::Error::Backend(error) => error,
+            })
+    })
+}
+
 /// プロセスを終了状態（Zombie）へ遷移させる
 pub fn mark_process_exited(id: ProcessId, exit_code: u64) {
     {

@@ -498,6 +498,66 @@ pub fn has_user_page_entry_in_table(table_phys: u64, page_addr: u64) -> bool {
     .unwrap_or(false)
 }
 
+/// A temporarily non-present user PTE; its mapping frame reference remains
+/// owned until restore or release. Never expose this token through a syscall.
+pub(crate) struct SuspendedUserPage {
+    entry: *mut PageTableEntry,
+    original: PageTableEntry,
+}
+
+/// # Safety
+/// The caller holds the process/mapping lock and keeps this page table alive
+/// through restore/release. No other writer may edit the captured leaf.
+pub(crate) unsafe fn suspend_user_page(
+    table_phys: u64,
+    page_addr: u64,
+) -> Result<Option<SuspendedUserPage>> {
+    if table_phys == 0
+        || table_phys & 4095 != 0
+        || page_addr & 4095 != 0
+        || page_addr >= 0x0000_8000_0000_0000
+    {
+        return Err(Kernel::Memory(Memory::InvalidAddress));
+    }
+    if physical_memory_offset().is_none() {
+        return Err(Kernel::Memory(Memory::NotMapped));
+    }
+    let _smap_guard = crate::cpu::SmapSmepGuard::new();
+    Ok(with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
+        if entry.is_unused() || !entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
+            return None;
+        }
+        let original = entry.clone();
+        let mut flags = entry.flags();
+        flags.remove(PageTableFlags::PRESENT);
+        entry.set_addr(entry.addr(), flags);
+        Some(SuspendedUserPage { entry, original })
+    })
+    .flatten())
+}
+
+impl SuspendedUserPage {
+    /// # Safety
+    /// The suspension's mapping lock is still held and the table is alive.
+    pub(crate) unsafe fn restore(self) {
+        let _smap_guard = crate::cpu::SmapSmepGuard::new();
+        unsafe {
+            *self.entry = self.original;
+        }
+    }
+
+    /// # Safety
+    /// As for restore, and all CPUs have acknowledged invalidation after the
+    /// suspension. Only then may the mapping's physical-frame reference drop.
+    pub(crate) unsafe fn release(self) {
+        let _smap_guard = crate::cpu::SmapSmepGuard::new();
+        unsafe {
+            (*self.entry).set_unused();
+        }
+        release_user_frame(self.original.addr().as_u64());
+    }
+}
+
 #[inline(never)]
 pub fn protect_user_page_if_mapped(
     table_phys: u64,

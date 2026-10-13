@@ -121,6 +121,13 @@ impl VmObject {
         }
     }
 
+    pub(crate) fn memory_identity(&self) -> Option<u64> {
+        match &self.source {
+            VmObjectSource::Memory(memory) => Some(memory.id()),
+            _ => None,
+        }
+    }
+
     pub fn provider(object: Arc<ProviderObject>, identity: u64) -> Self {
         Self {
             source: VmObjectSource::Provider { object, identity },
