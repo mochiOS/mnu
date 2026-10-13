@@ -612,9 +612,7 @@ pub fn memory_map(
         return EINVAL;
     }
 
-    let present = access != 0;
     let writable = access & mnu_abi::MEMORY_ACCESS_WRITE != 0;
-    let executable = access & mnu_abi::MEMORY_ACCESS_EXECUTE != 0;
     let file_backing = if anonymous {
         None
     } else {
@@ -736,34 +734,29 @@ pub fn memory_map(
         }
 
         if anonymous {
-            let region = crate::task::MemoryRegion::anonymous(
-                map_start, size, access, options, writable, shared,
-            );
+            // Shared reservations retain one backing object across clones,
+            // including pages neither process has faulted yet. Its storage
+            // is populated lazily by the existing RAM-object pager.
+            let region = if shared {
+                let memory = Arc::new(crate::mem::shared_memory::SharedMemory::new(
+                    size, size / 4096,
+                )?);
+                let object = Arc::new(crate::mem::vm_object::VmObject::shared_memory(memory));
+                crate::task::MemoryRegion::file_backed(
+                    map_start, size, access, options, object, 0, writable, true,
+                    mnu_abi::MEMORY_ACCESS_ALL,
+                )
+            } else {
+                crate::task::MemoryRegion::anonymous(
+                    map_start, size, access, options, writable, false,
+                )
+            };
             if !process.add_memory_region(region) {
                 crate::debug!("process::memory_map overlap");
                 return Err(EINVAL);
             }
-            // Private anonymous regions populate zero-filled pages through
-            // the existing fault handler. Do not allocate untouched backing
-            // just because the region already permits access. Shared anonymous
-            // regions stay eager until they have a shared pager identity, so
-            // fork still sees the same backing even on first access.
-            if present && shared
-                && crate::mem::paging::map_and_copy_segment_to(
-                    pt_phys,
-                    map_start,
-                    0,
-                    size,
-                    &[],
-                    writable,
-                    executable,
-                )
-                .is_err()
-            {
-                let _ = crate::mem::paging::unmap_range_in_table(pt_phys, map_start, size);
-                process.remove_memory_region(map_start, size);
-                return Err(ENOMEM);
-            }
+            // Both private and shared reservations use zero-fill faults;
+            // access permissions never force eager physical allocation.
         } else {
             let (object, file_offset, max_access) = match file_backing {
                 Some(backing) => backing,
