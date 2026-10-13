@@ -79,7 +79,6 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     crate::percpu::verify_syscall_frame_allocation_rollback()?;
 
     fs::init();
-    crate::vfs::init();
     crate::performance::mark_boot(crate::performance::BootMilestone::FilesystemMounted);
     crate::config::init();
     crate::capability::path::init_from_kernel_config();

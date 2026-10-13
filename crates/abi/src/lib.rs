@@ -103,8 +103,6 @@ pub enum SyscallNumber {
     BootSystemSlot = 618,
     BlockFlush = 619,
     BootEspGuid = 620,
-    FilesystemRegister = 624,
-    FilesystemMount = 625,
     HandleClose = 626,
     HandleDuplicate = 627,
     LaunchHandleGet = 628,
@@ -687,12 +685,6 @@ mod syscall_layout_tests {
     #[test]
     fn boot_system_slot_syscall_number_is_stable() {
         assert_eq!(super::SyscallNumber::BootSystemSlot as u64, 618);
-    }
-
-    #[test]
-    fn userspace_filesystem_syscall_numbers_are_stable() {
-        assert_eq!(super::SyscallNumber::FilesystemRegister as u64, 624);
-        assert_eq!(super::SyscallNumber::FilesystemMount as u64, 625);
     }
 
     #[test]

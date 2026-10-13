@@ -1,14 +1,13 @@
 //! ファイルシステム関連のシステムコール
 
 use super::types::{
-    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EINVAL, ENOTSUP, EPIPE,
+    EACCES, EAGAIN, EBADF, EFAULT, EINVAL, ENOTSUP, EPIPE,
 };
 use crate::capability::Capability;
 use crate::capability::path::{
     self, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner,
 };
 use crate::task::fd_table::{FileHandle, FileHandleCap};
-use crate::vfs::{self, FilesystemId};
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
@@ -147,66 +146,6 @@ pub(crate) fn remove_stream_waiter(stream_id: usize, waiter: crate::task::Thread
     let mut table = PIPE_TABLE.lock();
     if let Some(Some(stream)) = table.get_mut(stream_id) {
         stream.waiters.retain(|candidate| *candidate != waiter);
-    }
-}
-
-fn read_mount_path(ptr: u64, len: u64) -> Result<String, u64> {
-    let len = usize::try_from(len).map_err(|_| EINVAL)?;
-    if len == 0 || len > mochios_filesystem_protocol::MAX_PATH_LEN {
-        return Err(EINVAL);
-    }
-    let mut bytes = alloc::vec![0u8; len];
-    crate::syscall::copy_from_user(ptr, &mut bytes)?;
-    let path = core::str::from_utf8(&bytes).map_err(|_| EINVAL)?;
-    if !path.starts_with('/') || path.as_bytes().contains(&0) {
-        return Err(EINVAL);
-    }
-    Ok(normalize_path(path))
-}
-
-pub fn filesystem_register(endpoint: u64) -> u64 {
-    if !crate::syscall::security::caller_has_any_capability(&[Capability::ServiceRegister]) {
-        return EACCES;
-    }
-    let Some(process_id) = crate::syscall::security::current_process_id() else {
-        return EACCES;
-    };
-    if !crate::syscall::ipc::endpoint_is_owned_by(endpoint, process_id) {
-        return EACCES;
-    }
-    vfs::register_userspace_filesystem(endpoint, process_id.as_u64()).0
-}
-
-pub fn filesystem_mount(
-    filesystem_id: u64,
-    target_ptr: u64,
-    target_len: u64,
-    source_ptr: u64,
-    source_len: u64,
-) -> u64 {
-    if !crate::syscall::security::caller_has_any_capability(&[Capability::ServiceRegister]) {
-        return EACCES;
-    }
-    let Some(process_id) = crate::syscall::security::current_process_id() else {
-        return EACCES;
-    };
-    let filesystem_id = FilesystemId(filesystem_id);
-    if filesystem_id != vfs::ROOT_FILESYSTEM_ID
-        && !vfs::filesystem_owned_by(filesystem_id, process_id.as_u64())
-    {
-        return EACCES;
-    }
-    let target = match read_mount_path(target_ptr, target_len) {
-        Ok(path) => path,
-        Err(errno) => return errno,
-    };
-    let source = match read_mount_path(source_ptr, source_len) {
-        Ok(path) => path,
-        Err(errno) => return errno,
-    };
-    match vfs::mount_from(&target, filesystem_id, &source) {
-        Ok(mount_id) => mount_id.0,
-        Err(()) => EEXIST,
     }
 }
 
