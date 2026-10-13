@@ -24,11 +24,21 @@ impl Drop for OwnedFrame {
 
 impl SharedMemory {
     pub fn new(length: u64, maximum_pages: u64) -> Result<Self, u64> {
-        let pages =
-            SharedPages::new(length, PAGE_BYTES, maximum_pages).map_err(|error| match error {
-                SizeError::Invalid => crate::syscall::EINVAL,
-                SizeError::LimitExceeded => crate::syscall::ENOMEM,
-            })?;
+        let pages = SharedPages::new(length, PAGE_BYTES, maximum_pages);
+        Self::from_pages(pages)
+    }
+
+    /// Internal byte extent constructor. Native creation retains its existing
+    /// contract until mapping admission and resize authority are wired together.
+    pub(crate) fn new_resizable(length: u64, maximum_pages: u64) -> Result<Self, u64> {
+        Self::from_pages(SharedPages::new_bytes(length, PAGE_BYTES, maximum_pages))
+    }
+
+    fn from_pages(pages: Result<SharedPages<OwnedFrame>, SizeError>) -> Result<Self, u64> {
+        let pages = pages.map_err(|error| match error {
+            SizeError::Invalid => crate::syscall::EINVAL,
+            SizeError::LimitExceeded => crate::syscall::ENOMEM,
+        })?;
         let id = NEXT_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| crate::syscall::ENOMEM)?;

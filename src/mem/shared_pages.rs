@@ -31,6 +31,22 @@ pub(crate) enum ResizeError<Error> {
 }
 
 impl<Page> SharedPages<Page> {
+    /// Byte-sized logical extent with page-rounded, lazily populated storage.
+    /// The original allocation ceiling remains attached to the object.
+    pub(crate) fn new_bytes(
+        length: u64,
+        page_bytes: u64,
+        maximum_pages: u64,
+    ) -> Result<Self, SizeError> {
+        super::byte_extent::plan(0, length, page_bytes, maximum_pages)?;
+        Ok(Self {
+            length,
+            page_bytes,
+            maximum_pages,
+            pages: BTreeMap::new(),
+        })
+    }
+
     /// Native objects are page-granular. The creator's page limit is checked
     /// before any storage allocation; no unchecked size rounding is performed.
     pub(crate) fn new(length: u64, page_bytes: u64, maximum_pages: u64) -> Result<Self, SizeError> {
