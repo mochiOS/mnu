@@ -93,8 +93,6 @@ const SYS_IPC_CREATE: u64 = mnu_abi::SyscallNumber::IpcCreate as u64;
 const SYS_IPC_CALL: u64 = mnu_abi::SyscallNumber::IpcCall as u64;
 const SYS_IPC_REPLY: u64 = mnu_abi::SyscallNumber::IpcReply as u64;
 const SYS_IPC_WAIT: u64 = mnu_abi::SyscallNumber::IpcWait as u64;
-const SYS_ALLOC_SHARED_PAGES: u64 = mnu_abi::SyscallNumber::AllocSharedPages as u64;
-const SYS_UNMAP_PAGES: u64 = mnu_abi::SyscallNumber::UnmapPages as u64;
 const SYS_IPC_SEND: u64 = mnu_abi::SyscallNumber::IpcSend as u64;
 const SYS_IPC_RECV_WAIT: u64 = mnu_abi::SyscallNumber::IpcRecvWait as u64;
 const SYS_CAP_CLONE: u64 = mnu_abi::SyscallNumber::CapClone as u64;
@@ -485,26 +483,6 @@ pub fn ipc_wait(ptr: u64, len: u64, flags: u64) -> u64 {
     unsafe { syscall3(SYS_IPC_WAIT, ptr, len, flags) }
 }
 
-pub fn alloc_shared_pages(
-    page_count: u64,
-    phys_pages_ptr: u64,
-    phys_page_count: u64,
-    flags: u64,
-) -> u64 {
-    unsafe {
-        syscall4(
-            SYS_ALLOC_SHARED_PAGES,
-            page_count,
-            phys_pages_ptr,
-            phys_page_count,
-            flags,
-        )
-    }
-}
-
-pub fn unmap_pages(addr: u64, len: u64) -> u64 {
-    unsafe { syscall2(SYS_UNMAP_PAGES, addr, len) }
-}
 
 
 pub fn ipc_send(dest: u64, ptr: u64, len: u64) -> u64 {
