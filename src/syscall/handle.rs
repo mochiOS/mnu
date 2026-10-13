@@ -47,8 +47,8 @@ fn current_process() -> Result<crate::task::ProcessId, u64> {
 
 /// Creates backing owned by the caller, not a view into another process.
 /// Existing Handle duplication and IPC attachment paths enforce attenuation.
-pub fn memory_object_create(length: u64, reserved: u64) -> u64 {
-    if reserved != 0 {
+pub fn memory_object_create(length: u64, options: u64) -> u64 {
+    if options & !mnu_abi::MEMORY_OBJECT_RESIZABLE != 0 {
         return EINVAL;
     }
     let process_id = match current_process() {
@@ -57,18 +57,27 @@ pub fn memory_object_create(length: u64, reserved: u64) -> u64 {
     };
     crate::task::with_process_mut(process_id, |process| {
         let maximum_pages = process.resource_limits().max_mapped_pages as u64;
-        let memory = match crate::mem::shared_memory::SharedMemory::new(length, maximum_pages) {
+        let resizable = options & mnu_abi::MEMORY_OBJECT_RESIZABLE != 0;
+        let backing = if resizable {
+            crate::mem::shared_memory::SharedMemory::new_resizable(length, maximum_pages)
+        } else {
+            crate::mem::shared_memory::SharedMemory::new(length, maximum_pages)
+        };
+        let memory = match backing {
             Ok(memory) => Arc::new(memory),
             Err(error) => return error,
         };
         let object = KernelObject::VmObject(Arc::new(
             crate::mem::vm_object::VmObject::shared_memory(memory),
         ));
-        let rights = HandleRights::READ
+        let mut rights = HandleRights::READ
             .union(HandleRights::WRITE)
             .union(HandleRights::MAP)
             .union(HandleRights::DUPLICATE)
             .union(HandleRights::TRANSFER);
+        if resizable {
+            rights = rights.union(HandleRights::CONTROL);
+        }
         process
             .object_handles_mut()
             .insert(ObjectHandleEntry::new(object, rights))
@@ -86,6 +95,16 @@ fn decode_handle(raw: u64) -> Result<ObjectHandle, u64> {
 pub fn memory_object_length(raw: u64) -> u64 {
     match object(raw, HandleRights::MAP) {
         Ok(KernelObject::VmObject(object)) => object.memory_length().unwrap_or(EINVAL),
+        Ok(_) => EINVAL,
+        Err(error) => error,
+    }
+}
+
+pub fn memory_object_resize(raw: u64, length: u64) -> u64 {
+    // Resolve and retain the resource before acquiring the mapping lock. Never
+    // use a foreign PID/FD or hold a caller-table guard across global resize.
+    match object(raw, HandleRights::CONTROL) {
+        Ok(KernelObject::VmObject(object)) => object.resize_memory(length).err().unwrap_or(SUCCESS),
         Ok(_) => EINVAL,
         Err(error) => error,
     }

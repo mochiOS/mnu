@@ -28,8 +28,7 @@ impl SharedMemory {
         Self::from_pages(pages)
     }
 
-    /// Internal byte extent constructor. Native creation retains its existing
-    /// contract until mapping admission and resize authority are wired together.
+    /// Byte extent constructor for explicitly resizable native RAM objects.
     pub(crate) fn new_resizable(length: u64, maximum_pages: u64) -> Result<Self, u64> {
         Self::from_pages(SharedPages::new_bytes(length, PAGE_BYTES, maximum_pages))
     }

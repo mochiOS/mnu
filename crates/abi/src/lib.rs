@@ -39,6 +39,9 @@ pub const MEMORY_ACCESS_ALL: u64 = MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE | ME
 pub const MEMORY_MAP_EXACT: u64 = 1 << 0;
 pub const MEMORY_MAP_SHARED: u64 = 1 << 1;
 pub const MEMORY_MAP_OPTIONS_ALL: u64 = MEMORY_MAP_EXACT | MEMORY_MAP_SHARED;
+/// Byte-sized RAM backing whose creator receives CONTROL for extent changes.
+/// Zero options retain fixed, nonempty, page-aligned creation.
+pub const MEMORY_OBJECT_RESIZABLE: u64 = 1;
 
 /// mnu native syscall numbers.
 #[repr(u64)]
@@ -143,8 +146,10 @@ pub enum SyscallNumber {
     HandleControl = 668,
     ProcessSuspendCurrent = 669,
     ProcessHandleSuspend = 670,
-    /// Creates page-granular, zero-filled anonymous backing and returns a
-    /// process-local Handle. The second argument is reserved and must be zero.
+    /// Creates zero-filled RAM backing and returns a process-local Handle.
+    /// Arguments: byte length, options. Zero options select fixed nonempty
+    /// page-aligned backing; MEMORY_OBJECT_RESIZABLE permits byte extents,
+    /// including zero, and grants CONTROL for MemoryObjectResize.
     MemoryObjectCreate = 671,
     /// Returns the byte length of a process-local MemoryObject with MAP rights.
     MemoryObjectLength = 672,
@@ -194,6 +199,10 @@ pub enum SyscallNumber {
     /// Describes one native clock without reading its timestamp. Arguments:
     /// ClockId, ClockInfo output pointer, exact ClockInfo byte length.
     ClockDescribe = 685,
+    /// Changes the byte extent of RAM backing selected by a caller-owned
+    /// Handle granting CONTROL. Arguments: Handle, new length. Revokes live
+    /// and detached aliases before reclaiming or zeroing backing storage.
+    MemoryObjectResize = 686,
     CheckGravityExist = 999,
 }
 

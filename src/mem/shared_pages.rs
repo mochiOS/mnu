@@ -47,7 +47,7 @@ impl<Page> SharedPages<Page> {
         })
     }
 
-    /// Native objects are page-granular. The creator's page limit is checked
+    /// Fixed native objects are page-granular. The creator's page limit is checked
     /// before any storage allocation; no unchecked size rounding is performed.
     pub(crate) fn new(length: u64, page_bytes: u64, maximum_pages: u64) -> Result<Self, SizeError> {
         if length == 0 {
@@ -57,7 +57,7 @@ impl<Page> SharedPages<Page> {
     }
 
     /// Empty backing is valid for a resizable object. Keep the existing fixed
-    /// object constructor's nonempty contract until native resize is wired.
+    /// object constructor's nonempty contract. Byte extents use `new_bytes`.
     pub(crate) fn new_resizable(
         length: u64,
         page_bytes: u64,

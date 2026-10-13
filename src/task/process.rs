@@ -1622,15 +1622,12 @@ where
     }
 }
 
-/// Resizes owned RAM backing while excluding all address-space writers.
+/// Resizes owned RAM backing while excluding user mapping writers and readers.
 /// No names, POSIX descriptors or caller process identities select mappings.
-/// This remains internal until every mapping mutation uses the same lock scope.
-///
-/// # Safety
-/// All page-table mutation paths must serialize with PROCESS_TABLE. Existing
-/// unmap paths still mutate PTEs outside that lock, so this must not be exposed
-/// or called concurrently with those paths until their lock scopes are fixed.
-pub(crate) unsafe fn resize_shared_memory(
+/// Mapping admission, faults, COW, protection, unmap, usercopy, address waits
+/// and detached-image context validation serialize through PROCESS_TABLE.
+/// Registry pins retain unpublished roots until all revocation work finishes.
+pub(crate) fn resize_shared_memory(
     memory: &crate::mem::shared_memory::SharedMemory,
     length: u64,
 ) -> core::result::Result<(), u64> {
@@ -1686,7 +1683,7 @@ pub(crate) unsafe fn resize_shared_memory(
                 }
             }
         }
-        // SAFETY: the caller's writer exclusion plus the retained table guard
+        // SAFETY: user mapping exclusion plus the retained table guard
         // keeps every selected PTE and page-table hierarchy stable.
         transaction::revoke(ranges, &mut unsafe { Native::with_detached(&table, &roots) })
             .map_err(|error| match error {

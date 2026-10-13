@@ -121,6 +121,15 @@ impl VmObject {
         }
     }
 
+    pub(crate) fn resize_memory(&self, length: u64) -> Result<(), u64> {
+        match &self.source {
+            VmObjectSource::Memory(memory) => {
+                crate::task::process::resize_shared_memory(memory, length)
+            }
+            _ => Err(crate::syscall::EINVAL),
+        }
+    }
+
     pub(crate) fn memory_identity(&self) -> Option<u64> {
         match &self.source {
             VmObjectSource::Memory(memory) => Some(memory.id()),
@@ -338,7 +347,10 @@ impl VmObject {
 
     pub fn mark_page_dirty(&self, page_index: u64) -> Result<(), u64> {
         if let VmObjectSource::Memory(memory) = &self.source {
-            return if page_index < memory.length() / PAGE_BYTES as u64 {
+            return if page_index
+                .checked_mul(PAGE_BYTES as u64)
+                .is_some_and(|offset| offset < memory.length())
+            {
                 Ok(())
             } else {
                 Err(crate::syscall::EINVAL)
