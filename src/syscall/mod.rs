@@ -237,23 +237,6 @@ fn map_borrowed_range_for_process(
     }
 }
 
-pub fn get_physical_addr(virt_addr: u64) -> u64 {
-    use crate::capability::Capability;
-    use crate::syscall::types::{EACCES, EFAULT, ENOMEM};
-
-    if !crate::syscall::security::caller_has_any_capability(&[Capability::MemoryPhysTranslate]) {
-        return EACCES;
-    }
-    if !validate_user_ptr(virt_addr, 1) {
-        return EFAULT;
-    }
-    let pt_phys = match current_user_page_table() {
-        Some(pt) => pt,
-        None => return ENOMEM,
-    };
-    crate::mem::paging::virt_to_phys_in_table(pt_phys, virt_addr).unwrap_or(EFAULT)
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UserFramebufferInfo {
