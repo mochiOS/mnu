@@ -729,9 +729,12 @@ pub fn memory_map(
                 crate::debug!("process::memory_map overlap");
                 return Err(EINVAL);
             }
-            // An inaccessible anonymous region reserves virtual space only.
-            // MemoryProtect and the existing fault handler commit pages later.
-            if present
+            // Private anonymous regions populate zero-filled pages through
+            // the existing fault handler. Do not allocate untouched backing
+            // just because the region already permits access. Shared anonymous
+            // regions stay eager until they have a shared pager identity, so
+            // fork still sees the same backing even on first access.
+            if present && shared
                 && crate::mem::paging::map_and_copy_segment_to(
                     pt_phys,
                     map_start,
