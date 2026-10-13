@@ -804,7 +804,7 @@ extern "x86-interrupt" fn page_fault_handler(
         && error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE)
     {
         if let Some(table) = user_page_table {
-            match crate::mem::paging::resolve_copy_on_write(table, faulting_addr.as_u64()) {
+            match crate::syscall::process::resolve_user_copy_on_write(table, faulting_addr.as_u64()) {
                 Ok(true) => {
                     leave_to_user(entered_from_user);
                     return;

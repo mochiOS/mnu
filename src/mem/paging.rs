@@ -32,7 +32,10 @@ static KERNEL_L4_READY: core::sync::atomic::AtomicBool = core::sync::atomic::Ato
 static SHARED_USER_FRAMES: Mutex<FrameReferenceTable> = Mutex::new(FrameReferenceTable::new());
 /// x86-64 canonical ユーザー空間上限
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
-const COPY_ON_WRITE: PageTableFlags = PageTableFlags::BIT_9;
+const COPY_ON_WRITE: PageTableFlags =
+    PageTableFlags::from_bits_retain(super::cow_access::COPY_ON_WRITE);
+const COW_WRITE_DISABLED: PageTableFlags =
+    PageTableFlags::from_bits_retain(super::cow_access::WRITE_DISABLED);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForkPagePolicy {
@@ -592,18 +595,32 @@ pub fn protect_user_page_if_mapped(
     };
 
     if writable && initial_flags.contains(COPY_ON_WRITE) {
-        if !initial_flags.contains(PageTableFlags::PRESENT) {
+        // The native protection coordinator has authorized this write grant.
+        // Make a writable COW copy before publishing write access. NX is set
+        // first so restoring RW from RX never creates a transient W+X leaf.
+        with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
+            let mut flags = entry.flags();
+            flags.insert(
+                PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE,
+            );
+            flags.remove(PageTableFlags::WRITABLE | COW_WRITE_DISABLED);
+            entry.set_addr(entry.addr(), flags);
+        })
+        .ok_or(Kernel::Memory(Memory::NotMapped))?;
+        flush_page_if_active(table_phys, page_addr);
+        let resolved = resolve_copy_on_write(table_phys, page_addr);
+        if !matches!(resolved, Ok(true)) {
+            // A failed explicit grant must not leave a formerly read-only
+            // COW reference eligible for a later write fault.
             with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
-                let mut flags = entry.flags();
-                flags.insert(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
-                flags.remove(PageTableFlags::WRITABLE);
-                entry.set_addr(entry.addr(), flags);
+                entry.set_addr(entry.addr(), initial_flags);
             })
             .ok_or(Kernel::Memory(Memory::NotMapped))?;
             flush_page_if_active(table_phys, page_addr);
-        }
-        if !resolve_copy_on_write(table_phys, page_addr)? {
-            return Err(Kernel::Memory(Memory::PermissionDenied));
+            return match resolved {
+                Err(error) => Err(error),
+                _ => Err(Kernel::Memory(Memory::PermissionDenied)),
+            };
         }
     }
 
@@ -624,6 +641,9 @@ pub fn protect_user_page_if_mapped(
         } else {
             flags.insert(PageTableFlags::NO_EXECUTE);
         }
+        flags = PageTableFlags::from_bits_retain(
+            super::cow_access::with_write_access(flags.bits(), writable),
+        );
         entry.set_addr(entry.addr(), flags);
     })
     .ok_or(Kernel::Memory(Memory::NotMapped))?;
@@ -678,7 +698,7 @@ pub fn resolve_copy_on_write(table_phys: u64, address: u64) -> Result<bool> {
         return Ok(false);
     };
     let old_phys = old_address.as_u64();
-    if !old_flags.contains(COPY_ON_WRITE) || old_flags.contains(PageTableFlags::WRITABLE) {
+    if !super::cow_access::may_resolve(old_flags.bits()) {
         return Ok(false);
     }
 
@@ -694,12 +714,12 @@ pub fn resolve_copy_on_write(table_phys: u64, address: u64) -> Result<bool> {
             if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(COPY_ON_WRITE) {
                 return true;
             }
-            if entry.addr().as_u64() != old_phys || !flags.contains(COPY_ON_WRITE) {
+            if entry.addr().as_u64() != old_phys || !super::cow_access::may_resolve(flags.bits()) {
                 return false;
             }
 
             let mut writable_flags = flags | PageTableFlags::WRITABLE;
-            writable_flags.remove(COPY_ON_WRITE);
+            writable_flags.remove(COPY_ON_WRITE | COW_WRITE_DISABLED);
             if references.release(old_phys) {
                 entry.set_addr(PhysAddr::new(old_phys), writable_flags);
             } else {
@@ -1672,9 +1692,7 @@ pub fn clone_user_page_table(
                         continue;
                     }
                     let src_flags = pte.flags();
-                    if !src_flags.contains(Flags::PRESENT)
-                        || !src_flags.contains(Flags::USER_ACCESSIBLE)
-                    {
+                    if !src_flags.contains(Flags::USER_ACCESSIBLE) {
                         continue;
                     }
 
@@ -1693,19 +1711,16 @@ pub fn clone_user_page_table(
                             shared_pages += 1;
                         }
                         ForkPagePolicy::Private | ForkPagePolicy::PrivateWritable => {
-                            let mut shared_flags = src_flags;
-                            if policy == ForkPagePolicy::PrivateWritable
-                                || src_flags.contains(Flags::WRITABLE)
-                                || src_flags.contains(COPY_ON_WRITE)
-                            {
-                                shared_flags.remove(Flags::WRITABLE);
-                                shared_flags.insert(COPY_ON_WRITE);
-                                pte.set_addr(pte.addr(), shared_flags);
-                                // Revoke cached write access before sharing the
-                                // frame. Also required when destination setup
-                                // below fails: the source PTE is already COW.
-                                flush_page_if_active(src_table_phys, vaddr);
-                            }
+                            let shared_flags = Flags::from_bits_retain(
+                                super::cow_access::clone_private(
+                                    src_flags.bits(), policy == ForkPagePolicy::PrivateWritable,
+                                ),
+                            );
+                            pte.set_addr(pte.addr(), shared_flags);
+                            // Revoke cached write access before sharing the
+                            // frame. Also required when destination setup
+                            // below fails: the source PTE is already COW.
+                            flush_page_if_active(src_table_phys, vaddr);
                             share_page(dst_l4, vaddr, pte.addr().as_u64(), shared_flags, phys_off)?;
                             shared_pages += 1;
                         }

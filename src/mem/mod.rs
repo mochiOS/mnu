@@ -12,6 +12,7 @@ pub mod frame;
 mod frame_refs;
 pub mod gdt;
 pub mod paging;
+pub(crate) mod cow_access;
 pub(crate) mod object_io;
 pub(crate) mod range_plan;
 pub(crate) mod shared_pages;

@@ -315,6 +315,20 @@ pub fn sleep(milliseconds: u64) -> u64 {
     SUCCESS
 }
 
+/// Resolve a write-authorized COW leaf in the caller's retained VM root.
+pub(crate) fn resolve_user_copy_on_write(table: u64, address: u64) -> crate::result::Result<bool> {
+    let pid = crate::syscall::security::current_process_id()
+        .ok_or(crate::Kernel::Memory(crate::result::Memory::InvalidAddress))?;
+    crate::task::with_process_mut(pid, |process| {
+        if process.page_table() != Some(table) {
+            return Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress));
+        }
+        // Serialize COW leaf edits with native protection, unmap and teardown.
+        crate::mem::paging::resolve_copy_on_write(table, address)
+    })
+    .unwrap_or(Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress)))
+}
+
 /// Resolves one page of a native memory region after a user page fault.
 pub fn handle_user_memory_fault(fault_addr: u64, is_write: bool, is_execute: bool) -> bool {
     let tid = match current_thread_id() {

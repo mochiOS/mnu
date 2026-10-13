@@ -553,6 +553,21 @@ fn fault_in_user_range(table_phys: u64, address: u64, len: u64, write: bool) -> 
     }
 }
 
+/// Resident usercopy keeps the caller's root and leaf permissions stable.
+fn copy_into_current_root(table: u64, address: u64, bytes: &[u8]) -> crate::result::Result<()> {
+    let pid = security::current_process_id()
+        .ok_or(crate::Kernel::Memory(crate::result::Memory::InvalidAddress))?;
+    crate::task::with_process_mut(pid, |process| {
+        if process.page_table() != Some(table) {
+            return Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress));
+        }
+        // Fault preparation may do IPC, but this resident copy must exclude
+        // concurrent COW/protection/unmap edits and keep its root alive.
+        crate::mem::paging::copy_to_user_in_table(table, address, bytes)
+    })
+    .unwrap_or(Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress)))
+}
+
 /// バイト列をユーザー空間へコピーする（コピー元はカーネル空間）。
 pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
     if src.is_empty() {
@@ -565,9 +580,9 @@ pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
     if dst_ptr == 0 {
         return Err(EFAULT);
     }
-    let mut result = crate::mem::paging::copy_to_user_in_table(user_pt, dst_ptr, src);
+    let mut result = copy_into_current_root(user_pt, dst_ptr, src);
     if result.is_err() && fault_in_user_range(user_pt, dst_ptr, src.len() as u64, true) {
-        result = crate::mem::paging::copy_to_user_in_table(user_pt, dst_ptr, src);
+        result = copy_into_current_root(user_pt, dst_ptr, src);
     }
     result.map_err(|err| {
         let (syscall_num, syscall_args) = last_syscall_snapshot();
