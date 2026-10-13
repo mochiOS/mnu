@@ -493,9 +493,9 @@ pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
     if src_ptr == 0 {
         return Err(EFAULT);
     }
-    let mut result = crate::mem::paging::copy_from_user_in_table(user_pt, src_ptr, dst);
+    let mut result = copy_out_of_current_root(user_pt, src_ptr, dst);
     if result.is_err() && fault_in_user_range(user_pt, src_ptr, dst.len() as u64, false) {
-        result = crate::mem::paging::copy_from_user_in_table(user_pt, src_ptr, dst);
+        result = copy_out_of_current_root(user_pt, src_ptr, dst);
     }
     result.map_err(|err| {
         let (syscall_num, syscall_args) = last_syscall_snapshot();
@@ -537,12 +537,26 @@ fn fault_in_user_range(table_phys: u64, address: u64, len: u64, write: bool) -> 
     let end = address + len - 1;
     let mut page = address & !0xfff;
     let end_page = end & !0xfff;
+    let Some(pid) = security::current_process_id() else {
+        return false;
+    };
     loop {
-        let resident = if write {
-            crate::mem::paging::is_user_range_writable_in_table(table_phys, page, 1)
-        } else {
-            crate::mem::paging::is_user_range_mapped_in_table(table_phys, page, 1)
+        let resident = crate::task::with_process(pid, |process| {
+            if process.page_table() != Some(table_phys) {
+                return None;
+            }
+            Some(if write {
+                crate::mem::paging::is_user_range_writable_in_table(table_phys, page, 1)
+            } else {
+                crate::mem::paging::is_user_range_mapped_in_table(table_phys, page, 1)
+            })
+        })
+        .flatten();
+        let Some(resident) = resident else {
+            return false;
         };
+        // Provider fault preparation can do IPC. Drop PROC before it; the
+        // final resident copy revalidates and locks the original root again.
         if !resident && !process::handle_user_memory_fault(page, write, false) {
             return false;
         }
@@ -551,6 +565,21 @@ fn fault_in_user_range(table_phys: u64, address: u64, len: u64, write: bool) -> 
         }
         page += 4096;
     }
+}
+
+/// Resident usercopy keeps the caller's root and leaf permissions stable.
+fn copy_out_of_current_root(table: u64, address: u64, bytes: &mut [u8]) -> crate::result::Result<()> {
+    let pid = security::current_process_id()
+        .ok_or(crate::Kernel::Memory(crate::result::Memory::InvalidAddress))?;
+    crate::task::with_process(pid, |process| {
+        if process.page_table() != Some(table) {
+            return Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress));
+        }
+        // Retain the root and exclude protection/unmap/resize until the last
+        // translated byte has been copied into kernel-owned storage.
+        crate::mem::paging::copy_from_user_in_table(table, address, bytes)
+    })
+    .unwrap_or(Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress)))
 }
 
 /// Resident usercopy keeps the caller's root and leaf permissions stable.
