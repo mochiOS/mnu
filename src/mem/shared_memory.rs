@@ -51,7 +51,12 @@ impl SharedMemory {
 
     fn page(&self, index: u64) -> Result<(Arc<OwnedFrame>, u64), u64> {
         let mut pages = self.pages.lock();
-        let page = pages
+        let page = Self::populate(&mut pages, index)?;
+        Ok((page, self.generation.load(Ordering::Relaxed)))
+    }
+
+    fn populate(pages: &mut SharedPages<OwnedFrame>, index: u64) -> Result<Arc<OwnedFrame>, u64> {
+        pages
             .page_or_try_insert(index, || {
                 super::frame::allocate_zeroed_frame()
                     .map(|frame| OwnedFrame(frame.start_address().as_u64()))
@@ -60,8 +65,7 @@ impl SharedMemory {
             .map_err(|error| match error {
                 PageError::OutOfBounds => crate::syscall::EINVAL,
                 PageError::Allocation(error) => error,
-            })?;
-        Ok((page, self.generation.load(Ordering::Relaxed)))
+            })
     }
 
     /// Retains a frame for the caller; release it with `release_user_frame`.
@@ -96,8 +100,9 @@ impl SharedMemory {
         install()
     }
 
-    /// The VM coordinator must exclude mapping changes, revoke the shrinking
-    /// range and complete remote TLB invalidation in `revoke` before it returns.
+    /// The VM coordinator must exclude mapping changes, revoke every supplied
+    /// range (including a growth boundary) and acknowledge remote TLBs before
+    /// returning. Boundary pointer validation precedes revocation and mutation.
     pub(crate) fn resize_with(
         &self,
         length: u64,
@@ -113,7 +118,25 @@ impl SharedMemory {
             .checked_add(1)
             .ok_or(crate::syscall::ENOMEM)?;
         pages
-            .resize_with(length, revoke)
+            .resize_bytes_with(
+                length,
+                |page, range| {
+                    let base = super::paging::physical_memory_offset()
+                        .and_then(|offset| offset.checked_add(page.0))
+                        .ok_or(crate::syscall::EIO)?;
+                    let start = base.checked_add(range.start).ok_or(crate::syscall::EIO)?;
+                    base.checked_add(range.end).ok_or(crate::syscall::EIO)?;
+                    Ok((start, range.end - range.start))
+                },
+                revoke,
+                |_, (start, count)| {
+                    // No fallible operations after revocation. Never form a
+                    // reference to physical bytes also mapped by another CPU.
+                    for offset in 0..count {
+                        unsafe { core::ptr::write_volatile((start + offset) as *mut u8, 0) };
+                    }
+                },
+            )
             .map_err(|error| match error {
                 ResizeError::Size(SizeError::Invalid) => crate::syscall::EINVAL,
                 ResizeError::Size(SizeError::LimitExceeded) => crate::syscall::ENOMEM,
@@ -125,12 +148,13 @@ impl SharedMemory {
     }
 
     pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
-        let backing_length = self.length();
+        let mut pages = self.pages.lock();
+        let backing_length = pages.length();
         if offset > backing_length {
             return Err(crate::syscall::EINVAL);
         }
         let length = output.len().min((backing_length - offset) as usize);
-        self.copy(offset, length, |pointer, done, count| {
+        Self::copy(&mut pages, offset, length, |pointer, done, count| {
             for index in 0..count {
                 // Mapped users may modify the bytes; never form a Rust reference
                 // to storage owned concurrently by a different address space.
@@ -141,10 +165,11 @@ impl SharedMemory {
     }
 
     pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
-        if !self.contains_range(offset, input.len() as u64) {
+        let mut pages = self.pages.lock();
+        if !pages.contains_range(offset, input.len() as u64) {
             return Err(crate::syscall::EINVAL);
         }
-        self.copy(offset, input.len(), |pointer, done, count| {
+        Self::copy(&mut pages, offset, input.len(), |pointer, done, count| {
             for index in 0..count {
                 unsafe {
                     core::ptr::write_volatile(pointer.add(index), input[done + index]);
@@ -155,7 +180,7 @@ impl SharedMemory {
     }
 
     fn copy(
-        &self,
+        pages: &mut SharedPages<OwnedFrame>,
         offset: u64,
         length: usize,
         mut copy: impl FnMut(*mut u8, usize, usize),
@@ -164,7 +189,7 @@ impl SharedMemory {
         let mut done = 0;
         while done < length {
             let current = offset + done as u64;
-            let (page, _) = self.page(current / PAGE_BYTES)?;
+            let page = Self::populate(pages, current / PAGE_BYTES)?;
             let within = (current % PAGE_BYTES) as usize;
             let count = (length - done).min(PAGE_BYTES as usize - within);
             let address = physical_offset

@@ -123,7 +123,17 @@ impl<Page> SharedPages<Page> {
             zero(&page, token);
         }
         if length < self.length {
-            drop(self.pages.split_off(&(plan.capacity / self.page_bytes)));
+            let first_removed = plan.capacity / self.page_bytes;
+            // Do not allocate a second tree after revocation has committed.
+            // Removing this ledger's Arc never frees storage still pinned by
+            // a prepared page or another retained owner.
+            while self
+                .pages
+                .last_key_value()
+                .is_some_and(|(&index, _)| index >= first_removed)
+            {
+                drop(self.pages.pop_last());
+            }
         }
         self.length = plan.length;
         Ok(())
