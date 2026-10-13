@@ -565,7 +565,6 @@ pub fn exec_manifest_syscall(
         Some(authorities),
         requested_privilege,
         execution_class,
-        None,
         application_identity,
         &inherited_handles,
         &inherited_value_specs,
@@ -940,7 +939,6 @@ pub fn exec_kernel_with_name_caps_and_authorities(
         Some(requested_privilege),
         execution_class,
         None,
-        None,
         &[],
         &[],
         false,
@@ -957,7 +955,6 @@ fn exec_internal(
     initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
     execution_class: ExecutionClass,
-    access_process_override: Option<crate::task::ProcessId>,
     application_identity: Option<crate::task::process::ApplicationIdentity>,
     inherited_handles: &[InheritedHandleGrant],
     inherited_values: &[InheritedValueSpec],
@@ -972,15 +969,13 @@ fn exec_internal(
         process_name = alias;
     }
     if enforce_path_access {
-        let access_process = access_process_override.or_else(|| {
-            crate::task::current_thread_id()
-                .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
-        });
-        if let Some(pid) = access_process {
-            if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(path, pid)
-            {
-                return errno;
-            }
+        let Some(pid) = crate::task::current_thread_id()
+            .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
+        else {
+            return crate::syscall::types::EACCES;
+        };
+        if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(path, pid) {
+            return errno;
         }
     }
     if let Some((data, source)) = load_exec_image(path, execution_class) {
