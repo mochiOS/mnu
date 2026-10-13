@@ -118,6 +118,7 @@ impl SharedMemory {
                 ResizeError::Size(SizeError::Invalid) => crate::syscall::EINVAL,
                 ResizeError::Size(SizeError::LimitExceeded) => crate::syscall::ENOMEM,
                 ResizeError::Revocation(error) => error,
+                ResizeError::Preparation(error) => error,
             })?;
         self.generation.store(next, Ordering::Release);
         Ok(())

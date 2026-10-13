@@ -26,6 +26,7 @@ pub(crate) enum PageError<Error> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ResizeError<Error> {
     Size(SizeError),
+    Preparation(Error),
     Revocation(Error),
 }
 
@@ -80,19 +81,51 @@ impl<Page> SharedPages<Page> {
         length: u64,
         revoke: impl FnOnce(u64, u64) -> Result<(), Error>,
     ) -> Result<(), ResizeError<Error>> {
-        if length % self.page_bytes != 0 {
+        if length % self.page_bytes != 0 || self.length % self.page_bytes != 0 {
             return Err(ResizeError::Size(SizeError::Invalid));
         }
-        if length / self.page_bytes > self.maximum_pages {
-            return Err(ResizeError::Size(SizeError::LimitExceeded));
+        self.resize_bytes_with(length, |_, _| Ok(()), revoke, |_, _| {})
+    }
+
+    /// Prepare fallible boundary access without modifying contents, then revoke
+    /// aliases before an infallible zeroing commit. The enclosing object lock
+    /// must exclude faults, I/O and resize throughout all three callbacks.
+    pub(crate) fn resize_bytes_with<Token, Error>(
+        &mut self,
+        length: u64,
+        prepare: impl FnOnce(&Page, core::ops::Range<u64>) -> Result<Token, Error>,
+        revoke: impl FnOnce(u64, u64) -> Result<(), Error>,
+        zero: impl FnOnce(&Page, Token),
+    ) -> Result<(), ResizeError<Error>> {
+        let plan =
+            super::byte_extent::plan(self.length, length, self.page_bytes, self.maximum_pages)
+                .map_err(ResizeError::Size)?;
+        let boundary = match plan.zero {
+            Some(range) => {
+                let index = range.start / self.page_bytes;
+                match self.pages.get(&index) {
+                    Some(page) => {
+                        let base = index * self.page_bytes;
+                        let token = prepare(page, (range.start - base)..(range.end - base))
+                            .map_err(ResizeError::Preparation)?;
+                        Some((page.clone(), token))
+                    }
+                    // Absent pages are populated zeroed; no allocation needed.
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        if let Some(range) = plan.invalidate {
+            revoke(range.start, range.end).map_err(ResizeError::Revocation)?;
+        }
+        if let Some((page, token)) = boundary {
+            zero(&page, token);
         }
         if length < self.length {
-            revoke(length, self.length).map_err(ResizeError::Revocation)?;
-            // Retained Arc references remain owned; removing this ledger's
-            // reference cannot free physical storage still used by a caller.
-            drop(self.pages.split_off(&(length / self.page_bytes)));
+            drop(self.pages.split_off(&(plan.capacity / self.page_bytes)));
         }
-        self.length = length;
+        self.length = plan.length;
         Ok(())
     }
 
@@ -104,7 +137,8 @@ impl<Page> SharedPages<Page> {
         index: u64,
         allocate: impl FnOnce() -> Result<Page, Error>,
     ) -> Result<Arc<Page>, PageError<Error>> {
-        if index >= self.length / self.page_bytes {
+        let count = self.length / self.page_bytes + u64::from(self.length % self.page_bytes != 0);
+        if index >= count {
             return Err(PageError::OutOfBounds);
         }
         if let Some(page) = self.pages.get(&index) {
