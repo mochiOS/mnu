@@ -844,7 +844,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::IpcSendObjectHandles as u64 => {
             ipc::send_object_handles(arg0, arg1, arg2, arg3)
         }
-        x if x == SyscallNumber::IpcSendPages as u64 => ipc::send_pages(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::IpcRecv as u64 => ipc::recv(arg0, arg1),
         x if x == SyscallNumber::IpcRecvWait as u64 => ipc::recv_blocking(arg0, arg1),
         x if x == SyscallNumber::IpcCall as u64 => ipc::call(arg0, arg1, arg2, arg3, arg4),
@@ -961,7 +960,6 @@ fn is_ipc_syscall(num: u64) -> bool {
     num == SyscallNumber::IpcSend as u64
         || num == SyscallNumber::IpcRecv as u64
         || num == SyscallNumber::IpcRecvWait as u64
-        || num == SyscallNumber::IpcSendPages as u64
         || num == SyscallNumber::IpcSendObjectHandles as u64
         || num == SyscallNumber::IpcRecvObjectHandles as u64
         || num == SyscallNumber::IpcCallObjectHandles as u64

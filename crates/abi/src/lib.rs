@@ -58,7 +58,6 @@ pub enum SyscallNumber {
     GetPhysicalAddr = 547,
     AllocSharedPages = 548,
     UnmapPages = 549,
-    IpcSendPages = 550,
     IpcEndpointAlive = 551,
     ListProcesses = 552,
     CheckThreadCapability = 553,

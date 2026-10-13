@@ -95,7 +95,6 @@ const SYS_IPC_REPLY: u64 = mnu_abi::SyscallNumber::IpcReply as u64;
 const SYS_IPC_WAIT: u64 = mnu_abi::SyscallNumber::IpcWait as u64;
 const SYS_ALLOC_SHARED_PAGES: u64 = mnu_abi::SyscallNumber::AllocSharedPages as u64;
 const SYS_UNMAP_PAGES: u64 = mnu_abi::SyscallNumber::UnmapPages as u64;
-const SYS_IPC_SEND_PAGES: u64 = mnu_abi::SyscallNumber::IpcSendPages as u64;
 const SYS_IPC_SEND: u64 = mnu_abi::SyscallNumber::IpcSend as u64;
 const SYS_IPC_RECV_WAIT: u64 = mnu_abi::SyscallNumber::IpcRecvWait as u64;
 const SYS_CAP_CLONE: u64 = mnu_abi::SyscallNumber::CapClone as u64;
@@ -507,17 +506,6 @@ pub fn unmap_pages(addr: u64, len: u64) -> u64 {
     unsafe { syscall2(SYS_UNMAP_PAGES, addr, len) }
 }
 
-pub fn ipc_send_pages(endpoint: u64, phys_pages_ptr: u64, page_count: u64, local_base: u64) -> u64 {
-    unsafe {
-        syscall4(
-            SYS_IPC_SEND_PAGES,
-            endpoint,
-            phys_pages_ptr,
-            page_count,
-            local_base,
-        )
-    }
-}
 
 pub fn ipc_send(dest: u64, ptr: u64, len: u64) -> u64 {
     unsafe { syscall3(SYS_IPC_SEND, dest, ptr, len) }

@@ -902,8 +902,6 @@ fn install_received_object_handles(
 struct ExternalPages {
     count: u32,
     total: u64,
-    source_page_table: u64,
-    source_base: u64,
     inline_pages_count: u16,
     inline_pages: [u64; MAX_INLINE_EXT_PAGES],
 }
@@ -934,8 +932,6 @@ impl ExternalPages {
         Self {
             count: 0,
             total: 0,
-            source_page_table: 0,
-            source_base: 0,
             inline_pages_count: 0,
             inline_pages: [0; MAX_INLINE_EXT_PAGES],
         }
@@ -1869,72 +1865,6 @@ pub fn send_pages_from_kernel(
     })
 }
 
-fn send_virtual_pages_from_kernel(
-    dest_thread_id: u64,
-    map_start: u64,
-    total: u64,
-    page_count: usize,
-    source_page_table: u64,
-    source_base: u64,
-) -> bool {
-    if page_count == 0 || page_count > ipc_max_external_pages() {
-        return false;
-    }
-    let Ok(count) = u32::try_from(page_count) else {
-        return false;
-    };
-    let (idx, dest_generation) =
-        match crate::task::thread_slot_index_and_generation_by_u64(dest_thread_id) {
-            Some(v) => v,
-            None => return false,
-        };
-    if idx >= MAX_THREADS {
-        return false;
-    }
-    let sender = crate::task::current_thread_id()
-        .and_then(|t| ensure_endpoint_for_thread(t.as_u64()))
-        .unwrap_or(0);
-    let mut boxes = lock_mailboxes();
-    boxes.get_mut(idx).map_or(false, |mb| {
-        if 16 > ipc_max_msg_size() {
-            return false;
-        }
-        if let Some(slot_idx) = mb.alloc_slot() {
-            let Some(msg) = mb.slots[slot_idx].as_deref_mut() else {
-                mb.quarantine("ipc mailbox allocated slot is missing");
-                return false;
-            };
-            msg.from = sender;
-            msg.to = dest_thread_id;
-            msg.to_slot = idx as u16;
-            msg.to_generation = dest_generation;
-            msg.is_reply = false;
-            msg.expects_reply = false;
-            msg.data[0..8].copy_from_slice(&map_start.to_le_bytes());
-            msg.data[8..16].copy_from_slice(&total.to_le_bytes());
-            msg.len = 16;
-            msg.ext_pages = ExternalPages {
-                count,
-                total,
-                source_page_table,
-                source_base,
-                inline_pages_count: 0,
-                inline_pages: [0; MAX_INLINE_EXT_PAGES],
-            };
-            if mb.enqueue_slot(slot_idx).is_err() {
-                let _ = mb.free_slot(slot_idx);
-                return false;
-            }
-            let waiter = mb.take_waiter();
-            if waiter != 0 {
-                crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(waiter));
-            }
-            true
-        } else {
-            false
-        }
-    })
-}
 
 // New: Kernel -> recipient: send a map header only (magic + map_start + total) without page list
 pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u64) -> bool {
@@ -2234,70 +2164,6 @@ pub fn send_object_handles(
     )
 }
 
-pub fn send_pages(
-    dest_endpoint_handle: u64,
-    reserved: u64,
-    page_count_raw: u64,
-    local_base: u64,
-) -> u64 {
-    if !crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::IpcClient,
-        crate::capability::Capability::IpcServer,
-    ]) {
-        return EACCES;
-    }
-    // Users must not manufacture authority by naming physical frames. The
-    // remaining legacy operation accepts only a caller-local virtual range;
-    // explicit object sharing uses attenuated IPC Handle attachments.
-    if reserved != 0 {
-        return EINVAL;
-    }
-    let dest_thread_id =
-        if crate::task::thread_slot_index_and_generation_by_u64(dest_endpoint_handle).is_some() {
-            dest_endpoint_handle
-        } else {
-            match endpoint_record_from_handle(dest_endpoint_handle) {
-                Some(record) => {
-                    if !record.rights.contains(EndpointRights::RECV) {
-                        return EACCES;
-                    }
-                    record.thread_id
-                }
-                None => return EINVAL,
-            }
-        };
-    if page_count_raw == 0 || page_count_raw as usize > ipc_max_external_pages() {
-        return EINVAL;
-    }
-    let Ok(page_count) = usize::try_from(page_count_raw) else {
-        return EINVAL;
-    };
-    let total = match page_count_raw.checked_mul(4096) {
-        Some(v) => v,
-        None => return EINVAL,
-    };
-    if (local_base & 0xfff) != 0 {
-        return EINVAL;
-    }
-    let source_page_table = match crate::syscall::security::current_process_id()
-        .and_then(|pid| crate::task::with_process(pid, |process| process.page_table()))
-        .flatten()
-    {
-        Some(pt) => pt,
-        None => return EFAULT,
-    };
-    if send_virtual_pages_from_kernel(
-        dest_thread_id,
-        local_base,
-        total,
-        page_count,
-        source_page_table,
-        local_base,
-    ) {
-        return 0;
-    }
-    EAGAIN
-}
 
 fn map_external_pages_for_receiver(
     receiver_tid: u64,
@@ -2308,10 +2174,9 @@ fn map_external_pages_for_receiver(
     if ext_pages.count == 0 || ext_pages.count as usize > ipc_max_external_pages() {
         return Err(EINVAL);
     }
-    if ext_pages.source_page_table == 0
-        && (ext_pages.inline_pages_count == 0
-            || ext_pages.inline_pages_count as u32 != ext_pages.count
-            || ext_pages.inline_pages_count as usize > MAX_INLINE_EXT_PAGES)
+    if ext_pages.inline_pages_count == 0
+        || ext_pages.inline_pages_count as u32 != ext_pages.count
+        || ext_pages.inline_pages_count as usize > MAX_INLINE_EXT_PAGES
     {
         return Err(EINVAL);
     }
@@ -2354,20 +2219,7 @@ fn map_external_pages_for_receiver(
 
     for i in 0..(ext_pages.count as usize) {
         let target_virt = virt_addr + (i as u64 * 0x1000);
-        let phys_addr = if ext_pages.source_page_table != 0 {
-            let Some(source_virt) = ext_pages.source_base.checked_add((i as u64) * 0x1000) else {
-                return Err(EINVAL);
-            };
-            match crate::mem::paging::virt_to_phys_in_table(
-                ext_pages.source_page_table,
-                source_virt,
-            ) {
-                Some(phys) => phys & !0xfffu64,
-                None => return Err(EFAULT),
-            }
-        } else {
-            ext_pages.inline_pages[i]
-        };
+        let phys_addr = ext_pages.inline_pages[i];
         if crate::mem::paging::map_page_in_table(page_table, target_virt, phys_addr, true, true)
             .is_err()
         {
