@@ -175,6 +175,22 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
     if !has_mmio_device && !crate::task::process_has_kernel_authority(pid, &requested_authority) {
         return EACCES;
     }
+    map_borrowed_range_for_process(
+        pid, virt_addr, phys_addr, size, crate::mem::paging::MappingCache::Uncached,
+    )
+}
+
+fn map_borrowed_range_for_process(
+    pid: crate::task::ProcessId,
+    virt_addr: u64,
+    phys_addr: u64,
+    size: u64,
+    cache: crate::mem::paging::MappingCache,
+) -> u64 {
+    use crate::syscall::types::{EINVAL, ENOMEM, SUCCESS};
+    if !is_canonical_user_range(virt_addr, size) {
+        return EINVAL;
+    }
     let writable = true;
     let mapping = crate::task::MmioMapping::new(virt_addr, size, phys_addr, writable);
     let outcome = crate::task::with_process_mut(pid, |proc| {
@@ -194,7 +210,7 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
             virt_addr,
             phys_addr,
             size,
-            crate::mem::paging::MappingCache::Uncached,
+            cache,
         )
         .is_err()
         {
@@ -440,8 +456,10 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     } else {
         return ENXIO;
     };
-    let required = match framebuffer_size.checked_add(fb_offset) {
-        Some(v) => (v + 0xfff) & !0xfff,
+    let required = match framebuffer_size.checked_add(fb_offset)
+        .and_then(|bytes| bytes.checked_add(0xfff))
+    {
+        Some(v) => v & !0xfff,
         None => return EINVAL,
     };
     if size < required {
@@ -453,20 +471,14 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     let Some(pid) = crate::syscall::security::current_process_id() else {
         return ENOMEM;
     };
-    let Some(pt_phys) = crate::task::with_process(pid, |proc| proc.page_table()).flatten() else {
-        return ENOMEM;
-    };
     let cache = if mmio {
         crate::mem::paging::MappingCache::Uncached
     } else {
         crate::mem::paging::MappingCache::WriteBack
     };
-    if crate::mem::paging::map_physical_range_to_user(pt_phys, virt_addr, fb_base, required, cache)
-        .is_err()
-    {
-        return ENOMEM;
-    }
-    SUCCESS
+    // Both device MMIO and a platform-owned RAM surface are borrowed storage.
+    // Record ownership before mapping, and detach rather than free on teardown.
+    map_borrowed_range_for_process(pid, virt_addr, fb_base, required, cache)
 }
 
 /// ユーザー空間からバイト列をコピーする（コピー先はカーネル空間）。
