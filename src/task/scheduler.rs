@@ -234,6 +234,12 @@ fn select_next_thread() -> Option<(ThreadId, usize)> {
     // 見つけた次のスレッドを Running 状態に設定
     queue.set_state_at_slot(next_slot, ThreadState::Running);
 
+    // Handle teardown and exit notifications can wake a thread while holding
+    // process state. Never take the process-table lock with THREAD_QUEUE held:
+    // the reverse process -> wake -> queue edge would deadlock across CPUs.
+    // Selection/state transitions are complete; retain only copied metadata.
+    drop(queue);
+
     let (process_priority, is_foreground) = crate::task::with_process(next_pid, |process| {
         (process.priority(), process.is_foreground())
     })
@@ -245,7 +251,6 @@ fn select_next_thread() -> Option<(ThreadId, usize)> {
         cpu_burst_score,
     );
 
-    drop(queue);
     #[cfg(feature = "performance-instrumentation")]
     if let Some(started) = wakeup_started {
         crate::performance::record_latency(
