@@ -5,6 +5,9 @@ use alloc::vec::Vec;
 pub(crate) trait Backend {
     type Page;
     type Error;
+    /// Discover an allocated user leaf without editing it. Skip absent
+    /// subtrees; include non-present leaves that still own frame references.
+    fn next_page(&mut self, table: u64, start: u64, end: u64) -> Result<Option<u64>, Self::Error>;
     /// Retain the mapping's frame ownership, removing hardware PRESENT only.
     /// Failure must leave this particular entry unchanged.
     fn suspend(&mut self, table: u64, address: u64) -> Result<Option<Self::Page>, Self::Error>;
@@ -31,13 +34,10 @@ pub(crate) fn revoke<B: Backend>(
     backend: &mut B,
 ) -> Result<(), Error<B::Error>> {
     let mut plan = Vec::new();
-    let mut count = 0usize;
     for (table, start, end) in ranges {
         if start >= end || table & 4095 != 0 || start & 4095 != 0 || end & 4095 != 0 {
             return Err(Error::InvalidRange);
         }
-        let pages = usize::try_from((end - start) / 4096).map_err(|_| Error::InvalidRange)?;
-        count = count.checked_add(pages).ok_or(Error::InvalidRange)?;
         plan.try_reserve(1).map_err(|_| Error::Allocation)?;
         plan.push((table, start, end));
     }
@@ -50,24 +50,40 @@ pub(crate) fn revoke<B: Backend>(
     {
         return Err(Error::InvalidRange);
     }
+    // Discover first: allocation and walk errors must leave every PTE intact.
+    // Storage scales with allocated leaves, not the virtual reservation size.
+    let mut pages = Vec::new();
+    for (table, start, end) in plan {
+        let mut cursor = start;
+        while cursor < end {
+            let Some(address) = backend
+                .next_page(table, cursor, end)
+                .map_err(Error::Backend)?
+            else {
+                break;
+            };
+            if address < cursor || address >= end || address & 4095 != 0 {
+                return Err(Error::InvalidRange);
+            }
+            pages.try_reserve(1).map_err(|_| Error::Allocation)?;
+            pages.push((table, address));
+            cursor = address + 4096;
+        }
+    }
     let mut suspended = Vec::new();
     suspended
-        .try_reserve_exact(count)
+        .try_reserve_exact(pages.len())
         .map_err(|_| Error::Allocation)?;
-    for (table, start, end) in plan {
-        let mut address = start;
-        while address < end {
-            match backend.suspend(table, address) {
-                Ok(Some(page)) => suspended.push(page),
-                Ok(None) => {}
-                Err(error) => {
-                    for page in suspended.into_iter().rev() {
-                        backend.restore(page);
-                    }
-                    return Err(Error::Backend(error));
+    for (table, address) in pages {
+        match backend.suspend(table, address) {
+            Ok(Some(page)) => suspended.push(page),
+            Ok(None) => {}
+            Err(error) => {
+                for page in suspended.into_iter().rev() {
+                    backend.restore(page);
                 }
+                return Err(Error::Backend(error));
             }
-            address += 4096;
         }
     }
     if suspended.is_empty() {

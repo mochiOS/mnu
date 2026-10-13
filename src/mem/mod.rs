@@ -23,6 +23,7 @@ pub mod vm_object;
 pub(crate) mod tlb_rendezvous;
 pub(crate) mod tlb_shootdown;
 pub(crate) mod mapping_revocation;
+pub(crate) mod sparse_page_walk;
 pub(crate) mod mapping_revocation_native;
 pub(crate) mod detached_roots;
 

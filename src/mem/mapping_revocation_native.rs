@@ -16,6 +16,19 @@ enum Roots<'a> {
 }
 
 impl<'a> Native<'a> {
+    fn owns(&self, table: u64) -> bool {
+        match self.roots {
+            Roots::All(table_guard, roots) => {
+                table_guard
+                    .iter()
+                    .any(|process| process.page_table() == Some(table))
+                    || roots
+                        .iter()
+                        .any(|root| !root.published() && root.table() == table)
+            }
+            Roots::One(process) => process.page_table() == Some(table),
+        }
+    }
     /// # Safety
     /// Hold the mapping lock, keep all referenced tables alive, and exclude
     /// every PTE writer until the complete transaction has restored/released.
@@ -57,21 +70,19 @@ impl Backend for Native<'_> {
     type Page = paging::SuspendedUserPage;
     type Error = u64;
 
+    fn next_page(&mut self, table: u64, start: u64, end: u64) -> Result<Option<u64>, u64> {
+        if !self.owns(table) {
+            return Err(crate::syscall::EFAULT);
+        }
+        // SAFETY: the retained mapping lock excludes all writers and teardown.
+        unsafe { paging::next_user_page_entry(table, start, end) }
+            .map_err(|_| crate::syscall::EFAULT)
+    }
+
     fn suspend(&mut self, table: u64, address: u64) -> Result<Option<Self::Page>, u64> {
         // Never walk an arbitrary physical address supplied in a plan. It must
         // belong to an address space retained in this locked process table.
-        let owned = match self.roots {
-            Roots::All(table_guard, roots) => {
-                table_guard
-                    .iter()
-                    .any(|process| process.page_table() == Some(table))
-                    || roots
-                        .iter()
-                        .any(|root| !root.published() && root.table() == table)
-            }
-            Roots::One(process) => process.page_table() == Some(table),
-        };
-        if !owned {
+        if !self.owns(table) {
             return Err(crate::syscall::EFAULT);
         }
         // SAFETY: Native::new's caller excludes writers/faults/teardown and
