@@ -29,8 +29,8 @@ pub use process::{
     add_process, find_process_id_by_name, flush_deferred_process_reclaims, for_each_process,
     mark_process_exited, process_count, process_has_kernel_authority,
     process_has_kernel_capability_authority,
-    register_process_exit_waiter, release_process_dma_buffers,
-    release_process_mmio_mappings, remove_process, remove_process_exit_waiter,
+    register_process_exit_waiter, release_process_borrowed_mappings,
+    remove_process, remove_process_exit_waiter,
     remove_process_exit_waiters, with_process, with_process_mut, DmaBuffer, MemoryBacking, MemoryRegion,
     MmioMapping, Process, ProcessObject, ProcessTable, ResourceLimits,
 };

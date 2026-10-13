@@ -1755,8 +1755,7 @@ fn replace_current_process_image(
         return Err(crate::syscall::types::ENOMEM);
     }
     crate::task::scheduler::retire_image_siblings(pid, current_tid);
-    crate::task::release_process_mmio_mappings(pid);
-    crate::task::release_process_dma_buffers(pid);
+    crate::task::release_process_borrowed_mappings(pid)?;
     crate::task::with_thread_mut(current_tid, |thread| thread.set_fs_base(initial_fs_base));
     let old_pt_phys = crate::task::with_process_mut(pid, |process| {
         let previous = process.page_table();

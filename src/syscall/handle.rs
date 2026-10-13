@@ -1695,10 +1695,9 @@ pub fn process_terminate(raw: u64, exit_code: u64) -> u64 {
     for thread in threads {
         crate::task::terminate_thread(thread);
     }
-    crate::task::release_process_mmio_mappings(process_id);
-    crate::task::release_process_dma_buffers(process_id);
+    let cleanup = crate::task::release_process_borrowed_mappings(process_id);
     crate::task::mark_process_exited(process_id, exit_code);
-    SUCCESS
+    cleanup.map(|()| SUCCESS).unwrap_or_else(|error| error)
 }
 
 pub fn launch_get(key: u64) -> u64 {

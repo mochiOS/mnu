@@ -1582,9 +1582,8 @@ pub fn add_process(process: Process) -> Option<ProcessId> {
 
 /// プロセスを削除
 pub fn remove_process(id: ProcessId) -> Option<Process> {
+    release_process_borrowed_mappings(id).ok()?;
     crate::capability::path::revoke_scoped_paths(id.as_u64());
-    release_process_mmio_mappings(id);
-    release_process_dma_buffers(id);
     PROCESS_TABLE.lock().remove(id)
 }
 
@@ -1711,7 +1710,7 @@ pub fn mark_process_exited(id: ProcessId, exit_code: u64) {
     defer_process_reclaim(id);
 }
 
-fn destroy_exited_process(mut process: Process) -> (ProcessId, u64) {
+fn destroy_exited_process(process: Process) -> (ProcessId, u64) {
     let pid = process.id();
     let exit_code = process.exit_code().unwrap_or(0);
     let page_table = if process.page_table_owned() {
@@ -1719,34 +1718,7 @@ fn destroy_exited_process(mut process: Process) -> (ProcessId, u64) {
     } else {
         None
     };
-    let mmio_mappings = process.take_mmio_mappings();
-    let dma_buffers = process.take_dma_buffers();
     crate::capability::path::revoke_scoped_paths(pid.as_u64());
-    if let Some(table_phys) = page_table {
-        for mmio in &mmio_mappings {
-            let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
-                table_phys,
-                mmio.virt_start(),
-                mmio.len(),
-            );
-        }
-        for dma in &dma_buffers {
-            let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
-                table_phys,
-                dma.virt_start(),
-                dma.len(),
-            );
-        }
-    }
-    for dma in dma_buffers {
-        for page_index in 0..dma.page_count() {
-            let phys = dma.phys_start() + (page_index as u64) * 4096;
-            let frame = x86_64::structures::paging::PhysFrame::containing_address(
-                x86_64::PhysAddr::new(phys),
-            );
-            let _ = crate::mem::frame::deallocate_frame(frame);
-        }
-    }
     if let Some(table_phys) = page_table {
         if let Err(e) = crate::mem::paging::destroy_user_page_table(table_phys) {
             crate::warn!(
@@ -1784,6 +1756,14 @@ pub fn flush_deferred_process_reclaims() {
             defer_process_reclaim(process_id);
             continue;
         }
+        // Keep failed revocations discoverable in PROCESS_TABLE and retry from
+        // a later reclaim pass. Never destroy a root with live borrowed PTEs.
+        if release_process_borrowed_mappings(process_id).is_err() {
+            if with_process(process_id, |_| ()).is_some() {
+                defer_process_reclaim(process_id);
+            }
+            continue;
+        }
         let process = PROCESS_TABLE.lock().take_exited(process_id);
         if let Some(process) = process {
             let _ = destroy_exited_process(process);
@@ -1791,47 +1771,45 @@ pub fn flush_deferred_process_reclaims() {
     }
 }
 
-pub fn release_process_mmio_mappings(pid: ProcessId) {
-    let (page_table, mmio_mappings) = match with_process_mut(pid, |proc| {
-        let page_table = proc.page_table();
-        let mmio_mappings = proc.take_mmio_mappings();
-        (page_table, mmio_mappings)
-    }) {
-        Some((page_table, mmio_mappings)) => (page_table, mmio_mappings),
-        None => return,
-    };
-
-    if let Some(table_phys) = page_table {
-        for mmio in &mmio_mappings {
-            let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
-                table_phys,
-                mmio.virt_start(),
-                mmio.len(),
-            );
+/// Atomically revoke borrowed PTEs before changing ownership records. Failure
+/// leaves every record and frame owned, allowing exec to fail or exit reclaim
+/// to retry without recycling storage still accessible through remote TLBs.
+pub fn release_process_borrowed_mappings(pid: ProcessId) -> core::result::Result<(), u64> {
+    let dma_buffers = with_process_mut(pid, |proc| {
+        use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
+        if proc.mmio_mappings().is_empty() && proc.dma_buffers().is_empty() {
+            proc.reset_dma_arena();
+            return Ok(Vec::new());
         }
-    }
-}
-
-pub fn release_process_dma_buffers(pid: ProcessId) {
-    let (page_table, dma_buffers) = match with_process_mut(pid, |proc| {
-        let page_table = proc.page_table();
+        let page_table = proc.page_table().ok_or(crate::syscall::EINVAL)?;
+        let count = proc.mmio_mappings().len()
+            .checked_add(proc.dma_buffers().len())
+            .ok_or(crate::syscall::ENOMEM)?;
+        let mut ranges = Vec::new();
+        ranges.try_reserve_exact(count)
+            .map_err(|_| crate::syscall::ENOMEM)?;
+        for mmio in proc.mmio_mappings() {
+            ranges.push((page_table, mmio.virt_start(),
+                mmio.end().ok_or(crate::syscall::EINVAL)?));
+        }
+        for dma in proc.dma_buffers() {
+            ranges.push((page_table, dma.virt_start(),
+                dma.end().ok_or(crate::syscall::EINVAL)?));
+        }
+        // SAFETY: PROCESS_TABLE excludes hierarchy edits and pins this root.
+        // Borrowed PTEs must be detached, not returned to the RAM frame ledger.
+        let mut backend = unsafe { Native::for_process(proc, false) };
+        transaction::revoke(ranges, &mut backend).map_err(|error| match error {
+            transaction::Error::InvalidRange => crate::syscall::EINVAL,
+            transaction::Error::Allocation => crate::syscall::ENOMEM,
+            transaction::Error::Backend(error) => error,
+        })?;
+        proc.take_mmio_mappings();
         let dma_buffers = proc.take_dma_buffers();
         proc.reset_dma_arena();
-        (page_table, dma_buffers)
-    }) {
-        Some((page_table, dma_buffers)) => (page_table, dma_buffers),
-        None => return,
-    };
-
-    if let Some(table_phys) = page_table {
-        for dma in &dma_buffers {
-            let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
-                table_phys,
-                dma.virt_start(),
-                dma.len(),
-            );
-        }
-    }
+        Ok(dma_buffers)
+    })
+    .unwrap_or(Err(crate::syscall::ESRCH))?;
 
     for dma in dma_buffers {
         for page_index in 0..dma.page_count() {
@@ -1842,6 +1820,7 @@ pub fn release_process_dma_buffers(pid: ProcessId) {
             let _ = crate::mem::frame::deallocate_frame(frame);
         }
     }
+    Ok(())
 }
 
 /// 現在のプロセス数を取得

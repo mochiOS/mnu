@@ -484,8 +484,9 @@ pub fn exit_current_task(exit_code: u64) -> ! {
                 }
             });
             if !has_other_live_threads {
-                crate::task::release_process_mmio_mappings(pid);
-                crate::task::release_process_dma_buffers(pid);
+                if let Err(error) = crate::task::release_process_borrowed_mappings(pid) {
+                    crate::warn!("Borrowed mapping cleanup deferred for {:?}: {:#x}", pid, error);
+                }
                 crate::task::mark_process_exited(pid, exit_code);
             }
         }
