@@ -588,6 +588,18 @@ fn flush_page_if_active(table_phys: u64, page_addr: u64) {
     }
 }
 
+/// Fully invalidate this CPU, including globals and cached PCID contexts.
+/// Toggling CR4.PGE flushes all contexts, unlike reloading only current CR3.
+/// Call with interrupts disabled and CPU context stable.
+pub(crate) fn flush_all_translations_local() {
+    unsafe {
+        let flags: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) flags, options(nostack, preserves_flags));
+        core::arch::asm!("mov cr4, {}", in(reg) (flags ^ (1u64 << 7)), options(nostack, preserves_flags));
+        core::arch::asm!("mov cr4, {}", in(reg) flags, options(nostack, preserves_flags));
+    }
+}
+
 pub fn resolve_copy_on_write(table_phys: u64, address: u64) -> Result<bool> {
     let page_addr = address & !0xfff;
     let Some((old_address, old_flags)) =

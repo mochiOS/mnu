@@ -60,6 +60,7 @@ impl<T> SpinLock<T> {
         {
             // ロックが取得できるまでスピン
             while self.locked.load(Ordering::Relaxed) {
+                crate::mem::tlb_shootdown::service_pending();
                 core::hint::spin_loop();
             }
         }

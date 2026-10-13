@@ -145,6 +145,7 @@ pub fn init() {
             idt[i].set_handler_fn(generic_interrupt_handler);
         }
         idt[48].set_handler_fn(super::timer::local_timer_interrupt_handler);
+        idt[crate::mem::tlb_shootdown::VECTOR].set_handler_fn(tlb_shootdown_handler);
 
         idt
     });
@@ -167,6 +168,14 @@ pub fn init() {
 ///
 /// ## Arguments
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
+extern "x86-interrupt" fn tlb_shootdown_handler(mut stack_frame: InterruptStackFrame) {
+    let entered_from_user = enter_from_user(&stack_frame);
+    normalize_user_iret_frame(&mut stack_frame);
+    crate::mem::tlb_shootdown::service_pending();
+    crate::smp::local_apic_eoi();
+    leave_to_user(entered_from_user);
+}
+
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
     let _entered_from_user = enter_from_user(&stack_frame);
     let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;

@@ -153,9 +153,13 @@ pub fn protect(addr: u64, len: u64, access: u64) -> u64 {
                 return Err(EACCES);
             }
         }
-        protect_memory_pages(
+        let changed = protect_memory_pages(
             process, table_phys, start, end, present, writable, executable,
-        )?;
+        );
+        // Partial failure may have changed permissions too. Complete remote
+        // invalidation before reporting success or returning an editing error.
+        crate::mem::tlb_shootdown::invalidate_all().map_err(|_| EFAULT)?;
+        changed?;
         if !record_mapping_access(process, start, end, access) {
             return Err(EFAULT);
         }

@@ -560,6 +560,33 @@ fn startup_ipi_command(vector: u8) -> u32 {
     0x0000_0600 | u32::from(vector)
 }
 
+/// Sends a fixed, edge-triggered interrupt to an initialized local APIC.
+pub(crate) fn send_fixed_ipi(apic_id: u32, vector: u8) -> bool {
+    if vector < 32 {
+        return false;
+    }
+    let (_, flags) = ApicBase::read();
+    if !flags.contains(ApicBaseFlags::LAPIC_ENABLE) {
+        return false;
+    }
+    if apic_mode_is_x2apic() {
+        unsafe {
+            wait_for_icr_idle_x2apic();
+            write_icr_x2apic(apic_id, u32::from(vector));
+        }
+        true
+    } else {
+        if apic_id > u8::MAX as u32 || unsafe { xapic_mmio_base() }.is_none() {
+            return false;
+        }
+        unsafe {
+            wait_for_icr_idle_xapic();
+            write_icr_xapic(apic_id, u32::from(vector));
+        }
+        true
+    }
+}
+
 fn init_ipi_command() -> u32 {
     0x0000_4500
 }
@@ -724,6 +751,7 @@ pub fn start_secondary_cpus() {
     init_local_apic();
 
     if boot_info.cpu_enabled <= 1 {
+        crate::mem::tlb_shootdown::mark_current_cpu_online();
         crate::info!(
             "single CPU detected (enabled={}); skipping AP startup",
             boot_info.cpu_enabled
@@ -732,6 +760,7 @@ pub fn start_secondary_cpus() {
     }
 
     prepare_secondary_timer();
+    crate::mem::tlb_shootdown::mark_current_cpu_online();
     if enable_local_scheduler_timer() {
         crate::info!("Bootstrap CPU scheduler timer initialized");
     } else {

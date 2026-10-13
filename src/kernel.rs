@@ -234,6 +234,7 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo, boot_stac
         idle_thread_id, idle_thread_slot
     );
     task::set_thread_state(idle_thread_id, task::ThreadState::Running);
+    crate::mem::tlb_shootdown::mark_current_cpu_online();
     x86_64::instructions::interrupts::enable();
     unsafe {
         task::context::switch_to_thread_with_slots(None, idle_thread_id, idle_thread_slot);
