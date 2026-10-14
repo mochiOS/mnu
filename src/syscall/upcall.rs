@@ -26,11 +26,19 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
     if config.entry == 0
         || config.stack_size < 16
         || config.flags & !mnu_abi::THREAD_UPCALL_EXCEPTIONS != 0
-        || config.reserved != [0; 4]
+        || config.reserved != [0; 3]
         || !super::validate_user_ptr(config.entry, 1)
         || !super::validate_user_ptr(config.stack_base, config.stack_size)
     {
         return EINVAL;
+    }
+    if config.defer_word != 0 {
+        if config.defer_word & 3 != 0 || !super::is_canonical_user_range(config.defer_word, 4) {
+            return EINVAL;
+        }
+        if let Err(error) = super::address_wait::read_upcall_defer_word(config.defer_word) {
+            return error;
+        }
     }
     let Some(stack_end) = config.stack_base.checked_add(config.stack_size) else {
         return EINVAL;
@@ -57,6 +65,7 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
             config.entry,
             stack_top,
             config.flags & mnu_abi::THREAD_UPCALL_EXCEPTIONS != 0,
+            config.defer_word,
         )
     })
     .map(|result| match result {
@@ -357,6 +366,9 @@ fn prepare_context(context: &mut UserUpcallContext) -> bool {
         *context = restored;
         return true;
     }
+    if !current_has_deliverable_upcall() {
+        return false;
+    }
     let Some(delivery) =
         crate::task::with_thread_mut(thread_id, |thread| thread.begin_upcall(*context)).flatten()
     else {
@@ -373,6 +385,24 @@ fn prepare_context(context: &mut UserUpcallContext) -> bool {
     context.r8 = 0;
     context.r9 = 0;
     false
+}
+
+/// Only the current thread's own optional user word is consulted. Never hold
+/// the thread table across faultable usercopy, and never consume a deferred
+/// payload. A user word is scheduling input, not authority over another task.
+pub(crate) fn current_has_deliverable_upcall() -> bool {
+    let Some(id) = crate::task::current_thread_id() else {
+        return false;
+    };
+    let Some(Some(pointer)) =
+        crate::task::with_thread(id, |thread| thread.pending_upcall_defer_word())
+    else {
+        return false;
+    };
+    if pointer == 0 {
+        return true;
+    }
+    super::address_wait::read_upcall_defer_word(pointer) == Ok(0)
 }
 
 /// A synchronous exception bypasses the asynchronous queue, but may not

@@ -382,7 +382,11 @@ pub struct ThreadUpcallConfig {
     pub stack_base: u64,
     pub stack_size: u64,
     pub flags: u64,
-    pub reserved: [u64; 4],
+    /// Optional aligned user AtomicU32. Nonzero contents defer asynchronous
+    /// callbacks without consuming their queue. An unreadable word also
+    /// defers; synchronous exceptions and token returns are unaffected.
+    pub defer_word: u64,
+    pub reserved: [u64; 3],
 }
 
 #[repr(C)]

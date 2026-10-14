@@ -209,9 +209,7 @@ fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
                 pipe.waiters.push(current);
             }
             drop(table);
-            if crate::task::with_thread(current, |thread| thread.has_deliverable_upcall())
-                .unwrap_or(false)
-            {
+            if super::upcall::current_has_deliverable_upcall() {
                 remove_stream_waiter(pipe_id, current);
                 return EAGAIN;
             }
@@ -365,9 +363,7 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
             pipe.waiters.push(current);
         }
         drop(table);
-        if crate::task::with_thread(current, |thread| thread.has_deliverable_upcall())
-            .unwrap_or(false)
-        {
+        if super::upcall::current_has_deliverable_upcall() {
             remove_stream_waiter(pipe_id, current);
             return EAGAIN;
         }

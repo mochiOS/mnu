@@ -70,6 +70,11 @@ pub(crate) fn read_guard_value(address: u64) -> Result<u64, u64> {
     load_value(key, 8)
 }
 
+pub(crate) fn read_upcall_defer_word(address: u64) -> Result<u32, u64> {
+    let key = resolve_key(address, 4)?;
+    load_value(key, 4).map(|value| value as u32)
+}
+
 fn load_value(key: AddressKey, value_size: u64) -> Result<u64, u64> {
     if !matches!(value_size, 1 | 2 | 4 | 8) || key.virtual_address & (value_size - 1) != 0 {
         return Err(EINVAL);
@@ -291,9 +296,7 @@ fn wait_inner(
     loop {
         // Interrupt delivery needs a return to user mode, not just a scheduler
         // wakeup. No payload or userspace signal policy is interpreted here.
-        let interrupted =
-            crate::task::with_thread(thread, |thread| thread.has_deliverable_upcall())
-                .unwrap_or(false);
+        let interrupted = super::upcall::current_has_deliverable_upcall();
         let result = {
             let mut waiters = WAITERS.lock();
             if interrupted {

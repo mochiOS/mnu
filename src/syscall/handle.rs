@@ -1559,9 +1559,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         // in kernel mode. Registrations and deadlines were cleared above;
         // report no ready object and return so user-mode delivery can proceed.
         // The caller decides whether that notification requires another wait.
-        if crate::task::with_thread(current, |thread| thread.has_deliverable_upcall())
-            .unwrap_or(false)
-        {
+        if super::upcall::current_has_deliverable_upcall() {
             return match copy_wait_items_to_user(items_ptr, &items) {
                 Ok(()) => EAGAIN,
                 Err(error) => error,

@@ -95,6 +95,7 @@ struct ThreadUpcallState {
     entry: u64,
     stack_top: u64,
     exceptions: bool,
+    defer_word: u64,
     pending: [u64; THREAD_UPCALL_QUEUE_CAPACITY],
     pending_head: usize,
     pending_len: usize,
@@ -111,6 +112,7 @@ impl ThreadUpcallState {
             entry: 0,
             stack_top: 0,
             exceptions: false,
+            defer_word: 0,
             pending: [0; THREAD_UPCALL_QUEUE_CAPACITY],
             pending_head: 0,
             pending_len: 0,
@@ -1274,8 +1276,11 @@ impl Thread {
         entry: u64,
         stack_top: u64,
         exceptions: bool,
+        defer_word: u64,
     ) -> Result<(), ThreadUpcallError> {
-        self.upcall.install(entry, stack_top, exceptions)
+        self.upcall.install(entry, stack_top, exceptions)?;
+        self.upcall.defer_word = defer_word;
+        Ok(())
     }
 
     /// Image-local addresses, queued payloads and saved return contexts cannot
@@ -1298,6 +1303,10 @@ impl Thread {
             && self.upcall.stack_top != 0
             && self.upcall.pending_len != 0
             && self.upcall.active_token == 0
+    }
+
+    pub fn pending_upcall_defer_word(&self) -> Option<u64> {
+        self.has_deliverable_upcall().then_some(self.upcall.defer_word)
     }
 
     pub fn begin_upcall(
