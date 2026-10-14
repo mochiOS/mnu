@@ -1363,52 +1363,12 @@ impl ProcessTable {
 
     /// 名前でプロセスを検索
     pub fn find_by_name(&self, name: &str) -> Option<&Process> {
-        // 名前比較: まず完全一致を試し、それでも見つからない場合はいくつかの互換候補を試す。
-        // マッチ順序:
-        // 1. 完全一致
-        // 2. stored_name without ".elf" == name
-        // 3. stored_name == name + ".elf"
-        // 4. 起動ポリシーに定義された alias == name
-        // 5. stored_name contains name as substring (fallback)
-
-        // 1) 完全一致
-        if let Some(p) = self
-            .processes
-            .iter()
-            .filter_map(|s| s.as_ref())
-            .find(|p| p.name() == name)
-        {
-            return Some(p);
-        }
-
-        // 2) stored without .elf
-        if let Some(p) = self.processes.iter().filter_map(|s| s.as_ref()).find(|p| {
-            p.name()
-                .strip_suffix(".elf")
-                .map(|s| s == name)
-                .unwrap_or(false)
-        }) {
-            return Some(p);
-        }
-
-        // 3) stored == name + .elf
-        let mut name_elf = String::new();
-        name_elf.push_str(name);
-        name_elf.push_str(".elf");
-        if let Some(p) = self
-            .processes
-            .iter()
-            .filter_map(|s| s.as_ref())
-            .find(|p| p.name() == name_elf)
-        {
-            return Some(p);
-        }
-
-        // 4) fallback: substring match
+        // Labels are opaque caller-supplied metadata, not executable paths,
+        // file extensions, aliases, or a userspace service naming convention.
         self.processes
             .iter()
             .filter_map(|s| s.as_ref())
-            .find(|p| p.name().contains(name))
+            .find(|p| p.name() == name)
     }
 
     fn take_exited(&mut self, id: ProcessId) -> Option<Process> {
