@@ -895,6 +895,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::TimeNow as u64 => time::get_ticks(),
         x if x == SyscallNumber::ClockRead as u64 => time::clock_read(arg0, arg1),
         x if x == SyscallNumber::ClockDescribe as u64 => time::clock_describe(arg0, arg1, arg2),
+        x if x == SyscallNumber::ProcessorDescribe as u64 => processor_describe(arg0, arg1),
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
         x if x == SyscallNumber::DebugWrite as u64 => io::debug_write(arg0, arg1),
         x if x == SyscallNumber::DiagnosticRead as u64 => diagnostic::read(arg0, arg1, arg2, arg3),
@@ -917,6 +918,37 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
     crate::task::flush_deferred_process_reclaims();
 
     result
+}
+
+/// Public processor discovery; compatibility selectors remain in user space.
+fn processor_describe(destination: u64, length: u64) -> u64 {
+    if length != core::mem::size_of::<mnu_abi::ProcessorInfo>() as u64 {
+        return EINVAL;
+    }
+    let Some(boot) = crate::smp::boot_info() else {
+        return ENOSYS;
+    };
+    let configured = boot.cpu_total.min(crate::percpu::MAX_CPUS as u32);
+    let online = crate::mem::tlb_shootdown::online_cpu_count();
+    if online == 0 || online > configured {
+        return EAGAIN;
+    }
+    let info = mnu_abi::ProcessorInfo {
+        configured,
+        online,
+        reserved: [0; 2],
+    };
+    // ProcessorInfo contains four initialized u32 fields and no padding.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&info as *const mnu_abi::ProcessorInfo).cast::<u8>(),
+            core::mem::size_of_val(&info),
+        )
+    };
+    match copy_to_user(destination, bytes) {
+        Ok(()) => SUCCESS,
+        Err(error) => error,
+    }
 }
 
 /// Read-only boot identity. Legacy images report 0; A/B images report 1 or 2.

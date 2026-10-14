@@ -7,6 +7,12 @@ pub(crate) const VECTOR: u8 = 49;
 static LEDGER: Rendezvous<{ crate::percpu::MAX_CPUS }> = Rendezvous::new();
 static ONLINE: AtomicU64 = AtomicU64::new(0);
 
+/// Reuse the membership established before CPUs enter user context; discovery
+/// must not count firmware entries whose processors failed to come online.
+pub(crate) fn online_cpu_count() -> u32 {
+    ONLINE.load(Ordering::Acquire).count_ones()
+}
+
 /// After IDT/APIC initialization, before entering user context. New CPUs have
 /// no retained user translations; subsequent user entry loads CR3. Hot-unplug
 /// must retire pending requests before removing a CPU if implemented later.

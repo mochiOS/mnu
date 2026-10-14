@@ -227,7 +227,21 @@ pub enum SyscallNumber {
     /// not count. Only the exact creating endpoint thread/slot/generation may
     /// inspect its namespace. A sample is not a lifetime pin or revocation.
     ProviderObjectReferenceCount = 691,
+    /// Reads public logical processor counts. Arguments: ProcessorInfo output
+    /// pointer and exact byte length. No scheduling or compatibility policy.
+    ProcessorDescribe = 692,
     CheckGravityExist = 999,
+}
+
+/// Logical processors configured at boot and currently online. Read-only
+/// discovery does not grant affinity, scheduling or resource-control rights.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcessorInfo {
+    pub configured: u32,
+    pub online: u32,
+    /// Always zero; readers must reject unknown extensions.
+    pub reserved: [u32; 2],
 }
 
 pub const PROCESS_STATE_RUNNING: u32 = 1;
