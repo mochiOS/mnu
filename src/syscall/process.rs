@@ -227,9 +227,18 @@ pub fn clone_address_space() -> u64 {
     let Some(pid) = crate::syscall::security::current_process_id() else {
         return ENOSYS;
     };
+    // Exclude in-flight construction and new admission through completion of
+    // the image. A count sampled without this gate can miss a new runnable
+    // thread published after the check but before COW capture.
+    let Some(_capture) = crate::task::image_transition::begin_image_transition(pid) else {
+        return EAGAIN;
+    };
     let mut live_threads = 0usize;
     crate::task::for_each_thread(|thread| {
-        if thread.process_id() == pid && thread.state() != crate::task::ThreadState::Terminated {
+        if thread.process_id() == pid
+            && (thread.state() != crate::task::ThreadState::Terminated
+                || crate::percpu::thread_is_cpu_referenced(thread.id().as_u64()))
+        {
             live_threads += 1;
         }
     });

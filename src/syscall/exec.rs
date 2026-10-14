@@ -1208,7 +1208,7 @@ fn replace_current_process_image(
     let Some(process_id) = crate::syscall::security::current_process_id() else {
         return Err(EINVAL);
     };
-    let Some(transition) = crate::task::image_transition::begin_image_replace(process_id) else {
+    let Some(transition) = crate::task::image_transition::begin_image_transition(process_id) else {
         return Err(crate::syscall::types::EAGAIN);
     };
 
