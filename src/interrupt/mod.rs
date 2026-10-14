@@ -5,6 +5,7 @@
 pub mod apic;
 pub mod dispatch;
 pub mod idt;
+mod page_fault;
 pub mod pic;
 pub mod spinlock;
 pub mod timer;

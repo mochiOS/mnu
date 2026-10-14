@@ -99,7 +99,13 @@ pub fn init() {
             .set_handler_fn(stack_segment_fault_handler);
         idt.general_protection_fault
             .set_handler_fn(general_protection_fault_handler);
-        idt.page_fault.set_handler_fn(page_fault_handler);
+        unsafe {
+            // The assembly entry saves all GPRs and consumes the CPU error
+            // word before IRET; a Rust interrupt ABI would hide those GPRs.
+            idt.page_fault.set_handler_addr(x86_64::VirtAddr::new(
+                super::page_fault::entry as *const () as u64,
+            ));
+        }
         idt.x87_floating_point
             .set_handler_fn(x87_floating_point_handler);
         idt.alignment_check.set_handler_fn(alignment_check_handler);
@@ -786,9 +792,11 @@ fn translate_current_user_fault(expected_root: u64, address: u64) -> Option<u64>
 /// ## Arguments
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 /// - `error_code`: ページフォルトのエラーコード（エラーコードのビットフィールドには、ページが存在しないか、書き込みアクセスか、ユーザーモードかなどの情報が含まれる）
-extern "x86-interrupt" fn page_fault_handler(
+pub(super) fn page_fault_handler(
     mut stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,
+    registers: &mut [u64; 21],
+    entered_from_user: bool,
 ) {
     #[cfg(feature = "performance-instrumentation")]
     let _allocation_scope = crate::performance::AllocationScope::enter(
@@ -800,8 +808,11 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let faulting_addr = Cr2::read().unwrap_or(VirtAddr::new(0));
     let is_user_mode = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
-    let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(is_user_mode);
     normalize_user_iret_frame(&mut stack_frame);
+    if is_user_mode {
+        registers[17] = crate::mem::gdt::user_code_selector() as u64 | 3;
+        registers[20] = crate::mem::gdt::user_data_selector() as u64 | 3;
+    }
     let user_page_table = is_user_mode
         .then(|| {
             crate::task::current_thread_id()
@@ -842,6 +853,17 @@ extern "x86-interrupt" fn page_fault_handler(
     {
         leave_to_user(entered_from_user);
         return;
+    }
+
+    if is_user_mode {
+        let protection =
+            error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION);
+        if (!protection && try_grow_user_stack(faulting_addr.as_u64()))
+            || crate::syscall::prepare_user_exception(registers, faulting_addr.as_u64())
+        {
+            leave_to_user(entered_from_user);
+            return;
+        }
     }
 
     error!(
@@ -900,16 +922,6 @@ extern "x86-interrupt" fn page_fault_handler(
                     stack_frame.instruction_pointer.as_u64(),
                     stack_frame.stack_pointer.as_u64()
                 );
-            }
-        }
-
-        // 保護違反（既マップページへの不正アクセス）でなければスタック拡張を試みる
-        let is_protection_violation =
-            error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION);
-        if !is_protection_violation {
-            if try_grow_user_stack(faulting_addr.as_u64()) {
-                leave_to_user(entered_from_user);
-                return; // スタック拡張成功 → 命令を再試行
             }
         }
 

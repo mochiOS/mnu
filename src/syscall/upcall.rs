@@ -25,7 +25,7 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
     }
     if config.entry == 0
         || config.stack_size < 16
-        || config.flags != 0
+        || config.flags & !mnu_abi::THREAD_UPCALL_EXCEPTIONS != 0
         || config.reserved != [0; 4]
         || !super::validate_user_ptr(config.entry, 1)
         || !super::validate_user_ptr(config.stack_base, config.stack_size)
@@ -46,7 +46,11 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
         return ESRCH;
     };
     crate::task::with_thread_mut(thread_id, |thread| {
-        thread.install_upcall(config.entry, stack_top)
+        thread.install_upcall(
+            config.entry,
+            stack_top,
+            config.flags & mnu_abi::THREAD_UPCALL_EXCEPTIONS != 0,
+        )
     })
     .map(|result| match result {
         Ok(()) => SUCCESS,
@@ -188,7 +192,50 @@ fn prepare_context(context: &mut UserUpcallContext) -> bool {
     context.user_rsp = delivery.stack_top;
     context.rdi = delivery.payload;
     context.rsi = delivery.token;
+    // Native C callbacks enter with ordinary direction/debug flags. The
+    // original flags remain in the kernel-owned return snapshot.
+    context.user_rflags &= !((1 << 10) | (1 << 8) | (1 << 16));
+    context.rdx = mnu_abi::THREAD_UPCALL_KIND_INTERRUPT;
+    context.r8 = 0;
+    context.r9 = 0;
     false
+}
+
+/// A synchronous exception bypasses the asynchronous queue, but may not
+/// replace an active delivery. All original registers remain kernel-owned.
+pub(crate) fn prepare_user_exception(raw: &mut [u64; 21], address: u64) -> bool {
+    let mut frame = [0; 20];
+    frame[..15].copy_from_slice(&raw[..15]);
+    frame[15..].copy_from_slice(&raw[16..]);
+    if frame[16] & 3 != 3 {
+        return false;
+    }
+    let mut context = read_interrupt_context(&frame);
+    if !valid_user_return(&context) {
+        return false;
+    }
+    let Some(id) = crate::task::current_thread_id() else {
+        return false;
+    };
+    let Some(delivery) =
+        crate::task::with_thread_mut(id, |thread| thread.begin_exception_upcall(context, 14))
+            .flatten()
+    else {
+        return false;
+    };
+    context.user_rip = delivery.entry;
+    context.user_rsp = delivery.stack_top;
+    context.rdi = delivery.payload;
+    context.rsi = delivery.token;
+    context.user_rflags &= !((1 << 10) | (1 << 8) | (1 << 16));
+    context.rdx = mnu_abi::THREAD_UPCALL_KIND_EXCEPTION;
+    context.rcx = address;
+    context.r8 = raw[15];
+    context.r9 = frame[15];
+    write_interrupt_context(&mut frame, context);
+    raw[..15].copy_from_slice(&frame[..15]);
+    raw[16..].copy_from_slice(&frame[15..]);
+    true
 }
 
 fn valid_user_return(context: &UserUpcallContext) -> bool {

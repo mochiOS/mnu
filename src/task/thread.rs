@@ -93,6 +93,7 @@ pub enum ThreadUpcallError {
 struct ThreadUpcallState {
     entry: u64,
     stack_top: u64,
+    exceptions: bool,
     pending: [u64; THREAD_UPCALL_QUEUE_CAPACITY],
     pending_head: usize,
     pending_len: usize,
@@ -108,6 +109,7 @@ impl ThreadUpcallState {
         Self {
             entry: 0,
             stack_top: 0,
+            exceptions: false,
             pending: [0; THREAD_UPCALL_QUEUE_CAPACITY],
             pending_head: 0,
             pending_len: 0,
@@ -119,12 +121,18 @@ impl ThreadUpcallState {
         }
     }
 
-    fn install(&mut self, entry: u64, stack_top: u64) -> Result<(), ThreadUpcallError> {
+    fn install(
+        &mut self,
+        entry: u64,
+        stack_top: u64,
+        exceptions: bool,
+    ) -> Result<(), ThreadUpcallError> {
         if self.active_token != 0 {
             return Err(ThreadUpcallError::Active);
         }
         self.entry = entry;
         self.stack_top = stack_top;
+        self.exceptions = exceptions;
         Ok(())
     }
 
@@ -139,16 +147,38 @@ impl ThreadUpcallState {
     }
 
     fn begin(&mut self, context: UserUpcallContext) -> Option<ThreadUpcallDelivery> {
+        if self.pending_len == 0 {
+            return None;
+        }
+        let payload = self.pending[self.pending_head];
+        let delivery = self.begin_event(context, payload)?;
+        self.pending_head = (self.pending_head + 1) % THREAD_UPCALL_QUEUE_CAPACITY;
+        self.pending_len -= 1;
+        Some(delivery)
+    }
+
+    fn begin_exception(
+        &mut self,
+        context: UserUpcallContext,
+        vector: u64,
+    ) -> Option<ThreadUpcallDelivery> {
+        if !self.exceptions {
+            return None;
+        }
+        self.begin_event(context, vector)
+    }
+
+    fn begin_event(
+        &mut self,
+        context: UserUpcallContext,
+        payload: u64,
+    ) -> Option<ThreadUpcallDelivery> {
         if self.entry == 0
             || self.stack_top == 0
-            || self.pending_len == 0
             || self.active_token != 0
         {
             return None;
         }
-        let payload = self.pending[self.pending_head];
-        self.pending_head = (self.pending_head + 1) % THREAD_UPCALL_QUEUE_CAPACITY;
-        self.pending_len -= 1;
         let token = self.next_token.max(1);
         self.next_token = token.wrapping_add(1).max(1);
         self.active_token = token;
@@ -1191,8 +1221,9 @@ impl Thread {
         &mut self,
         entry: u64,
         stack_top: u64,
+        exceptions: bool,
     ) -> Result<(), ThreadUpcallError> {
-        self.upcall.install(entry, stack_top)
+        self.upcall.install(entry, stack_top, exceptions)
     }
 
     /// Image-local addresses, queued payloads and saved return contexts cannot
@@ -1226,6 +1257,14 @@ impl Thread {
 
     pub fn request_upcall_return(&mut self, token: u64) -> Result<(), ThreadUpcallError> {
         self.upcall.request_return(token)
+    }
+
+    pub fn begin_exception_upcall(
+        &mut self,
+        context: UserUpcallContext,
+        vector: u64,
+    ) -> Option<ThreadUpcallDelivery> {
+        self.upcall.begin_exception(context, vector)
     }
 
     pub fn take_restored_upcall_context(&mut self) -> Option<UserUpcallContext> {

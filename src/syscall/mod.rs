@@ -20,6 +20,7 @@ pub mod syscall_entry;
 pub mod task;
 pub mod time;
 pub mod upcall;
+pub(crate) use upcall::prepare_user_exception;
 
 mod types;
 

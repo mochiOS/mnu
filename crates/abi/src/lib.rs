@@ -310,12 +310,22 @@ pub struct ThreadInitialRegisters {
     pub r15: u64,
 }
 
+/// Opt in to synchronous user exception delivery on this thread's upcall stack.
+pub const THREAD_UPCALL_EXCEPTIONS: u64 = 1;
+pub const THREAD_UPCALL_KIND_INTERRUPT: u64 = 0;
+pub const THREAD_UPCALL_KIND_EXCEPTION: u64 = 1;
+
 /// User-space entry point and private stack for a native thread upcall.
 ///
 /// The kernel treats `payload` values as opaque. The entry point receives the
 /// payload in the first argument register and a one-shot return token in the
 /// second argument register. It must finish with `ThreadUpcallReturn` rather
 /// than returning normally.
+/// The third argument identifies INTERRUPT (opaque payload) or EXCEPTION.
+/// With THREAD_UPCALL_EXCEPTIONS enabled, an x86-64 page fault supplies vector
+/// 14 as payload, fault address as argument four, CPU error code as argument
+/// five, and the faulting instruction address as argument six. Return retries
+/// the original instruction; recursive exceptions while active are not queued.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ThreadUpcallConfig {
