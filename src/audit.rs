@@ -101,44 +101,20 @@ impl fmt::Debug for AuditRecord {
 }
 
 struct AuditFile {
-    data: [u8; AUDIT_FILE_CAPACITY],
-    start: usize,
-    len: usize,
+    data: crate::util::diagnostic_buffer::ByteRing<AUDIT_FILE_CAPACITY>,
 }
 
 impl AuditFile {
     const fn new() -> Self {
         Self {
-            data: [0; AUDIT_FILE_CAPACITY],
-            start: 0,
-            len: 0,
+            data: crate::util::diagnostic_buffer::ByteRing::new(),
         }
     }
 
     fn push_bytes(&mut self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-
-        if bytes.len() >= AUDIT_FILE_CAPACITY {
-            let tail = &bytes[bytes.len() - AUDIT_FILE_CAPACITY..];
-            self.data.copy_from_slice(tail);
-            self.start = 0;
-            self.len = AUDIT_FILE_CAPACITY;
-            return;
-        }
-
-        while self.len + bytes.len() > AUDIT_FILE_CAPACITY {
-            self.start = (self.start + 1) % AUDIT_FILE_CAPACITY;
-            self.len -= 1;
-        }
-
-        let mut write_idx = (self.start + self.len) % AUDIT_FILE_CAPACITY;
-        for &b in bytes {
-            self.data[write_idx] = b;
-            write_idx = (write_idx + 1) % AUDIT_FILE_CAPACITY;
-        }
-        self.len += bytes.len();
+        // At cursor exhaustion retain the last valid history, never wrap a
+        // reader into unrelated bytes. Console reporting remains independent.
+        let _ = self.data.append(bytes);
     }
 
     fn append_record(&mut self, seq: u64, kind: AuditEventKind, message: &str) {
@@ -155,19 +131,16 @@ impl AuditFile {
     }
 
     fn read_at(&self, offset: usize, out: &mut [u8]) -> usize {
-        if offset >= self.len || out.is_empty() {
+        if offset >= self.data.len() || out.is_empty() {
             return 0;
         }
-        let to_read = core::cmp::min(out.len(), self.len - offset);
-        for i in 0..to_read {
-            let idx = (self.start + offset + i) % AUDIT_FILE_CAPACITY;
-            out[i] = self.data[idx];
-        }
-        to_read
+        self.data
+            .read(self.data.oldest() + offset as u64, out)
+            .map_or(0, |read| read.bytes)
     }
 
     fn size(&self) -> usize {
-        self.len
+        self.data.len()
     }
 }
 
@@ -253,6 +226,16 @@ pub fn file_size() -> usize {
 
 pub fn read_file_at(offset: usize, out: &mut [u8]) -> usize {
     AUDIT_FILE.lock().read_at(offset, out)
+}
+
+/// Read-only diagnostic bytes with a reader-owned absolute cursor. Permission
+/// checks belong to the native API which exposes this internal mechanism.
+pub fn read_cursor(
+    cursor: u64,
+    out: &mut [u8],
+) -> Result<crate::util::diagnostic_buffer::ReadResult, crate::util::diagnostic_buffer::CursorError>
+{
+    AUDIT_FILE.lock().data.read(cursor, out)
 }
 
 fn should_force_flush(kind: AuditEventKind) -> bool {
