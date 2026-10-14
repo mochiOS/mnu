@@ -99,8 +99,6 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
             let rc = crate::cext::fs::mount(0, 0);
             if rc != 0 {
                 crate::warn!("cext: fs mount failed rc={}", rc);
-            } else {
-                crate::audit::flush_to_disk();
             }
         }
     }

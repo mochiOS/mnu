@@ -7,8 +7,6 @@ use core::fmt;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use alloc::vec::Vec;
-
 use crate::interrupt::spinlock::SpinLock;
 
 const AUDIT_CAPACITY: usize = 256;
@@ -129,19 +127,6 @@ impl AuditFile {
         );
         self.push_bytes(writer.as_bytes());
     }
-
-    fn read_at(&self, offset: usize, out: &mut [u8]) -> usize {
-        if offset >= self.data.len() || out.is_empty() {
-            return 0;
-        }
-        self.data
-            .read(self.data.oldest() + offset as u64, out)
-            .map_or(0, |read| read.bytes)
-    }
-
-    fn size(&self) -> usize {
-        self.data.len()
-    }
 }
 
 struct SliceWriter<'a> {
@@ -179,7 +164,6 @@ static AUDIT_LOG: SpinLock<[AuditRecord; AUDIT_CAPACITY]> =
     SpinLock::new([AuditRecord::empty(); AUDIT_CAPACITY]);
 static AUDIT_FILE: SpinLock<AuditFile> = SpinLock::new(AuditFile::new());
 static AUDIT_SEQ: AtomicUsize = AtomicUsize::new(1);
-static AUDIT_FLUSH_TICK: AtomicUsize = AtomicUsize::new(0);
 
 pub fn log(kind: AuditEventKind, message: &str) {
     let seq = AUDIT_SEQ.fetch_add(1, Ordering::Relaxed) as u64;
@@ -195,7 +179,6 @@ pub fn log(kind: AuditEventKind, message: &str) {
         let mut file = AUDIT_FILE.lock();
         file.append_record(seq, kind, message);
     }
-    maybe_flush_to_disk(kind);
     crate::warn!("[AUDIT {:?} #{seq}] {}", kind, message);
 }
 
@@ -220,14 +203,6 @@ pub fn snapshot_into(out: &mut [AuditRecord]) -> usize {
     written
 }
 
-pub fn file_size() -> usize {
-    AUDIT_FILE.lock().size()
-}
-
-pub fn read_file_at(offset: usize, out: &mut [u8]) -> usize {
-    AUDIT_FILE.lock().read_at(offset, out)
-}
-
 /// Read-only diagnostic bytes with a reader-owned absolute cursor. Permission
 /// checks belong to the native API which exposes this internal mechanism.
 pub fn read_cursor(
@@ -236,47 +211,4 @@ pub fn read_cursor(
 ) -> Result<crate::util::diagnostic_buffer::ReadResult, crate::util::diagnostic_buffer::CursorError>
 {
     AUDIT_FILE.lock().data.read(cursor, out)
-}
-
-fn should_force_flush(kind: AuditEventKind) -> bool {
-    matches!(
-        kind,
-        AuditEventKind::Fault
-            | AuditEventKind::Quarantine
-            | AuditEventKind::Memory
-            | AuditEventKind::Deny
-            | AuditEventKind::Policy
-    )
-}
-
-fn maybe_flush_to_disk(kind: AuditEventKind) {
-    if !crate::cext::fs::is_loaded() {
-        return;
-    }
-
-    let tick = AUDIT_FLUSH_TICK.fetch_add(1, Ordering::Relaxed);
-    if !should_force_flush(kind) && tick % 16 != 0 {
-        return;
-    }
-    flush_to_disk();
-}
-
-pub fn flush_to_disk() {
-    if !crate::cext::fs::is_loaded() {
-        return;
-    }
-    let Some(log_path) = crate::config::kernel().policy_paths.audit_log() else {
-        return;
-    };
-
-    let mut snapshot = Vec::new();
-    {
-        let file = AUDIT_FILE.lock();
-        snapshot.resize(file.size(), 0);
-        let _ = file.read_at(0, &mut snapshot);
-    }
-    if snapshot.len() < AUDIT_FILE_CAPACITY {
-        snapshot.resize(AUDIT_FILE_CAPACITY, 0);
-    }
-    let _ = crate::cext::fs::write_all(log_path, 0, &snapshot);
 }

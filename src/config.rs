@@ -60,18 +60,6 @@ pub struct FsConfig {
     pub service_retry_ms: u64,
 }
 
-#[derive(Clone, Default)]
-pub struct PolicyPaths {
-    audit_log: String,
-}
-
-impl PolicyPaths {
-    pub fn audit_log(&self) -> Option<&str> {
-        configured_path(&self.audit_log)
-    }
-
-}
-
 #[derive(Clone, Copy)]
 pub struct BlockConfig {
     pub max_sectors_per_call: u64,
@@ -119,7 +107,6 @@ pub struct KernelConfig {
     pub capability: CapabilityConfig,
     pub exec: ExecConfig,
     pub cext: CextConfig,
-    pub policy_paths: PolicyPaths,
 }
 
 impl Default for KernelConfig {
@@ -168,7 +155,6 @@ impl Default for KernelConfig {
                 module_load_guard: 0x20_0000,
                 max_read_bytes: 64 * 1024 * 1024,
             },
-            policy_paths: PolicyPaths::default(),
         }
     }
 }
@@ -225,31 +211,6 @@ fn parse_usize(value: &str) -> Option<usize> {
 
 fn parse_u8(value: &str) -> Option<u8> {
     parse_u64(value).and_then(|v| u8::try_from(v).ok())
-}
-
-fn configured_path(path: &String) -> Option<&str> {
-    (!path.is_empty()).then_some(path.as_str())
-}
-
-fn set_policy_path(destination: &mut String, value: &str) {
-    const MAX_POLICY_PATH_BYTES: usize = 1024;
-
-    let canonical = value.starts_with('/')
-        && value.len() <= MAX_POLICY_PATH_BYTES
-        && !value.as_bytes().contains(&0)
-        && value
-            .split('/')
-            .all(|segment| segment != "." && segment != "..");
-    if !canonical {
-        crate::warn!("ignoring invalid kernel policy path");
-        return;
-    }
-
-    destination.clear();
-    destination.push_str(value.trim_end_matches('/'));
-    if destination.is_empty() {
-        destination.push('/');
-    }
 }
 
 fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
@@ -323,9 +284,6 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
             if let Some(v) = parse_u64(value) {
                 config.fs.service_retry_ms = v;
             }
-        }
-        "policy.audit_log" => {
-            set_policy_path(&mut config.policy_paths.audit_log, value);
         }
         "block.max_sectors_per_call" => {
             if let Some(v) = parse_u64(value) {
@@ -413,17 +371,5 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
             }
         }
         _ => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{apply_key_value, KernelConfig};
-
-    #[test]
-    fn optional_policy_paths_are_empty_by_default() {
-        let config = KernelConfig::default();
-
-        assert_eq!(config.policy_paths.audit_log(), None);
     }
 }
