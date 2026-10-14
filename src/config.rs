@@ -62,16 +62,11 @@ pub struct FsConfig {
 
 #[derive(Clone, Default)]
 pub struct PolicyPaths {
-    identity_storage_root: String,
     audit_log: String,
     process_aliases: String,
 }
 
 impl PolicyPaths {
-    pub fn identity_storage_root(&self) -> Option<&str> {
-        configured_path(&self.identity_storage_root)
-    }
-
     pub fn audit_log(&self) -> Option<&str> {
         configured_path(&self.audit_log)
     }
@@ -333,9 +328,6 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
                 config.fs.service_retry_ms = v;
             }
         }
-        "policy.identity_storage_root" => {
-            set_policy_path(&mut config.policy_paths.identity_storage_root, value);
-        }
         "policy.audit_log" => {
             set_policy_path(&mut config.policy_paths.audit_log, value);
         }
@@ -439,8 +431,6 @@ mod tests {
     fn optional_policy_paths_are_empty_by_default() {
         let config = KernelConfig::default();
 
-        assert_eq!(config.policy_paths.identity_storage_root(), None);
-        assert_eq!(config.policy_paths.execution_allowlist(), None);
         assert_eq!(config.policy_paths.audit_log(), None);
         assert_eq!(config.policy_paths.process_aliases(), None);
     }

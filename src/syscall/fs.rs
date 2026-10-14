@@ -8,8 +8,6 @@ use crate::capability::path::{
     self, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner,
 };
 use crate::task::fd_table::{FileHandle, FileHandleCap};
-use alloc::string::String;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 
 const MAX_IO_BYTES: usize = 128 * 1024 * 1024;
@@ -169,9 +167,6 @@ fn ensure_fs_capability_access_for_process(
     if path::scoped_path_allows(pid_raw, path, needed_rights) {
         return Ok(());
     }
-    if identity_storage_path_allows(path, pid_raw) {
-        return Ok(());
-    }
     if let Some(entry) = path::lookup_path(path) {
         if !path_owner_allows(entry.owner, pid_raw) {
             return Err(EACCES);
@@ -194,42 +189,6 @@ fn ensure_fs_capability_access_for_process(
         )?;
     }
     Ok(())
-}
-
-fn identity_storage_path_allows(path: &str, pid_raw: u64) -> bool {
-    if !path.starts_with('/') {
-        return false;
-    }
-    let Some(storage_root) = crate::config::kernel().policy_paths.identity_storage_root() else {
-        return false;
-    };
-    let normalized = normalize_path(path);
-    crate::task::with_process(crate::task::ids::ProcessId::from_u64(pid_raw), |process| {
-        process.security_identity().is_some_and(|identity| {
-            path_is_in_identity_storage(&normalized, storage_root, identity)
-        })
-    })
-    .unwrap_or(false)
-}
-
-fn path_is_in_identity_storage(normalized: &str, storage_root: &str, identity: &str) -> bool {
-    if identity.is_empty() || identity.as_bytes().contains(&b'/') {
-        return false;
-    }
-    let Some(relative) = path_relative_to(normalized, storage_root) else {
-        return false;
-    };
-    relative == identity
-        || relative
-            .strip_prefix(identity)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-fn path_relative_to<'a>(normalized: &'a str, root: &str) -> Option<&'a str> {
-    if root == "/" {
-        return normalized.strip_prefix('/');
-    }
-    normalized.strip_prefix(root)?.strip_prefix('/')
 }
 
 fn path_owner_allows(owner: PathOwner, pid_raw: u64) -> bool {
@@ -283,25 +242,6 @@ fn enforce_fs_capabilities_for_process(
         enforce_required_capability(write_capability, Capability::FsWriteAll, pid_raw)?;
     }
     Ok(())
-}
-
-/// パスを正規化する（`.` / `..` を解決し重複スラッシュを除去）
-fn normalize_path(path: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    for seg in path.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            other => parts.push(other),
-        }
-    }
-    if parts.is_empty() {
-        "/".to_string()
-    } else {
-        alloc::format!("/{}", parts.join("/"))
-    }
 }
 
 pub(crate) fn file_handle_options(handle: &FileHandle) -> Result<u64, u64> {
@@ -541,7 +481,6 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
 mod unix_mode_tests {
     use super::{
         PIPE_BUFFER_CAP, PipeState, capability_requirement_satisfied,
-        path_is_in_identity_storage,
     };
     use crate::capability::Capability;
 
@@ -567,35 +506,6 @@ mod unix_mode_tests {
         );
         stream.readers = 0;
         assert_eq!(stream.signals(true), mnu_abi::HANDLE_SIGNAL_PEER_CLOSED);
-    }
-
-    #[test]
-    fn identity_storage_is_scoped_to_exact_security_identity() {
-        assert!(path_is_in_identity_storage(
-            "/policy/identity-data/process.example.shell",
-            "/policy/identity-data",
-            "process.example.shell"
-        ));
-        assert!(path_is_in_identity_storage(
-            "/policy/identity-data/process.example.shell/preferences.conf",
-            "/policy/identity-data",
-            "process.example.shell"
-        ));
-        assert!(!path_is_in_identity_storage(
-            "/policy/identity-data/process.example.files/settings",
-            "/policy/identity-data",
-            "process.example.shell"
-        ));
-        assert!(!path_is_in_identity_storage(
-            "/policy/identity-data/process.example.shell-extra/settings",
-            "/policy/identity-data",
-            "process.example.shell"
-        ));
-        assert!(!path_is_in_identity_storage(
-            "/policy/identity-data/process.example.shell/settings",
-            "/somewhere/else",
-            "process.example.shell"
-        ));
     }
 
     #[test]
