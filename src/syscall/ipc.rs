@@ -1084,29 +1084,38 @@ impl Mailbox {
     }
 
     fn free_slot(&mut self, idx: usize) -> bool {
+        match self.take_slot(idx) {
+            Some(message) => {
+                release_message(message);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn take_slot(&mut self, idx: usize) -> Option<Box<Message>> {
         if idx >= MAILBOX_CAP {
             self.quarantine("ipc mailbox free list corrupted: slot index out of range");
-            return false;
+            return None;
         }
         if self.free_count >= MAILBOX_CAP {
             self.quarantine("ipc mailbox free list corrupted: free_count overflow");
-            return false;
+            return None;
         }
         for i in 0..self.free_count {
             if self.free[i] as usize == idx {
                 self.quarantine("ipc mailbox free list corrupted: double free");
-                return false;
+                return None;
             }
         }
 
         let Some(message) = self.slots[idx].take() else {
             self.quarantine("ipc mailbox slot missing during free");
-            return false;
+            return None;
         };
-        release_message(message);
         self.free[self.free_count] = idx as u8;
         self.free_count += 1;
-        true
+        Some(message)
     }
 
     fn enqueue_slot(&mut self, slot_idx: usize) -> Result<(), ()> {
@@ -1127,6 +1136,47 @@ impl Mailbox {
         self.head = (self.head + 1) % MAILBOX_CAP;
         self.count -= 1;
         Some(idx)
+    }
+
+    /// Detach only the retired destination's messages. The caller releases
+    /// their attachments after dropping the mailbox lock. Filtering preserves
+    /// FIFO order for a newer generation already occupying this reusable slot.
+    fn retire_destination(
+        &mut self,
+        endpoint: IpcEndpoint,
+    ) -> [Option<Box<Message>>; MAILBOX_CAP] {
+        let mut retired = [const { None }; MAILBOX_CAP];
+        if self.count > MAILBOX_CAP {
+            self.quarantine("ipc mailbox count exceeds capacity during retirement");
+            return retired;
+        }
+        let count = self.count;
+        for output in retired.iter_mut().take(count) {
+            let Some(slot) = self.dequeue_slot() else {
+                break;
+            };
+            let Some(message) = self.slots.get(slot).and_then(Option::as_ref) else {
+                self.quarantine("ipc mailbox retirement points to an empty slot");
+                break;
+            };
+            if message.to == endpoint.thread_id
+                && message.to_slot == endpoint.slot
+                && message.to_generation == endpoint.generation
+            {
+                *output = self.take_slot(slot);
+                if output.is_none() {
+                    break;
+                }
+            } else if self.enqueue_slot(slot).is_err() {
+                self.quarantine("ipc mailbox retirement could not preserve queue");
+                break;
+            }
+        }
+        if self.reply_owner == Some((endpoint.thread_id, endpoint.generation)) {
+            self.reply_targets.clear();
+            self.reply_owner = None;
+        }
+        retired
     }
 
     fn push_message(
@@ -1513,6 +1563,31 @@ fn lock_mailboxes() -> SpinLockGuard<'static, [Mailbox; MAX_THREADS]> {
     guard
 }
 
+/// The caller has published termination and released the thread queue lock.
+/// Exact destination filtering also tolerates delayed cleanup after slot reuse.
+pub(crate) fn retire_endpoint(endpoint: IpcEndpoint) {
+    if (endpoint.slot as usize) < MAX_THREADS {
+        let retired = {
+            let mut boxes = lock_mailboxes();
+            let mailbox = &mut boxes[endpoint.slot as usize];
+            let retired = mailbox.retire_destination(endpoint);
+            let current = crate::task::thread_slot_index_and_generation_by_u64(endpoint.thread_id);
+            if mailbox.waiter == endpoint.thread_id
+                && current.is_none_or(|(slot, generation)| {
+                    slot == endpoint.slot as usize && generation == endpoint.generation
+                })
+            {
+                mailbox.waiter = 0;
+            }
+            retired
+        };
+        for message in retired.into_iter().flatten() {
+            release_message(message);
+        }
+    }
+    lifetime::retire(endpoint);
+}
+
 /// カーネル内部からIPC送信（ユーザー空間コピー不要）
 pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
     let len = data.len();
@@ -1531,6 +1606,13 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
         .and_then(|t| ensure_endpoint_for_thread(t.as_u64()))
         .unwrap_or(0);
     lock_mailboxes().get_mut(idx).map_or(false, |mb| {
+        if !endpoint_is_valid(IpcEndpoint {
+            thread_id: dest_thread_id,
+            slot: idx as u16,
+            generation: dest_generation,
+        }) {
+            return false;
+        }
         if mb
             .push_message(
                 sender,
@@ -1565,6 +1647,9 @@ pub(crate) fn send_provider_from_kernel(endpoint: IpcEndpoint, data: &[u8]) -> b
         .and_then(|thread| ensure_endpoint_for_thread(thread.as_u64()))
         .unwrap_or(0);
     let mut mailboxes = lock_mailboxes();
+    if !endpoint_is_valid(endpoint) {
+        return false;
+    }
     let Some(mailbox) = mailboxes.get_mut(endpoint.slot as usize) else {
         return false;
     };
@@ -1696,6 +1781,9 @@ fn call_endpoint_with_attachments_from_kernel(
             return Err(super::ESRCH);
         }
         let mut mailboxes = lock_mailboxes();
+        if !endpoint_is_valid(endpoint) {
+            return Err(super::ESRCH);
+        }
         let mailbox = mailboxes.get_mut(dest_slot).ok_or(EINVAL)?;
         if let Some(slot) = mailbox.alloc_slot() {
             let Some(message) = mailbox.slots[slot].as_deref_mut() else {
@@ -1892,6 +1980,15 @@ fn send_to_thread_id_with_attachments(
         record_ipc_copy(len);
     }
     let mut boxes = lock_mailboxes();
+    if !endpoint_is_valid(IpcEndpoint {
+        thread_id: dest_thread_id,
+        slot: idx as u16,
+        generation: dest_generation,
+    }) {
+        drop(boxes);
+        release_message(message);
+        return super::ESRCH;
+    }
     if boxes[idx].enqueue_message(message).is_err() {
         return EAGAIN;
     }

@@ -1906,7 +1906,7 @@ fn clear_thread_wait_registrations(id: ThreadId) {
 
 fn retire_thread_endpoint(id: ThreadId, position: Option<(usize, u64)>) {
     if let Some((slot, generation)) = position {
-        crate::syscall::ipc::lifetime::retire(crate::syscall::ipc::IpcEndpoint {
+        crate::syscall::ipc::retire_endpoint(crate::syscall::ipc::IpcEndpoint {
             thread_id: id.as_u64(),
             slot: slot as u16,
             generation,
