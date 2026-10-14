@@ -47,6 +47,10 @@ mnu-metrics = { path = "crates/metrics" }
 [patch."https://github.com/mochiOS/mnu"]
 mnu-abi = { path = "crates/abi" }
 
+[patch."https://github.com/mochiOS/syscalls"]
+mochi-user-syscall = { path = "../user/crates/syscall" }
+mochios-capability-protocol = { path = "../user/crates/capability-protocol" }
+
 [features]
 default = ["kernel-bin"]
 kernel-bin = []
