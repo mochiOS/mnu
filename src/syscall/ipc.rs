@@ -1457,6 +1457,12 @@ impl MessageCache {
 }
 
 fn wipe_message(mut message: Box<Message>) -> Box<Message> {
+    // Volatile stores do not drop the overwritten value. Release any authority
+    // still owned by a discarded message before erasing its reusable storage.
+    drop(core::mem::replace(
+        &mut message.object_handles,
+        ObjectHandleAttachments::empty(),
+    ));
     // The volatile replacement keeps message contents from surviving in a
     // reusable kernel heap allocation after the queue releases them.
     unsafe {
