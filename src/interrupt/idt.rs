@@ -115,7 +115,11 @@ pub fn init() {
         idt.virtualization.set_handler_fn(virtualization_handler);
 
         // ハードウェア割り込みハンドラ（32-47番）
-        idt[32].set_handler_fn(super::timer::timer_interrupt_handler); // Timer IRQ0
+        unsafe {
+            idt[32].set_handler_addr(x86_64::VirtAddr::new(
+                super::timer::timer_interrupt_handler as *const () as u64,
+            ));
+        }
         idt[33].set_handler_fn(keyboard_interrupt_handler); // Keyboard IRQ1 (C-2修正)
         idt[44].set_handler_fn(mouse_interrupt_handler); // Mouse IRQ12 (PS/2 AUX)
 
@@ -150,7 +154,11 @@ pub fn init() {
             }
             idt[i].set_handler_fn(generic_interrupt_handler);
         }
-        idt[48].set_handler_fn(super::timer::local_timer_interrupt_handler);
+        unsafe {
+            idt[48].set_handler_addr(x86_64::VirtAddr::new(
+                super::timer::local_timer_interrupt_handler as *const () as u64,
+            ));
+        }
         idt[crate::mem::tlb_shootdown::VECTOR].set_handler_fn(tlb_shootdown_handler);
 
         idt

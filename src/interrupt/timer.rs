@@ -4,9 +4,6 @@
 
 use crate::debug;
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::structures::gdt::SegmentSelector;
-use x86_64::structures::idt::InterruptStackFrame;
-use x86_64::PrivilegeLevel;
 
 pub const PIT_HZ: u64 = 500;
 pub const TICK_MS: u64 = 1000 / PIT_HZ;
@@ -22,70 +19,67 @@ fn advance_clock() {
     crate::syscall::time::wake_due_sleepers(ticks);
 }
 
-/// タイマー割り込みハンドラ（IRQ0）
-///
-/// ## Arguments
-/// - `_stack_frame`: 割り込み発生時のスタックフレーム
-pub extern "x86-interrupt" fn timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
-    crate::performance::increment(crate::performance::CounterMetric::TimerInterrupts, 1);
-    let user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
-    let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(user_mode);
-    normalize_user_iret_frame(&mut stack_frame);
-
-    advance_clock();
-
-    // スケジューラのティックを実行
-    let should_schedule = crate::task::scheduler_tick(user_mode);
-
-    // End of Interrupt (EOI) 信号をPICに送信
-    super::send_eoi(32);
-
-    // タイムスライスが尽きた場合はプリエンプト
-    // switch_context がカーネルスタック状態を保存するため、
-    // タイマーハンドラの iretq で自動的にユーザー/カーネルモードに戻る
-    if should_schedule {
-        crate::task::schedule_and_switch();
-    }
-
-    // ユーザーから入ってきた場合は、復帰先スレッドに応じたユーザーCR3へ戻す
-    crate::syscall::syscall_entry::kpti_leave_after_trap(entered_from_user);
+// Save all fifteen GPRs adjacent to the five CPU IRET slots. A compiler-made
+// x86-interrupt prologue cannot expose the GPRs for upcall continuation edits.
+macro_rules! timer_entry {
+    ($name:ident, $local:expr) => {
+        #[unsafe(naked)]
+        pub unsafe extern "C" fn $name() {
+            core::arch::naked_asm!(
+                "push rax", "push rcx", "push rdx", "push rbx", "push rbp",
+                "push rsi", "push rdi", "push r8", "push r9", "push r10",
+                "push r11", "push r12", "push r13", "push r14", "push r15",
+                "mov rdi, rsp",
+                "mov rbx, rsp",
+                "and rsp, -16",
+                "mov esi, {local}",
+                "cld",
+                "call {handle}",
+                "mov rsp, rbx",
+                "pop r15", "pop r14", "pop r13", "pop r12", "pop r11",
+                "pop r10", "pop r9", "pop r8", "pop rdi", "pop rsi",
+                "pop rbp", "pop rbx", "pop rdx", "pop rcx", "pop rax",
+                "iretq",
+                local = const $local,
+                handle = sym handle_timer,
+            );
+        }
+    };
 }
+timer_entry!(timer_interrupt_handler, 0);
+timer_entry!(local_timer_interrupt_handler, 1);
 
-/// Per-CPU timer; the bootstrap CPU also supplies timekeeping in a PV guest.
-pub extern "x86-interrupt" fn local_timer_interrupt_handler(mut stack_frame: InterruptStackFrame) {
-    crate::performance::increment(crate::performance::CounterMetric::TimerInterrupts, 1);
-    let user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
+extern "sysv64" fn handle_timer(raw: *mut [u64; 20], local: bool) {
+    // Only the assembly entries above supply this kernel-owned frame.
+    let frame = unsafe { &mut *raw };
+    let user_mode = frame[16] & 3 == 3;
     let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(user_mode);
-    normalize_user_iret_frame(&mut stack_frame);
+    crate::performance::increment(crate::performance::CounterMetric::TimerInterrupts, 1);
+    if user_mode {
+        frame[16] = u64::from(crate::mem::gdt::user_code_selector() | 3);
+        frame[19] = u64::from(crate::mem::gdt::user_data_selector() | 3);
+    }
 
     // PV guests have no PIT. Advance shared time on the bootstrap CPU only,
     // so secondary CPUs do not multiply the clock rate.
-    if crate::hypervisor_guest::is_active() && crate::percpu::current_cpu_id() == 0 {
+    if !local || (crate::hypervisor_guest::is_active() && crate::percpu::current_cpu_id() == 0) {
         advance_clock();
     }
 
     let should_schedule = crate::task::scheduler_tick(user_mode);
-    crate::smp::local_apic_eoi();
+    if local {
+        crate::smp::local_apic_eoi();
+    } else {
+        super::send_eoi(32);
+    }
     if should_schedule {
         crate::task::schedule_and_switch();
     }
 
+    // This frame belongs to the thread whose kernel stack resumes after a
+    // scheduler switch. Select its user upcall before leaving the kernel CR3.
+    crate::syscall::upcall::prepare_interrupt_return(frame);
     crate::syscall::syscall_entry::kpti_leave_after_trap(entered_from_user);
-}
-
-fn normalize_user_iret_frame(stack_frame: &mut InterruptStackFrame) {
-    if stack_frame.code_segment.rpl() != PrivilegeLevel::Ring3 {
-        return;
-    }
-
-    let user_cs = SegmentSelector(crate::mem::gdt::user_code_selector() | 0x3);
-    let user_ss = SegmentSelector(crate::mem::gdt::user_data_selector() | 0x3);
-    unsafe {
-        stack_frame.as_mut().update(|frame| {
-            frame.code_segment = user_cs;
-            frame.stack_segment = user_ss;
-        });
-    }
 }
 
 /// 現在のタイマーティック数を取得
