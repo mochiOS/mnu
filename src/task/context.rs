@@ -44,6 +44,18 @@ impl FxSaveArea {
             );
         }
     }
+
+    pub(super) fn snapshot_bytes(&self) -> [u8; FXSAVE_AREA_SIZE] {
+        let mut bytes = self.bytes;
+        // FXSAVE leaves reserved bytes untouched. Do not expose them even if
+        // a future save-area initializer stops zeroing the entire buffer.
+        bytes[5] = 0;
+        for slot in 0..8 {
+            bytes[32 + slot * 16 + 10..32 + slot * 16 + 16].fill(0);
+        }
+        bytes[416..].fill(0);
+        bytes
+    }
 }
 
 impl core::fmt::Debug for FxSaveArea {

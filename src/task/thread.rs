@@ -193,6 +193,14 @@ impl ThreadUpcallState {
         })
     }
 
+    fn snapshot(&self, token: u64) -> Result<(UserUpcallContext, [u8; 512]), ThreadUpcallError> {
+        if token == 0 || token != self.active_token || self.restore_pending {
+            return Err(ThreadUpcallError::InvalidToken);
+        }
+        let context = self.saved_context.ok_or(ThreadUpcallError::InvalidToken)?;
+        Ok((context, self.saved_fx_state.snapshot_bytes()))
+    }
+
     fn request_return(&mut self, token: u64) -> Result<(), ThreadUpcallError> {
         if token == 0 || token != self.active_token || self.saved_context.is_none() {
             return Err(ThreadUpcallError::InvalidToken);
@@ -1257,6 +1265,13 @@ impl Thread {
 
     pub fn request_upcall_return(&mut self, token: u64) -> Result<(), ThreadUpcallError> {
         self.upcall.request_return(token)
+    }
+
+    pub fn upcall_snapshot(
+        &self,
+        token: u64,
+    ) -> Result<(UserUpcallContext, [u8; 512]), ThreadUpcallError> {
+        self.upcall.snapshot(token)
     }
 
     pub fn begin_exception_upcall(

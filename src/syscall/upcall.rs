@@ -157,6 +157,61 @@ pub fn return_from(token: u64) -> u64 {
         .unwrap_or(ESRCH)
 }
 
+pub fn inspect(token: u64, output: u64, length: u64) -> u64 {
+    if length != core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>() as u64 {
+        return EINVAL;
+    }
+    let Some(id) = crate::task::current_thread_id() else {
+        return ESRCH;
+    };
+    let snapshot = match crate::task::with_thread(id, |thread| thread.upcall_snapshot(token)) {
+        Some(Ok((context, fx_state))) => snapshot_context(context, fx_state),
+        Some(Err(_)) => return EINVAL,
+        None => return ESRCH,
+    };
+    // Snapshot under the thread lock, then drop it before faultable usercopy.
+    // Neither a failed copy nor edits to the output consume or alter delivery.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&snapshot as *const mnu_abi::ThreadUpcallSnapshot).cast::<u8>(),
+            core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>(),
+        )
+    };
+    match super::copy_to_user(output, bytes) {
+        Ok(()) => SUCCESS,
+        Err(error) => error,
+    }
+}
+
+fn snapshot_context(
+    context: UserUpcallContext,
+    fx_state: [u8; 512],
+) -> mnu_abi::ThreadUpcallSnapshot {
+    mnu_abi::ThreadUpcallSnapshot {
+        instruction: context.user_rip,
+        stack_pointer: context.user_rsp,
+        rflags: context.user_rflags,
+        argument: context.rdi,
+        registers: mnu_abi::ThreadInitialRegisters {
+            rax: context.rax,
+            rbx: context.rbx,
+            rcx: context.rcx,
+            rdx: context.rdx,
+            rsi: context.rsi,
+            rbp: context.rbp,
+            r8: context.r8,
+            r9: context.r9,
+            r10: context.r10,
+            r11: context.r11,
+            r12: context.r12,
+            r13: context.r13,
+            r14: context.r14,
+            r15: context.r15,
+        },
+        fx_state,
+    }
+}
+
 pub fn prepare_syscall_return(frame: &mut SavedSyscallFrame) {
     let mut context = read_context(frame);
     if prepare_context(&mut context) {

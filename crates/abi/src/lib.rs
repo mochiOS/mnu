@@ -206,6 +206,10 @@ pub enum SyscallNumber {
     /// Arguments: absolute cursor, byte buffer, byte capacity, diagnostic
     /// ReadResult output pointer. Returns copied bytes; never consumes history.
     DiagnosticRead = 687,
+    /// Read the current thread's interrupted context using its active upcall
+    /// token. Arguments: token, output pointer, exact ThreadUpcallSnapshot size.
+    /// No PID, thread Handle, or caller-supplied return context is accepted.
+    ThreadUpcallInspect = 688,
     CheckGravityExist = 999,
 }
 
@@ -309,6 +313,24 @@ pub struct ThreadInitialRegisters {
     pub r14: u64,
     pub r15: u64,
 }
+
+/// Read-only x86-64 context captured before entering a native upcall.
+/// RDI is `argument`; the remaining GPRs use the native thread register layout.
+/// `fx_state` is the 512-byte FXSAVE64 image (x87/SSE, not AVX/XSAVE).
+/// Changing this userspace copy does not change the kernel's return context.
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadUpcallSnapshot {
+    pub instruction: u64,
+    pub stack_pointer: u64,
+    pub rflags: u64,
+    pub argument: u64,
+    pub registers: ThreadInitialRegisters,
+    pub fx_state: [u8; 512],
+}
+
+const _: () = assert!(core::mem::size_of::<ThreadUpcallSnapshot>() == 656);
+const _: () = assert!(core::mem::offset_of!(ThreadUpcallSnapshot, fx_state) == 144);
 
 /// Opt in to synchronous user exception delivery on this thread's upcall stack.
 pub const THREAD_UPCALL_EXCEPTIONS: u64 = 1;
@@ -654,6 +676,7 @@ mod object_handle_tests {
             SyscallNumber::WakeAddress as u64,
             SyscallNumber::ThreadUpcallInstall as u64,
             SyscallNumber::ThreadUpcallReturn as u64,
+            SyscallNumber::ThreadUpcallInspect as u64,
             SyscallNumber::ThreadHandleCreate as u64,
             SyscallNumber::ThreadInterrupt as u64,
             SyscallNumber::ThreadHandleStatus as u64,
