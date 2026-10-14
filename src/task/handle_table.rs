@@ -391,7 +391,7 @@ impl ObjectHandleEntry {
         self.rights
     }
 
-    fn restricted(&self, requested: HandleRights) -> Option<Self> {
+    pub(crate) fn restricted(&self, requested: HandleRights) -> Option<Self> {
         self.rights
             .contains(requested)
             .then(|| Self::new(self.object.clone(), requested))
@@ -414,6 +414,16 @@ impl ObjectHandleTable {
 
     pub fn get(&self, handle: ObjectHandle) -> Option<ObjectHandleEntry> {
         self.entries.get(&handle).cloned()
+    }
+
+    /// Captures transferable references and all metadata under the caller's
+    /// table lock. Closing/reusing a live slot cannot retarget these references.
+    pub fn capture(&self) -> Result<super::handle_snapshot::HandleSnapshot, ()> {
+        super::handle_snapshot::HandleSnapshot::capture(
+            self.entries
+                .iter()
+                .map(|(handle, entry)| (*handle, entry.clone())),
+        )
     }
 
     /// Metadata only: neither duplicates objects nor makes another table visible.

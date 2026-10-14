@@ -5,6 +5,7 @@
 pub mod context;
 pub mod fd_table;
 pub mod handle_table;
+pub(crate) mod handle_snapshot;
 pub mod ids;
 pub(crate) mod image_origin;
 pub(crate) mod image_transition;
