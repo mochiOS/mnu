@@ -70,6 +70,8 @@ pub struct UserUpcallContext {
     pub rsi: u64,
     pub rdi: u64,
     pub rax: u64,
+    pub rcx: u64,
+    pub r11: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

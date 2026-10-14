@@ -1121,6 +1121,7 @@ pub unsafe extern "C" fn syscall_interrupt_handler() {
         // KPTI で user CR3 から kernel heap を完全に外しているため、signal 配送や
         // プロセス/スレッド metadata 参照を user CR3 上で行うと kernel-mode page fault になる。
         "mov rdi, rsp",               // arg0 = kstack（saved registers 先頭）
+        "cld",
         "call {int80_handler}",       // 最終的な戻り値を rax で返す
 
         // 戻り値 (rax) をスタック上の保存された rax の位置に書き込む
@@ -1198,6 +1199,13 @@ extern "sysv64" fn syscall_interrupt_handler_rust(kstack: *mut u64) -> u64 {
     } else if let Some(tid) = current_tid {
         crate::task::with_thread_mut(tid, |t| t.set_in_syscall(false));
     }
+
+    // The assembly owns 15 saved GPRs followed by the five-word user IRET
+    // frame. Publish dispatch's result before upcall delivery/restoration.
+    let frame = unsafe { &mut *kstack.cast::<[u64; 20]>() };
+    frame[14] = ret;
+    upcall::prepare_interrupt_return(frame);
+    let ret = frame[14];
 
     // int 0x80 復帰フレームの CS/SS を GDT 実値で正規化する。
     // 一部環境で固定値と実際の GDT 割当がずれると iretq で #GP(index=3/4) を起こすため、
