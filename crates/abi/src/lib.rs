@@ -214,6 +214,12 @@ pub enum SyscallNumber {
     /// ThreadUpcallSnapshot pointer, exact byte length. Validation and commit
     /// are atomic; invalid input leaves delivery and saved state unchanged.
     ThreadUpcallReturnContext = 689,
+    /// Replace only the calling thread's user CPU context, without an upcall
+    /// token. Arguments: ThreadUpcallSnapshot pointer, exact byte length.
+    /// Validates user addresses, flags and CPU-supported x87/SSE state before
+    /// committing. Rejects an active upcall or pending restoration (EAGAIN).
+    /// Does not change TLS, Handles, credentials, or another thread's state.
+    ThreadContextRestore = 690,
     CheckGravityExist = 999,
 }
 
@@ -322,7 +328,9 @@ pub struct ThreadInitialRegisters {
 /// RDI is `argument`; the remaining GPRs use the native thread register layout.
 /// `fx_state` is the 512-byte FXSAVE64 image (x87/SSE, not AVX/XSAVE).
 /// Editing the copy alone does not change the kernel's return context. It may
-/// be supplied to ThreadUpcallReturnContext, which validates it atomically.
+/// be supplied to ThreadUpcallReturnContext for an active delivery, or to
+/// ThreadContextRestore for an independent self continuation. Both validate
+/// user CPU state atomically and leave TLS and execution authority unchanged.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadUpcallSnapshot {
@@ -683,6 +691,7 @@ mod object_handle_tests {
             SyscallNumber::ThreadUpcallReturn as u64,
             SyscallNumber::ThreadUpcallInspect as u64,
             SyscallNumber::ThreadUpcallReturnContext as u64,
+            SyscallNumber::ThreadContextRestore as u64,
             SyscallNumber::ThreadHandleCreate as u64,
             SyscallNumber::ThreadInterrupt as u64,
             SyscallNumber::ThreadHandleStatus as u64,

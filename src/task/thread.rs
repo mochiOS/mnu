@@ -128,7 +128,7 @@ impl ThreadUpcallState {
         stack_top: u64,
         exceptions: bool,
     ) -> Result<(), ThreadUpcallError> {
-        if self.active_token != 0 {
+        if self.active_token != 0 || self.restore_pending {
             return Err(ThreadUpcallError::Active);
         }
         self.entry = entry;
@@ -177,6 +177,7 @@ impl ThreadUpcallState {
         if self.entry == 0
             || self.stack_top == 0
             || self.active_token != 0
+            || self.restore_pending
         {
             return None;
         }
@@ -241,6 +242,26 @@ impl ThreadUpcallState {
         self.active_token = 0;
         self.saved_fx_state.restore_current();
         Some(context)
+    }
+
+    fn request_context_restore(
+        &mut self,
+        context: UserUpcallContext,
+        bytes: [u8; 512],
+    ) -> Result<(), ThreadUpcallError> {
+        // An independent continuation must never discard a live delivery or
+        // authorize returning through somebody else's one-shot token.
+        if self.active_token != 0 || self.restore_pending {
+            return Err(ThreadUpcallError::Active);
+        }
+        let mut current = super::context::FxSaveArea::initial();
+        current.save_current();
+        let selected = current.with_user_bytes(bytes)
+            .ok_or(ThreadUpcallError::InvalidContext)?;
+        self.saved_context = Some(context);
+        self.saved_fx_state = selected;
+        self.restore_pending = true;
+        Ok(())
     }
 }
 
@@ -1316,6 +1337,14 @@ impl Thread {
 
     pub fn take_restored_upcall_context(&mut self) -> Option<UserUpcallContext> {
         self.upcall.take_restored_context()
+    }
+
+    pub fn request_context_restore(
+        &mut self,
+        context: UserUpcallContext,
+        fx_state: [u8; 512],
+    ) -> Result<(), ThreadUpcallError> {
+        self.upcall.request_context_restore(context, fx_state)
     }
 
     pub fn interactive_score(&self) -> u8 {

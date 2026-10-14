@@ -182,6 +182,37 @@ pub fn return_from_context(token: u64, context_ptr: u64, context_len: u64) -> u6
     .unwrap_or(ESRCH)
 }
 
+pub fn restore_context(context_ptr: u64, context_len: u64) -> u64 {
+    let Some(thread_id) = crate::task::current_thread_id() else {
+        return ESRCH;
+    };
+    if context_ptr == 0
+        || context_len != core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>() as u64
+    {
+        return EINVAL;
+    }
+    let mut snapshot = core::mem::MaybeUninit::<mnu_abi::ThreadUpcallSnapshot>::zeroed();
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(snapshot.as_mut_ptr().cast::<u8>(), context_len as usize)
+    };
+    if let Err(error) = super::copy_from_user(context_ptr, bytes) {
+        return error;
+    }
+    let snapshot = unsafe { snapshot.assume_init() };
+    let Some(context) = return_context(&snapshot).filter(|context| context.user_rsp >= 16) else {
+        return EINVAL;
+    };
+    crate::task::with_thread_mut(thread_id, |thread| {
+        thread.request_context_restore(context, snapshot.fx_state)
+    })
+    .map(|result| match result {
+        Ok(()) => SUCCESS,
+        Err(ThreadUpcallError::Active) => EAGAIN,
+        Err(_) => EINVAL,
+    })
+    .unwrap_or(ESRCH)
+}
+
 pub fn return_from(token: u64) -> u64 {
     let Some(thread_id) = crate::task::current_thread_id() else {
         return ESRCH;
@@ -423,7 +454,7 @@ fn resume_context(context: UserUpcallContext) -> ! {
         rcx: context.rcx,
         r11: context.r11,
     };
-    // Only an authenticated, kernel-retained upcall snapshot reaches here.
+    // Only a kernel-validated, current-thread continuation reaches here.
     // The ordinary syscall path still uses SYSRET; full restoration uses the
     // same validated IRET machinery as native address-space continuation.
     unsafe { crate::task::usermode::resume_usermode(registers, context.rax, fs_base) }
