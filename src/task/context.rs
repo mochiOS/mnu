@@ -6,12 +6,12 @@ const FXSAVE_AREA_SIZE: usize = 512;
 
 #[derive(Clone, Copy)]
 #[repr(C, align(16))]
-struct FxSaveArea {
+pub(super) struct FxSaveArea {
     bytes: [u8; FXSAVE_AREA_SIZE],
 }
 
 impl FxSaveArea {
-    const fn initial() -> Self {
+    pub(super) const fn initial() -> Self {
         let mut bytes = [0u8; FXSAVE_AREA_SIZE];
         // Intel-defined reset state used by FNINIT and LDMXCSR.
         bytes[0] = 0x7f;
@@ -19,6 +19,30 @@ impl FxSaveArea {
         bytes[24] = 0x80;
         bytes[25] = 0x1f;
         Self { bytes }
+    }
+
+    /// Capture the current thread's x87/SSE state before entering user code.
+    pub(super) fn save_current(&mut self) {
+        unsafe {
+            core::arch::asm!(
+                "fxsave64 [{}]",
+                in(reg) self as *mut Self,
+                options(nostack, preserves_flags),
+            );
+        }
+    }
+
+    /// Restore a kernel-owned snapshot. This state is never supplied by a
+    /// user pointer, so invalid MXCSR bits cannot reach FXRSTOR through IPC.
+    pub(super) fn restore_current(&self) {
+        unsafe {
+            core::arch::asm!(
+                "fxrstor64 [{}]",
+                in(reg) self as *const Self,
+                clobber_abi("C"),
+                options(nostack, preserves_flags, readonly),
+            );
+        }
     }
 }
 

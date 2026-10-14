@@ -97,6 +97,7 @@ struct ThreadUpcallState {
     next_token: u64,
     active_token: u64,
     saved_context: Option<UserUpcallContext>,
+    saved_fx_state: super::context::FxSaveArea,
     restore_pending: bool,
 }
 
@@ -111,6 +112,7 @@ impl ThreadUpcallState {
             next_token: 1,
             active_token: 0,
             saved_context: None,
+            saved_fx_state: super::context::FxSaveArea::initial(),
             restore_pending: false,
         }
     }
@@ -149,6 +151,7 @@ impl ThreadUpcallState {
         self.next_token = token.wrapping_add(1).max(1);
         self.active_token = token;
         self.saved_context = Some(context);
+        self.saved_fx_state.save_current();
         self.restore_pending = false;
         Some(ThreadUpcallDelivery {
             entry: self.entry,
@@ -173,6 +176,7 @@ impl ThreadUpcallState {
         let context = self.saved_context.take()?;
         self.restore_pending = false;
         self.active_token = 0;
+        self.saved_fx_state.restore_current();
         Some(context)
     }
 }
