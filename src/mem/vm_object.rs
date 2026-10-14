@@ -8,6 +8,20 @@ use crate::interrupt::spinlock::SpinLock;
 use crate::task::ProviderObject;
 
 pub const PAGE_BYTES: usize = 4096;
+
+/// A failed fault-page preparation, distinct from an ordinary read at EOF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VmPageError {
+    OutsideBacking,
+    Operation(u64),
+}
+
+impl From<u64> for VmPageError {
+    fn from(error: u64) -> Self {
+        Self::Operation(error)
+    }
+}
+
 const MAX_CACHED_PAGES: usize = 256;
 const MAX_READ_BATCH_BYTES: usize = 256 * 1024;
 
@@ -185,8 +199,31 @@ impl VmObject {
         }
     }
 
-    pub fn page(&self, page_index: u64) -> Result<Arc<[u8; PAGE_BYTES]>, u64> {
-        self.page_with_len(page_index).map(|(bytes, _)| bytes)
+    pub fn page(&self, page_index: u64) -> Result<Arc<[u8; PAGE_BYTES]>, VmPageError> {
+        self.fault_page_with_len(page_index).map(|(bytes, _)| bytes)
+    }
+
+    fn page_error(&self, error: u64) -> VmPageError {
+        // RAM population uses EINVAL only for an index outside its extent.
+        // A provider's error with the same value must not be guessed as EOF.
+        match (&self.source, error) {
+            (VmObjectSource::Memory(_), crate::syscall::EINVAL) => VmPageError::OutsideBacking,
+            _ => VmPageError::Operation(error),
+        }
+    }
+
+    fn fault_page_with_len(
+        &self,
+        page_index: u64,
+    ) -> Result<(Arc<[u8; PAGE_BYTES]>, usize), VmPageError> {
+        let (bytes, valid_len) = self
+            .page_with_len(page_index)
+            .map_err(|error| self.page_error(error))?;
+        if valid_len == 0 {
+            return Err(VmPageError::OutsideBacking);
+        }
+        // A partial final page remains accessible with its zero-filled tail.
+        Ok((bytes, valid_len))
     }
 
     fn page_with_len(&self, page_index: u64) -> Result<(Arc<[u8; PAGE_BYTES]>, usize), u64> {
@@ -297,15 +334,17 @@ impl VmObject {
         Ok(written)
     }
 
-    pub fn prepare_shared_page(&self, page_index: u64) -> Result<PreparedSharedPage, u64> {
+    pub fn prepare_shared_page(&self, page_index: u64) -> Result<PreparedSharedPage, VmPageError> {
         if let VmObjectSource::Memory(memory) = &self.source {
-            let (frame_phys, generation) = memory.prepare_page(page_index)?;
+            let (frame_phys, generation) = memory
+                .prepare_page(page_index)
+                .map_err(|error| self.page_error(error))?;
             return Ok(PreparedSharedPage {
                 frame_phys,
                 memory_generation: Some((memory.clone(), generation)),
             });
         }
-        let (loaded, loaded_len) = self.page_with_len(page_index)?;
+        let (loaded, loaded_len) = self.fault_page_with_len(page_index)?;
         let key = self.page_key(page_index);
 
         let mut cache = PAGE_CACHE.lock();
@@ -329,7 +368,7 @@ impl VmObject {
             let frame_phys = frame.start_address().as_u64();
             if let Err(errno) = copy_to_frame(frame_phys, 0, cache[entry_index].bytes.as_slice()) {
                 let _ = crate::mem::frame::deallocate_frame(frame);
-                return Err(errno);
+                return Err(VmPageError::Operation(errno));
             }
             cache[entry_index].frame_phys = Some(frame_phys);
         }
