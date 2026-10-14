@@ -3,10 +3,6 @@
 use super::types::{
     EACCES, EAGAIN, EBADF, EFAULT, EINVAL, ENOTSUP, EPIPE,
 };
-use crate::capability::Capability;
-use crate::capability::path::{
-    self, PATH_CREATE, PATH_DELETE, PATH_EXEC, PATH_LIST, PATH_READ, PATH_WRITE, PathOwner,
-};
 use crate::task::fd_table::{FileHandle, FileHandleCap};
 use alloc::vec::Vec;
 
@@ -145,103 +141,6 @@ pub(crate) fn remove_stream_waiter(stream_id: usize, waiter: crate::task::Thread
     if let Some(Some(stream)) = table.get_mut(stream_id) {
         stream.waiters.retain(|candidate| *candidate != waiter);
     }
-}
-
-pub(crate) fn ensure_fs_path_executable_for_process(
-    path: &str,
-    pid: crate::task::ids::ProcessId,
-) -> Result<(), u64> {
-    // Only native authority is checked here. POSIX credentials and execute
-    // permissions are userspace policy, not kernel process state.
-    if crate::task::with_process(pid, |_| ()).is_none() {
-        return Err(EACCES);
-    }
-    ensure_fs_capability_access_for_process(path, PATH_EXEC, pid.as_u64())
-}
-
-fn ensure_fs_capability_access_for_process(
-    path: &str,
-    needed_rights: u32,
-    pid_raw: u64,
-) -> Result<(), u64> {
-    if path::scoped_path_allows(pid_raw, path, needed_rights) {
-        return Ok(());
-    }
-    if let Some(entry) = path::lookup_path(path) {
-        if !path_owner_allows(entry.owner, pid_raw) {
-            return Err(EACCES);
-        }
-        let missing_rights = needed_rights & !entry.rights.bits;
-        if missing_rights != 0 {
-            enforce_fs_capabilities_for_process(
-                entry.read_capability,
-                entry.write_capability,
-                missing_rights,
-                pid_raw,
-            )?;
-        }
-    } else {
-        enforce_fs_capabilities_for_process(
-            Capability::FsReadAll,
-            Capability::FsWriteAll,
-            needed_rights,
-            pid_raw,
-        )?;
-    }
-    Ok(())
-}
-
-fn path_owner_allows(owner: PathOwner, pid_raw: u64) -> bool {
-    match owner {
-        PathOwner::Any => true,
-        PathOwner::System => false,
-        PathOwner::Service(owner_pid) | PathOwner::Application(owner_pid) => owner_pid == pid_raw,
-    }
-}
-
-fn process_has_cap(pid_raw: u64, cap: Capability) -> bool {
-    crate::syscall::security::process_has_any_capability(
-        crate::task::ids::ProcessId::from_u64(pid_raw),
-        &[cap],
-    )
-}
-
-fn capability_requirement_satisfied(
-    required: Capability,
-    broad: Capability,
-    has_required: bool,
-    has_broad: bool,
-) -> bool {
-    has_required || (required != broad && has_broad)
-}
-
-fn enforce_required_capability(
-    required: Capability,
-    broad: Capability,
-    pid_raw: u64,
-) -> Result<(), u64> {
-    let has_required = process_has_cap(pid_raw, required);
-    let has_broad = process_has_cap(pid_raw, broad);
-    if capability_requirement_satisfied(required, broad, has_required, has_broad) {
-        Ok(())
-    } else {
-        Err(EACCES)
-    }
-}
-
-fn enforce_fs_capabilities_for_process(
-    read_capability: Capability,
-    write_capability: Capability,
-    needed_rights: u32,
-    pid_raw: u64,
-) -> Result<(), u64> {
-    if needed_rights & (PATH_READ | PATH_LIST | PATH_EXEC) != 0 {
-        enforce_required_capability(read_capability, Capability::FsReadAll, pid_raw)?;
-    }
-    if (needed_rights & (PATH_WRITE | PATH_CREATE | PATH_DELETE)) != 0 {
-        enforce_required_capability(write_capability, Capability::FsWriteAll, pid_raw)?;
-    }
-    Ok(())
 }
 
 pub(crate) fn file_handle_options(handle: &FileHandle) -> Result<u64, u64> {
@@ -478,11 +377,8 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
 }
 
 #[cfg(test)]
-mod unix_mode_tests {
-    use super::{
-        PIPE_BUFFER_CAP, PipeState, capability_requirement_satisfied,
-    };
-    use crate::capability::Capability;
+mod stream_tests {
+    use super::{PIPE_BUFFER_CAP, PipeState};
 
     #[test]
     fn stream_signals_cover_data_capacity_and_peer_closure() {
@@ -506,27 +402,5 @@ mod unix_mode_tests {
         );
         stream.readers = 0;
         assert_eq!(stream.signals(true), mnu_abi::HANDLE_SIGNAL_PEER_CLOSED);
-    }
-
-    #[test]
-    fn broad_capability_does_not_become_implicit() {
-        assert!(!capability_requirement_satisfied(
-            Capability::FsReadAll,
-            Capability::FsReadAll,
-            false,
-            false,
-        ));
-        assert!(capability_requirement_satisfied(
-            Capability::FsReadAll,
-            Capability::FsReadAll,
-            true,
-            true,
-        ));
-        assert!(capability_requirement_satisfied(
-            Capability::FsReadTmp,
-            Capability::FsReadAll,
-            false,
-            true,
-        ));
     }
 }

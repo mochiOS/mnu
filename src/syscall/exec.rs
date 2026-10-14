@@ -600,161 +600,44 @@ pub fn authorize_exec_syscall(
     crate::syscall::types::SUCCESS
 }
 
-pub fn exec_kernel_with_name_caps_and_authorities(
+/// Launches the boot-selected initial image from the authenticated initfs only.
+/// Runtime filesystem lookup, naming and executable selection are userspace policy.
+pub(crate) fn launch_bootstrap_image(
     path: &str,
     name: &str,
     initial_caps: CapabilitySet,
     initial_kernel_authorities: KernelAuthoritySet,
     requested_privilege: crate::task::PrivilegeLevel,
 ) -> u64 {
-    crate::info!("exec: kernel: launching: {} name={}", path, name);
-
-    let execution_class = match requested_privilege {
-        crate::task::PrivilegeLevel::Core | crate::task::PrivilegeLevel::Service => {
-            ExecutionClass::Privileged
-        }
-        crate::task::PrivilegeLevel::User => ExecutionClass::Unprivileged,
+    let Some(data) = crate::init::fs::read_initfs(path) else {
+        return crate::syscall::types::ENOENT;
     };
-    exec_internal(
+    crate::performance::increment(
+        crate::performance::CounterMetric::ExecutableBytesRead,
+        data.len() as u64,
+    );
+    crate::util::log::release_boot_marker(format_args!(
+        "exec: loaded '{}' from initfs ({} bytes)",
         path,
-        Some(name),
+        data.len()
+    ));
+    let mut measurement = ExecMeasurement::start();
+    let result = exec_with_data(
+        &data,
+        name,
+        path,
         &[],
         &[],
         Some(initial_caps),
         Some(initial_kernel_authorities),
         Some(requested_privilege),
-        execution_class,
         None,
         &[],
         &[],
-        false,
         None,
-    )
-}
-
-fn exec_internal(
-    path: &str,
-    name_override: Option<&str>,
-    args: &[&str],
-    envp: &[&str],
-    initial_caps: Option<CapabilitySet>,
-    initial_kernel_authorities: Option<KernelAuthoritySet>,
-    requested_privilege: Option<crate::task::PrivilegeLevel>,
-    execution_class: ExecutionClass,
-    application_identity: Option<crate::task::process::ApplicationIdentity>,
-    inherited_handles: &[InheritedHandleGrant],
-    inherited_values: &[InheritedValueSpec],
-    enforce_path_access: bool,
-    expected_digest: Option<[u8; 32]>,
-) -> u64 {
-    let mut measurement = ExecMeasurement::start();
-    let process_name = name_override
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| derive_process_name(path));
-    if enforce_path_access {
-        let Some(pid) = crate::task::current_thread_id()
-            .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
-        else {
-            return crate::syscall::types::EACCES;
-        };
-        if let Err(errno) = crate::syscall::fs::ensure_fs_path_executable_for_process(path, pid) {
-            return errno;
-        }
-    }
-    if let Some((data, source)) = load_exec_image(path, execution_class) {
-        if expected_digest.is_some_and(|expected| {
-            let actual: [u8; 32] = Sha256::digest(&data).into();
-            actual != expected
-        }) {
-            crate::warn!("exec: executable changed after authorization '{}'", path);
-            return crate::syscall::types::EACCES;
-        }
-        crate::info!(
-            "exec: loaded '{}' from {} ({} bytes)",
-            path,
-            source,
-            data.len()
-        );
-        crate::util::log::release_boot_marker(format_args!(
-            "exec: loaded '{}' from {} ({} bytes)",
-            path,
-            source,
-            data.len()
-        ));
-        let result = exec_with_data(
-            &data,
-            &process_name,
-            path,
-            args,
-            envp,
-            initial_caps,
-            initial_kernel_authorities,
-            requested_privilege,
-            application_identity,
-            inherited_handles,
-            inherited_values,
-            None,
-            &mut measurement,
-        );
-        measurement.finish(result)
-    } else {
-        crate::warn!("exec: file not found: {}", path);
-        crate::syscall::types::ENOENT
-    }
-}
-
-fn load_exec_image(path: &str, execution_class: ExecutionClass) -> Option<(Vec<u8>, &'static str)> {
-    let loaded = load_regular_exec_image(path, execution_class)?;
-    crate::performance::increment(
-        crate::performance::CounterMetric::ExecutableBytesRead,
-        loaded.0.len() as u64,
+        &mut measurement,
     );
-    Some(loaded)
-}
-
-fn load_regular_exec_image(
-    path: &str,
-    execution_class: ExecutionClass,
-) -> Option<(Vec<u8>, &'static str)> {
-    // A file bundled in initfs belongs to the authenticated boot generation and
-    // shadows a same-named file on a previously installed filesystem. This is
-    // independent of privilege: boot applications and their services must not
-    // be assembled from different releases.
-    if let Some(data) = crate::init::fs::read_initfs(path) {
-        return Some((data, "initfs"));
-    }
-    if execution_class == ExecutionClass::Privileged {
-        if let Some(data) = crate::cext::fs::read_all(path) {
-            return Some((data, "cext"));
-        }
-        if let Some(data) = crate::init::fs::read_rootfs(path) {
-            return Some((data, "rootfs"));
-        }
-        if let Some(data) = crate::init::fs::read(path) {
-            return Some((data, "fallback"));
-        }
-        None
-    } else {
-        if let Some(data) = crate::init::fs::read_rootfs(path) {
-            return Some((data, "rootfs"));
-        }
-        if let Some(data) = crate::cext::fs::read_all(path) {
-            return Some((data, "cext"));
-        }
-        if let Some(data) = crate::init::fs::read(path) {
-            return Some((data, "fallback"));
-        }
-        None
-    }
-}
-
-fn derive_process_name(path: &str) -> String {
-    let normalized = path.trim_end_matches('/');
-    normalized
-        .rsplit('/')
-        .next()
-        .unwrap_or(normalized)
-        .to_string()
+    measurement.finish(result)
 }
 
 pub(crate) fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u64> {
