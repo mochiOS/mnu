@@ -8,6 +8,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod file_options;
+mod native_launch;
 
 const HEAP_SIZE: usize = 256 * 1024;
 
@@ -73,7 +74,6 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 const SYS_DEBUG_WRITE: u64 = mnu_abi::SyscallNumber::DebugWrite as u64;
-const SYS_EXEC_MANIFEST: u64 = mnu_abi::SyscallNumber::ExecManifest as u64;
 const SYS_PROCESS_EXIT: u64 = mnu_abi::SyscallNumber::ProcessExit as u64;
 const SYS_ADDRESS_SPACE_CLONE: u64 = mnu_abi::SyscallNumber::AddressSpaceClone as u64;
 const SYS_HANDLE_CLOSE: u64 = mnu_abi::SyscallNumber::HandleClose as u64;
@@ -365,20 +365,16 @@ pub fn performance_snapshot(
     }
 }
 
-fn exec_and_wait(path: &str, caps: &[&str]) -> Option<i32> {
-    let pid = exec_with_capabilities(path, caps);
-    if pid == 0 || pid & (1u64 << 63) != 0 {
-        return None;
-    }
-
-    let mut status: i32 = i32::MIN;
-    let waited = process_wait(pid, &mut status as *mut i32 as u64, 0);
-    if waited == pid { Some(status) } else { None }
+fn exec_and_wait(path: &str) -> Option<i32> {
+    native_launch::spawn(path).ok()?.wait().ok()
 }
 
-fn exec_should_be_denied(path: &str, caps: &[&str]) -> bool {
-    let rc = exec_with_capabilities(path, caps);
-    rc & (1u64 << 63) != 0
+fn exec_should_be_denied(path: &str) -> bool {
+    // An unavailable broker, missing fixture, or transport failure is not
+    // evidence that signature policy rejected the executable.
+    native_launch::spawn(path).err().is_some_and(|error| {
+        matches!(error.errno(), Some(1 | 13))
+    })
 }
 
 pub fn thread_create(context: &mnu_abi::ThreadCreateContext) -> u64 {
@@ -595,39 +591,6 @@ pub fn file_seek(handle: u64, offset: i64, whence: u64) -> u64 {
     }
 }
 
-fn exec_with_capabilities(path: &str, caps: &[&str]) -> u64 {
-    let mut path_buf = [0u8; 128];
-    let path_bytes = path.as_bytes();
-    if path_bytes.len() + 1 > path_buf.len() {
-        return mnu_abi::EINVAL as u64;
-    }
-    path_buf[..path_bytes.len()].copy_from_slice(path_bytes);
-    path_buf[path_bytes.len()] = 0;
-
-    let mut caps_buf = [0u8; 256];
-    let mut len = 0usize;
-    for cap in caps {
-        let bytes = cap.as_bytes();
-        if len + bytes.len() + 1 >= caps_buf.len() {
-            return mnu_abi::EINVAL as u64;
-        }
-        caps_buf[len..len + bytes.len()].copy_from_slice(bytes);
-        len += bytes.len();
-        caps_buf[len] = 0;
-        len += 1;
-    }
-
-    unsafe {
-        syscall5(
-            SYS_EXEC_MANIFEST,
-            path_buf.as_ptr() as u64,
-            0,
-            caps_buf.as_ptr() as u64,
-            len as u64,
-            mnu_abi::exec::ExecutionClass::Unprivileged.as_raw(),
-        )
-    }
-}
 
 fn ipc_send_bytes(dest: u64, buf: &[u8]) -> u64 {
     unsafe { syscall3(SYS_IPC_SEND, dest, buf.as_ptr() as u64, buf.len() as u64) }
@@ -653,27 +616,20 @@ fn find_process_by_name(name: &str) -> u64 {
     }
 }
 
-fn launch_plugkit_test_driver() -> Option<(u64, u64)> {
-    let pid = exec_with_capabilities(
-        PLUGKIT_TEST_DRIVER_PATH,
-        &["ipc.client", "ipc.server", "fs.read.all", "fs.write.all"],
-    );
-    if pid & (1u64 << 63) != 0 || pid == 0 {
-        None
-    } else {
-        for _ in 0..100 {
-            let tid = find_process_by_name("com.mnu.plugkit.test.null");
-            if tid != 0 {
-                return Some((pid, tid));
-            }
-            let tid = find_process_by_name(PLUGKIT_TEST_DRIVER_PATH);
-            if tid != 0 {
-                return Some((pid, tid));
-            }
-            let _ = yield_now();
+fn launch_plugkit_test_driver() -> Option<(native_launch::Child, u64)> {
+    let child = native_launch::spawn(PLUGKIT_TEST_DRIVER_PATH).ok()?;
+    for _ in 0..100 {
+        let tid = find_process_by_name("com.mnu.plugkit.test.null");
+        if tid != 0 {
+            return Some((child, tid));
         }
-        None
+        let tid = find_process_by_name(PLUGKIT_TEST_DRIVER_PATH);
+        if tid != 0 {
+            return Some((child, tid));
+        }
+        let _ = yield_now();
     }
+    None
 }
 
 fn recv_ipc_response(buf: &mut [u8]) -> Option<(u64, usize)> {
@@ -852,7 +808,7 @@ fn fileio_self_test() -> bool {
 }
 
 fn plugkit_ipc_self_test() -> bool {
-    let Some((driver_pid, driver_tid)) = launch_plugkit_test_driver() else {
+    let Some((mut driver, driver_tid)) = launch_plugkit_test_driver() else {
         write_line("plugkit-test: driver launch failed");
         return false;
     };
@@ -928,8 +884,7 @@ fn plugkit_ipc_self_test() -> bool {
         }
     }
 
-    let mut status = -1;
-    if process_wait(driver_pid, &mut status as *mut i32 as u64, 0) == driver_pid && status == 0 {
+    if driver.wait() == Ok(0) {
         true
     } else {
         write_line("plugkit-test: child wait failed");
@@ -1035,14 +990,14 @@ fn signature_db_self_test() -> bool {
 }
 
 fn signature_exec_self_test() -> bool {
-    let allow_status = exec_and_wait(SIGNATURE_ALLOW_PATH, &[]);
+    let allow_status = exec_and_wait(SIGNATURE_ALLOW_PATH);
     if allow_status != Some(0) {
         write_line("selftest: signature allow failed");
         return false;
     }
     write_line("selftest: signature allow ok");
 
-    if !exec_should_be_denied(SIGNATURE_DENY_PATH, &[]) {
+    if !exec_should_be_denied(SIGNATURE_DENY_PATH) {
         write_line("selftest: signature deny failed");
         return false;
     }

@@ -9,7 +9,8 @@ path = "src/lib.rs"
 [dependencies]
 mnu-abi = { path = "../../crates/abi" }
 mochi-user-syscall = { path = "../../../user/crates/syscall" }
-mochios-posix-client = { path = "../../../user/crates/posix-client", default-features = false, features = ["syscall-endpoint"] }
+mochi-user-platform = { path = "../../../user/crates/platform", default-features = false }
+mochios-posix-client = { path = "../../../user/crates/posix-client", default-features = false, features = ["syscall-endpoint", "launch-arguments"] }
 mochios-posix-protocol = { path = "../../../user/crates/posix-protocol" }
 
 [[bin]]
