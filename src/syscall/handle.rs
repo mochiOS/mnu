@@ -750,7 +750,22 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         Err(_) => return EINVAL,
     };
     if length == 0 {
-        return SUCCESS;
+        // A Provider owns the meaning of an empty operation too. Do not
+        // fabricate success or inspect the unused user buffer on its behalf.
+        let request = mnu_abi::provider::RequestHeader {
+            opcode: mnu_abi::provider::OP_WRITE,
+            object_id: provider.object_id,
+            argument: 0,
+            basis: 0,
+            length: 0,
+            data_length: 0,
+        };
+        let mut response = [0; mnu_abi::provider::RESPONSE_HEADER_LEN + 8];
+        return match provider_call(provider, request, &[], &mut response) {
+            Ok((header, 0 | 8)) if header.value == 0 => SUCCESS,
+            Ok(_) => EIO,
+            Err(error) => error,
+        };
     }
     let identity = match provider_cache_identity(provider) {
         Ok(identity) => identity,
