@@ -30,6 +30,7 @@ pub enum KernelCapability {
     CextStop,
     DeviceClaim,
     KernelDebug,
+    DiagnosticsRead,
     SignatureWrite,
     SignatureRead,
 }
@@ -134,6 +135,7 @@ impl KernelCapability {
             CextStop => "cext.stop",
             DeviceClaim => "device.claim",
             KernelDebug => "kernel.debug",
+            DiagnosticsRead => "diagnostics.read",
             SignatureWrite => "signature.db.write",
             SignatureRead => "signature.db.read",
         }
@@ -158,6 +160,7 @@ impl KernelCapability {
             "cext.stop" => Some(CextStop),
             "device.claim" => Some(DeviceClaim),
             "kernel.debug" => Some(KernelDebug),
+            "diagnostics.read" => Some(DiagnosticsRead),
             _ => None,
         }
     }
@@ -193,6 +196,7 @@ pub enum Capability {
     MemoryPhysMap,
     MemoryPhysTranslate,
     KernelDebug,
+    DiagnosticsRead,
     DeviceGpu,
     DeviceInput,
     DeviceStorage,
@@ -230,6 +234,7 @@ impl Capability {
             MemoryPhysMap => "memory.phys.map",
             MemoryPhysTranslate => "memory.phys.translate",
             KernelDebug => "kernel.debug",
+            DiagnosticsRead => "diagnostics.read",
             DeviceGpu => "device.gpu",
             DeviceInput => "device.input",
             DeviceStorage => "device.storage",
@@ -294,6 +299,7 @@ impl Capability {
             MemoryPhysMap,
             MemoryPhysTranslate,
             KernelDebug,
+            DiagnosticsRead,
             DeviceGpu,
             DeviceInput,
             DeviceStorage,

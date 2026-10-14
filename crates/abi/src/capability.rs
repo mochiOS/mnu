@@ -127,6 +127,7 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     system!("memory.phys.translate"),
     system!("kernel.module.load"),
     system!("kernel.debug"),
+    system!("diagnostics.read"),
     privileged!("device.gpu"),
     privileged!("device.audio"),
     privileged!("device.input"),

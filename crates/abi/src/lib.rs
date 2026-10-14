@@ -5,6 +5,7 @@ pub mod boot;
 
 /// Canonical metadata for named capabilities shared by kernel and user space.
 pub mod capability;
+pub mod diagnostic;
 
 /// プロセス作成時に渡すメタデータのABIです。
 pub mod exec;
@@ -203,6 +204,10 @@ pub enum SyscallNumber {
     /// Handle granting CONTROL. Arguments: Handle, new length. Revokes live
     /// and detached aliases before reclaiming or zeroing backing storage.
     MemoryObjectResize = 686,
+    /// Read a bounded diagnostic byte history. Requires diagnostics.read.
+    /// Arguments: absolute cursor, byte buffer, byte capacity, diagnostic
+    /// ReadResult output pointer. Returns copied bytes; never consumes history.
+    DiagnosticRead = 687,
     CheckGravityExist = 999,
 }
 
