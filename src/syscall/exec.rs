@@ -12,8 +12,10 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 mod image;
+mod launch;
 
 use image::{map_elf_image, ElfImageLayout};
+use launch::ImageLaunch;
 
 use mnu_abi::exec::{
     ExecutionClass, APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX,
@@ -634,7 +636,7 @@ pub(crate) fn launch_bootstrap_image(
         None,
         &[],
         &[],
-        None,
+        ImageLaunch::Bootstrap,
         &mut measurement,
     );
     measurement.finish(result)
@@ -842,9 +844,11 @@ fn exec_with_data(
     application_identity: Option<crate::task::process::ApplicationIdentity>,
     inherited_handles: &[InheritedHandleGrant],
     inherited_values: &[InheritedValueSpec],
-    native_startup: Option<mnu_abi::process_image::StartupImage<'_>>,
+    launch: ImageLaunch<'_>,
     measurement: &mut ExecMeasurement,
 ) -> u64 {
+    let is_boot_init = launch.is_bootstrap();
+    let native_startup = launch.startup();
     crate::debug!("exec: name={}", process_name);
     let aslr_seed = next_aslr_seed(process_name);
 
@@ -1021,14 +1025,6 @@ fn exec_with_data(
 
         // プロセスを作成してページテーブルをセット
         let privilege = resolve_exec_privilege(requested_privilege);
-        let is_boot_init = if native_startup.is_some() {
-            false
-        } else {
-            let boot_init = crate::policy::init_launch();
-            privilege == crate::task::PrivilegeLevel::Service
-                && exec_path == boot_init.exec_path
-                && process_name == boot_init.process_name
-        };
         const DEFAULT_PROCESS_PRIORITY: u8 = 8;
         let priority = DEFAULT_PROCESS_PRIORITY;
         let mut proc = crate::task::Process::new(process_name, privilege, priority);
@@ -1182,9 +1178,8 @@ fn exec_with_data(
             crate::debug!("exec: new_thread_id={:?}", tid);
         }
 
-        // Legacy spawn publishes a ready thread and therefore cannot guarantee
-        // that its thread ID is still live when the caller receives it. Native
-        // creation returns a retained object while scheduling remains suspended.
+        // Bootstrap returns the claimed process identity, not a thread ID.
+        // Native creation returns a retained object while scheduling remains suspended.
 
         crate::debug!(
             "exec: created usermode process '{}' (pid={:?}, entry={:#x})",
@@ -1196,8 +1191,7 @@ fn exec_with_data(
         if let Some(handle) = created_handle.0.take() {
             handle
         } else {
-            let launched_tid = add_res.expect("add_thread succeeded after non-None check");
-            launched_tid.as_u64()
+            pid.as_u64()
         }
     }
 }
@@ -1543,7 +1537,7 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         Some(authorization.identity),
         &grants,
         &values,
-        Some(startup),
+        ImageLaunch::Created(startup),
         &mut measurement,
     );
     measurement.finish(result)
