@@ -1,5 +1,4 @@
 use crate::interrupt::spinlock::SpinLock;
-use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -1405,19 +1404,7 @@ impl ProcessTable {
             return Some(p);
         }
 
-        // 4) executable path alias lookup (path -> alias)
-        if let Some(alias) = process_alias_for_executable(name) {
-            if let Some(p) = self
-                .processes
-                .iter()
-                .filter_map(|s| s.as_ref())
-                .find(|p| p.name() == alias || p.name() == format!("{}.elf", alias))
-            {
-                return Some(p);
-            }
-        }
-
-        // 5) fallback: substring match
+        // 4) fallback: substring match
         self.processes
             .iter()
             .filter_map(|s| s.as_ref())
@@ -1441,28 +1428,6 @@ impl ProcessTable {
     pub fn count(&self) -> usize {
         self.count
     }
-}
-
-pub(crate) fn process_alias_for_executable(path: &str) -> Option<String> {
-    let aliases_path = crate::config::kernel().policy_paths.process_aliases()?;
-    let data = crate::cext::fs::read_all(aliases_path)?;
-    let text = core::str::from_utf8(&data).ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((alias, driver_path)) = line.split_once('=') else {
-            continue;
-        };
-        if driver_path.trim() == path {
-            let alias = alias.trim();
-            if !alias.is_empty() {
-                return Some(alias.to_string());
-            }
-        }
-    }
-    None
 }
 
 impl Default for ProcessTable {

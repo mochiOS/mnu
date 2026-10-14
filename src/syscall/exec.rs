@@ -978,12 +978,9 @@ fn exec_internal(
     expected_digest: Option<[u8; 32]>,
 ) -> u64 {
     let mut measurement = ExecMeasurement::start();
-    let mut process_name = name_override
+    let process_name = name_override
         .map(|s| s.to_string())
         .unwrap_or_else(|| derive_process_name(path));
-    if let Some(alias) = crate::task::process::process_alias_for_executable(path) {
-        process_name = alias;
-    }
     if enforce_path_access {
         let Some(pid) = crate::task::current_thread_id()
             .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))

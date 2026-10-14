@@ -63,7 +63,6 @@ pub struct FsConfig {
 #[derive(Clone, Default)]
 pub struct PolicyPaths {
     audit_log: String,
-    process_aliases: String,
 }
 
 impl PolicyPaths {
@@ -71,9 +70,6 @@ impl PolicyPaths {
         configured_path(&self.audit_log)
     }
 
-    pub fn process_aliases(&self) -> Option<&str> {
-        configured_path(&self.process_aliases)
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -331,9 +327,6 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
         "policy.audit_log" => {
             set_policy_path(&mut config.policy_paths.audit_log, value);
         }
-        "policy.process_aliases" => {
-            set_policy_path(&mut config.policy_paths.process_aliases, value);
-        }
         "block.max_sectors_per_call" => {
             if let Some(v) = parse_u64(value) {
                 config.block.max_sectors_per_call = v;
@@ -432,6 +425,5 @@ mod tests {
         let config = KernelConfig::default();
 
         assert_eq!(config.policy_paths.audit_log(), None);
-        assert_eq!(config.policy_paths.process_aliases(), None);
     }
 }
