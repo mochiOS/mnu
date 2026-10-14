@@ -847,6 +847,15 @@ fn provider_seek(
 /// Reads one seekable object into kernel-owned storage without exposing any
 /// filesystem path or provider identifier to the caller.
 pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Vec<u8>, u64> {
+    let readable = object(raw, HandleRights::READ)?;
+    if let KernelObject::VmObject(memory) = readable {
+        let length = memory.memory_length().ok_or(ENOTSUP)?;
+        return crate::util::object_snapshot::read(length, maximum_length, |bytes| {
+            memory.read_at(0, bytes)
+        });
+    }
+    // Provider snapshots retain the existing seek/cursor contract. RAM above
+    // has explicit-position reads, so it neither needs nor receives SEEK.
     let object = object(raw, HandleRights::READ.union(HandleRights::SEEK))?;
     let KernelObject::Provider(provider) = object else {
         return Err(ENOTSUP);
