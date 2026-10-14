@@ -3,6 +3,8 @@ use alloc::vec;
 
 mod snapshot;
 pub use snapshot::table_read;
+mod provider_reference;
+pub use provider_reference::count as provider_object_reference_count;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 

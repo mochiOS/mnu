@@ -220,6 +220,13 @@ pub enum SyscallNumber {
     /// committing. Rejects an active upcall or pending restoration (EAGAIN).
     /// Does not change TLS, Handles, credentials, or another thread's state.
     ThreadContextRestore = 690,
+    /// Samples strong references to an object owned by the calling endpoint.
+    /// Argument: provider-owned object ID (not a Handle or process ID). Counts
+    /// Handles, IPC attachments, VM aliases and temporary kernel references;
+    /// excludes only this query's temporary reference. Weak registrations do
+    /// not count. Only the exact creating endpoint thread/slot/generation may
+    /// inspect its namespace. A sample is not a lifetime pin or revocation.
+    ProviderObjectReferenceCount = 691,
     CheckGravityExist = 999,
 }
 
