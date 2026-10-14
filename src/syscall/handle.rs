@@ -1403,6 +1403,9 @@ fn wait_item_signal(item: &mut mnu_abi::HandleWaitItem) -> Result<(WaitTarget, b
             if item.interests & !supported != 0 {
                 return Err(EINVAL);
             }
+            if !crate::syscall::ipc::endpoint_is_valid(provider_endpoint(&provider)) {
+                return Err(ESRCH);
+            }
             item.observed = provider.signals() & item.interests;
             Ok((WaitTarget::Provider(provider), item.observed != 0))
         }
@@ -1488,6 +1491,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
     let mut registered_endpoints = alloc::vec::Vec::new();
     let mut registered_streams = alloc::vec::Vec::new();
     let mut registered_providers = alloc::vec::Vec::new();
+    let mut endpoint_lifetimes = alloc::vec::Vec::new();
     let deadline_tick = if matches!(
         deadline_nanoseconds,
         mnu_abi::HANDLE_WAIT_POLL | mnu_abi::HANDLE_WAIT_INFINITE
@@ -1505,6 +1509,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         registered_endpoints.clear();
         registered_streams.clear();
         registered_providers.clear();
+        endpoint_lifetimes.clear();
         crate::syscall::time::disarm_thread_deadline(current);
         let mut targets = alloc::vec::Vec::with_capacity(items.len());
         let mut ready = None;
@@ -1613,6 +1618,16 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                     }
                 }
                 WaitTarget::Provider(provider) => {
+                    match crate::syscall::ipc::lifetime::observe(provider_endpoint(&provider), current) {
+                        Ok(observation) => endpoint_lifetimes.push(observation),
+                        Err(error) => {
+                            crate::task::remove_process_exit_waiters(current);
+                            remove_endpoint_waiters(current, &registered_endpoints);
+                            remove_stream_waiters(current, &registered_streams);
+                            remove_provider_waiters(current, &registered_providers);
+                            return error;
+                        }
+                    }
                     if !provider.register_waiter(current) {
                         crate::task::remove_process_exit_waiters(current);
                         remove_endpoint_waiters(current, &registered_endpoints);

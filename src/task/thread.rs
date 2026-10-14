@@ -1882,8 +1882,13 @@ where
 
 /// スレッドを削除
 pub fn remove_thread(id: ThreadId) -> Option<Thread> {
-    let removed = THREAD_QUEUE.lock().remove(id);
+    let (removed, endpoint) = {
+        let mut queue = THREAD_QUEUE.lock();
+        let endpoint = queue.slot_index_and_generation(id);
+        (queue.remove(id), endpoint)
+    };
     if removed.is_some() {
+        retire_thread_endpoint(id, endpoint);
         clear_thread_wait_registrations(id);
     }
     removed
@@ -1893,9 +1898,20 @@ pub fn remove_thread(id: ThreadId) -> Option<Thread> {
 // Release native wait records after dropping the queue lock: their normal
 // registration/wake paths may acquire the thread queue in the other order.
 fn clear_thread_wait_registrations(id: ThreadId) {
+    crate::syscall::ipc::lifetime::remove_waiter(id);
     crate::syscall::address_wait::remove_waiter(id);
     crate::syscall::time::disarm_thread_deadline(id);
     super::process::remove_process_exit_waiters(id);
+}
+
+fn retire_thread_endpoint(id: ThreadId, position: Option<(usize, u64)>) {
+    if let Some((slot, generation)) = position {
+        crate::syscall::ipc::lifetime::retire(crate::syscall::ipc::IpcEndpoint {
+            thread_id: id.as_u64(),
+            slot: slot as u16,
+            generation,
+        });
+    }
 }
 
 /// 次に実行すべきスレッドIDを取得
@@ -1959,6 +1975,15 @@ pub fn thread_slot_index_and_generation_by_u64(id_val: u64) -> Option<(usize, u6
     thread_slot_index_and_generation(ThreadId::from_u64(id_val))
 }
 
+pub(crate) fn live_thread_slot_index_and_generation_by_u64(id_val: u64) -> Option<(usize, u64)> {
+    let id = ThreadId::from_u64(id_val);
+    let queue = THREAD_QUEUE.lock();
+    if queue.get(id)?.state() == ThreadState::Terminated {
+        return None;
+    }
+    queue.slot_index_and_generation(id)
+}
+
 /// 現在実行中のスレッドIDを取得
 pub fn current_thread_id() -> Option<ThreadId> {
     let raw = crate::percpu::current_thread_raw_id();
@@ -1991,7 +2016,18 @@ pub fn set_current_thread_by_id(id: Option<ThreadId>) {
 
 /// 現在スレッドの状態を更新
 pub fn set_thread_state(id: ThreadId, state: ThreadState) -> bool {
-    THREAD_QUEUE.lock().set_state(id, state)
+    if state != ThreadState::Terminated {
+        return THREAD_QUEUE.lock().set_state(id, state);
+    }
+    let (changed, endpoint) = {
+        let mut queue = THREAD_QUEUE.lock();
+        let endpoint = queue.slot_index_and_generation(id);
+        (queue.set_state(id, state), endpoint)
+    };
+    if changed {
+        retire_thread_endpoint(id, endpoint);
+    }
+    changed
 }
 
 /// CPU tick writers hold this queue lock, so both domains are sampled at the
@@ -2006,7 +2042,13 @@ pub(super) fn mark_thread_terminated(id: ThreadId) -> Option<bool> {
     let previous = queue.get(id)?.state();
     let retained = previous == ThreadState::Running
         || crate::percpu::thread_is_cpu_referenced(id.as_u64());
-    queue.set_state(id, ThreadState::Terminated).then_some(retained)
+    let endpoint = queue.slot_index_and_generation(id);
+    let changed = queue.set_state(id, ThreadState::Terminated);
+    drop(queue);
+    if changed {
+        retire_thread_endpoint(id, endpoint);
+    }
+    changed.then_some(retained)
 }
 
 pub(super) fn remove_quiescent_terminated_thread(id: ThreadId) -> Option<Thread> {

@@ -6,6 +6,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
+pub(crate) mod lifetime;
+
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
 use super::{EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EIO, EMSGSIZE, ENOSPC};
@@ -86,7 +88,7 @@ pub fn ensure_endpoint_handle_for_thread(thread_id: u64) -> Option<u64> {
 }
 
 pub fn endpoint_is_valid(endpoint: IpcEndpoint) -> bool {
-    match crate::task::thread_slot_index_and_generation_by_u64(endpoint.thread_id) {
+    match crate::task::thread::live_thread_slot_index_and_generation_by_u64(endpoint.thread_id) {
         Some((slot, generation)) => {
             slot as u16 == endpoint.slot && generation == endpoint.generation
         }
@@ -125,10 +127,11 @@ fn with_default_endpoints_mut<R>(f: impl FnOnce(&mut BTreeMap<u64, u64>) -> R) -
 }
 
 fn endpoint_record_is_valid(record: &EndpointRecord) -> bool {
-    match crate::task::thread_slot_index_and_generation_by_u64(record.thread_id) {
-        Some((slot, generation)) => slot as u16 == record.slot && generation == record.generation,
-        None => false,
-    }
+    endpoint_is_valid(IpcEndpoint {
+        thread_id: record.thread_id,
+        slot: record.slot,
+        generation: record.generation,
+    })
 }
 
 fn endpoint_record_from_handle(handle: u64) -> Option<EndpointRecord> {
@@ -432,10 +435,21 @@ pub fn call(
         Some(handle) => handle,
         None => return EINVAL,
     };
+    let destination = match endpoint_for_thread(dest_thread_id) {
+        Some(endpoint) => endpoint,
+        None => return super::ESRCH,
+    };
+    let _lifetime = match lifetime::observe(destination, crate::task::ThreadId::from_u64(caller)) {
+        Ok(observation) => observation,
+        Err(error) => return error,
+    };
     let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
     #[cfg(feature = "performance-instrumentation")]
     let round_trip_start = crate::performance::timestamp();
     let sent = loop {
+        if !endpoint_is_valid(destination) {
+            return super::ESRCH;
+        }
         let status = send_call_to_thread_id(
             dest_thread_id, sender, call_id, req_ptr, req_len, delivery_flags,
         );
@@ -455,6 +469,7 @@ pub fn call(
         reply_ptr,
         reply_len,
         None,
+        destination,
     );
     #[cfg(feature = "performance-instrumentation")]
     if (result as i64) >= 0 {
@@ -502,8 +517,19 @@ pub fn call_object_handles(
         Some(handle) => handle,
         None => return EINVAL,
     };
+    let destination = match endpoint_for_thread(dest_thread_id) {
+        Some(endpoint) => endpoint,
+        None => return super::ESRCH,
+    };
+    let _lifetime = match lifetime::observe(destination, crate::task::ThreadId::from_u64(caller)) {
+        Ok(observation) => observation,
+        Err(error) => return error,
+    };
     let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let sent = loop {
+        if !endpoint_is_valid(destination) {
+            return super::ESRCH;
+        }
         let mut attachments = match decode_outgoing_object_handles(handles_ptr) {
             Ok(handles) => handles,
             Err(error) => return error,
@@ -535,6 +561,7 @@ pub fn call_object_handles(
         reply_ptr,
         reply_len,
         Some(handles_ptr),
+        destination,
     )
 }
 
@@ -626,6 +653,7 @@ fn recv_blocking_reply_for_thread(
     buf_ptr: u64,
     max_len: u64,
     object_handles_output: Option<u64>,
+    destination: IpcEndpoint,
 ) -> u64 {
     let (idx, receiver_generation) =
         match crate::task::thread_slot_index_and_generation_by_u64(receiver_thread_id) {
@@ -706,6 +734,13 @@ fn recv_blocking_reply_for_thread(
                         }
                         return error;
                     }
+                }
+                if !endpoint_is_valid(destination) {
+                    let mut boxes = lock_mailboxes();
+                    if boxes[idx].waiter == caller_thread_id {
+                        boxes[idx].waiter = 0;
+                    }
+                    return super::ESRCH;
                 }
                 if crate::task::sleep_thread_unless_woken(crate::task::ThreadId::from_u64(
                     caller_thread_id,
@@ -1573,7 +1608,7 @@ pub(crate) fn call_provider_from_kernel(
     reply: &mut [u8],
 ) -> Result<usize, u64> {
     if !endpoint_is_valid(endpoint) {
-        return Err(EINVAL);
+        return Err(super::ESRCH);
     }
     let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id).ok_or(EINVAL)?;
     let mut attachments = ObjectHandleAttachments::empty();
@@ -1606,7 +1641,7 @@ pub(crate) fn call_provider_with_handle_from_kernel(
     requested: HandleRights,
 ) -> Result<usize, u64> {
     if !endpoint_is_valid(endpoint) {
-        return Err(EINVAL);
+        return Err(super::ESRCH);
     }
     let process_id = crate::syscall::security::current_process_id().ok_or(EINVAL)?;
     let mut attachments = ObjectHandleAttachments::empty();
@@ -1630,6 +1665,7 @@ fn call_endpoint_with_attachments_from_kernel(
         return Err(EINVAL);
     }
     let caller = crate::task::current_thread_id().ok_or(EINVAL)?.as_u64();
+    let _lifetime = lifetime::observe(endpoint, crate::task::ThreadId::from_u64(caller))?;
     let sender = ensure_endpoint_for_thread(caller).ok_or(EINVAL)?;
     let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let (dest_slot, dest_generation) =
@@ -1640,7 +1676,7 @@ fn call_endpoint_with_attachments_from_kernel(
             .ok_or(EINVAL)?;
     loop {
         if !endpoint_is_valid(endpoint) {
-            return Err(EINVAL);
+            return Err(super::ESRCH);
         }
         let mut mailboxes = lock_mailboxes();
         let mailbox = mailboxes.get_mut(dest_slot).ok_or(EINVAL)?;
@@ -1682,9 +1718,6 @@ fn call_endpoint_with_attachments_from_kernel(
     let (caller_slot, caller_generation) =
         crate::task::thread_slot_index_and_generation_by_u64(caller).ok_or(EINVAL)?;
     loop {
-        if !endpoint_is_valid(endpoint) {
-            return Err(EINVAL);
-        }
         let received = {
             let mut mailboxes = lock_mailboxes();
             let mailbox = mailboxes.get_mut(caller_slot).ok_or(EINVAL)?;
@@ -1703,6 +1736,13 @@ fn call_endpoint_with_attachments_from_kernel(
         };
         if let Some((_, length)) = received {
             return Ok(length);
+        }
+        if !endpoint_is_valid(endpoint) {
+            let mut mailboxes = lock_mailboxes();
+            if mailboxes[caller_slot].waiter == caller {
+                mailboxes[caller_slot].waiter = 0;
+            }
+            return Err(super::ESRCH);
         }
         if crate::task::sleep_thread_unless_woken(crate::task::ThreadId::from_u64(caller)) {
             crate::task::yield_now();
