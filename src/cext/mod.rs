@@ -1,6 +1,7 @@
 //! cext 境界の共通定義
 //!
-//! fs や disk のような実装は kernel ではなく cext として扱う。
+//! Block-device implementations are isolated behind their CExt ABI adapter.
+//! Filesystem services and POSIX metadata do not execute through this boundary.
 //! このモジュールは、cext の登録・停止・endpoint・resource limit を束ねる
 //! 最小の信頼基盤を表す。
 
@@ -18,7 +19,9 @@ use spin::Mutex;
 use crate::task::ResourceLimits;
 
 pub mod disk;
-pub mod fs;
+mod provider;
+pub use provider::CextKind;
+use provider::provider_kind;
 
 const MCX_CEXT_ABI: u16 = 4;
 const MCX_LOG_ERROR: u32 = 0;
@@ -44,68 +47,6 @@ pub struct McxKernelApi {
     pub register_irq: extern "C" fn(irq: u8, handler: extern "C" fn(u8)) -> i32,
     pub now_seconds: extern "C" fn() -> u32,
     pub boot_system_slot: extern "C" fn() -> u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct McxBuffer {
-    pub ptr: *mut u8,
-    pub len: usize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct McxPath {
-    pub ptr: *const u8,
-    pub len: usize,
-}
-
-#[repr(C)]
-pub struct McxFsOps {
-    pub mount: extern "C" fn(device_id: u32, flags: u32) -> i32,
-    pub set_disk_ops: extern "C" fn(ops: *const disk::McxDiskOps) -> i32,
-    pub create: extern "C" fn(path: McxPath, mode: u32, uid: u32, gid: u32) -> i32,
-    pub remove: extern "C" fn(path: McxPath, is_dir: u32) -> i32,
-    pub rename: extern "C" fn(src: McxPath, dst: McxPath) -> i32,
-    pub read:
-        extern "C" fn(path: McxPath, offset: u64, buf: McxBuffer, out_read: *mut usize) -> i32,
-    pub write:
-        extern "C" fn(path: McxPath, offset: u64, buf: McxBuffer, out_written: *mut usize) -> i32,
-    pub truncate: extern "C" fn(path: McxPath, len: u64) -> i32,
-    pub stat: extern "C" fn(
-        path: McxPath,
-        out_mode: *mut u16,
-        out_size: *mut u64,
-        out_uid: *mut u32,
-        out_gid: *mut u32,
-    ) -> i32,
-    pub chmod: extern "C" fn(path: McxPath, mode: u32) -> i32,
-    pub chown: extern "C" fn(path: McxPath, uid: u32, gid: u32) -> i32,
-    pub readdir: extern "C" fn(path: McxPath, buf: McxBuffer, out_len: *mut usize) -> i32,
-    pub sync: extern "C" fn() -> i32,
-    pub open_handle: extern "C" fn(path: McxPath, out_handle: *mut u64) -> i32,
-    pub close_handle: extern "C" fn(handle: u64) -> i32,
-    pub read_handle:
-        extern "C" fn(handle: u64, offset: u64, buf: McxBuffer, out_read: *mut usize) -> i32,
-    pub stat_handle: extern "C" fn(
-        handle: u64,
-        out_mode: *mut u16,
-        out_size: *mut u64,
-        out_uid: *mut u32,
-        out_gid: *mut u32,
-    ) -> i32,
-    pub write_handle:
-        extern "C" fn(handle: u64, offset: u64, buf: McxBuffer, out_written: *mut usize) -> i32,
-    pub truncate_handle: extern "C" fn(handle: u64, len: u64) -> i32,
-}
-
-/// cext の種類
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum CextKind {
-    Filesystem,
-    BlockDevice,
-    DeviceService,
-    Other,
 }
 
 /// cext インスタンス
@@ -177,7 +118,6 @@ pub fn unregister(id: u64) -> bool {
     with_registry_mut(|registry| registry.remove(&id).is_some())
 }
 
-type FsInitFn = unsafe extern "C" fn(api: *const McxKernelApi) -> *const McxFsOps;
 type DiskInitFn = unsafe extern "C" fn(api: *const McxKernelApi) -> *const disk::McxDiskOps;
 
 extern "C" fn kernel_log(level: u32, ptr: *const u8, len: usize) {
@@ -285,12 +225,6 @@ fn register_disk_provider(init_addr: u64, module_version: u16) -> bool {
     let init: DiskInitFn = unsafe { core::mem::transmute(init_addr) };
     let ops = unsafe { init(&KERNEL_API) };
     !ops.is_null() && disk::activate_bundle(module_version, ops)
-}
-
-fn register_filesystem_provider(init_addr: u64, module_version: u16) -> bool {
-    let init: FsInitFn = unsafe { core::mem::transmute(init_addr) };
-    let ops = unsafe { init(&KERNEL_API) };
-    !ops.is_null() && fs::activate_bundle(module_version, ops)
 }
 
 struct CextHeader {
@@ -410,31 +344,9 @@ fn parse_bundle_manifest(bytes: &[u8]) -> Option<BundleManifest> {
     })
 }
 
-fn provider_kind(interfaces: &[String]) -> Option<CextKind> {
-    let mut kind = None;
-    for interface in interfaces {
-        let candidate = if interface == "block.device" {
-            Some(CextKind::BlockDevice)
-        } else if interface.starts_with("filesystem.") {
-            Some(CextKind::Filesystem)
-        } else {
-            None
-        };
-        let Some(candidate) = candidate else {
-            continue;
-        };
-        if kind.is_some_and(|current| current != candidate) {
-            return None;
-        }
-        kind = Some(candidate);
-    }
-    kind
-}
-
 fn register_provider(kind: CextKind, init_addr: u64, version: u16) -> bool {
     match kind {
         CextKind::BlockDevice => register_disk_provider(init_addr, version),
-        CextKind::Filesystem => register_filesystem_provider(init_addr, version),
         CextKind::DeviceService | CextKind::Other => false,
     }
 }
@@ -484,6 +396,14 @@ fn load_bundle_directories() -> bool {
         if manifest.load_stage != "boot" {
             continue;
         }
+        // Select an explicit kernel adapter before reading or loading code.
+        let Some(kind) = provider_kind(&manifest.provides) else {
+            crate::warn!(
+                "cext: unsupported provider interfaces for {}",
+                manifest.name
+            );
+            continue;
+        };
         let entry_path = if manifest.entry.starts_with('/') {
             manifest.entry.clone()
         } else {
@@ -500,15 +420,6 @@ fn load_bundle_directories() -> bool {
             if manifest.required {
                 crate::warn!("cext: required bundle {} is incomplete", manifest.name);
             }
-            continue;
-        };
-        // Boot-stage bundles are covered by the signed initfs trust boundary. The kernel
-        // selects an ABI adapter from the interfaces, never from a product-specific name.
-        let Some(kind) = provider_kind(&manifest.provides) else {
-            crate::warn!(
-                "cext: unsupported provider interfaces for {}",
-                manifest.name
-            );
             continue;
         };
         let Some(meta) = parse_cext(&entry_bytes) else {
@@ -546,12 +457,10 @@ fn load_bundle_directories() -> bool {
                 manifest.provides,
                 manifest.requires
             );
-            if meta.name == "disk" || meta.name == "ext2" {
-                crate::util::log::release_boot_marker(format_args!(
-                    "cext: loaded bundle {}",
-                    meta.name
-                ));
-            }
+            crate::util::log::release_boot_marker(format_args!(
+                "cext: loaded bundle {}",
+                meta.name
+            ));
         } else {
             crate::warn!("cext: module init failed for {}", manifest.name);
             crate::util::log::release_boot_marker(format_args!(

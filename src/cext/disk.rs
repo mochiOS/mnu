@@ -56,13 +56,6 @@ extern "C" fn serialized_flush(disk_id: u32) -> i32 {
     unsafe { ((*ops).flush)(disk_id) }
 }
 
-static SERIALIZED_OPS: McxDiskOps = McxDiskOps {
-    probe: serialized_probe,
-    read_sector: serialized_read_sector,
-    write_sector: serialized_write_sector,
-    flush: serialized_flush,
-};
-
 pub fn activate_bundle(version: u16, ops: *const McxDiskOps) -> bool {
     if ops.is_null() {
         return false;
@@ -75,10 +68,6 @@ pub fn activate_bundle(version: u16, ops: *const McxDiskOps) -> bool {
 
 pub fn ops_ptr() -> *const McxDiskOps {
     OPS.load(Ordering::Acquire)
-}
-
-pub fn serialized_ops_ptr() -> *const McxDiskOps {
-    &SERIALIZED_OPS
 }
 
 pub fn is_loaded() -> bool {
