@@ -605,14 +605,14 @@ fn reply_with_attachments(
     };
     let target = {
         let boxes = lock_mailboxes();
-        let (idx, _) = match crate::task::thread_slot_index_and_generation_by_u64(current) {
+        let (idx, generation) = match crate::task::thread_slot_index_and_generation_by_u64(current) {
             Some(v) => v,
             None => return EINVAL,
         };
         if idx >= MAX_THREADS {
             return EINVAL;
         }
-        match boxes[idx].reply_target(dest_thread_id) {
+        match boxes[idx].reply_target(dest_thread_id, (current, generation)) {
             Some(target) => target,
             None => return EACCES,
         }
@@ -982,6 +982,7 @@ struct Mailbox {
     /// Endpoints whose synchronous calls this thread has received and may
     /// answer later.
     reply_targets: Vec<ReplyTarget>,
+    reply_owner: Option<(u64, u64)>,
 }
 
 impl Mailbox {
@@ -1002,17 +1003,27 @@ impl Mailbox {
             free_count: MAILBOX_CAP,
             waiter: 0,
             reply_targets: Vec::new(),
+            reply_owner: None,
         }
     }
 
-    fn add_reply_target(&mut self, endpoint: u64, call_id: u64) {
+    fn add_reply_target(&mut self, endpoint: u64, call_id: u64, owner: (u64, u64)) {
+        // Mailboxes are indexed by reusable thread slots. Reply authority may
+        // never survive into a different thread or a new slot generation.
+        if self.reply_owner != Some(owner) {
+            self.reply_targets.clear();
+            self.reply_owner = Some(owner);
+        }
         let target = ReplyTarget { endpoint, call_id };
         if endpoint != 0 && call_id != 0 && !self.reply_targets.contains(&target) {
             self.reply_targets.push(target);
         }
     }
 
-    fn reply_target(&self, endpoint: u64) -> Option<ReplyTarget> {
+    fn reply_target(&self, endpoint: u64, owner: (u64, u64)) -> Option<ReplyTarget> {
+        if self.reply_owner != Some(owner) {
+            return None;
+        }
         self.reply_targets
             .iter()
             .copied()
@@ -2025,11 +2036,13 @@ fn recv_from_thread_nonblocking(
             object_handles_output.is_some(),
         ) {
             Ok(Some(receive)) => {
-                if let Some((caller_idx, _)) =
+                if let Some((caller_idx, caller_generation)) =
                     crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                 {
                     if caller_idx < MAX_THREADS && receive.expects_reply {
-                        boxes[caller_idx].add_reply_target(receive.from, receive.call_id);
+                        boxes[caller_idx].add_reply_target(
+                            receive.from, receive.call_id, (caller_thread_id, caller_generation),
+                        );
                     }
                 }
                 receive
@@ -2083,11 +2096,13 @@ fn recv_blocking_for_thread(
                 object_handles_output.is_some(),
             ) {
                 Ok(Some(receive)) => {
-                    if let Some((caller_idx, _)) =
+                    if let Some((caller_idx, caller_generation)) =
                         crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                     {
                         if caller_idx < MAX_THREADS && receive.expects_reply {
-                            boxes[caller_idx].add_reply_target(receive.from, receive.call_id);
+                            boxes[caller_idx].add_reply_target(
+                                receive.from, receive.call_id, (caller_thread_id, caller_generation),
+                            );
                         }
                     }
                     Some(receive)
@@ -2133,11 +2148,13 @@ fn recv_blocking_for_thread(
                         if boxes[idx].waiter == caller_thread_id {
                             boxes[idx].waiter = 0;
                         }
-                        if let Some((caller_idx, _)) =
+                        if let Some((caller_idx, caller_generation)) =
                             crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
                         {
                             if caller_idx < MAX_THREADS && receive.expects_reply {
-                                boxes[caller_idx].add_reply_target(receive.from, receive.call_id);
+                                boxes[caller_idx].add_reply_target(
+                                    receive.from, receive.call_id, (caller_thread_id, caller_generation),
+                                );
                             }
                         }
                         drop(boxes);
@@ -2380,20 +2397,20 @@ mod tests {
     #[test]
     fn mailbox_tracks_more_than_one_deferred_reply() {
         let mut mailbox = Mailbox::new();
-        mailbox.add_reply_target(11, 101);
-        mailbox.add_reply_target(22, 202);
-        mailbox.add_reply_target(11, 101);
+        mailbox.add_reply_target(11, 101, (7, 3));
+        mailbox.add_reply_target(22, 202, (7, 3));
+        mailbox.add_reply_target(11, 101, (7, 3));
 
-        assert_eq!(mailbox.reply_target(11).unwrap().call_id, 101);
-        assert_eq!(mailbox.reply_target(22).unwrap().call_id, 202);
+        assert_eq!(mailbox.reply_target(11, (7, 3)).unwrap().call_id, 101);
+        assert_eq!(mailbox.reply_target(22, (7, 3)).unwrap().call_id, 202);
         assert_eq!(mailbox.reply_targets.len(), 2);
 
         mailbox.remove_reply_target(ReplyTarget {
             endpoint: 22,
             call_id: 202,
         });
-        assert!(mailbox.reply_target(11).is_some());
-        assert!(mailbox.reply_target(22).is_none());
+        assert!(mailbox.reply_target(11, (7, 3)).is_some());
+        assert!(mailbox.reply_target(22, (7, 3)).is_none());
     }
 
     #[test]
