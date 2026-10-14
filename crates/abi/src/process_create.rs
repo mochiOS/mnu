@@ -1,16 +1,18 @@
 //! Native creation metadata. Keys and values have no kernel-defined policy.
-//! Handles refer only to the creating process's own handle table.
+//! Handles refer to the creating process's own live or explicitly captured table.
 
 pub const MAGIC: [u8; 4] = *b"MCRT";
 pub const VERSION: u16 = 2;
 pub const HEADER_LEN: usize = 32;
+pub const CAPTURE_VERSION: u16 = 3;
+pub const CAPTURE_HEADER_LEN: usize = 40;
 pub const HANDLE_LEN: usize = 24;
 pub const VALUE_LEN: usize = 16;
 pub const MAX_IDENTITY_BYTES: usize = 256;
 pub const MAX_LABEL_BYTES: usize = 32;
 pub const MAX_HANDLES: usize = 256;
 pub const MAX_VALUES: usize = 256;
-pub const MAX_REQUEST_BYTES: usize = HEADER_LEN
+pub const MAX_REQUEST_BYTES: usize = CAPTURE_HEADER_LEN
     + MAX_IDENTITY_BYTES
     + MAX_LABEL_BYTES
     + crate::process_image::HEADER_LEN
@@ -102,6 +104,9 @@ pub struct Request<'a> {
     /// User-supplied diagnostic label, independent of authorization identity.
     pub label: &'a str,
     pub startup: InitialState<'a>,
+    /// Caller-owned CONTROL Handle for immutable source references. None uses
+    /// the caller's live table. This is never a PID or a foreign table selector.
+    pub handle_capture: Option<u32>,
     handles: &'a [u8],
     values: &'a [u8],
 }
@@ -138,13 +143,23 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
     if bytes.len() < HEADER_LEN || bytes.len() > MAX_REQUEST_BYTES {
         return Err(Error::Length);
     }
-    if bytes[..4] != MAGIC
-        || bytes[4..6] != VERSION.to_le_bytes()
-        || bytes[6..8] != (HEADER_LEN as u16).to_le_bytes()
-        || u32_at(bytes, 28) > 1
-    {
+    if bytes[..4] != MAGIC || u32_at(bytes, 28) > 1 {
         return Err(Error::Header);
     }
+    let (header_len, handle_capture) = if bytes[4..6] == VERSION.to_le_bytes()
+        && bytes[6..8] == (HEADER_LEN as u16).to_le_bytes()
+    {
+        (HEADER_LEN, None)
+    } else if bytes[4..6] == CAPTURE_VERSION.to_le_bytes()
+        && bytes[6..8] == (CAPTURE_HEADER_LEN as u16).to_le_bytes()
+        && bytes.len() >= CAPTURE_HEADER_LEN
+        && u32_at(bytes, 32) != 0
+        && u32_at(bytes, 36) == 0
+    {
+        (CAPTURE_HEADER_LEN, Some(u32_at(bytes, 32)))
+    } else {
+        return Err(Error::Header);
+    };
     let identity_len = u32_at(bytes, 8) as usize;
     let startup_len = u32_at(bytes, 12) as usize;
     let handles = u32_at(bytes, 16) as usize;
@@ -159,7 +174,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
     {
         return Err(Error::Length);
     }
-    let identity_end = HEADER_LEN + identity_len;
+    let identity_end = header_len + identity_len;
     let label_end = identity_end.checked_add(label_len).ok_or(Error::Length)?;
     let startup_end = label_end.checked_add(startup_len).ok_or(Error::Length)?;
     let handles_end = startup_end
@@ -172,7 +187,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
         return Err(Error::Length);
     }
     let identity =
-        core::str::from_utf8(&bytes[HEADER_LEN..identity_end]).map_err(|_| Error::Identity)?;
+        core::str::from_utf8(&bytes[header_len..identity_end]).map_err(|_| Error::Identity)?;
     if identity.as_bytes().contains(&0) {
         return Err(Error::Identity);
     }
@@ -192,6 +207,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
         identity,
         label,
         startup,
+        handle_capture,
         handles: &bytes[startup_end..handles_end],
         values: &bytes[handles_end..],
     };
@@ -225,6 +241,34 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
         }
     }
     Ok(request)
+}
+
+/// Select an immutable Handle source without changing the startup payload.
+/// Validation/capacity failures leave the entire buffer unchanged. Version 3
+/// adds an explicit capture Handle and a zero reserved word to the header;
+/// the syscall argument registers and ordinary version-2 requests are unchanged.
+pub fn attach_handle_capture(
+    output: &mut [u8],
+    length: usize,
+    capture: u32,
+) -> Result<usize, Error> {
+    let request = decode(output.get(..length).ok_or(Error::Length)?)?;
+    if capture == 0 || request.handle_capture.is_some() {
+        return Err(Error::Handle);
+    }
+    let extended = length
+        .checked_add(CAPTURE_HEADER_LEN - HEADER_LEN)
+        .ok_or(Error::Length)?;
+    if extended > MAX_REQUEST_BYTES {
+        return Err(Error::Length);
+    }
+    let output = output.get_mut(..extended).ok_or(Error::BufferTooSmall)?;
+    output.copy_within(HEADER_LEN..length, CAPTURE_HEADER_LEN);
+    output[4..6].copy_from_slice(&CAPTURE_VERSION.to_le_bytes());
+    output[6..8].copy_from_slice(&(CAPTURE_HEADER_LEN as u16).to_le_bytes());
+    output[32..36].copy_from_slice(&capture.to_le_bytes());
+    output[36..40].fill(0);
+    Ok(extended)
 }
 
 pub fn encode(

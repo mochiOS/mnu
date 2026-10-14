@@ -304,6 +304,7 @@ pub enum KernelObject {
     Thread(super::ids::ThreadId),
     VmObject(Arc<crate::mem::vm_object::VmObject>),
     AddressSpace(Arc<crate::mem::address_space::AddressSpaceObject>),
+    HandleSnapshot(Arc<super::handle_snapshot::HandleSnapshot>),
     File(Arc<FileHandle>),
     Provider(Arc<ProviderObject>),
 }
@@ -335,6 +336,7 @@ impl KernelObject {
             (Self::Thread(left), Self::Thread(right)) => left == right,
             (Self::VmObject(left), Self::VmObject(right)) => Arc::ptr_eq(left, right),
             (Self::AddressSpace(left), Self::AddressSpace(right)) => Arc::ptr_eq(left, right),
+            (Self::HandleSnapshot(left), Self::HandleSnapshot(right)) => Arc::ptr_eq(left, right),
             (Self::File(left), Self::File(right)) => Arc::ptr_eq(left, right),
             (Self::Provider(left), Self::Provider(right)) => Arc::ptr_eq(left, right),
             _ => false,
@@ -363,6 +365,10 @@ impl core::fmt::Debug for KernelObject {
             Self::Thread(thread) => formatter.debug_tuple("Thread").field(thread).finish(),
             Self::VmObject(id) => formatter.debug_tuple("VmObject").field(id).finish(),
             Self::AddressSpace(image) => formatter.debug_tuple("AddressSpace").field(image).finish(),
+            Self::HandleSnapshot(snapshot) => formatter
+                .debug_tuple("HandleSnapshot")
+                .field(&snapshot.len())
+                .finish(),
             Self::File(file) => formatter
                 .debug_tuple("File")
                 .field(&(Arc::as_ptr(file) as usize))

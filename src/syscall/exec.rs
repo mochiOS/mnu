@@ -13,6 +13,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 mod image;
 mod launch;
+mod captured_handles;
 
 use image::{map_elf_image, ElfImageLayout};
 use launch::ImageLaunch;
@@ -1493,7 +1494,11 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
             rights,
         });
     }
-    let grants = match export_inherited_handles(Some(owner), &specs) {
+    let grants = match if let Some(capture) = request.handle_capture {
+        captured_handles::export(u64::from(capture), &specs)
+    } else {
+        export_inherited_handles(Some(owner), &specs)
+    } {
         Ok(grants) => grants,
         Err(errno) => return errno,
     };

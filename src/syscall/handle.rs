@@ -3,6 +3,8 @@ use alloc::vec;
 
 mod snapshot;
 pub use snapshot::table_read;
+mod capture;
+pub use capture::table_capture;
 mod provider_reference;
 pub use provider_reference::count as provider_object_reference_count;
 
@@ -212,6 +214,7 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
     let required = if write { HandleRights::WRITE } else { HandleRights::READ };
     let object = match object(raw, required) {
         Ok(object @ (KernelObject::Provider(_) | KernelObject::VmObject(_))) => object,
+        Ok(object @ KernelObject::HandleSnapshot(_)) if !write => object,
         Ok(_) => return ENOTSUP,
         Err(error) => return error,
     };
@@ -277,6 +280,9 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
             }
             KernelObject::VmObject(object) if write => object.write_at(position, &data[..chunk]),
             KernelObject::VmObject(object) => object.read_at(position, &mut data[..chunk]),
+            KernelObject::HandleSnapshot(snapshot) => {
+                Ok(snapshot.read_at(position, &mut data[..chunk]))
+            }
             _ => return ENOTSUP,
         };
         let count = match result {

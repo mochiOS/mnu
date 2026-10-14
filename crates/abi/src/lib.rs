@@ -6,6 +6,7 @@ pub mod boot;
 /// Canonical metadata for named capabilities shared by kernel and user space.
 pub mod capability;
 pub mod diagnostic;
+pub mod handle_snapshot;
 
 /// プロセス作成時に渡すメタデータのABIです。
 pub mod exec;
@@ -164,6 +165,8 @@ pub enum SyscallNumber {
     /// Creates a stopped process from an authorized image Handle and serialized
     /// process_create metadata. Returns a retained WAIT/SIGNAL Process Handle.
     /// Arguments: image Handle, metadata pointer, byte length.
+    /// Metadata may select a caller-owned CONTROL Handle-table capture as the
+    /// source of explicit grants; it never names a foreign process table.
     ProcessCreate = 676,
     /// Reads the calling native execution context, not POSIX credentials.
     /// Arguments: output pointer and exact ExecutionIdentity byte length.
@@ -231,6 +234,11 @@ pub enum SyscallNumber {
     /// Reads public logical processor counts. Arguments: ProcessorInfo output
     /// pointer and exact byte length. No scheduling or compatibility policy.
     ProcessorDescribe = 692,
+    /// Captures references from the caller's own Handle table. No arguments.
+    /// Returns a private READ/CONTROL/DUPLICATE Handle, without TRANSFER.
+    /// HandleReadAt reads immutable handle_snapshot metadata; ProcessCreate
+    /// may explicitly select it as its captured grant source.
+    HandleTableCapture = 693,
     CheckGravityExist = 999,
 }
 

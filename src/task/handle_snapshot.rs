@@ -48,6 +48,37 @@ impl HandleSnapshot {
         self.entries.len()
     }
 
+    pub fn read_at(&self, offset: u64, output: &mut [u8]) -> usize {
+        use mnu_abi::handle_snapshot as wire;
+        let Ok(offset) = usize::try_from(offset) else {
+            return 0;
+        };
+        let length = wire::HEADER_LEN + self.entries.len() * wire::RECORD_LEN;
+        let count = output.len().min(length.saturating_sub(offset));
+        let mut header = [0u8; wire::HEADER_LEN];
+        header[..4].copy_from_slice(&wire::VERSION.to_le_bytes());
+        header[4..8].copy_from_slice(&(self.entries.len() as u32).to_le_bytes());
+        header[8..12].copy_from_slice(&(wire::RECORD_LEN as u32).to_le_bytes());
+        let mut done = 0;
+        while done < count {
+            let position = offset + done;
+            let (record, within) = if position < wire::HEADER_LEN {
+                (header, position)
+            } else {
+                let position = position - wire::HEADER_LEN;
+                let entry = &self.entries[position / wire::RECORD_LEN];
+                let mut record = [0u8; wire::RECORD_LEN];
+                record[..4].copy_from_slice(&entry.handle.raw().to_le_bytes());
+                record[8..].copy_from_slice(&entry.rights.bits().to_le_bytes());
+                (record, position % wire::RECORD_LEN)
+            };
+            let chunk = (record.len() - within).min(count - done);
+            output[done..done + chunk].copy_from_slice(&record[within..within + chunk]);
+            done += chunk;
+        }
+        count
+    }
+
     pub fn describe(&self) -> impl ExactSizeIterator<Item = mnu_abi::HandleInfo> + '_ {
         self.entries.iter().map(|entry| mnu_abi::HandleInfo {
             handle: entry.handle.raw(),
