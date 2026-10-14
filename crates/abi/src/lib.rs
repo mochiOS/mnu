@@ -174,7 +174,8 @@ pub enum SyscallNumber {
     IpcEndpointIdentityRead = 678,
     /// Clones only the current address space into a detached image Handle.
     /// No arguments. Requires process.spawn; no process or thread is created.
-    /// The source must have exactly one live thread and no borrowed MMIO.
+    /// Sibling execution contexts are temporarily quiesced; borrowed MMIO
+    /// mappings cannot be captured.
     AddressSpaceClone = 679,
     /// Reads metadata for the caller's own Handle table. No object references
     /// are acquired. Arguments: HandleInfo buffer, record capacity. (0, 0)
