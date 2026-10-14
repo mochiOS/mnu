@@ -542,7 +542,7 @@ fn fault_in_user_range(table_phys: u64, address: u64, len: u64, write: bool) -> 
         };
         // Provider fault preparation can do IPC. Drop PROC before it; the
         // final resident copy revalidates and locks the original root again.
-        if !resident && !process::handle_user_memory_fault(page, write, false) {
+        if !resident && process::handle_user_memory_fault(page, write, false).is_err() {
             return false;
         }
         if page == end_page {

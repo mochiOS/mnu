@@ -2,7 +2,7 @@ use crate::task::{
     HandleRights, KernelObject, ObjectHandleEntry, ThreadUpcallError, UserUpcallContext,
 };
 
-use super::{SavedSyscallFrame, EAGAIN, EBADF, EFAULT, EINVAL, ENOSPC, ESRCH, SUCCESS};
+use super::{EAGAIN, EBADF, EFAULT, EINVAL, ENOSPC, ESRCH, SUCCESS, SavedSyscallFrame};
 
 const THREAD_HANDLE_RIGHTS: HandleRights = HandleRights::WAIT
     .union(HandleRights::SIGNAL)
@@ -35,7 +35,14 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
     let Some(stack_end) = config.stack_base.checked_add(config.stack_size) else {
         return EINVAL;
     };
-    let stack_top = (stack_end & !0xf).saturating_sub(8);
+    // Exception callbacks have a seventh C argument at RSP+8. Leave another
+    // sixteen bytes above the return slot while retaining RSP % 16 == 8.
+    let frame_bytes = if config.flags & mnu_abi::THREAD_UPCALL_EXCEPTIONS != 0 {
+        24
+    } else {
+        8
+    };
+    let stack_top = (stack_end & !0xf).saturating_sub(frame_bytes);
     if stack_top < config.stack_base {
         return EINVAL;
     }
@@ -203,7 +210,11 @@ fn prepare_context(context: &mut UserUpcallContext) -> bool {
 
 /// A synchronous exception bypasses the asynchronous queue, but may not
 /// replace an active delivery. All original registers remain kernel-owned.
-pub(crate) fn prepare_user_exception(raw: &mut [u64; 21], address: u64) -> bool {
+pub(crate) fn prepare_user_exception(
+    raw: &mut [u64; 21],
+    address: u64,
+    cause: mnu_abi::MemoryFaultCause,
+) -> bool {
     let mut frame = [0; 20];
     frame[..15].copy_from_slice(&raw[..15]);
     frame[15..].copy_from_slice(&raw[16..]);
@@ -223,6 +234,12 @@ pub(crate) fn prepare_user_exception(raw: &mut [u64; 21], address: u64) -> bool 
     else {
         return false;
     };
+    // No thread-table lock is held across faultable usercopy. If this stack
+    // became inaccessible, the caller retains its native fatal-fault path;
+    // never enter the callback with missing or stale exception metadata.
+    if super::copy_to_user(delivery.stack_top + 8, &(cause as u64).to_ne_bytes()).is_err() {
+        return false;
+    }
     context.user_rip = delivery.entry;
     context.user_rsp = delivery.stack_top;
     context.rdi = delivery.payload;

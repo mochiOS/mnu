@@ -315,6 +315,18 @@ pub const THREAD_UPCALL_EXCEPTIONS: u64 = 1;
 pub const THREAD_UPCALL_KIND_INTERRUPT: u64 = 0;
 pub const THREAD_UPCALL_KIND_EXCEPTION: u64 = 1;
 
+/// Generic VM failure information; language runtimes choose their own policy.
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryFaultCause {
+    Unmapped = 1,
+    AccessDenied = 2,
+    OutsideBacking = 3,
+    BackingFailure = 4,
+    ResourceUnavailable = 5,
+    Unresolved = 6,
+}
+
 /// User-space entry point and private stack for a native thread upcall.
 ///
 /// The kernel treats `payload` values as opaque. The entry point receives the
@@ -324,7 +336,9 @@ pub const THREAD_UPCALL_KIND_EXCEPTION: u64 = 1;
 /// The third argument identifies INTERRUPT (opaque payload) or EXCEPTION.
 /// With THREAD_UPCALL_EXCEPTIONS enabled, an x86-64 page fault supplies vector
 /// 14 as payload, fault address as argument four, CPU error code as argument
-/// five, and the faulting instruction address as argument six. Return retries
+/// five, the faulting instruction address as argument six, and a
+/// `MemoryFaultCause` value as argument seven (on the x86-64 C ABI stack).
+/// Return retries
 /// the original instruction; recursive exceptions while active are not queued.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

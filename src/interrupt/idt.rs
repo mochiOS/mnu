@@ -843,23 +843,26 @@ pub(super) fn page_fault_handler(
         }
     }
 
-    if is_user_mode
-        && !copy_on_write_failed
-        && crate::syscall::process::handle_user_memory_fault(
+    let mut fault_cause = mnu_abi::MemoryFaultCause::Unresolved;
+    if is_user_mode && !copy_on_write_failed {
+        match crate::syscall::process::handle_user_memory_fault(
             faulting_addr.as_u64(),
             error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE),
             error_code.contains(x86_64::structures::idt::PageFaultErrorCode::INSTRUCTION_FETCH),
-        )
-    {
-        leave_to_user(entered_from_user);
-        return;
+        ) {
+            Ok(()) => {
+                leave_to_user(entered_from_user);
+                return;
+            }
+            Err(fault) => fault_cause = fault.cause(),
+        }
     }
 
     if is_user_mode {
         let protection =
             error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION);
         if (!protection && try_grow_user_stack(faulting_addr.as_u64()))
-            || crate::syscall::prepare_user_exception(registers, faulting_addr.as_u64())
+            || crate::syscall::prepare_user_exception(registers, faulting_addr.as_u64(), fault_cause)
         {
             leave_to_user(entered_from_user);
             return;
