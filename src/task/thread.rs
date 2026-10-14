@@ -455,6 +455,8 @@ pub struct Thread {
     state: ThreadState,
     /// Excludes this thread from scheduling without changing its wait state.
     scheduling_suspended: bool,
+    /// Temporary VM-image capture hold, independent of lifecycle suspension.
+    image_held: bool,
     /// CPU that owns this thread after its first dispatch.
     cpu_affinity: Option<usize>,
     /// CPUコンテキスト
@@ -945,6 +947,7 @@ impl Thread {
             name_len: len,
             state: ThreadState::Ready,
             scheduling_suspended: false,
+            image_held: false,
             cpu_affinity: None,
             context,
             kernel_stack,
@@ -1070,6 +1073,7 @@ impl Thread {
             name_len: len,
             state: ThreadState::Ready,
             scheduling_suspended: false,
+            image_held: false,
             cpu_affinity: None,
             context,
             kernel_stack,
@@ -1179,6 +1183,7 @@ impl Thread {
             name_len: 6,
             state: ThreadState::Ready,
             scheduling_suspended: false,
+            image_held: false,
             cpu_affinity: None,
             context,
             kernel_stack,
@@ -1432,7 +1437,7 @@ impl Thread {
     }
 
     pub fn is_scheduling_suspended(&self) -> bool {
-        self.scheduling_suspended
+        self.scheduling_suspended || self.image_held
     }
 
     pub fn cpu_affinity(&self) -> Option<usize> {
@@ -1772,6 +1777,43 @@ impl ThreadQueue {
             }
         }
         suspended
+    }
+
+    /// The caller owns this process's image-transition gate. Incoming
+    /// construction and other image holds therefore cannot overlap this one.
+    pub(super) fn hold_image_siblings(
+        &mut self,
+        process_id: ProcessId,
+        owner: ThreadId,
+    ) -> [Option<ThreadId>; Self::MAX_THREADS] {
+        let mut held = [None; Self::MAX_THREADS];
+        let mut count = 0;
+        for (slot, thread) in self.threads.iter_mut().enumerate() {
+            let Some(thread) = thread.as_mut() else {
+                continue;
+            };
+            if thread.process_id() != process_id || thread.id() == owner {
+                continue;
+            }
+            thread.image_held = true;
+            self.ready_bitmap &= !(1u64 << slot);
+            held[count] = Some(thread.id());
+            count += 1;
+        }
+        held
+    }
+
+    pub(super) fn release_image_hold(&mut self, id: ThreadId) {
+        let Some(slot) = self.slot_index(id) else {
+            return;
+        };
+        let Some(thread) = self.threads[slot].as_mut() else {
+            return;
+        };
+        thread.image_held = false;
+        if thread.state() == ThreadState::Ready && !thread.is_scheduling_suspended() {
+            self.ready_bitmap |= 1u64 << slot;
+        }
     }
 
     pub fn resume_process(&mut self, process_id: ProcessId) -> Option<usize> {

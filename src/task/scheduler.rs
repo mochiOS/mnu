@@ -427,6 +427,40 @@ pub fn terminate_thread(id: ThreadId) {
     }
 }
 
+pub(crate) struct ImageQuiescence {
+    held: [Option<ThreadId>; super::thread::ThreadQueue::MAX_THREADS],
+}
+
+/// The caller owns the image-transition gate, but holds no process/VM lock.
+/// Queue exclusion stops new dispatch; CPU handoff markers prove that outgoing
+/// contexts have also stopped. Do not freeze arbitrary CPUs inside kernel
+/// allocator/VM critical sections: wait for normal scheduler handoff instead.
+pub(crate) fn quiesce_image_siblings(
+    process: super::ProcessId,
+    owner: ThreadId,
+) -> ImageQuiescence {
+    let held = THREAD_QUEUE.lock().hold_image_siblings(process, owner);
+    let guard = ImageQuiescence { held };
+    while guard
+        .held
+        .iter()
+        .flatten()
+        .any(|id| crate::percpu::thread_is_cpu_referenced(id.as_u64()))
+    {
+        yield_now();
+    }
+    guard
+}
+
+impl Drop for ImageQuiescence {
+    fn drop(&mut self) {
+        let mut queue = THREAD_QUEUE.lock();
+        for &id in self.held.iter().flatten() {
+            queue.release_image_hold(id);
+        }
+    }
+}
+
 /// The caller owns the image-transition gate and has completed all fallible
 /// image preparation. Do not release the old VM until every sibling has left
 /// its CPU, including an outgoing stack/context handoff.

@@ -233,18 +233,10 @@ pub fn clone_address_space() -> u64 {
     let Some(_capture) = crate::task::image_transition::begin_image_transition(pid) else {
         return EAGAIN;
     };
-    let mut live_threads = 0usize;
-    crate::task::for_each_thread(|thread| {
-        if thread.process_id() == pid
-            && (thread.state() != crate::task::ThreadState::Terminated
-                || crate::percpu::thread_is_cpu_referenced(thread.id().as_u64()))
-        {
-            live_threads += 1;
-        }
-    });
-    if live_threads != 1 {
-        return EAGAIN;
-    }
+    let Some(owner) = crate::task::current_thread_id() else {
+        return ENOSYS;
+    };
+    let _quiescence = crate::task::scheduler::quiesce_image_siblings(pid, owner);
     // CONTROL authorizes eventual image consumption; MAP/READ/WRITE do not
     // grant access to these pages through ordinary memory-object operations.
     let rights = crate::task::HandleRights::CONTROL
