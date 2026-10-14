@@ -144,6 +144,44 @@ pub fn thread_status(handle: u64, output: u64) -> u64 {
     }
 }
 
+pub fn return_from_context(token: u64, context_ptr: u64, context_len: u64) -> u64 {
+    let Some(thread_id) = crate::task::current_thread_id() else {
+        return ESRCH;
+    };
+    if context_ptr == 0
+        || context_len != core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>() as u64
+    {
+        return EINVAL;
+    }
+    if !matches!(
+        crate::task::with_thread(thread_id, |thread| thread.upcall_snapshot(token)),
+        Some(Ok(_))
+    ) {
+        return EINVAL;
+    }
+    let mut snapshot = core::mem::MaybeUninit::<mnu_abi::ThreadUpcallSnapshot>::zeroed();
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(snapshot.as_mut_ptr().cast::<u8>(), context_len as usize)
+    };
+    if let Err(error) = super::copy_from_user(context_ptr, bytes) {
+        return error;
+    }
+    // All fields are integers/byte arrays; every initialized bit pattern
+    // is a Rust value. Hardware validity is checked before committing it.
+    let snapshot = unsafe { snapshot.assume_init() };
+    let Some(context) = return_context(&snapshot) else {
+        return EINVAL;
+    };
+    crate::task::with_thread_mut(thread_id, |thread| {
+        thread.request_upcall_return_context(token, context, snapshot.fx_state)
+    })
+    .map(|result| match result {
+        Ok(()) => SUCCESS,
+        Err(_) => EINVAL,
+    })
+    .unwrap_or(ESRCH)
+}
+
 pub fn return_from(token: u64) -> u64 {
     let Some(thread_id) = crate::task::current_thread_id() else {
         return ESRCH;
@@ -155,6 +193,49 @@ pub fn return_from(token: u64) -> u64 {
             Err(_) => EAGAIN,
         })
         .unwrap_or(ESRCH)
+}
+
+fn return_context(snapshot: &mnu_abi::ThreadUpcallSnapshot) -> Option<UserUpcallContext> {
+    // Only user-modifiable arithmetic/debug flags are accepted. In particular
+    // IOPL, NT, VM and virtual-interrupt flags must never reach IRET/FXRSTOR.
+    const REQUIRED: u64 = (1 << 1) | (1 << 9);
+    const ALLOWED: u64 = REQUIRED
+        | (1 << 0)
+        | (1 << 2)
+        | (1 << 4)
+        | (1 << 6)
+        | (1 << 7)
+        | (1 << 8)
+        | (1 << 10)
+        | (1 << 11)
+        | (1 << 16)
+        | (1 << 18)
+        | (1 << 21);
+    if snapshot.rflags & REQUIRED != REQUIRED || snapshot.rflags & !ALLOWED != 0 {
+        return None;
+    }
+    let registers = &snapshot.registers;
+    let context = UserUpcallContext {
+        user_rip: snapshot.instruction,
+        user_rsp: snapshot.stack_pointer,
+        user_rflags: snapshot.rflags,
+        rdi: snapshot.argument,
+        rax: registers.rax,
+        rbx: registers.rbx,
+        rcx: registers.rcx,
+        rdx: registers.rdx,
+        rsi: registers.rsi,
+        rbp: registers.rbp,
+        r8: registers.r8,
+        r9: registers.r9,
+        r10: registers.r10,
+        r11: registers.r11,
+        r12: registers.r12,
+        r13: registers.r13,
+        r14: registers.r14,
+        r15: registers.r15,
+    };
+    valid_user_return(&context).then_some(context)
 }
 
 pub fn inspect(token: u64, output: u64, length: u64) -> u64 {

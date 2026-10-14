@@ -210,6 +210,10 @@ pub enum SyscallNumber {
     /// token. Arguments: token, output pointer, exact ThreadUpcallSnapshot size.
     /// No PID, thread Handle, or caller-supplied return context is accepted.
     ThreadUpcallInspect = 688,
+    /// Return to an explicitly selected user context. Arguments: active token,
+    /// ThreadUpcallSnapshot pointer, exact byte length. Validation and commit
+    /// are atomic; invalid input leaves delivery and saved state unchanged.
+    ThreadUpcallReturnContext = 689,
     CheckGravityExist = 999,
 }
 
@@ -317,7 +321,8 @@ pub struct ThreadInitialRegisters {
 /// Read-only x86-64 context captured before entering a native upcall.
 /// RDI is `argument`; the remaining GPRs use the native thread register layout.
 /// `fx_state` is the 512-byte FXSAVE64 image (x87/SSE, not AVX/XSAVE).
-/// Changing this userspace copy does not change the kernel's return context.
+/// Editing the copy alone does not change the kernel's return context. It may
+/// be supplied to ThreadUpcallReturnContext, which validates it atomically.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadUpcallSnapshot {
@@ -677,6 +682,7 @@ mod object_handle_tests {
             SyscallNumber::ThreadUpcallInstall as u64,
             SyscallNumber::ThreadUpcallReturn as u64,
             SyscallNumber::ThreadUpcallInspect as u64,
+            SyscallNumber::ThreadUpcallReturnContext as u64,
             SyscallNumber::ThreadHandleCreate as u64,
             SyscallNumber::ThreadInterrupt as u64,
             SyscallNumber::ThreadHandleStatus as u64,

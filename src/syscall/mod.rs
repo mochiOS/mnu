@@ -814,6 +814,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::WakeAddress as u64 => address_wait::wake(arg0, arg1),
         x if x == SyscallNumber::ThreadUpcallInstall as u64 => upcall::install(arg0, arg1),
         x if x == SyscallNumber::ThreadUpcallReturn as u64 => upcall::return_from(arg0),
+        x if x == SyscallNumber::ThreadUpcallReturnContext as u64 => {
+            upcall::return_from_context(arg0, arg1, arg2)
+        }
         x if x == SyscallNumber::ThreadUpcallInspect as u64 => upcall::inspect(arg0, arg1, arg2),
         x if x == SyscallNumber::ThreadHandleCreate as u64 => upcall::create_thread_handle(),
         x if x == SyscallNumber::ThreadInterrupt as u64 => upcall::interrupt(arg0, arg1),

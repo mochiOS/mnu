@@ -84,6 +84,7 @@ pub struct ThreadUpcallDelivery {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadUpcallError {
+    InvalidContext,
     Active,
     QueueFull,
     InvalidToken,
@@ -205,6 +206,28 @@ impl ThreadUpcallState {
         if token == 0 || token != self.active_token || self.saved_context.is_none() {
             return Err(ThreadUpcallError::InvalidToken);
         }
+        self.restore_pending = true;
+        Ok(())
+    }
+
+    fn request_return_context(
+        &mut self,
+        token: u64,
+        context: UserUpcallContext,
+        fx_state: [u8; 512],
+    ) -> Result<(), ThreadUpcallError> {
+        if token == 0
+            || token != self.active_token
+            || self.saved_context.is_none()
+            || self.restore_pending
+        {
+            return Err(ThreadUpcallError::InvalidToken);
+        }
+        let fx_state = self.saved_fx_state
+            .with_user_bytes(fx_state)
+            .ok_or(ThreadUpcallError::InvalidContext)?;
+        self.saved_context = Some(context);
+        self.saved_fx_state = fx_state;
         self.restore_pending = true;
         Ok(())
     }
@@ -1272,6 +1295,15 @@ impl Thread {
         token: u64,
     ) -> Result<(UserUpcallContext, [u8; 512]), ThreadUpcallError> {
         self.upcall.snapshot(token)
+    }
+
+    pub fn request_upcall_return_context(
+        &mut self,
+        token: u64,
+        context: UserUpcallContext,
+        fx_state: [u8; 512],
+    ) -> Result<(), ThreadUpcallError> {
+        self.upcall.request_return_context(token, context, fx_state)
     }
 
     pub fn begin_exception_upcall(

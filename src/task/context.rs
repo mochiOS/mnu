@@ -45,6 +45,20 @@ impl FxSaveArea {
         }
     }
 
+    pub(super) fn with_user_bytes(&self, bytes: [u8; FXSAVE_AREA_SIZE]) -> Option<Self> {
+        // Use the CPU's captured mask, never a mask supplied by user space.
+        let mask = u32::from_le_bytes(self.bytes[28..32].try_into().ok()?);
+        let mask = if mask == 0 { 0xffbf } else { mask };
+        let mxcsr = u32::from_le_bytes(bytes[24..28].try_into().ok()?);
+        if mxcsr & !mask != 0 {
+            return None;
+        }
+        let mut state = Self { bytes };
+        state.bytes[28..32].copy_from_slice(&mask.to_le_bytes());
+        state.bytes = state.snapshot_bytes();
+        Some(state)
+    }
+
     pub(super) fn snapshot_bytes(&self) -> [u8; FXSAVE_AREA_SIZE] {
         let mut bytes = self.bytes;
         // FXSAVE leaves reserved bytes untouched. Do not expose them even if
