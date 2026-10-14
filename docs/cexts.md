@@ -134,7 +134,7 @@ services = []
 
 kernel = [
   "ipc",
-  "memory_share",
+  "memory_object_create",
   "capability",
   "event"
 ]

@@ -49,7 +49,8 @@ The public syscall ABI is fixed to a small kernel surface:
 - `memory_map`
 - `memory_unmap`
 - `memory_protect`
-- `memory_share`
+- `memory_object_create`
+- `memory_object_length`
 - `memory_sync`
 - `ipc_create`
 - `ipc_send`

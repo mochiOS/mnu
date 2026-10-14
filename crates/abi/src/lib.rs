@@ -72,7 +72,6 @@ pub enum SyscallNumber {
     MemoryMap = 582,
     MemoryUnmap = 583,
     MemoryProtect = 584,
-    MemoryShare = 585,
     MemorySync = 586,
     IpcCreate = 587,
     IpcCall = 588,

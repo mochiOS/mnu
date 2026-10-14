@@ -86,7 +86,6 @@ const SYS_THREAD_YIELD: u64 = mnu_abi::SyscallNumber::ThreadYield as u64;
 const SYS_MEMORY_MAP: u64 = mnu_abi::SyscallNumber::MemoryMap as u64;
 const SYS_MEMORY_UNMAP: u64 = mnu_abi::SyscallNumber::MemoryUnmap as u64;
 const SYS_MEMORY_PROTECT: u64 = mnu_abi::SyscallNumber::MemoryProtect as u64;
-const SYS_MEMORY_SHARE: u64 = mnu_abi::SyscallNumber::MemoryShare as u64;
 const SYS_MEMORY_SYNC: u64 = mnu_abi::SyscallNumber::MemorySync as u64;
 const SYS_MAP_PHYSICAL_RANGE: u64 = mnu_abi::SyscallNumber::MapPhysicalRange as u64;
 const SYS_IPC_CREATE: u64 = mnu_abi::SyscallNumber::IpcCreate as u64;
@@ -440,10 +439,6 @@ pub fn memory_unmap(addr: u64, len: u64) -> u64 {
 
 pub fn memory_protect(addr: u64, len: u64, access: u64) -> u64 {
     unsafe { syscall3(SYS_MEMORY_PROTECT, addr, len, access) }
-}
-
-pub fn memory_share(addr: u64, len: u64, options: u64) -> u64 {
-    unsafe { syscall3(SYS_MEMORY_SHARE, addr, len, options) }
 }
 
 pub fn memory_sync(addr: u64, len: u64, options: u64) -> u64 {

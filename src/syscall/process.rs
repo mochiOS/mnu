@@ -877,48 +877,6 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
     SUCCESS
 }
 
-/// memory_share システムコール
-///
-/// 匿名領域を共有可能なマッピングとして扱う。
-/// ファイルbackingの共有化はHandle権限を検証するMemoryMap経路で行う。
-pub fn memory_share(addr: u64, length: u64, options: u64) -> u64 {
-    if options != 0 || addr == 0 || length == 0 || addr & 4095 != 0 {
-        return EINVAL;
-    }
-    let share_len = match page_align_up(length) {
-        Some(v) if v > 0 => v,
-        _ => return EINVAL,
-    };
-    if !is_user_range(addr, share_len) {
-        return EINVAL;
-    }
-    if !super::validate_user_ptr(addr, share_len) {
-        return EFAULT;
-    }
-
-    let pid = match crate::syscall::security::current_process_id() {
-        Some(p) => p.as_u64(),
-        None => return ENOSYS,
-    };
-
-    let ok = crate::task::with_process_mut(crate::task::ids::ProcessId::from_u64(pid), |process| {
-        let region_start = addr & !4095;
-        let Some(region) = process.find_memory_region_mut(region_start) else {
-            return false;
-        };
-        if region_start != region.start() || share_len > region.len() {
-            return false;
-        }
-        if !region.allows_write_range(region_start, share_len) {
-            return false;
-        }
-        region.set_shared(true)
-    })
-    .unwrap_or(false);
-    if ok { SUCCESS } else { EINVAL }
-}
-
-
 /// memory_sync システムコール
 ///
 /// 共有マッピングの内容を backing に同期する。

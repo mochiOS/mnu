@@ -143,16 +143,34 @@ fn run_memory_tests() -> bool {
         *byte = (i as u8).wrapping_mul(3).wrapping_add(1);
     }
 
-    let ptr = user::memory_map(0, PAGE_SIZE, 3, NATIVE_ANONYMOUS_PRIVATE, 0);
-    if ptr == 0 || is_error(ptr) {
-        write_literal(b"memory: mmap failed\n");
+    let Ok(object) = mochi_user_platform::memory_object::MemoryObject::create(PAGE_SIZE) else {
+        write_literal(b"memory: backing allocation failed\n");
         return false;
-    }
-    let share = user::memory_share(ptr, PAGE_SIZE, 0);
-    if !expect_success(share) {
-        write_literal(b"memory: share failed\n");
+    };
+    let Ok(mut mapping) = object.map(0, PAGE_SIZE, 3) else {
+        write_literal(b"memory: shared mapping failed\n");
         return false;
+    };
+    let Ok(mut alias) = object.map(0, PAGE_SIZE, 3) else {
+        write_literal(b"memory: shared alias failed\n");
+        return false;
+    };
+    // The mappings retain backing independently of the creator's Handle.
+    drop(object);
+    unsafe {
+        if core::ptr::read_volatile(mapping.as_ptr()) != 0 {
+            return false;
+        }
+        core::ptr::write_volatile(mapping.as_mut_ptr(), 0x5b);
+        if core::ptr::read_volatile(alias.as_ptr()) != 0x5b {
+            return false;
+        }
+        core::ptr::write_volatile(alias.as_mut_ptr(), 0xa7);
+        if core::ptr::read_volatile(mapping.as_ptr()) != 0xa7 {
+            return false;
+        }
     }
+    let ptr = mapping.address();
     let sync = user::memory_sync(ptr, PAGE_SIZE, 0);
     if !expect_success(sync) {
         write_literal(b"memory: sync failed\n");
@@ -162,7 +180,7 @@ fn run_memory_tests() -> bool {
         write_literal(b"memory: protect failed\n");
         return false;
     }
-    if !expect_success(user::memory_unmap(ptr, PAGE_SIZE)) {
+    if mapping.unmap().is_err() || alias.unmap().is_err() {
         write_literal(b"memory: unmap failed\n");
         return false;
     }

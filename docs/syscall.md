@@ -71,7 +71,8 @@ ptr        ユーザー空間ポインタ
 | Memory / VM      | memory_map            |
 | Memory / VM      | memory_unmap          |
 | Memory / VM      | memory_protect        |
-| Memory / VM      | memory_share          |
+| Memory / VM      | memory_object_create  |
+| Memory / VM      | memory_object_length  |
 | Memory / VM      | memory_sync           |
 | Physical Memory  | memory_phys_translate |
 | Physical Memory  | memory_phys_map       |
@@ -197,17 +198,21 @@ memory_protect(addr: ptr, size: usize, prot: u64) -> isize
 
 元のCapabilityで許可されていない権限を追加してはいけません。
 
-### memory_share
+### memory_object_create / memory_object_length
 
-プロセス間共有メモリを作成、または既存領域から共有Capabilityを作成します。
+共有可能なRAM backingを作成し、プロセスローカルなHandleを返します。
 
 ```
-memory_share(addr: ptr, size: usize, flags: u64) -> cap_t
+memory_object_create(size: u64, options: u64) -> handle
+memory_object_length(handle) -> u64
 ```
 
-返されたCapabilityはIPCなどで他プロセスへ渡せます。
+固定長backingはoptionsを0、sizeを正のページサイズ倍数にします。
+このHandleを指定した`memory_map`で共有マッピングを作成します。
+既存のprivateマッピングを後から共有扱いには変更しません。
 
-大容量データをIPCメッセージ本体に載せる代わりに、この共有メモリを使います。
+他プロセスへはIPCにHandleを明示的に添付し、必要なREAD / WRITE / MAP権限だけを委譲します。
+Handleを閉じても、既存マッピングが参照しているbackingは維持されます。
 
 ### memory_sync
 
@@ -223,7 +228,7 @@ memory_sync(addr: ptr, size: usize, flags: u64) -> isize
 
 ### 物理メモリ操作
 
-物理アドレスの取得や物理ページのマッピングは、一般的な `memory_map` / `memory_share` とは別に扱います。
+物理アドレスの取得や物理ページのマッピングは、一般的な `memory_map` / `memory_object_create` とは別に扱います。
 
 ```
 memory_phys_translate(target: pid_t, vaddr: ptr) -> u64
@@ -289,7 +294,7 @@ ipc_send(endpoint_cap: cap_t, msg_ptr: ptr, msg_len: usize, flags: u64) -> isize
 
 `msg_ptr` はユーザー空間上のメッセージヘッダと短いpayloadを指します。
 
-大容量データはメッセージ本体に載せず、`memory_share` による共有メモリCapabilityを使います。
+大容量データはメッセージ本体に載せず、`memory_object_create`で作ったRAM objectのHandleを添付します。
 
 ### ipc_recv
 
@@ -531,7 +536,7 @@ FS、GPU、Display、Networkなどの高頻度I/Oは、専用syscallではなく
 大容量データは次の仕組みで扱います。
 
 ```
-memory_share
+memory_object_create
 memory_map
 memory_sync
 event_poll
