@@ -90,7 +90,6 @@ pub enum SyscallNumber {
     TimeNow = 600,
     DmaAlloc = 604,
     DmaFree = 605,
-    ExecManifest = 606,
     RandomFill = 607,
     PresentFramebuffer = 610,
     StorageControl = 611,

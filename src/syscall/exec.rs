@@ -2,7 +2,7 @@ use crate::capability::{
     parse_kernel_authority_spec, Capability, CapabilitySet, KernelAuthoritySet,
 };
 use crate::policy::{
-    caller_can_grant_capabilities_on_exec, claim_init_pid, release_init_pid, resolve_exec_privilege,
+    claim_init_pid, release_init_pid, resolve_exec_privilege,
 };
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -17,11 +17,10 @@ use image::{map_elf_image, ElfImageLayout};
 
 use mnu_abi::exec::{
     ExecutionClass, APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX,
-    APPLICATION_PROVENANCE_PREFIX, APPLICATION_SUBJECT_KEY_ID_PREFIX, ENVIRONMENT_PREFIX,
+    APPLICATION_PROVENANCE_PREFIX, APPLICATION_SUBJECT_KEY_ID_PREFIX,
     EXECUTABLE_DIGEST_PREFIX, EXEC_AUTHORIZATION_CLASS_PREFIX,
     EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE, EXEC_AUTHORIZATION_KIND_PREFIX,
-    EXEC_AUTHORIZATION_KIND_SPAWN, INHERITED_HANDLE_PREFIX, INHERITED_VALUE_PREFIX,
-    SECURITY_IDENTITY_PREFIX,
+    EXEC_AUTHORIZATION_KIND_SPAWN,
 };
 use sha2::{Digest, Sha256};
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -293,16 +292,6 @@ fn caller_has_process_spawn_capability() -> bool {
     crate::syscall::security::caller_has_any_capability(&[Capability::ProcessSpawn])
 }
 
-fn current_process_capabilities() -> Option<CapabilitySet> {
-    let pid = crate::syscall::security::current_process_id()?;
-    crate::task::with_process(pid, |proc| proc.capabilities().clone())
-}
-
-fn current_process_kernel_authorities() -> Option<KernelAuthoritySet> {
-    let pid = crate::syscall::security::current_process_id()?;
-    crate::task::with_process(pid, |proc| proc.kernel_authorities().clone())
-}
-
 fn parse_requested_exec_grants(
     caps_list: &[String],
     can_intern: bool,
@@ -334,285 +323,6 @@ fn parse_requested_exec_grants(
         caps.insert(cap);
     }
     Ok((caps, authorities))
-}
-
-fn validate_requested_exec_capabilities(
-    caps: &CapabilitySet,
-    authorities: &KernelAuthoritySet,
-) -> Result<(), u64> {
-    use crate::syscall::types::EPERM;
-
-    let Some(caller_caps) = current_process_capabilities() else {
-        return Ok(());
-    };
-    let caller_authorities = current_process_kernel_authorities().unwrap_or_default();
-
-    let caller_can_manage_capabilities =
-        caller_caps.contains(crate::capability::Capability::CapabilitiesManage);
-    if !caller_can_manage_capabilities && !caps.is_subset_of(&caller_caps) {
-        return Err(EPERM);
-    }
-    if !authorities.is_subset_of(&caller_authorities) {
-        return Err(EPERM);
-    }
-    Ok(())
-}
-
-fn parse_execution_class(raw: u64) -> Option<ExecutionClass> {
-    ExecutionClass::from_raw(raw)
-}
-
-pub fn exec_manifest_syscall(
-    path_ptr: u64,
-    args_ptr: u64,
-    caps_ptr: u64,
-    caps_total_len: u64,
-    execution_class_raw: u64,
-) -> u64 {
-    use crate::syscall::types::{EACCES, EINVAL, EPERM};
-
-    let Some(execution_class) = parse_execution_class(execution_class_raw) else {
-        return EINVAL;
-    };
-    let allowed = match execution_class {
-        ExecutionClass::Privileged => crate::policy::caller_can_launch_privileged(),
-        ExecutionClass::Unprivileged => caller_has_process_spawn_capability(),
-    };
-    if !allowed {
-        crate::warn!(
-            "exec_manifest denied class={:?} caller.service_or_core={} caller.process.spawn={}",
-            execution_class,
-            crate::policy::caller_is_service_or_core_process(),
-            caller_has_process_spawn_capability()
-        );
-        return EACCES;
-    }
-
-    let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
-        Ok(s) => s,
-        Err(_) => return EINVAL,
-    };
-
-    crate::info!("exec: launching: {}", path);
-
-    let extra_args_owned = match read_nul_args_from_user(args_ptr, 4096, 64) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let mut extra_args: Vec<&str> = Vec::new();
-    let mut envp: Vec<&str> = Vec::new();
-    let mut identity_package: Option<&str> = None;
-    let mut identity_developer: Option<&str> = None;
-    let mut identity_subject_key: Option<[u8; 32]> = None;
-    let mut identity_provenance: Option<crate::task::process::ApplicationProvenance> = None;
-    let mut inherited_handle_specs = Vec::new();
-    let mut inherited_value_specs = Vec::new();
-    for item in &extra_args_owned {
-        if let Some(env) = item.strip_prefix(ENVIRONMENT_PREFIX) {
-            if env.is_empty() || !env.contains('=') {
-                return EINVAL;
-            }
-            envp.push(env);
-        } else if let Some(value) = item.strip_prefix(INHERITED_HANDLE_PREFIX) {
-            let Some(spec) = parse_inherited_handle_spec(value) else {
-                return EINVAL;
-            };
-            if inherited_handle_specs.len() >= crate::task::PROCESS_MAX_INHERITED_HANDLES
-                || inherited_handle_specs
-                    .iter()
-                    .any(|existing: &InheritedHandleSpec| existing.key == spec.key)
-            {
-                return EINVAL;
-            }
-            inherited_handle_specs.push(spec);
-        } else if let Some(value) = item.strip_prefix(INHERITED_VALUE_PREFIX) {
-            let Some(spec) = parse_inherited_value_spec(value) else {
-                return EINVAL;
-            };
-            if inherited_value_specs.len() >= crate::task::PROCESS_MAX_INHERITED_VALUES
-                || inherited_value_specs
-                    .iter()
-                    .any(|existing: &InheritedValueSpec| existing.key == spec.key)
-            {
-                return EINVAL;
-            }
-            inherited_value_specs.push(spec);
-        } else if item.starts_with(SECURITY_IDENTITY_PREFIX) {
-            // Opaque identities are no longer accepted. A trusted launcher must
-            // provide the complete structured identity below.
-            return EINVAL;
-        } else if let Some(value) = item.strip_prefix(APPLICATION_PACKAGE_ID_PREFIX) {
-            if identity_package.is_some() || !valid_security_identity(value) {
-                return EINVAL;
-            }
-            identity_package = Some(value);
-        } else if let Some(value) = item.strip_prefix(APPLICATION_DEVELOPER_ID_PREFIX) {
-            if identity_developer.is_some() || !valid_security_identity(value) {
-                return EINVAL;
-            }
-            identity_developer = Some(value);
-        } else if let Some(value) = item.strip_prefix(APPLICATION_SUBJECT_KEY_ID_PREFIX) {
-            if identity_subject_key.is_some() {
-                return EINVAL;
-            }
-            identity_subject_key = Some(match decode_subject_key_id(value) {
-                Some(value) => value,
-                None => return EINVAL,
-            });
-        } else if let Some(value) = item.strip_prefix(APPLICATION_PROVENANCE_PREFIX) {
-            if identity_provenance.is_some() {
-                return EINVAL;
-            }
-            identity_provenance = Some(match value {
-                "built-in" => crate::task::process::ApplicationProvenance::BuiltIn,
-                "verified-package" => crate::task::process::ApplicationProvenance::VerifiedPackage,
-                "development" => crate::task::process::ApplicationProvenance::Development,
-                _ => return EINVAL,
-            });
-        } else {
-            extra_args.push(item.as_str());
-        }
-    }
-    let application_identity = match (
-        identity_package,
-        identity_developer,
-        identity_subject_key,
-        identity_provenance,
-    ) {
-        (None, None, None, None) => None,
-        (Some(package), Some(developer), Some(subject_key), Some(provenance)) => {
-            Some(crate::task::process::ApplicationIdentity::new(
-                package.to_string(),
-                developer.to_string(),
-                subject_key,
-                provenance,
-            ))
-        }
-        _ => return EINVAL,
-    };
-
-    if !caller_can_grant_capabilities_on_exec() {
-        crate::warn!(
-            "exec_manifest capability grant denied class={:?} caller.service_or_core={} caller.process.spawn={}",
-            execution_class,
-            crate::policy::caller_is_service_or_core_process(),
-            caller_has_process_spawn_capability()
-        );
-        return EPERM;
-    }
-    let caps_list = match read_nul_caps_from_user(caps_ptr, caps_total_len) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let can_intern = current_process_capabilities()
-        .is_none_or(|caps| caps.contains(crate::capability::Capability::CapabilitiesManage));
-    let (caps, authorities) = match parse_requested_exec_grants(&caps_list, can_intern) {
-        Ok(grants) => grants,
-        Err(errno) => return errno,
-    };
-    if let Err(errno) = validate_requested_exec_capabilities(&caps, &authorities) {
-        crate::warn!(
-            "exec_manifest capability validation failed requested_caps={} requested_authorities={} caller_caps={} caller_authorities={}",
-            caps.len(),
-            authorities.len(),
-            current_process_capabilities().map(|c| c.len()).unwrap_or(0),
-            current_process_kernel_authorities()
-                .map(|a| a.len())
-                .unwrap_or(0)
-        );
-        return errno;
-    }
-
-    let authorization_pid = crate::syscall::security::current_process_id();
-    let authorization_thread = crate::task::current_thread_id();
-    let authorization = authorization_pid
-        .zip(authorization_thread)
-        .and_then(|(pid, thread)| {
-            crate::task::with_process_mut(pid, |process| {
-                process.take_exec_authorization(&path, thread)
-            })
-            .flatten()
-        });
-    let expected_digest = if let Some(authorization) = authorization {
-        let caps_match = caps.is_subset_of(&authorization.capabilities)
-            && authorization.capabilities.is_subset_of(&caps);
-        let authorities_match = authorities.is_subset_of(&authorization.kernel_authorities)
-            && authorization.kernel_authorities.is_subset_of(&authorities);
-        if authorization.kind != crate::task::process::PendingExecKind::Spawn
-            || authorization.execution_class != execution_class
-            || application_identity.as_ref() != Some(&authorization.identity)
-            || !caps_match
-            || !authorities_match
-        {
-            crate::warn!("exec_manifest: security decision mismatch for '{}'", path);
-            return EACCES;
-        }
-        Some(authorization.executable_digest)
-    } else if crate::policy::caller_is_bootstrap_init_process() {
-        // The bootstrap process launches the initial policy services from the
-        // authenticated boot generation before the policy authority exists.
-        None
-    } else {
-        crate::warn!(
-            "exec_manifest: no matching spawn authorization for '{}'",
-            path
-        );
-        return EACCES;
-    };
-
-    let requested_privilege = match execution_class {
-        ExecutionClass::Privileged => Some(crate::task::PrivilegeLevel::Service),
-        ExecutionClass::Unprivileged => Some(crate::task::PrivilegeLevel::User),
-    };
-
-    let transfer_process = crate::syscall::security::current_process_id();
-    let inherited_handles =
-        match export_inherited_handles(transfer_process, inherited_handle_specs.as_slice()) {
-            Ok(handles) => handles,
-            Err(errno) => return errno,
-        };
-
-    exec_internal(
-        path.as_str(),
-        None,
-        &extra_args,
-        &envp,
-        Some(caps),
-        Some(authorities),
-        requested_privilege,
-        execution_class,
-        application_identity,
-        &inherited_handles,
-        &inherited_value_specs,
-        true,
-        expected_digest,
-    )
-}
-
-fn parse_inherited_handle_spec(value: &str) -> Option<InheritedHandleSpec> {
-    let mut fields = value.split(':');
-    let key = fields.next()?.parse::<u64>().ok()?;
-    let source = fields.next()?.parse::<u32>().ok()?;
-    let rights = fields.next()?.parse::<u64>().ok()?;
-    if fields.next().is_some() {
-        return None;
-    }
-    Some(InheritedHandleSpec {
-        key,
-        target: 0,
-        source: crate::task::ObjectHandle::from_raw(source)?,
-        rights: crate::task::HandleRights::from_bits(rights)?,
-    })
-}
-
-fn parse_inherited_value_spec(value: &str) -> Option<InheritedValueSpec> {
-    let mut fields = value.split(':');
-    let key = fields.next()?.parse::<u64>().ok()?;
-    let value = fields.next()?.parse::<u64>().ok()?;
-    if fields.next().is_some() {
-        return None;
-    }
-    Some(InheritedValueSpec { key, value })
 }
 
 fn export_inherited_handles(
@@ -698,46 +408,6 @@ fn install_inherited_values(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod inherited_handle_tests {
-    use super::*;
-
-    #[test]
-    fn inherited_handle_metadata_is_strict_and_opaque() {
-        let rights = crate::task::HandleRights::SEND
-            .union(crate::task::HandleRights::TRANSFER)
-            .bits();
-        let encoded = alloc::format!("77:41:{rights}");
-        let parsed = parse_inherited_handle_spec(&encoded).unwrap();
-        assert_eq!(parsed.key, 77);
-        assert_eq!(parsed.source.raw(), 41);
-        assert_eq!(parsed.rights.bits(), rights);
-    }
-
-    #[test]
-    fn inherited_handle_metadata_rejects_invalid_fields() {
-        assert!(parse_inherited_handle_spec("").is_none());
-        assert!(parse_inherited_handle_spec("1:0:0").is_none());
-        assert!(parse_inherited_handle_spec("1:2").is_none());
-        assert!(parse_inherited_handle_spec("1:2:0:4").is_none());
-        assert!(parse_inherited_handle_spec("1:2:128").is_none());
-    }
-
-    #[test]
-    fn inherited_value_metadata_is_strict_and_opaque() {
-        assert_eq!(
-            parse_inherited_value_spec("7:18446744073709551615"),
-            Some(InheritedValueSpec {
-                key: 7,
-                value: u64::MAX,
-            })
-        );
-        assert!(parse_inherited_value_spec("7").is_none());
-        assert!(parse_inherited_value_spec("7:8:9").is_none());
-        assert!(parse_inherited_value_spec("x:8").is_none());
-    }
 }
 
 fn valid_security_identity(value: &str) -> bool {
