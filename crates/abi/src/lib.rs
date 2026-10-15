@@ -251,6 +251,14 @@ pub enum SyscallNumber {
     /// before VM locking; live usage and insertion are one atomic operation.
     /// Same authority and placement rules as MemoryMap; stores no policy.
     MemoryMapBounded = 695,
+    /// Replaces the caller's image with a per-operation virtual-byte ceiling.
+    /// Arguments: image Handle, opaque authorization identity pointer/length,
+    /// startup image pointer/length, byte ceiling. Same authority and input
+    /// validation as ProcessImageReplace. Counts the prepared target's image,
+    /// stack, TLS and reservations, not the old address space. A rejected
+    /// target leaves the current image and sibling threads intact. No policy
+    /// or resource-limit identity is interpreted or stored by this operation.
+    ProcessImageReplaceBounded = 696,
     CheckGravityExist = 999,
 }
 

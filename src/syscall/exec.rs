@@ -1197,11 +1197,36 @@ fn exec_with_data(
     }
 }
 
+fn check_image_byte_ceiling(
+    table: u64,
+    reservations: &[crate::task::MemoryRegion],
+    byte_ceiling: u64,
+) -> Result<(), u64> {
+    if byte_ceiling == u64::MAX {
+        return Ok(());
+    }
+    use crate::mem::mapping_usage;
+    // This detached root is privately owned by the preparation guard. No
+    // process, fault handler or sibling can edit it during admission.
+    let used = mapping_usage::bytes(
+        reservations
+            .iter()
+            .map(|region| (region.start(), region.end().unwrap_or(u64::MAX))),
+        |start, end| unsafe { crate::mem::paging::next_user_page_entry(table, start, end) },
+    )
+    .map_err(|_| crate::syscall::types::EFAULT)?;
+    if !mapping_usage::permits(used, 0, byte_ceiling) {
+        return Err(crate::syscall::types::ENOMEM);
+    }
+    Ok(())
+}
+
 fn replace_current_process_image(
     data: &[u8],
     identity: &str,
     authorization: crate::task::process::PendingExecSecurity,
     startup: mnu_abi::process_image::StartupImage<'_>,
+    byte_ceiling: u64,
     mut measurement: ExecMeasurement,
 ) -> Result<(u64, u64, u64), u64> {
     use crate::syscall::types::EINVAL;
@@ -1283,6 +1308,10 @@ fn replace_current_process_image(
         Ok(base) => base,
         Err(errno) => return Err(errno),
     };
+    // Admission precedes every destructive old-image operation, including
+    // sibling retirement, borrowed mapping revocation, TLS/context edits and
+    // launch-Handle retention. Failed preparation drops only the new root.
+    check_image_byte_ceiling(new_pt_phys, &deferred_zero_regions, byte_ceiling)?;
     let current_tid = match crate::task::current_thread_id() {
         Some(thread) => thread,
         None => return Err(EINVAL),
@@ -1346,6 +1375,42 @@ pub fn process_image_replace_syscall(
     identity_len: u64,
     startup_ptr: u64,
     startup_len: u64,
+) -> u64 {
+    process_image_replace_impl(
+        image_handle,
+        identity_ptr,
+        identity_len,
+        startup_ptr,
+        startup_len,
+        u64::MAX,
+    )
+}
+
+pub fn process_image_replace_bounded_syscall(
+    image_handle: u64,
+    identity_ptr: u64,
+    identity_len: u64,
+    startup_ptr: u64,
+    startup_len: u64,
+    byte_ceiling: u64,
+) -> u64 {
+    process_image_replace_impl(
+        image_handle,
+        identity_ptr,
+        identity_len,
+        startup_ptr,
+        startup_len,
+        byte_ceiling,
+    )
+}
+
+fn process_image_replace_impl(
+    image_handle: u64,
+    identity_ptr: u64,
+    identity_len: u64,
+    startup_ptr: u64,
+    startup_len: u64,
+    byte_ceiling: u64,
 ) -> u64 {
     use crate::syscall::types::{EACCES, EINVAL, EPERM};
 
@@ -1425,6 +1490,7 @@ pub fn process_image_replace_syscall(
         identity,
         authorization,
         startup,
+        byte_ceiling,
         ExecMeasurement::start(),
     ) {
         Ok(image) => image,

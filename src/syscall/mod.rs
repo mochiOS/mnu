@@ -909,6 +909,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ProcessImageReplace as u64 => {
             exec::process_image_replace_syscall(arg0, arg1, arg2, arg3, arg4)
         }
+        x if x == SyscallNumber::ProcessImageReplaceBounded as u64 => {
+            exec::process_image_replace_bounded_syscall(arg0, arg1, arg2, arg3, arg4, arg5)
+        }
         x if x == SyscallNumber::ProcessCreate as u64 => {
             exec::process_create_syscall(arg0, arg1, arg2)
         }
@@ -1040,6 +1043,7 @@ fn is_vfs_syscall(num: u64) -> bool {
 #[cfg(feature = "performance-instrumentation")]
 fn is_process_creation_syscall(num: u64) -> bool {
     num == SyscallNumber::ProcessImageReplace as u64
+        || num == SyscallNumber::ProcessImageReplaceBounded as u64
         || num == SyscallNumber::ProcessCreate as u64
 }
 
