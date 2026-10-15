@@ -862,6 +862,14 @@ pub(super) fn page_fault_handler(
                 leave_to_user(entered_from_user);
                 return;
             }
+            Err(fault) if fault.is_retryable() => {
+                // Every VM/cache guard has been dropped by the resolver. Let
+                // the owner finish its mutation, then retry the original user
+                // instruction without changing registers or delivering an upcall.
+                crate::task::yield_now();
+                leave_to_user(entered_from_user);
+                return;
+            }
             Err(fault) => fault_cause = fault.cause(),
         }
     }

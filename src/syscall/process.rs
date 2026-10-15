@@ -347,6 +347,16 @@ impl From<u64> for MemoryFault {
 }
 
 impl MemoryFault {
+    /// A backing reservation or superseded page snapshot is not a user access
+    /// violation. Retry outside all VM/cache locks rather than deliver an upcall.
+    pub(crate) fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::Operation(EAGAIN)
+                | Self::Backing(crate::mem::vm_object::VmPageError::Operation(EAGAIN))
+        )
+    }
+
     pub(crate) fn cause(self) -> mnu_abi::MemoryFaultCause {
         use crate::mem::vm_object::VmPageError;
         use mnu_abi::MemoryFaultCause;
