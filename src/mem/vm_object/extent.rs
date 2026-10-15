@@ -17,6 +17,7 @@ pub(crate) struct PreparedExtent {
     old_capacity: u64,
     plan: byte_extent::ResizePlan,
     boundary: Option<Arc<[u8; PAGE_BYTES]>>,
+    published: bool,
 }
 
 impl VmObject {
@@ -76,6 +77,7 @@ impl VmObject {
             old_capacity,
             plan,
             boundary,
+            published: false,
         })
     }
 }
@@ -85,11 +87,23 @@ impl PreparedExtent {
     /// a rejected epoch leaves the cache/frame bytes/dirty ranges untouched.
     /// This is only the cache commit, not an external-storage transaction.
     pub(crate) fn commit(mut self) -> Result<(), u64> {
+        self.publish()
+    }
+
+    /// Publish once without releasing admission. An enclosing journal must
+    /// retain this owner until its final PTE restore/release has completed.
+    /// Failure retains the reservation too, allowing PTE rollback first.
+    /// This is still a fallible local-cache operation, not storage commit.
+    pub(crate) fn publish(&mut self) -> Result<(), u64> {
+        if self.published {
+            return Err(crate::syscall::EINVAL);
+        }
         let mut cache = PAGE_CACHE.lock();
         if self.gate.generation() != self.epoch {
             return Err(crate::syscall::EAGAIN);
         }
         if self.plan.length == self.old_length {
+            self.published = true;
             return Ok(());
         }
         let boundary_index = self.plan.zero.as_ref().and_then(|range| {
@@ -157,6 +171,7 @@ impl PreparedExtent {
             entry.key.object != self.object || entry.key.page_index < keep_below / PAGE_BYTES as u64
         });
         bump_cache_mutation_epoch(self.object);
+        self.published = true;
         Ok(())
     }
 }
