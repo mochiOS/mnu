@@ -3,6 +3,7 @@
 //! マルチタスク機能を提供（プロセスとスレッドの管理）
 
 pub mod context;
+pub(crate) mod deferred;
 pub mod fd_table;
 pub mod handle_table;
 pub(crate) mod handle_snapshot;

@@ -18,7 +18,7 @@ use super::{
 pub(crate) fn flush_provider_releases() {
     let mut releases = crate::task::handle_table::take_provider_releases();
     while let Some(ticket) = releases.pop() {
-        let release = ticket.release();
+        let release = *ticket.value();
         let endpoint = crate::syscall::ipc::IpcEndpoint {
             thread_id: release.endpoint_thread_id,
             slot: release.endpoint_slot,

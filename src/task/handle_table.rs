@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::fd_table::FileHandle;
 use super::process::ProcessObject;
-mod provider_release;
+use super::deferred;
 
 pub const PROCESS_MAX_OBJECT_HANDLES: usize = mnu_abi::PROCESS_MAX_OBJECT_HANDLES;
 
@@ -16,7 +16,7 @@ pub struct ProviderObject {
     pub endpoint_generation: u64,
     pub object_id: u64,
     registered: AtomicBool,
-    release_ticket: Option<provider_release::Ticket>,
+    release_ticket: Option<deferred::Deferred<'static, ProviderRelease>>,
     io_options: AtomicU64,
     memory_identity: AtomicU64,
     memory_identity_unavailable: AtomicBool,
@@ -57,15 +57,16 @@ pub(crate) struct ProviderRelease {
     pub object_id: u64,
 }
 
-static PENDING_PROVIDER_RELEASES: crate::interrupt::spinlock::SpinLock<provider_release::Pending> =
-    crate::interrupt::spinlock::SpinLock::new(provider_release::Pending::new());
+static PENDING_PROVIDER_RELEASES: crate::interrupt::spinlock::SpinLock<
+    deferred::Pending<ProviderRelease>,
+> = crate::interrupt::spinlock::SpinLock::new(deferred::Pending::new());
 
-pub(crate) fn take_provider_releases() -> provider_release::Pending {
+pub(crate) fn take_provider_releases() -> deferred::Pending<ProviderRelease> {
     let pending = core::mem::take(&mut *PENDING_PROVIDER_RELEASES.lock());
     pending.reversed()
 }
 
-pub(crate) fn requeue_provider_release(ticket: provider_release::Ticket) {
+pub(crate) fn requeue_provider_release(ticket: deferred::Ticket<ProviderRelease>) {
     PENDING_PROVIDER_RELEASES.lock().push(ticket);
 }
 
@@ -79,11 +80,14 @@ impl Drop for ProviderObject {
             objects.remove(&self.key());
         }
         drop(objects);
-        if !self.registered.load(Ordering::Acquire) {
-            return;
-        }
         if let Some(ticket) = self.release_ticket.take() {
-            PENDING_PROVIDER_RELEASES.lock().push(ticket);
+            if self.registered.load(Ordering::Acquire) {
+                drop(ticket);
+            } else {
+                // Failed publication never acquired the provider's resource.
+                // Disarm deferred cleanup instead of emitting OP_RELEASE.
+                drop(ticket.into_ticket());
+            }
         }
     }
 }
@@ -95,12 +99,14 @@ impl ProviderObject {
         endpoint_generation: u64,
         object_id: u64,
     ) -> Result<Self, u64> {
-        let release_ticket = provider_release::Ticket::new(ProviderRelease {
+        let release_ticket = deferred::Ticket::new(ProviderRelease {
             endpoint_thread_id,
             endpoint_slot,
             endpoint_generation,
             object_id,
-        })?;
+        })
+        .map_err(|_| mnu_abi::ENOMEM)?
+        .defer_on_drop(&PENDING_PROVIDER_RELEASES);
         Ok(Self {
             endpoint_thread_id,
             endpoint_slot,
