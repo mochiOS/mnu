@@ -1,5 +1,5 @@
 //! Owned, not-yet-published VM roots. Weak discovery does not extend lifetime;
-//! snapshot pins keep physical tables alive during backing revocation.
+//! snapshot pins retain physical tables even across publication and retirement.
 use super::vm_object::ObjectKey;
 use crate::interrupt::spinlock::SpinLock;
 use alloc::sync::{Arc, Weak};
@@ -18,6 +18,7 @@ pub(crate) struct Mapping {
 
 pub(crate) struct Root {
     table: u64,
+    _lifetime: Option<super::root_lifetime::Pin>,
     mappings: Vec<Mapping>,
     published: AtomicBool,
 }
@@ -28,9 +29,11 @@ impl Root {
     pub(crate) fn new(table: u64, regions: &[crate::task::MemoryRegion]) -> Result<Arc<Self>, ()> {
         let mut root = Self {
             table,
+            _lifetime: None,
             mappings: Vec::new(),
             published: AtomicBool::new(false),
         };
+        root._lifetime = Some(super::root_lifetime_native::pin(table)?);
         for region in regions {
             if let Some(identity) = region
                 .backing()
@@ -85,7 +88,9 @@ impl Drop for Root {
     }
 }
 
-/// Caller holds the mapping/process lock through revocation and dropping pins.
+/// Caller holds the mapping/process lock during discovery, mapping inspection
+/// and revocation. Pins may outlive that lock for physical lifetime only: they
+/// do not keep mapping records or PTE contents unchanged after publication.
 /// No process IDs, descriptors, endpoints or names are used for discovery.
 pub(crate) fn snapshot() -> Result<Vec<Arc<Root>>, ()> {
     let mut roots = ROOTS.lock();

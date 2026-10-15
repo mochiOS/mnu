@@ -2395,8 +2395,17 @@ fn destroy_user_l3_table(l3_phys: u64, phys_off: u64, vaddr_base: u64) {
     deallocate_4k_frame_by_phys(l3_phys);
 }
 
-/// 失敗したfork/exec経路のロールバック用に、ユーザーページテーブルを破棄する
+/// 所有者が手放したユーザーページテーブルを、最後のpinの解放後に破棄する。
 pub fn destroy_user_page_table(table_phys: u64) -> Result<()> {
+    destroy_user_page_table_inner(table_phys, true)
+}
+
+/// Final-pin cleanup bypasses registration, never native safety validation.
+pub(crate) fn destroy_user_page_table_unpinned(table_phys: u64) -> Result<()> {
+    destroy_user_page_table_inner(table_phys, false)
+}
+
+fn destroy_user_page_table_inner(table_phys: u64, may_defer: bool) -> Result<()> {
     if table_phys == 0 || (table_phys & 0xfff) != 0 {
         return Err(Kernel::InvalidParam);
     }
@@ -2404,6 +2413,9 @@ pub fn destroy_user_page_table(table_phys: u64) -> Result<()> {
         return Err(Kernel::Memory(Memory::PermissionDenied));
     }
     let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+    if may_defer && super::root_lifetime::retire(table_phys) {
+        return Ok(());
+    }
     // Ensure SMAP/SMEP disabled while dereferencing HHDM pointers
     let _smap_guard = crate::cpu::SmapSmepGuard::new();
     let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
