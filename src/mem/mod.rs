@@ -27,6 +27,7 @@ pub(crate) mod mapping_revocation;
 pub(crate) mod mapping_usage;
 pub(crate) mod sparse_page_walk;
 pub(crate) mod mapping_revocation_native;
+pub(crate) mod mapping_preservation_native;
 pub(crate) mod detached_roots;
 
 /// メモリの初期化

@@ -576,6 +576,21 @@ pub(crate) unsafe fn suspend_user_page(
 }
 
 impl SuspendedUserPage {
+    /// Validate physical access before the synchronization/commit barrier.
+    /// The suspension retains this frame; no physical memory is touched here.
+    pub(crate) fn suffix_address(&self, offset: usize) -> Result<(u64, usize)> {
+        if offset > 4096 {
+            return Err(Kernel::Memory(Memory::InvalidAddress));
+        }
+        let length = 4096 - offset;
+        let start = physical_memory_offset()
+            .and_then(|base| base.checked_add(self.original.addr().as_u64()))
+            .and_then(|base| base.checked_add(offset as u64))
+            .filter(|start| start.checked_add(length as u64).is_some())
+            .ok_or(Kernel::Memory(Memory::NotMapped))?;
+        Ok((start, length))
+    }
+
     /// # Safety
     /// The suspension's mapping lock is still held and the table is alive.
     pub(crate) unsafe fn restore(self) {

@@ -117,6 +117,22 @@ impl SharedMemory {
         length: u64,
         revoke: impl FnOnce(u64, u64) -> Result<(), u64>,
     ) -> Result<(), u64> {
+        self.resize_transaction(length, |start, end, commit| {
+            revoke(start, end)?;
+            Ok(commit.commit())
+        })
+    }
+
+    pub(crate) fn resize_transaction(
+        &self,
+        length: u64,
+        coordinate: impl for<'a> FnOnce(
+            u64,
+            u64,
+            super::shared_pages::ResizeCommit<'a>,
+        )
+            -> Result<super::shared_pages::ResizeCommitted<'a>, u64>,
+    ) -> Result<(), u64> {
         let mut pages = self.pages.lock();
         if pages.length() == length {
             return Ok(());
@@ -127,7 +143,7 @@ impl SharedMemory {
             .checked_add(1)
             .ok_or(crate::syscall::ENOMEM)?;
         pages
-            .resize_bytes_with(
+            .resize_bytes_transaction(
                 length,
                 |page, range| {
                     let base = super::paging::physical_memory_offset()
@@ -137,7 +153,7 @@ impl SharedMemory {
                     base.checked_add(range.end).ok_or(crate::syscall::EIO)?;
                     Ok((start, range.end - range.start))
                 },
-                revoke,
+                coordinate,
                 |_, (start, count)| {
                     // No fallible operations after revocation. Never form a
                     // reference to physical bytes also mapped by another CPU.

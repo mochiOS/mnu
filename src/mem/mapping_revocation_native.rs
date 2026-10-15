@@ -16,6 +16,10 @@ enum Roots<'a> {
 }
 
 impl<'a> Native<'a> {
+    pub(crate) fn owns_ram_frames(&self) -> bool {
+        self.release_frames
+    }
+
     fn owns(&self, table: u64) -> bool {
         match self.roots {
             Roots::All(table_guard, roots) => {

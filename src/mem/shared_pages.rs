@@ -30,6 +30,23 @@ pub(crate) enum ResizeError<Error> {
     Revocation(Error),
 }
 
+/// One stack-resident, consuming commit capability. The VM coordinator must
+/// suspend translations before invoking it, and restore retained PTEs only
+/// after it returns. No allocation or external I/O occurs in this action.
+/// A coordinator may return an error only before consuming this capability.
+pub(crate) struct ResizeCommit<'a> {
+    run: &'a mut dyn FnMut(),
+}
+
+pub(crate) struct ResizeCommitted<'a>(core::marker::PhantomData<&'a mut ()>);
+
+impl<'a> ResizeCommit<'a> {
+    pub(crate) fn commit(self) -> ResizeCommitted<'a> {
+        (self.run)();
+        ResizeCommitted(core::marker::PhantomData)
+    }
+}
+
 impl<Page> SharedPages<Page> {
     /// Byte-sized logical extent with page-rounded, lazily populated storage.
     /// The original allocation ceiling remains attached to the object.
@@ -113,6 +130,28 @@ impl<Page> SharedPages<Page> {
         revoke: impl FnOnce(u64, u64) -> Result<(), Error>,
         zero: impl FnOnce(&Page, Token),
     ) -> Result<(), ResizeError<Error>> {
+        self.resize_bytes_transaction(
+            length,
+            prepare,
+            |start, end, commit| {
+                revoke(start, end)?;
+                Ok(commit.commit())
+            },
+            zero,
+        )
+    }
+
+    pub(crate) fn resize_bytes_transaction<Token, Error>(
+        &mut self,
+        length: u64,
+        prepare: impl FnOnce(&Page, core::ops::Range<u64>) -> Result<Token, Error>,
+        coordinate: impl for<'a> FnOnce(
+            u64,
+            u64,
+            ResizeCommit<'a>,
+        ) -> Result<ResizeCommitted<'a>, Error>,
+        zero: impl FnOnce(&Page, Token),
+    ) -> Result<(), ResizeError<Error>> {
         let plan =
             super::byte_extent::plan(self.length, length, self.page_bytes, self.maximum_pages)
                 .map_err(ResizeError::Size)?;
@@ -132,26 +171,43 @@ impl<Page> SharedPages<Page> {
             }
             None => None,
         };
-        if let Some(range) = plan.invalidate {
-            revoke(range.start, range.end).map_err(ResizeError::Revocation)?;
-        }
-        if let Some((page, token)) = boundary {
-            zero(&page, token);
-        }
-        if length < self.length {
-            let first_removed = plan.capacity / self.page_bytes;
-            // Do not allocate a second tree after revocation has committed.
-            // Removing this ledger's Arc never frees storage still pinned by
-            // a prepared page or another retained owner.
-            while self
-                .pages
-                .last_key_value()
-                .is_some_and(|(&index, _)| index >= first_removed)
-            {
-                drop(self.pages.pop_last());
+        let invalidation = plan.invalidate;
+        let mut action = Some(move || {
+            if let Some((page, token)) = boundary {
+                zero(&page, token);
+            }
+            if length < self.length {
+                let first_removed = plan.capacity / self.page_bytes;
+                // Do not allocate a second tree after revocation has committed.
+                // Removing this ledger's Arc never frees storage still pinned by
+                // a prepared page or another retained owner.
+                while self
+                    .pages
+                    .last_key_value()
+                    .is_some_and(|(&index, _)| index >= first_removed)
+                {
+                    drop(self.pages.pop_last());
+                }
+            }
+            self.length = plan.length;
+        });
+        let mut run = || {
+            // ResizeCommit is non-Clone and consumes itself. This action can
+            // therefore be reached exactly once without a boxed closure.
+            if let Some(action) = action.take() {
+                action();
+            }
+        };
+        let commit = ResizeCommit { run: &mut run };
+        match invalidation {
+            Some(range) => {
+                let _ =
+                    coordinate(range.start, range.end, commit).map_err(ResizeError::Revocation)?;
+            }
+            None => {
+                let _ = commit.commit();
             }
         }
-        self.length = plan.length;
         Ok(())
     }
 
