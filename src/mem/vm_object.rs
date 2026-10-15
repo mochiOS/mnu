@@ -240,34 +240,31 @@ impl VmObject {
             let length = memory.read_at(offset, &mut bytes)?;
             return Ok((Arc::new(bytes), length));
         }
-        let key = self.page_key(page_index);
-
-        if let Some(page) = cached_page(key)? {
-            return Ok(page);
-        }
-
         let offset = page_index
             .checked_mul(PAGE_BYTES as u64)
             .ok_or(crate::syscall::EINVAL)?;
-
-        let epoch = cache_mutation_epoch();
-        let mut page = [0u8; PAGE_BYTES];
-        let outcome = read_lower_until(&self.source, offset, &mut page);
-
-        if let Some(errno) = outcome.error {
-            return Err(errno);
+        let key = self.page_key(page_index);
+        loop {
+            if let Some(page) = cached_page(key)? {
+                return Ok(page);
+            }
+            let epoch = cache_mutation_epoch();
+            let mut page = [0u8; PAGE_BYTES];
+            let outcome = read_lower_until(&self.source, offset, &mut page);
+            if let Some(errno) = outcome.error {
+                return Err(errno);
+            }
+            let valid_len = outcome.bytes_read;
+            let bytes = Arc::new(page);
+            match cache_or_snapshot_page(key, &bytes[..valid_len], valid_len, Some(epoch)) {
+                Ok(Some(existing)) => return Ok(existing),
+                // Capacity pressure may bypass caching, but only after the
+                // snapshot was validated under the cache lock.
+                Ok(None) => return Ok((bytes, valid_len)),
+                Err(crate::syscall::EAGAIN) => continue,
+                Err(error) => return Err(error),
+            }
         }
-
-        let valid_len = outcome.bytes_read;
-        let bytes = Arc::new(page);
-
-        if let Some(existing) =
-            cache_or_snapshot_page(key, &bytes[..valid_len], valid_len, Some(epoch))?
-        {
-            return Ok(existing);
-        }
-
-        Ok((bytes, valid_len))
     }
 
     pub fn invalidate(&self) {
@@ -344,44 +341,54 @@ impl VmObject {
                 memory_generation: Some((memory.clone(), generation)),
             });
         }
-        let (loaded, loaded_len) = self.fault_page_with_len(page_index)?;
-        let key = self.page_key(page_index);
+        loop {
+            let epoch = cache_mutation_epoch();
+            let (loaded, loaded_len) = self.fault_page_with_len(page_index)?;
+            let key = self.page_key(page_index);
 
-        let mut cache = PAGE_CACHE.lock();
-        let entry_index = if let Some(index) = cache.iter().position(|entry| entry.key == key) {
-            index
-        } else {
-            cache.push(CachedPage {
-                key,
-                bytes: loaded,
-                frame_phys: None,
-                valid_len: loaded_len,
-                dirty_range: None,
-                version: 0,
-                last_used: next_cache_access(),
-            });
-            cache.len() - 1
-        };
-        if cache[entry_index].frame_phys.is_none() {
-            let frame =
-                crate::mem::frame::allocate_zeroed_frame().map_err(|_| crate::syscall::ENOMEM)?;
-            let frame_phys = frame.start_address().as_u64();
-            if let Err(errno) = copy_to_frame(frame_phys, 0, cache[entry_index].bytes.as_slice()) {
-                let _ = crate::mem::frame::deallocate_frame(frame);
-                return Err(VmPageError::Operation(errno));
+            let mut cache = PAGE_CACHE.lock();
+            let entry_index = if let Some(index) = cache.iter().position(|entry| entry.key == key) {
+                index
+            } else {
+                // Loading and final frame preparation take separate cache locks.
+                // An invalidated snapshot must not repopulate the missing entry.
+                if cache_mutation_epoch() != epoch {
+                    continue;
+                }
+                cache.push(CachedPage {
+                    key,
+                    bytes: loaded,
+                    frame_phys: None,
+                    valid_len: loaded_len,
+                    dirty_range: None,
+                    version: 0,
+                    last_used: next_cache_access(),
+                });
+                cache.len() - 1
+            };
+            if cache[entry_index].frame_phys.is_none() {
+                let frame = crate::mem::frame::allocate_zeroed_frame()
+                    .map_err(|_| crate::syscall::ENOMEM)?;
+                let frame_phys = frame.start_address().as_u64();
+                if let Err(errno) =
+                    copy_to_frame(frame_phys, 0, cache[entry_index].bytes.as_slice())
+                {
+                    let _ = crate::mem::frame::deallocate_frame(frame);
+                    return Err(VmPageError::Operation(errno));
+                }
+                cache[entry_index].frame_phys = Some(frame_phys);
             }
-            cache[entry_index].frame_phys = Some(frame_phys);
+            let frame_phys = cache[entry_index]
+                .frame_phys
+                .ok_or(crate::syscall::ENOMEM)?;
+            crate::mem::paging::retain_shared_user_frame(frame_phys)
+                .map_err(|_| crate::syscall::ENOMEM)?;
+            cache[entry_index].last_used = next_cache_access();
+            return Ok(PreparedSharedPage {
+                frame_phys,
+                memory_generation: None,
+            });
         }
-        let frame_phys = cache[entry_index]
-            .frame_phys
-            .ok_or(crate::syscall::ENOMEM)?;
-        crate::mem::paging::retain_shared_user_frame(frame_phys)
-            .map_err(|_| crate::syscall::ENOMEM)?;
-        cache[entry_index].last_used = next_cache_access();
-        Ok(PreparedSharedPage {
-            frame_phys,
-            memory_generation: None,
-        })
     }
 
     pub fn mark_page_dirty(&self, page_index: u64) -> Result<(), u64> {
@@ -441,6 +448,7 @@ impl VmObject {
 
             let count = core::cmp::min(input.len() - staged, PAGE_BYTES - page_offset);
 
+            let epoch = cache_mutation_epoch();
             let (loaded, loaded_len) = self.page_with_len(page_index)?;
 
             let key = self.page_key(page_index);
@@ -450,6 +458,9 @@ impl VmObject {
             let entry_index = if let Some(index) = cache.iter().position(|entry| entry.key == key) {
                 index
             } else {
+                if cache_mutation_epoch() != epoch {
+                    continue;
+                }
                 cache.push(CachedPage {
                     key,
                     bytes: loaded,
@@ -939,7 +950,9 @@ fn cache_or_snapshot_page(
     };
 
     if cache_mutation_epoch() != expected_epoch {
-        return Ok(None);
+        // This is not a capacity bypass: the lower bytes may predate a write
+        // or invalidation. The loader must retry, not return those bytes.
+        return Err(crate::syscall::EAGAIN);
     }
 
     if cache.len() >= MAX_CACHED_PAGES {
