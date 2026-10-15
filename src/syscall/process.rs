@@ -609,6 +609,49 @@ pub fn memory_map(
     backing_handle: u64,
     backing_offset: u64,
 ) -> u64 {
+    memory_map_impl(
+        addr,
+        length,
+        access,
+        options,
+        backing_handle,
+        backing_offset,
+        None,
+    )
+}
+
+pub fn memory_map_bounded(request: u64, request_len: u64) -> u64 {
+    if request_len != mnu_abi::memory_map::REQUEST_LEN as u64 {
+        return EINVAL;
+    }
+    let mut bytes = [0; mnu_abi::memory_map::REQUEST_LEN];
+    // Copy before PROCESS_TABLE: the source may itself need a user fault.
+    if crate::syscall::copy_from_user(request, &mut bytes).is_err() {
+        return EFAULT;
+    }
+    let Some(request) = mnu_abi::memory_map::Request::decode(&bytes) else {
+        return EINVAL;
+    };
+    memory_map_impl(
+        request.address,
+        request.length,
+        request.access,
+        request.options,
+        request.backing_handle,
+        request.backing_offset,
+        Some(request.byte_ceiling),
+    )
+}
+
+fn memory_map_impl(
+    addr: u64,
+    length: u64,
+    access: u64,
+    options: u64,
+    backing_handle: u64,
+    backing_offset: u64,
+    byte_ceiling: Option<u64>,
+) -> u64 {
     use super::types::{EINVAL, ENOMEM};
 
     if length == 0 {
@@ -699,18 +742,18 @@ pub fn memory_map(
     };
 
     let result = crate::task::with_process_mut(pid, |process| {
-        // mmap用のヒープ領域を現在のbrk以降に割り当てる
-        // (簡易実装: brkと同じ領域を使う)
-        if process.heap_start() == 0 {
+        // Choose a placement cursor without publishing changes on failure.
+        let placement_base = if process.heap_start() == 0 {
             let exec_cfg = crate::config::kernel().exec;
             let default_heap_base = randomized_heap_base(
                 pid,
                 exec_cfg.memory_map_base_min,
                 exec_cfg.memory_map_aslr_max_pages,
             );
-            process.set_heap_start(default_heap_base);
-            process.set_heap_end(default_heap_base);
-        }
+            default_heap_base
+        } else {
+            process.heap_end()
+        };
 
         // ユーザー空間の上限アドレスを超えるaddrを拒否
         if addr != 0 && addr > USER_SPACE_END {
@@ -721,6 +764,31 @@ pub fn memory_map(
             Some(p) => p,
             None => return Err(ENOMEM),
         };
+
+        if let Some(ceiling) = byte_ceiling.filter(|&value| value != u64::MAX) {
+            use crate::mem::mapping_usage;
+            // PROCESS_TABLE retains the root and excludes every mapping/PTE
+            // writer. Do not use heap_end: it is a placement cursor, not use.
+            let used = mapping_usage::bytes(
+                process
+                    .memory_regions()
+                    .iter()
+                    .map(|region| (region.start(), region.end().unwrap_or(u64::MAX)))
+                    .chain(process.mmio_mappings().iter().map(|mapping| {
+                        (mapping.virt_start(), mapping.end().unwrap_or(u64::MAX))
+                    }))
+                    .chain(process.dma_buffers().iter().map(|buffer| {
+                        (buffer.virt_start(), buffer.end().unwrap_or(u64::MAX))
+                    })),
+                |start, end| unsafe {
+                    crate::mem::paging::next_user_page_entry(pt_phys, start, end)
+                },
+            )
+            .map_err(|_| EFAULT)?;
+            if !mapping_usage::permits(used, size, ceiling) {
+                return Err(ENOMEM);
+            }
+        }
 
         let range_is_available = |candidate: u64| {
             is_user_range(candidate, size)
@@ -753,7 +821,7 @@ pub fn memory_map(
         } else if requested.is_some_and(range_is_available) {
             requested.unwrap_or(0)
         } else {
-            let mut candidate = match page_align_up(process.heap_end()) {
+            let mut candidate = match page_align_up(placement_base) {
                 Some(v) => v,
                 None => return Err(EINVAL),
             };
@@ -816,6 +884,10 @@ pub fn memory_map(
             }
         }
 
+        if process.heap_start() == 0 {
+            process.set_heap_start(placement_base);
+            process.set_heap_end(placement_base);
+        }
         // heap_end を更新してアドレス空間が重ならないようにする
         if !exact {
             let new_heap_end = match map_start.checked_add(size) {

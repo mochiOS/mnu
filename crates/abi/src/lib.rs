@@ -7,6 +7,7 @@ pub mod boot;
 pub mod capability;
 pub mod diagnostic;
 pub mod handle_snapshot;
+pub mod memory_map;
 
 /// プロセス作成時に渡すメタデータのABIです。
 pub mod exec;
@@ -245,6 +246,11 @@ pub enum SyscallNumber {
     /// query or persisted policy is involved. STATUS_BOUND_REACHED means no
     /// nonempty prefix fits. Other objects/providers may reject the operation.
     HandleWriteBounded = 694,
+    /// Maps with a caller-supplied per-operation virtual-byte ceiling. Args:
+    /// memory_map::Request pointer, exact REQUEST_LEN. The request is copied
+    /// before VM locking; live usage and insertion are one atomic operation.
+    /// Same authority and placement rules as MemoryMap; stores no policy.
+    MemoryMapBounded = 695,
     CheckGravityExist = 999,
 }
 
