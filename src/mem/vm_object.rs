@@ -9,6 +9,9 @@ use crate::task::ProviderObject;
 #[path = "vm_object/extent.rs"]
 mod extent;
 pub(crate) use extent::PreparedExtent;
+#[path = "vm_object/admission.rs"]
+mod admission;
+pub(crate) use admission::ProviderAdmission;
 
 pub const PAGE_BYTES: usize = 4096;
 
@@ -747,6 +750,12 @@ fn next_cache_access() -> u64 {
 pub(crate) struct ProviderIoGuard {
     key: ObjectKey,
     _guard: super::object_io::IoGuard,
+}
+
+impl ProviderIoGuard {
+    pub(crate) fn key(&self) -> ObjectKey {
+        self.key
+    }
 }
 
 pub(crate) fn update_provider_range(guard: &ProviderIoGuard, offset: u64, input: &[u8]) {

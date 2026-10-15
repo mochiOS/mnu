@@ -261,7 +261,8 @@ pub enum SyscallNumber {
     /// or resource-limit identity is interpreted or stored by this operation.
     ProcessImageReplaceBounded = 696,
     /// Prepares an owned provider-memory extent update. Arguments: caller-local
-    /// endpoint RECEIVE Handle, nonzero memory identity, old length, new length.
+    /// endpoint RECEIVE Handle, nonzero memory identity, old length, new length,
+    /// optional admission Handle (zero for immediate, unordered admission).
     /// Endpoint authority scopes the identity; no PID/FD/path or provider RPC.
     /// Suspends all matching mappings and acknowledges remote TLBs before
     /// returning a private CONTROL-only Handle (no TRANSFER or DUPLICATE).
@@ -269,6 +270,11 @@ pub enum SyscallNumber {
     /// Close before BEGIN cancels; close after BEGIN without confirmation
     /// quarantines backing data. No external mutation may precede BEGIN.
     ProviderMemoryUpdateCreate = 697,
+    /// Registers a cancellable FIFO position for a provider's memory identity.
+    /// Args: caller-local endpoint RECEIVE Handle, nonzero memory identity.
+    /// Returns WAIT|TRANSFER only. Readable means a retry can consume it; peer
+    /// closed means consumed/unavailable. It grants no mutation permission.
+    ProviderMemoryAdmissionCreate = 698,
     CheckGravityExist = 999,
 }
 

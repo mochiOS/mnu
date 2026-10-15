@@ -1,33 +1,75 @@
 //! Private update ownership for a provider endpoint's memory namespace. Only
 //! the endpoint RECEIVE capability selects authority; identifiers are opaque.
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use crate::interrupt::spinlock::SpinLock;
-use crate::mem::{extent_transaction::ExtentTransaction, vm_object::ObjectKey};
+use crate::mem::{
+    extent_transaction::ExtentTransaction,
+    vm_object::{ObjectKey, ProviderAdmission},
+};
 use crate::syscall::{EAGAIN, EINVAL, ENOMEM, ENOSPC, ENOSYS, SUCCESS};
 use crate::task::{HandleRights, KernelObject, ObjectHandleEntry};
 
-pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64) -> u64 {
+fn provider_key(endpoint: u64, identity: u64) -> Result<ObjectKey, u64> {
     if identity == 0 {
-        return EINVAL;
+        return Err(EINVAL);
     }
-    let process_id = match super::current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
-    };
     // This existing resolver enforces caller-table RECEIVE and exact live
     // thread/slot/generation. Client FileHandle CONTROL is not owner authority.
     let (endpoint_thread_id, endpoint_slot, endpoint_generation) =
-        match crate::syscall::ipc::resolve_provider_endpoint(endpoint) {
-            Ok(endpoint) => endpoint,
-            Err(error) => return error,
-        };
-    let key = ObjectKey::Provider {
+        crate::syscall::ipc::resolve_provider_endpoint(endpoint)?;
+    Ok(ObjectKey::Provider {
         endpoint_thread_id,
         endpoint_slot,
         endpoint_generation,
         identity,
+    })
+}
+
+pub fn create_admission(endpoint: u64, identity: u64) -> u64 {
+    let result = (|| {
+        let process_id = super::current_process()?;
+        let admission = Arc::try_new(ProviderAdmission::new(provider_key(endpoint, identity)?)?)
+            .map_err(|_| ENOMEM)?;
+        crate::task::with_process_mut(process_id, |process| {
+            process
+                .object_handles_mut()
+                .insert(ObjectHandleEntry::new(
+                    KernelObject::MemoryAdmission(admission),
+                    HandleRights::WAIT.union(HandleRights::TRANSFER),
+                ))
+                .map(|handle| handle.raw() as u64)
+                .ok_or(ENOSPC)
+        })
+        .ok_or(EINVAL)?
+    })();
+    result.unwrap_or_else(|error| error)
+}
+
+pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64, admission: u64) -> u64 {
+    let process_id = match super::current_process() {
+        Ok(id) => id,
+        Err(error) => return error,
     };
-    let update = match ExtentTransaction::prepare_provider(key, old_length, length) {
+    let key = match provider_key(endpoint, identity) {
+        Ok(key) => key,
+        Err(error) => return error,
+    };
+    let prepared = if admission == 0 {
+        ExtentTransaction::prepare_provider(key, old_length, length)
+    } else {
+        (|| {
+            let KernelObject::MemoryAdmission(admission) =
+                super::object(admission, HandleRights::WAIT)?
+            else {
+                return Err(EINVAL);
+            };
+            // Consumption drops the intent lock BEFORE VM/process exclusion.
+            // The acquired guard itself carries its authenticated backing key.
+            let guard = admission.acquire(key)?;
+            ExtentTransaction::prepare_admitted(guard, old_length, length)
+        })()
+    };
+    let update = match prepared {
         Ok(update) => update,
         Err(error) => return error,
     };
@@ -48,6 +90,46 @@ pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64) -> u64
             .unwrap_or(ENOSPC)
     })
     .unwrap_or(EINVAL)
+}
+
+pub(super) fn admission_endpoint(
+    admission: &ProviderAdmission,
+) -> crate::syscall::ipc::IpcEndpoint {
+    let (thread_id, slot, generation) = admission.endpoint_parts();
+    crate::syscall::ipc::IpcEndpoint {
+        thread_id,
+        slot,
+        generation,
+    }
+}
+
+pub(super) struct AdmissionWaiter {
+    // A sleeping kernel frame must not own the queue position. In particular,
+    // closing the final Handle (or tearing down its process) must cancel it
+    // even if that frame never resumes to run Rust destructors.
+    admission: Weak<ProviderAdmission>,
+    waiter: crate::task::ThreadId,
+}
+
+impl AdmissionWaiter {
+    pub(super) fn register(
+        admission: Arc<ProviderAdmission>,
+        waiter: crate::task::ThreadId,
+    ) -> Result<Self, u64> {
+        admission.register_waiter(waiter.as_u64(), crate::task::ThreadQueue::MAX_THREADS)?;
+        Ok(Self {
+            admission: Arc::downgrade(&admission),
+            waiter,
+        })
+    }
+}
+
+impl Drop for AdmissionWaiter {
+    fn drop(&mut self) {
+        if let Some(admission) = self.admission.upgrade() {
+            admission.remove_waiter(self.waiter.as_u64());
+        }
+    }
 }
 
 pub(super) fn control(

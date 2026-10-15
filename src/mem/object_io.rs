@@ -8,6 +8,7 @@ struct Admission {
     locked: bool,
     next: u64,
     waiting: VecDeque<u64>,
+    waiters: Vec<u64>,
 }
 
 impl Admission {
@@ -16,6 +17,7 @@ impl Admission {
             locked: false,
             next: 0,
             waiting: VecDeque::new(),
+            waiters: Vec::new(),
         }
     }
 }
@@ -25,16 +27,30 @@ pub(crate) struct State {
     reserved: AtomicBool,
     unavailable: AtomicBool,
     generation: AtomicU64,
+    wake: fn(u64),
 }
 
 impl State {
-    pub(crate) const fn new() -> Self {
+    pub(crate) const fn new(wake: fn(u64)) -> Self {
         Self {
             admission: SpinLock::new(Admission::new()),
             reserved: AtomicBool::new(false),
             unavailable: AtomicBool::new(false),
             generation: AtomicU64::new(1),
+            wake,
         }
+    }
+
+    fn wake(&self, waiters: Vec<u64>) {
+        // Never invoke scheduler/observer callbacks while admission is locked.
+        for waiter in waiters {
+            (self.wake)(waiter);
+        }
+    }
+
+    fn notify(&self) {
+        let waiters = core::mem::take(&mut self.admission.lock().waiters);
+        self.wake(waiters);
     }
 }
 
@@ -177,6 +193,43 @@ pub(crate) struct IoIntent {
 }
 
 impl IoIntent {
+    /// Readiness is only an observation. It neither consumes this position nor
+    /// grants access to the backing. Register and recheck before sleeping.
+    pub(crate) fn ready(&self) -> Result<bool, IntentError> {
+        let ticket = self.ticket.ok_or(IntentError::Consumed)?;
+        let admission = self.gate.0.admission.lock();
+        if self.gate.is_unavailable() {
+            return Err(IntentError::Unavailable);
+        }
+        Ok(!admission.locked && admission.waiting.front() == Some(&ticket))
+    }
+
+    pub(crate) fn register_waiter(&self, waiter: u64, maximum: usize) -> Result<(), IntentError> {
+        self.ticket.ok_or(IntentError::Consumed)?;
+        let mut admission = self.gate.0.admission.lock();
+        if admission.waiters.contains(&waiter) {
+            return Ok(());
+        }
+        if admission.waiters.len() >= maximum {
+            return Err(IntentError::Exhausted);
+        }
+        admission
+            .waiters
+            .try_reserve(1)
+            .map_err(|_| IntentError::NoMemory)?;
+        admission.waiters.push(waiter);
+        Ok(())
+    }
+
+    pub(crate) fn remove_waiter(&self, waiter: u64) {
+        self.gate
+            .0
+            .admission
+            .lock()
+            .waiters
+            .retain(|entry| *entry != waiter);
+    }
+
     /// Poll without sleeping/IPC and consume the position exactly once on
     /// success. All owner-death/cancellation paths can simply drop the intent.
     pub(crate) fn try_acquire(&mut self) -> Result<Option<IoGuard>, IntentError> {
@@ -194,7 +247,11 @@ impl IoIntent {
         admission.waiting.pop_front();
         admission.locked = true;
         self.ticket = None;
-        Ok(Some(IoGuard(self.gate.0.clone())))
+        let guard = IoGuard(self.gate.0.clone());
+        let waiters = core::mem::take(&mut admission.waiters);
+        drop(admission);
+        self.gate.0.wake(waiters);
+        Ok(Some(guard))
     }
 }
 
@@ -205,6 +262,9 @@ impl Drop for IoIntent {
             if let Some(index) = admission.waiting.iter().position(|entry| *entry == ticket) {
                 admission.waiting.remove(index);
             }
+            let waiters = core::mem::take(&mut admission.waiters);
+            drop(admission);
+            self.gate.0.wake(waiters);
         }
     }
 }
@@ -234,6 +294,7 @@ impl Reservation {
     pub(crate) fn mark_unavailable(&self) {
         if !self.guard.0.unavailable.swap(true, Ordering::AcqRel) {
             self.guard.0.generation.fetch_add(1, Ordering::AcqRel);
+            self.guard.0.notify();
         }
     }
 }
@@ -247,6 +308,11 @@ impl Drop for Reservation {
 
 impl Drop for IoGuard {
     fn drop(&mut self) {
-        self.0.admission.lock().locked = false;
+        let waiters = {
+            let mut admission = self.0.admission.lock();
+            admission.locked = false;
+            core::mem::take(&mut admission.waiters)
+        };
+        self.0.wake(waiters);
     }
 }

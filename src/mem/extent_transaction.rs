@@ -93,6 +93,18 @@ impl ExtentTransaction {
         })
     }
 
+    pub(crate) fn prepare_admitted(
+        guard: super::vm_object::ProviderIoGuard,
+        old_length: u64,
+        length: u64,
+    ) -> Result<Self, u64> {
+        Self::prepare_extent(guard.key(), true, || {
+            PreparedExtent::prepare_admitted(guard, old_length, length, |bytes| {
+                Arc::try_new(bytes).map_err(|_| crate::syscall::ENOMEM)
+            })
+        })
+    }
+
     fn prepare_extent(
         key: ObjectKey,
         external: bool,

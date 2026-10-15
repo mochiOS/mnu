@@ -57,6 +57,7 @@ impl VmObject {
             old_length,
             length,
             allocate,
+            None,
         )
     }
 }
@@ -79,7 +80,25 @@ impl PreparedExtent {
             crate::mem::object_io_native::new_lock,
             crate::syscall::ENOMEM,
         )?;
-        Self::prepare(key, gate, None, old_length, length, allocate)
+        Self::prepare(key, gate, None, old_length, length, allocate, None)
+    }
+
+    pub(crate) fn prepare_admitted(
+        guard: ProviderIoGuard,
+        old_length: u64,
+        length: u64,
+        allocate: impl FnOnce([u8; PAGE_BYTES]) -> Result<Arc<[u8; PAGE_BYTES]>, u64>,
+    ) -> Result<Self, u64> {
+        let gate = retain_cache_gate(guard.key)?;
+        Self::prepare(
+            guard.key,
+            gate,
+            None,
+            old_length,
+            length,
+            allocate,
+            Some(guard._guard),
+        )
     }
 
     fn prepare(
@@ -89,6 +108,7 @@ impl PreparedExtent {
         old_length: u64,
         length: u64,
         allocate: impl FnOnce([u8; PAGE_BYTES]) -> Result<Arc<[u8; PAGE_BYTES]>, u64>,
+        admitted: Option<super::super::object_io::IoGuard>,
     ) -> Result<Self, u64> {
         let geometry = |length| {
             byte_extent::plan(
@@ -101,10 +121,13 @@ impl PreparedExtent {
         };
         let old_capacity = geometry(old_length)?.capacity;
         let plan = geometry(length)?;
-        let io_guard = gate
-            .try_lock()
-            .map_err(|_| crate::syscall::EIO)?
-            .ok_or(crate::syscall::EAGAIN)?;
+        let io_guard = match admitted {
+            Some(guard) => guard,
+            None => gate
+                .try_lock()
+                .map_err(|_| crate::syscall::EIO)?
+                .ok_or(crate::syscall::EAGAIN)?,
+        };
         let boundary = if plan.zero.is_some() {
             let mut bytes = allocate([0; PAGE_BYTES])?;
             // Nothing may obtain an alias after preparation: the buffer stays

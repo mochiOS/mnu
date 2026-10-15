@@ -1,4 +1,4 @@
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 
 mod snapshot;
@@ -9,6 +9,7 @@ mod provider_reference;
 pub use provider_reference::count as provider_object_reference_count;
 mod memory_update;
 pub use memory_update::create as provider_memory_update_create;
+pub use memory_update::create_admission as provider_memory_admission_create;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
@@ -1424,13 +1425,27 @@ enum WaitTarget {
     IpcEndpoint(crate::syscall::ipc::IpcEndpoint),
     Stream(Arc<crate::task::FileHandle>),
     Provider(Arc<ProviderObject>),
+    MemoryAdmission(Arc<crate::mem::vm_object::ProviderAdmission>),
 }
 
-fn wait_item_signal(item: &mut mnu_abi::HandleWaitItem) -> Result<(WaitTarget, bool), u64> {
+fn wait_item_signal(
+    item: &mut mnu_abi::HandleWaitItem,
+    admission_source: Option<&Weak<crate::mem::vm_object::ProviderAdmission>>,
+) -> Result<(WaitTarget, bool), u64> {
     if item.interests == 0 {
         return Err(EINVAL);
     }
-    let object = object(u64::from(item.handle), HandleRights::WAIT)?;
+    let object = object(u64::from(item.handle), HandleRights::WAIT)
+        .map_err(|error| if admission_source.is_some() { EBADF } else { error })?;
+    if let Some(source) = admission_source {
+        // Keep identity, not ownership, across sleep. A closed/reused Handle
+        // label cannot redirect this wait to an unrelated object.
+        if !matches!(&object, KernelObject::MemoryAdmission(admission)
+            if Weak::ptr_eq(source, &Arc::downgrade(admission)))
+        {
+            return Err(EBADF);
+        }
+    }
     if item.minimum_write_bytes != 0
         && (!matches!(&object, KernelObject::File(_))
             || item.interests & mnu_abi::HANDLE_SIGNAL_WRITABLE == 0)
@@ -1471,6 +1486,17 @@ fn wait_item_signal(item: &mut mnu_abi::HandleWaitItem) -> Result<(WaitTarget, b
                 0
             };
             Ok((WaitTarget::IpcEndpoint(endpoint), readable))
+        }
+        KernelObject::MemoryAdmission(admission) => {
+            let supported = mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
+            if item.interests & !supported != 0 {
+                return Err(EINVAL);
+            }
+            if !crate::syscall::ipc::endpoint_is_valid(memory_update::admission_endpoint(&admission)) {
+                return Err(ESRCH);
+            }
+            item.observed = admission.signals() & item.interests;
+            Ok((WaitTarget::MemoryAdmission(admission), item.observed != 0))
         }
         KernelObject::File(file) => {
             let supported = mnu_abi::HANDLE_SIGNAL_READABLE
@@ -1581,6 +1607,19 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
     let mut registered_streams = alloc::vec::Vec::new();
     let mut registered_providers = alloc::vec::Vec::new();
     let mut endpoint_lifetimes = alloc::vec::Vec::new();
+    let mut admission_waiters = alloc::vec::Vec::<memory_update::AdmissionWaiter>::new();
+    let mut admission_sources = alloc::vec::Vec::new();
+    if admission_sources.try_reserve_exact(items.len()).is_err() {
+        return super::ENOMEM;
+    }
+    for item in &items {
+        let source = match object(u64::from(item.handle), HandleRights::WAIT) {
+            Ok(KernelObject::MemoryAdmission(admission)) => Some(Arc::downgrade(&admission)),
+            Ok(_) => None,
+            Err(error) => return error,
+        };
+        admission_sources.push(source);
+    }
     let deadline_tick = if matches!(
         deadline_nanoseconds,
         mnu_abi::HANDLE_WAIT_POLL | mnu_abi::HANDLE_WAIT_INFINITE
@@ -1599,11 +1638,12 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         registered_streams.clear();
         registered_providers.clear();
         endpoint_lifetimes.clear();
+        admission_waiters.clear();
         crate::syscall::time::disarm_thread_deadline(current);
         let mut targets = alloc::vec::Vec::with_capacity(items.len());
         let mut ready = None;
         for (index, item) in items.iter_mut().enumerate() {
-            match wait_item_signal(item) {
+            match wait_item_signal(item, admission_sources[index].as_ref()) {
                 Ok((_, true)) if ready.is_none() => ready = Some(index),
                 Ok((target, _)) => {
                     targets.push(target);
@@ -1673,6 +1713,27 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         }
         for target in targets {
             match target {
+                WaitTarget::MemoryAdmission(admission) => {
+                    let registered = (|| {
+                        let endpoint = memory_update::admission_endpoint(&admission);
+                        let observation =
+                            crate::syscall::ipc::lifetime::observe(endpoint, current)?;
+                        admission_waiters
+                            .try_reserve(1)
+                            .map_err(|_| super::ENOMEM)?;
+                        let waiter = memory_update::AdmissionWaiter::register(admission, current)?;
+                        admission_waiters.push(waiter);
+                        endpoint_lifetimes.push(observation);
+                        Ok::<(), u64>(())
+                    })();
+                    if let Err(error) = registered {
+                        crate::task::remove_process_exit_waiters(current);
+                        remove_endpoint_waiters(current, &registered_endpoints);
+                        remove_stream_waiters(current, &registered_streams);
+                        remove_provider_waiters(current, &registered_providers);
+                        return error;
+                    }
+                }
                 WaitTarget::Process(process_id) => {
                     if !crate::task::register_process_exit_waiter(current, process_id) {
                         crate::task::remove_process_exit_waiters(current);
@@ -1741,8 +1802,8 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         // Recheck after waiter registration so exits racing with registration
         // cannot be missed. A pending wakeup prevents sleeping in that case.
         let mut became_ready = false;
-        for item in &mut items {
-            match wait_item_signal(item) {
+        for (index, item) in items.iter_mut().enumerate() {
+            match wait_item_signal(item, admission_sources[index].as_ref()) {
                 Ok((_, is_ready)) => became_ready |= is_ready,
                 Err(error) => {
                     crate::task::remove_process_exit_waiters(current);
