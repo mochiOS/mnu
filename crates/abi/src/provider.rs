@@ -23,6 +23,14 @@ pub const OP_READ_WITH_POSITION: u16 = 10;
 /// require READ | WRITE | MAP, validate the mapping bounds, and close the attachment.
 /// Success returns the byte count in `value` and an inline u64 starting position.
 pub const OP_READ_SHARED: u16 = 11;
+/// Sequential write with a per-operation exclusive byte end in `basis`.
+/// The provider selects position and limits the written prefix atomically.
+/// Success includes one LE u64 starting position; an empty operation may
+/// succeed at any position. This does not modify the object's authority.
+pub const OP_WRITE_BOUNDED: u16 = 12;
+/// A nonempty operation has no prefix within its supplied byte bound.
+/// This native provider condition has no resource-policy or signal meaning.
+pub const STATUS_BOUND_REACHED: i64 = -4094;
 
 pub const REQUEST_HEADER_LEN: usize = 48;
 pub const RESPONSE_HEADER_LEN: usize = 40;
@@ -183,6 +191,7 @@ const fn valid_opcode(opcode: u16) -> bool {
             | OP_MEMORY_OBJECT
             | OP_READ_WITH_POSITION
             | OP_READ_SHARED
+            | OP_WRITE_BOUNDED
     )
 }
 
@@ -210,6 +219,11 @@ const fn valid_request_fields(header: RequestHeader) -> bool {
         OP_WRITE => {
             header.argument == 0
                 && header.basis == 0
+                && header.length == header.data_length
+                && header.length as usize <= MAX_DATA_LEN
+        }
+        OP_WRITE_BOUNDED => {
+            header.argument == 0
                 && header.length == header.data_length
                 && header.length as usize <= MAX_DATA_LEN
         }
@@ -279,6 +293,7 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
         // Positioned providers may return the starting byte offset alongside
         // a sequential write result, captured by the same operation.
         OP_WRITE => header.data_length == 0 || header.data_length == 8,
+        OP_WRITE_BOUNDED => header.data_length == 8 && header.value <= MAX_DATA_LEN as u64,
         OP_WRITE_AT | OP_SEEK | OP_RELEASE | OP_SYNC => header.data_length == 0,
         OP_MEMORY_OBJECT => header.value != 0 && header.data_length == 0,
         _ => false,

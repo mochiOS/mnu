@@ -158,6 +158,16 @@ pub fn write(raw: u64, buffer: u64, length: u64) -> u64 {
     }
 }
 
+pub fn write_bounded(raw: u64, buffer: u64, length: u64, byte_end: u64) -> u64 {
+    match object(raw, HandleRights::WRITE) {
+        Ok(KernelObject::Provider(provider)) => {
+            provider_write_impl(&provider, buffer, length, Some(byte_end))
+        }
+        Ok(_) => ENOTSUP,
+        Err(error) => error,
+    }
+}
+
 pub fn stream_read(raw: u64, buffer: u64, length: u64, options: u64) -> u64 {
     if options & !mnu_abi::STREAM_READ_OPTIONS_ALL != 0 {
         return EINVAL;
@@ -751,6 +761,15 @@ fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
 }
 
 fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
+    provider_write_impl(provider, buffer, length, None)
+}
+
+fn provider_write_impl(
+    provider: &ProviderObject,
+    buffer: u64,
+    length: u64,
+    byte_end: Option<u64>,
+) -> u64 {
     let length = match usize::try_from(length) {
         Ok(length) => length,
         Err(_) => return EINVAL,
@@ -759,16 +778,21 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         // A Provider owns the meaning of an empty operation too. Do not
         // fabricate success or inspect the unused user buffer on its behalf.
         let request = mnu_abi::provider::RequestHeader {
-            opcode: mnu_abi::provider::OP_WRITE,
+            opcode: if byte_end.is_some() {
+                mnu_abi::provider::OP_WRITE_BOUNDED
+            } else {
+                mnu_abi::provider::OP_WRITE
+            },
             object_id: provider.object_id,
             argument: 0,
-            basis: 0,
+            basis: byte_end.unwrap_or(0),
             length: 0,
             data_length: 0,
         };
         let mut response = [0; mnu_abi::provider::RESPONSE_HEADER_LEN + 8];
         return match provider_call(provider, request, &[], &mut response) {
-            Ok((header, 0 | 8)) if header.value == 0 => SUCCESS,
+            Ok((header, data_len @ (0 | 8)))
+                if header.value == 0 && (byte_end.is_none() || data_len == 8) => SUCCESS,
             Ok(_) => EIO,
             Err(error) => error,
         };
@@ -794,10 +818,14 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         let _io_guard =
             identity.map(|identity| crate::mem::vm_object::lock_provider_io(provider, identity));
         let request = mnu_abi::provider::RequestHeader {
-            opcode: mnu_abi::provider::OP_WRITE,
+            opcode: if byte_end.is_some() {
+                mnu_abi::provider::OP_WRITE_BOUNDED
+            } else {
+                mnu_abi::provider::OP_WRITE
+            },
             object_id: provider.object_id,
             argument: 0,
-            basis: 0,
+            basis: byte_end.unwrap_or(0),
             length: chunk as u32,
             data_length: chunk as u32,
         };
@@ -807,15 +835,27 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
                 Err(error) => return if total == 0 { error } else { total as u64 },
             };
         let written = match usize::try_from(response.value) {
-            Ok(written) if (data_len == 0 || data_len == 8) && written <= chunk => written,
+            Ok(written)
+                if (data_len == 8 || (byte_end.is_none() && data_len == 0)) && written <= chunk =>
+            {
+                written
+            }
             _ => return if total == 0 { EIO } else { total as u64 },
         };
+        let mut reached_end = false;
         if written != 0 && data_len == 8 {
             let start = u64::from_le_bytes(
                 response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN..]
                     .try_into()
                     .unwrap(),
             );
+            if let Some(end) = byte_end {
+                let Some(after) = start.checked_add(written as u64).filter(|after| *after <= end)
+                else {
+                    return if total == 0 { EIO } else { total as u64 };
+                };
+                reached_end = after == end;
+            }
             if let Some(identity) = identity {
                 crate::mem::vm_object::update_provider_range(
                     provider,
@@ -826,7 +866,7 @@ fn provider_write(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
             }
         }
         total += written;
-        if written < chunk {
+        if written < chunk || reached_end {
             break;
         }
     }

@@ -239,6 +239,12 @@ pub enum SyscallNumber {
     /// HandleReadAt reads immutable handle_snapshot metadata; ProcessCreate
     /// may explicitly select it as its captured grant source.
     HandleTableCapture = 693,
+    /// Writes to a provider with a per-operation exclusive byte end. Arguments:
+    /// WRITE Handle, source pointer, byte length, byte end. Provider selects
+    /// its current position and allowed prefix in one operation; no cursor
+    /// query or persisted policy is involved. STATUS_BOUND_REACHED means no
+    /// nonempty prefix fits. Other objects/providers may reject the operation.
+    HandleWriteBounded = 694,
     CheckGravityExist = 999,
 }
 

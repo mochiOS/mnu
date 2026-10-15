@@ -767,6 +767,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::LaunchValueGet as u64 => handle::launch_value_get(arg0, arg1),
         x if x == SyscallNumber::HandleRead as u64 => handle::read(arg0, arg1, arg2),
         x if x == SyscallNumber::HandleWrite as u64 => handle::write(arg0, arg1, arg2),
+        x if x == SyscallNumber::HandleWriteBounded as u64 => {
+            handle::write_bounded(arg0, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::HandleSeek as u64 => handle::seek(arg0, arg1, arg2),
         x if x == SyscallNumber::HandleControl as u64 => {
             handle::control(arg0, arg1, arg2, arg3, arg4, arg5)
@@ -1027,6 +1030,7 @@ fn is_ipc_syscall(num: u64) -> bool {
 fn is_vfs_syscall(num: u64) -> bool {
     num == SyscallNumber::HandleRead as u64
         || num == SyscallNumber::HandleWrite as u64
+        || num == SyscallNumber::HandleWriteBounded as u64
         || num == SyscallNumber::HandleReadAt as u64
         || num == SyscallNumber::HandleWriteAt as u64
         || num == SyscallNumber::HandleSeek as u64
