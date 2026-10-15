@@ -10,6 +10,7 @@ use crate::task::{MemoryRegion, Process};
 pub enum ConsumeError {
     Consumed,
     Authorization,
+    BackingBusy,
     Context,
 }
 
@@ -36,6 +37,16 @@ impl AddressSpaceObject {
         let image = slot.as_ref().ok_or(ConsumeError::Consumed)?;
         if !image.permits(authorization) {
             return Err(ConsumeError::Authorization);
+        }
+        // The image can have been captured before an owner reserved backing.
+        // Follow the caller's mapping lock through this preflight and the
+        // one-shot take; temporary PTE suspension is not an invalid context.
+        for region in &image.regions {
+            if let Some(object) = region.backing().file_object() {
+                object
+                    .with_memory_generation(object.memory_generation(), || Ok(()))
+                    .map_err(|_| ConsumeError::BackingBusy)?;
+            }
         }
         let table = image.table.ok_or(ConsumeError::Consumed)?;
         if !super::paging::is_user_initial_context_in_table(table, context) {

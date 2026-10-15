@@ -1531,7 +1531,7 @@ fn consume_address_space_for_create(
     crate::task::with_process(pid, |_| image.consume(authorization, context))
         .ok_or(EACCES)?
         .map_err(|error| match error {
-            ConsumeError::Consumed => EAGAIN,
+            ConsumeError::Consumed | ConsumeError::BackingBusy => EAGAIN,
             ConsumeError::Authorization => EACCES,
             ConsumeError::Context => EFAULT,
         })
