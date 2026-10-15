@@ -1,5 +1,6 @@
-//! Cache-side extent publication. The VM coordinator must freeze backing I/O,
-//! revoke affected PTEs and acknowledge remote TLBs before calling `commit`.
+//! Cache-side extent publication. Preparation reserves backing I/O without
+//! waiting. The VM coordinator must additionally revoke affected PTEs and
+//! acknowledge remote TLBs before calling `commit`.
 use super::*;
 use crate::mem::byte_extent;
 
@@ -7,6 +8,9 @@ pub(crate) struct PreparedExtent {
     object: ObjectKey,
     epoch: u64,
     gate: super::super::object_io::IoLock,
+    // Keep I/O excluded until commit or cancellation, including delayed reply
+    // publication by an earlier writer. Never wait in a provider's request path.
+    _io_guard: super::super::object_io::IoGuard,
     // Preparation must keep the provider object alive through publication.
     _provider: Arc<ProviderObject>,
     old_length: u64,
@@ -42,6 +46,7 @@ impl VmObject {
         };
         let old_capacity = geometry(old_length)?.capacity;
         let plan = geometry(length)?;
+        let io_guard = _io_lock.try_lock().ok_or(crate::syscall::EAGAIN)?;
         let epoch = _io_lock.generation();
         let boundary = if plan.zero.is_some() {
             let mut bytes = allocate([0; PAGE_BYTES])?;
@@ -58,6 +63,7 @@ impl VmObject {
             object: self.object_key(),
             epoch,
             gate: _io_lock.clone(),
+            _io_guard: io_guard,
             _provider: object.clone(),
             old_length,
             old_capacity,

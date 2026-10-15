@@ -66,17 +66,23 @@ impl IoLock {
     pub(crate) fn advance_generation(&self) {
         self.0.generation.fetch_add(1, Ordering::AcqRel);
     }
-    /// Waiting must cooperate with the scheduler; this is not an IRQ spinlock.
-    pub(crate) fn lock(&self, mut wait: impl FnMut()) -> IoGuard {
-        while self
-            .0
+    /// A resource owner must not wait for an I/O caller that may itself be
+    /// waiting for that owner's reply. Failed admission leaves ownership alone.
+    pub(crate) fn try_lock(&self) -> Option<IoGuard> {
+        self.0
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
+            .ok()
+            .map(|_| IoGuard(self.0.clone()))
+    }
+    /// Waiting must cooperate with the scheduler; this is not an IRQ spinlock.
+    pub(crate) fn lock(&self, mut wait: impl FnMut()) -> IoGuard {
+        loop {
+            if let Some(guard) = self.try_lock() {
+                return guard;
+            }
             wait();
         }
-        IoGuard(self.0.clone())
     }
 }
 
