@@ -24,7 +24,14 @@ struct Work {
     // have been resolved. Incomplete Work is never dropped by this module.
     targets: Targets,
     extent: PreparedExtent,
-    published: bool,
+    publication: Publication,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Publication {
+    Prepared,
+    Requested,
+    Published,
 }
 
 static PENDING: SpinLock<Pending<Option<Work>>> = SpinLock::new(Pending::new());
@@ -79,7 +86,7 @@ impl ExtentTransaction {
                 pages,
                 targets,
                 extent,
-                published: false,
+                publication: Publication::Prepared,
             });
             let work = owner.value_mut().as_mut().ok_or(crate::syscall::EINVAL)?;
             for (root, address) in locations {
@@ -123,17 +130,27 @@ impl ExtentTransaction {
     /// error. Once cache publication succeeds, drop/retry always completes the
     /// new extent rather than restoring removed mappings to the old extent.
     pub(crate) fn publish_local(&mut self) -> Result<(), u64> {
+        self.finish(false)
+    }
+
+    /// Record an irrevocable decision to publish this extent BEFORE any
+    /// remaining cache/PTE check can fail. Subsequent failure or owner drop
+    /// retries publication; it must never restore the old extent.
+    /// This neither starts nor acknowledges external I/O. Its outcome must
+    /// already be resolved by the caller; unconfirmed in-flight owner death
+    /// still requires a separate protocol before exposing a public API.
+    pub(crate) fn request_publication(&mut self) -> Result<(), u64> {
+        self.finish(true)
+    }
+
+    fn finish(&mut self, request_publication: bool) -> Result<(), u64> {
         let owner = self.owner.as_mut().ok_or(crate::syscall::EINVAL)?;
         process::with_mapping_table(|_| {
             let work = owner.value_mut().as_mut().ok_or(crate::syscall::EINVAL)?;
-            if !work.published {
-                // All PTE checks precede cache mutation, under the same lock.
-                if !work.pages.iter().all(|page| work.current(page)) {
-                    return Err(crate::syscall::EFAULT);
-                }
-                work.extent.publish()?;
-                work.published = true;
+            if request_publication && work.publication == Publication::Prepared {
+                work.publication = Publication::Requested;
             }
+            work.publish_cache()?;
             work.resolve()
         })?;
         // Every PTE is finished. Disarm enqueue and release pins/admission
@@ -146,6 +163,28 @@ impl ExtentTransaction {
 }
 
 impl Work {
+    fn publish_cache(&mut self) -> Result<(), u64> {
+        if self.publication != Publication::Published {
+            // All PTE checks precede cache mutation, under the same lock.
+            if !self.pages.iter().all(|page| self.current(page)) {
+                return Err(crate::syscall::EFAULT);
+            }
+            self.extent.publish()?;
+            self.publication = Publication::Published;
+        }
+        Ok(())
+    }
+
+    fn progress(&mut self) -> Result<(), u64> {
+        match self.publication {
+            Publication::Prepared => self.resolve(),
+            Publication::Requested | Publication::Published => {
+                self.publish_cache()?;
+                self.resolve()
+            }
+        }
+    }
+
     // Caller holds VM exclusion; the reservation/root pins remain owned here.
     fn current(&self, page: &Page) -> bool {
         let (root, address) = page.record.location();
@@ -155,6 +194,12 @@ impl Work {
     }
 
     fn resolve(&mut self) -> Result<(), u64> {
+        let published = match self.publication {
+            Publication::Prepared => false,
+            Publication::Published => true,
+            // An irrevocable request cannot fall through to cancellation.
+            Publication::Requested => return Err(crate::syscall::EAGAIN),
+        };
         while let Some(page) = self.pages.pop() {
             if !self.current(&page) {
                 self.pages.push(page);
@@ -162,7 +207,7 @@ impl Work {
             }
             // Zero only after cache publication, never during cancellation.
             // Physical access was validated before TLB synchronization.
-            if self.published {
+            if published {
                 if let Some((start, length)) = page.zero {
                     for offset in 0..length {
                         unsafe {
@@ -175,7 +220,7 @@ impl Work {
             // SAFETY: selected root is pinned, VM exclusion is held, and
             // published release is reachable only after all-CPU TLB ack.
             let result = unsafe {
-                if !self.published || zero.is_some() {
+                if !published || zero.is_some() {
                     record.try_restore()
                 } else {
                     record.try_release()
@@ -202,7 +247,7 @@ pub(crate) fn flush() {
     while let Some(mut ticket) = batch.pop() {
         let complete = match ticket.value_mut().as_mut() {
             None => true,
-            Some(work) => process::try_with_mapping_table(|_| work.resolve())
+            Some(work) => process::try_with_mapping_table(|_| work.progress())
                 .is_some_and(|result| result.is_ok()),
         };
         if !complete {
