@@ -1012,7 +1012,8 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
     for region in removed {
         if region.is_shared() && region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE) {
             if let Some(object) = region.backing().file_object() {
-                if let Err(errno) = object.flush_range(region.backing().file_offset(), region.len())
+                if let Err(errno) =
+                    object.flush_unmapped_range(region.backing().file_offset(), region.len())
                 {
                     return errno;
                 }

@@ -657,6 +657,21 @@ impl VmObject {
         Ok(())
     }
 
+    /// Cleanup after PTEs and mapping metadata have already been removed.
+    /// Quarantined data must not be written back, and cannot prevent removal.
+    /// Other writeback errors still propagate; ordinary sync remains strict.
+    pub(crate) fn flush_unmapped_range(&self, offset: u64, length: u64) -> Result<(), u64> {
+        let result = self.flush_range(offset, length);
+        let unavailable = match &self.source {
+            VmObjectSource::Provider { _io_lock, .. } => _io_lock.is_unavailable(),
+            VmObjectSource::Memory(_) => false,
+        };
+        match result {
+            Err(crate::syscall::EIO) if unavailable => Ok(()),
+            result => result,
+        }
+    }
+
     pub fn flush(&self) -> Result<(), u64> {
         self.flush_range(0, u64::MAX)
     }
