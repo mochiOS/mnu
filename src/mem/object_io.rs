@@ -1,9 +1,27 @@
 use alloc::sync::{Arc, Weak};
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::interrupt::spinlock::SpinLock;
+
+struct Admission {
+    locked: bool,
+    next: u64,
+    waiting: VecDeque<u64>,
+}
+
+impl Admission {
+    const fn new() -> Self {
+        Self {
+            locked: false,
+            next: 0,
+            waiting: VecDeque::new(),
+        }
+    }
+}
 
 pub(crate) struct State {
-    locked: AtomicBool,
+    admission: SpinLock<Admission>,
     reserved: AtomicBool,
     unavailable: AtomicBool,
     generation: AtomicU64,
@@ -12,7 +30,7 @@ pub(crate) struct State {
 impl State {
     pub(crate) const fn new() -> Self {
         Self {
-            locked: AtomicBool::new(false),
+            admission: SpinLock::new(Admission::new()),
             reserved: AtomicBool::new(false),
             unavailable: AtomicBool::new(false),
             generation: AtomicU64::new(1),
@@ -62,6 +80,14 @@ pub(crate) struct IoLock(Arc<State>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Unavailable;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntentError {
+    Unavailable,
+    NoMemory,
+    Exhausted,
+    Consumed,
+}
+
 impl IoLock {
     pub(crate) fn from_allocated(gate: Arc<State>) -> Self {
         Self(gate)
@@ -85,19 +111,50 @@ impl IoLock {
         if self.is_unavailable() {
             return Err(Unavailable);
         }
-        let guard = self
-            .0
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()
-            .map(|_| IoGuard(self.0.clone()));
-        // An unavailable owner can release between the first check and CAS.
+        let guard = {
+            let mut admission = self.0.admission.lock();
+            if admission.locked || !admission.waiting.is_empty() {
+                None
+            } else {
+                admission.locked = true;
+                Some(IoGuard(self.0.clone()))
+            }
+        };
+        // An unavailable owner can release between the first check and
+        // acquisition. Never turn that handoff into healthy I/O admission.
         if self.is_unavailable() {
             drop(guard);
             Err(Unavailable)
         } else {
             Ok(guard)
         }
+    }
+
+    /// Register an owned, cancellable place ahead of NEW ordinary I/O.
+    /// Existing I/O is not interrupted and this call never waits for it.
+    /// Keep the intent alive while serving outstanding provider calls; merely
+    /// remembering contention without an owner would strand later callers.
+    /// Failed registration leaves both admission and generation unchanged.
+    pub(crate) fn intent(&self) -> Result<IoIntent, IntentError> {
+        if self.is_unavailable() {
+            return Err(IntentError::Unavailable);
+        }
+        let mut admission = self.0.admission.lock();
+        if self.is_unavailable() {
+            return Err(IntentError::Unavailable);
+        }
+        let ticket = admission.next;
+        let next = ticket.checked_add(1).ok_or(IntentError::Exhausted)?;
+        admission
+            .waiting
+            .try_reserve(1)
+            .map_err(|_| IntentError::NoMemory)?;
+        admission.waiting.push_back(ticket);
+        admission.next = next;
+        Ok(IoIntent {
+            gate: self.clone(),
+            ticket: Some(ticket),
+        })
     }
     /// Waiting must cooperate with the scheduler; this is not an IRQ spinlock.
     pub(crate) fn lock(&self, mut wait: impl FnMut()) -> Result<IoGuard, Unavailable> {
@@ -106,6 +163,48 @@ impl IoLock {
                 return Ok(guard);
             }
             wait();
+        }
+    }
+}
+
+/// A queue position, not storage permission or a mapping reservation. No VM
+/// state changes until the acquired IoGuard is explicitly reserved. Ordinary
+/// I/O cannot barge ahead of an intent; intents themselves are FIFO. Dropping
+/// one removes just that position, including cancellation in the middle.
+pub(crate) struct IoIntent {
+    gate: IoLock,
+    ticket: Option<u64>,
+}
+
+impl IoIntent {
+    /// Poll without sleeping/IPC and consume the position exactly once on
+    /// success. All owner-death/cancellation paths can simply drop the intent.
+    pub(crate) fn try_acquire(&mut self) -> Result<Option<IoGuard>, IntentError> {
+        let ticket = self.ticket.ok_or(IntentError::Consumed)?;
+        if self.gate.is_unavailable() {
+            return Err(IntentError::Unavailable);
+        }
+        let mut admission = self.gate.0.admission.lock();
+        if self.gate.is_unavailable() {
+            return Err(IntentError::Unavailable);
+        }
+        if admission.locked || admission.waiting.front() != Some(&ticket) {
+            return Ok(None);
+        }
+        admission.waiting.pop_front();
+        admission.locked = true;
+        self.ticket = None;
+        Ok(Some(IoGuard(self.gate.0.clone())))
+    }
+}
+
+impl Drop for IoIntent {
+    fn drop(&mut self) {
+        if let Some(ticket) = self.ticket.take() {
+            let mut admission = self.gate.0.admission.lock();
+            if let Some(index) = admission.waiting.iter().position(|entry| *entry == ticket) {
+                admission.waiting.remove(index);
+            }
         }
     }
 }
@@ -148,6 +247,6 @@ impl Drop for Reservation {
 
 impl Drop for IoGuard {
     fn drop(&mut self) {
-        self.0.locked.store(false, Ordering::Release);
+        self.0.admission.lock().locked = false;
     }
 }
