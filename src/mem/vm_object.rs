@@ -298,8 +298,8 @@ impl VmObject {
         }
     }
 
-    pub fn invalidate(&self) {
-        invalidate_object(self.object_key());
+    pub fn invalidate(&self) -> Result<(), u64> {
+        invalidate_object(self.object_key())
     }
 
     pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
@@ -357,7 +357,9 @@ impl VmObject {
             return Err(crate::syscall::EIO);
         }
 
-        update_cached_range(self.object_key(), offset, &input[..written]);
+        if let Some(guard) = &_io_guard {
+            update_cached_range(guard, offset, &input[..written]);
+        }
 
         Ok(written)
     }
@@ -702,28 +704,21 @@ fn next_cache_access() -> u64 {
     PAGE_CACHE_CLOCK.fetch_add(1, Ordering::Relaxed)
 }
 
-pub(crate) fn update_provider_range(
-    object: &ProviderObject,
-    identity: u64,
-    offset: u64,
-    input: &[u8],
-) {
-    update_cached_range(
-        ObjectKey::Provider {
-            endpoint_thread_id: object.endpoint_thread_id,
-            endpoint_slot: object.endpoint_slot,
-            endpoint_generation: object.endpoint_generation,
-            identity,
-        },
-        offset,
-        input,
-    );
+/// The key and held gate are inseparable: a delayed reply cannot publish to
+/// an arbitrary backing or outlive the I/O exclusion which admitted it.
+pub(crate) struct ProviderIoGuard {
+    key: ObjectKey,
+    _guard: super::object_io::IoGuard,
+}
+
+pub(crate) fn update_provider_range(guard: &ProviderIoGuard, offset: u64, input: &[u8]) {
+    update_cached_range(guard, offset, input);
 }
 
 pub(crate) fn lock_provider_io(
     object: &ProviderObject,
     identity: u64,
-) -> Result<super::object_io::IoGuard, u64> {
+) -> Result<ProviderIoGuard, u64> {
     lock_provider_key(ObjectKey::Provider {
         endpoint_thread_id: object.endpoint_thread_id,
         endpoint_slot: object.endpoint_slot,
@@ -770,19 +765,21 @@ pub(crate) fn overlay_provider_range(
     Ok(())
 }
 
-fn lock_provider_key(key: ObjectKey) -> Result<super::object_io::IoGuard, u64> {
+fn lock_provider_key(key: ObjectKey) -> Result<ProviderIoGuard, u64> {
     let gate = PROVIDER_IO.lock().try_get(
         key,
         crate::mem::object_io_native::new_lock,
         crate::syscall::ENOMEM,
     )?;
-    Ok(gate.lock(|| {
+    let guard = gate.lock(|| {
         let _ = crate::task::yield_now();
-    }))
+    });
+    Ok(ProviderIoGuard { key, _guard: guard })
 }
 
-fn invalidate_object(object: ObjectKey) {
+fn invalidate_object(object: ObjectKey) -> Result<(), u64> {
     let mut cache = PAGE_CACHE.lock();
+    ensure_unreserved(object)?;
 
     cache.retain(|entry| {
         entry.key.object != object
@@ -792,9 +789,11 @@ fn invalidate_object(object: ObjectKey) {
     });
 
     bump_cache_mutation_epoch(object);
+    Ok(())
 }
 
-fn update_cached_range(object: ObjectKey, offset: u64, input: &[u8]) {
+fn update_cached_range(guard: &ProviderIoGuard, offset: u64, input: &[u8]) {
+    let object = guard.key;
     if input.is_empty() {
         return;
     }

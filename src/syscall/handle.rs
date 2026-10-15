@@ -273,9 +273,9 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
                 };
                 if write {
                     provider_write_at(provider, position, &data[..chunk]).map(|count| {
-                        if let Some(identity) = identity {
+                        if let Some(guard) = &_guard {
                             crate::mem::vm_object::update_provider_range(
-                                provider, identity, position, &data[..count],
+                                guard, position, &data[..count],
                             );
                         }
                         count
@@ -869,10 +869,9 @@ fn provider_write_impl(
                 };
                 reached_end = after == end;
             }
-            if let Some(identity) = identity {
+            if let Some(guard) = &_io_guard {
                 crate::mem::vm_object::update_provider_range(
-                    provider,
-                    identity,
+                    guard,
                     start,
                     &data[..written],
                 );
