@@ -1,4 +1,4 @@
-use super::{mapping_error_errno, ExecMeasurement};
+use super::{ExecMeasurement, mapping_error_errno};
 use alloc::vec::Vec;
 
 const EM_X86_64: u16 = 0x3e;
@@ -122,6 +122,9 @@ fn parse_load_segments(
             .ok_or(EINVAL)?;
         if program_header.p_type == crate::elf::PT_LOAD {
             validate_load_segment(data, &program_header)?;
+            segments
+                .try_reserve(1)
+                .map_err(|_| crate::syscall::types::ENOMEM)?;
             segments.push(program_header);
         }
     }
@@ -157,6 +160,10 @@ pub(super) fn map_elf_image(
         .ok_or(EINVAL)?;
     let phdr_vaddr = load_base.checked_add(header.e_phoff).ok_or(EINVAL)?;
     let mut deferred_zero_regions = Vec::new();
+    // Finish metadata allocation before the first page-table mutation.
+    deferred_zero_regions
+        .try_reserve_exact(segments.len())
+        .map_err(|_| crate::syscall::types::ENOMEM)?;
 
     for (index, segment) in segments.iter().enumerate() {
         let source_offset = segment.p_offset as usize;

@@ -7,13 +7,13 @@ use crate::policy::{
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::string::ToString;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 mod image;
 mod launch;
 mod captured_handles;
+mod storage;
 
 use image::{map_elf_image, ElfImageLayout};
 use launch::ImageLaunch;
@@ -338,8 +338,11 @@ fn export_inherited_handles(
         return Ok(Vec::new());
     }
     let source_process = source_process.ok_or(EINVAL)?;
+    let mut grants = Vec::new();
+    grants
+        .try_reserve_exact(specs.len())
+        .map_err(|_| crate::syscall::types::ENOMEM)?;
     crate::task::with_process(source_process, |process| {
-        let mut grants = Vec::with_capacity(specs.len());
         for spec in specs {
             let source = process.object_handles().get(spec.source).ok_or(EBADF)?;
             if !source
@@ -648,7 +651,11 @@ pub(crate) fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u6
     let tls_base = exec
         .tls_base_min
         .saturating_add(aslr_offset_pages(aslr_seed ^ 0x19d7_3c6a, exec.tls_aslr_max_pages) * 4096);
-    let mut tls_data = vec![0u8; exec.initial_tls_size as usize];
+    let length = usize::try_from(exec.initial_tls_size)
+        .ok()
+        .filter(|&length| length >= core::mem::size_of::<u64>())
+        .ok_or(crate::syscall::types::EINVAL)?;
+    let mut tls_data = crate::util::object_snapshot::zeroed(length)?;
     tls_data[..8].copy_from_slice(&tls_base.to_ne_bytes());
     match crate::mem::paging::map_and_copy_segment_to(
         table_phys,
@@ -801,7 +808,7 @@ fn build_relocatable_user_stack(
         .checked_sub(startup.stack().len())
         .ok_or(crate::syscall::types::EINVAL)?;
     let image_base = stack_end_vaddr - startup.stack().len() as u64;
-    let mut page_data = alloc::vec![0u8; 4096];
+    let mut page_data = crate::util::object_snapshot::zeroed(4096)?;
     page_data[image_offset..].copy_from_slice(startup.stack());
     for relocation in startup.relocations() {
         let offset = image_offset + relocation.offset as usize;
@@ -1437,10 +1444,10 @@ fn process_image_replace_impl(
         return EINVAL;
     }
 
-    let mut identity_bytes = vec![0u8; identity_len];
-    if let Err(errno) = crate::syscall::copy_from_user(identity_ptr, &mut identity_bytes) {
-        return errno;
-    }
+    let identity_bytes = match storage::from_user(identity_ptr, identity_len) {
+        Ok(bytes) => bytes,
+        Err(errno) => return errno,
+    };
     if identity_bytes.contains(&0) {
         return EINVAL;
     }
@@ -1449,10 +1456,10 @@ fn process_image_replace_impl(
         Err(_) => return EINVAL,
     };
 
-    let mut startup_bytes = vec![0u8; startup_len];
-    if let Err(errno) = crate::syscall::copy_from_user(startup_ptr, &mut startup_bytes) {
-        return errno;
-    }
+    let startup_bytes = match storage::from_user(startup_ptr, startup_len) {
+        Ok(bytes) => bytes,
+        Err(errno) => return errno,
+    };
     let startup = match mnu_abi::process_image::decode(&startup_bytes) {
         Ok(startup) => startup,
         Err(_) => return EINVAL,
@@ -1522,10 +1529,10 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         Ok(length) if length > 0 && length <= mnu_abi::process_create::MAX_REQUEST_BYTES => length,
         _ => return EINVAL,
     };
-    let mut bytes = vec![0u8; length];
-    if let Err(errno) = crate::syscall::copy_from_user(request_ptr, &mut bytes) {
-        return errno;
-    }
+    let bytes = match storage::from_user(request_ptr, length) {
+        Ok(bytes) => bytes,
+        Err(errno) => return errno,
+    };
     let request = match mnu_abi::process_create::decode(&bytes) {
         Ok(request) => request,
         Err(_) => return EINVAL,
@@ -1546,6 +1553,9 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         return EACCES;
     }
     let mut specs = Vec::new();
+    if specs.try_reserve_exact(request.handles().count()).is_err() {
+        return crate::syscall::types::ENOMEM;
+    }
     for grant in request.handles() {
         let Some(source) = crate::task::ObjectHandle::from_raw(grant.source) else {
             return EINVAL;
@@ -1568,18 +1578,24 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         Ok(grants) => grants,
         Err(errno) => return errno,
     };
-    let values: Vec<_> = request
-        .values()
-        .map(|value| InheritedValueSpec {
-            key: value.key,
-            value: value.value,
-        })
-        .collect();
+    let mut values = Vec::new();
+    if values.try_reserve_exact(request.values().count()).is_err() {
+        return crate::syscall::types::ENOMEM;
+    }
+    values.extend(request.values().map(|value| InheritedValueSpec {
+        key: value.key,
+        value: value.value,
+    }));
     let startup = match request.startup {
         mnu_abi::process_create::InitialState::Image(startup) => startup,
         mnu_abi::process_create::InitialState::Context(context) => {
             return create_from_address_space(
-                image_handle, &request, context, authorization, &grants, &values,
+                image_handle,
+                &request,
+                context,
+                authorization,
+                &grants,
+                &values,
             );
         }
     };

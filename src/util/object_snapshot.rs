@@ -3,6 +3,17 @@
 
 use alloc::vec::Vec;
 
+/// Allocate initialized storage without invoking the allocation-error handler.
+/// Callers validate their own extent and policy bounds before requesting it.
+pub fn zeroed(length: usize) -> Result<Vec<u8>, u64> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| mnu_abi::ENOMEM)?;
+    bytes.resize(length, 0);
+    Ok(bytes)
+}
+
 pub fn read(
     length: u64,
     maximum: usize,
@@ -12,11 +23,7 @@ pub fn read(
         .ok()
         .filter(|length| *length <= maximum)
         .ok_or(mnu_abi::EFBIG)?;
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(length)
-        .map_err(|_| mnu_abi::ENOMEM)?;
-    bytes.resize(length, 0);
+    let mut bytes = zeroed(length)?;
     if copy(&mut bytes)? != length {
         return Err(mnu_abi::EIO);
     }

@@ -937,12 +937,11 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
         return Err(EFBIG);
     }
     provider_seek_result(&provider, 0, crate::syscall::fs::SeekBasis::Start)?;
-    let mut output = alloc::vec![0u8; length];
+    let mut output = crate::util::object_snapshot::zeroed(length)?;
     let mut offset = 0usize;
-    let mut response_storage = alloc::vec![
-        0u8;
-        mnu_abi::provider::RESPONSE_HEADER_LEN + mnu_abi::provider::MAX_DATA_LEN
-    ];
+    let mut response_storage = crate::util::object_snapshot::zeroed(
+        mnu_abi::provider::RESPONSE_HEADER_LEN + mnu_abi::provider::MAX_DATA_LEN,
+    )?;
     while offset < output.len() {
         let chunk = (output.len() - offset).min(maximum);
         let data = provider_read_chunk(&provider, identity, chunk, &mut response_storage)?;
