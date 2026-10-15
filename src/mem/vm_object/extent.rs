@@ -59,7 +59,10 @@ impl VmObject {
         };
         let old_capacity = geometry(old_length)?.capacity;
         let plan = geometry(length)?;
-        let io_guard = _io_lock.try_lock().ok_or(crate::syscall::EAGAIN)?;
+        let io_guard = _io_lock
+            .try_lock()
+            .map_err(|_| crate::syscall::EIO)?
+            .ok_or(crate::syscall::EAGAIN)?;
         let boundary = if plan.zero.is_some() {
             let mut bytes = allocate([0; PAGE_BYTES])?;
             // Nothing may obtain an alias after preparation: the buffer stays
@@ -115,6 +118,9 @@ impl PreparedExtent {
     fn check<'a>(&mut self, cache: &'a [CachedPage]) -> Result<Option<BoundaryCheck<'a>>, u64> {
         if self.published {
             return Err(crate::syscall::EINVAL);
+        }
+        if self.gate.is_unavailable() {
+            return Err(crate::syscall::EIO);
         }
         if self.gate.generation() != self.epoch {
             return Err(crate::syscall::EAGAIN);

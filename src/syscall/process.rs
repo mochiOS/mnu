@@ -970,7 +970,7 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
             }
         }
         let owns_frames = mmio.is_none();
-        crate::mem::mapping_admission::check(
+        crate::mem::mapping_admission::check_unmap(
             process.memory_regions(),
             unmap_start,
             unmap_end,

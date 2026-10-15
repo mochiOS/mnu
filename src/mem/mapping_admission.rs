@@ -6,6 +6,25 @@ pub(crate) fn check(
     start: u64,
     end: u64,
 ) -> Result<(), u64> {
+    check_range(regions, start, end, false)
+}
+
+/// Unmapping can discard unavailable data, but not an extent owner's PTEs.
+/// This admission must never be used for protection changes or data access.
+pub(crate) fn check_unmap(
+    regions: &[crate::task::MemoryRegion],
+    start: u64,
+    end: u64,
+) -> Result<(), u64> {
+    check_range(regions, start, end, true)
+}
+
+fn check_range(
+    regions: &[crate::task::MemoryRegion],
+    start: u64,
+    end: u64,
+    removing: bool,
+) -> Result<(), u64> {
     if start >= end {
         return Err(crate::syscall::EINVAL);
     }
@@ -13,7 +32,11 @@ pub(crate) fn check(
         let region_end = region.end().ok_or(crate::syscall::EINVAL)?;
         if start < region_end && region.start() < end {
             if let Some(object) = region.backing().file_object() {
-                object.with_memory_generation(object.memory_generation(), || Ok(()))?;
+                if removing {
+                    object.check_mapping_removal()?;
+                } else {
+                    object.with_memory_generation(object.memory_generation(), || Ok(()))?;
+                }
             }
         }
     }

@@ -54,6 +54,8 @@ struct PageKey {
 
 struct CachedPage {
     key: PageKey,
+    // Cache data must not outlive its canonical availability/epoch state.
+    io_gate: super::object_io::IoLock,
     bytes: Arc<[u8; PAGE_BYTES]>,
     frame_phys: Option<u64>,
     valid_len: usize,
@@ -185,6 +187,25 @@ impl VmObject {
                 with_cache_generation(_io_lock, generation, install)
             }
             _ => Err(crate::syscall::EINVAL),
+        }
+    }
+
+    /// Removing an existing mapping needs no usable backing bytes. The caller
+    /// holds mapping exclusion through removal; an extent owner still excludes
+    /// edits until it has resolved its suspended PTEs and released reservation.
+    pub(crate) fn check_mapping_removal(&self) -> Result<(), u64> {
+        match &self.source {
+            VmObjectSource::Memory(memory) => {
+                memory.with_generation(memory.generation(), || Ok(()))
+            }
+            VmObjectSource::Provider { _io_lock, .. } => {
+                let _cache = PAGE_CACHE.lock();
+                if _io_lock.is_reserved() {
+                    Err(crate::syscall::EAGAIN)
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -394,6 +415,7 @@ impl VmObject {
                 }
                 cache.push(CachedPage {
                     key,
+                    io_gate: retain_cache_gate(key.object)?,
                     bytes: loaded,
                     frame_phys: None,
                     valid_len: loaded_len,
@@ -502,6 +524,7 @@ impl VmObject {
                 }
                 cache.push(CachedPage {
                     key,
+                    io_gate: retain_cache_gate(key.object)?,
                     bytes: loaded,
                     frame_phys: None,
                     valid_len: loaded_len,
@@ -693,7 +716,7 @@ fn copy_to_frame(frame_phys: u64, offset: usize, input: &[u8]) -> Result<(), u64
 }
 
 fn cache_entry_is_evictable(entry: &CachedPage) -> bool {
-    !backing_is_reserved(entry.key.object)
+    !entry.io_gate.is_reserved()
         && entry.dirty_range.is_none()
         && entry
             .frame_phys
@@ -771,15 +794,19 @@ fn lock_provider_key(key: ObjectKey) -> Result<ProviderIoGuard, u64> {
         crate::mem::object_io_native::new_lock,
         crate::syscall::ENOMEM,
     )?;
-    let guard = gate.lock(|| {
-        let _ = crate::task::yield_now();
-    });
+    let guard = gate
+        .lock(|| {
+            let _ = crate::task::yield_now();
+        })
+        .map_err(|_| crate::syscall::EIO)?;
     Ok(ProviderIoGuard { key, _guard: guard })
 }
 
 fn invalidate_object(object: ObjectKey) -> Result<(), u64> {
     let mut cache = PAGE_CACHE.lock();
-    ensure_unreserved(object)?;
+    if backing_is_reserved(object) {
+        return Err(crate::syscall::EAGAIN);
+    }
 
     cache.retain(|entry| {
         entry.key.object != object
@@ -1026,6 +1053,7 @@ fn cache_or_snapshot_page(
 
     cache.push(CachedPage {
         key,
+        io_gate: retain_cache_gate(key.object)?,
         bytes: bytes.clone(),
         frame_phys: None,
         valid_len,
@@ -1051,13 +1079,21 @@ fn backing_is_reserved(object: ObjectKey) -> bool {
         .is_some_and(|gate| gate.is_reserved())
 }
 
+fn retain_cache_gate(object: ObjectKey) -> Result<super::object_io::IoLock, u64> {
+    PROVIDER_IO.lock().existing(&object).ok_or(crate::syscall::EIO)
+}
+
 /// Caller serializes admission with extent reservation through PAGE_CACHE.
 fn ensure_unreserved(object: ObjectKey) -> Result<(), u64> {
-    if backing_is_reserved(object) {
-        Err(crate::syscall::EAGAIN)
-    } else {
-        Ok(())
+    if let Some(gate) = PROVIDER_IO.lock().existing(&object) {
+        if gate.is_unavailable() {
+            return Err(crate::syscall::EIO);
+        }
+        if gate.is_reserved() {
+            return Err(crate::syscall::EAGAIN);
+        }
     }
+    Ok(())
 }
 
 fn with_cache_generation<T>(
@@ -1068,6 +1104,9 @@ fn with_cache_generation<T>(
     // The mapping/process lock is held by the final installer. Taking the
     // cache lock here excludes mutation until its PTE has been published.
     let _cache = PAGE_CACHE.lock();
+    if gate.is_unavailable() {
+        return Err(crate::syscall::EIO);
+    }
     if gate.is_reserved() || gate.generation() != generation {
         return Err(crate::syscall::EAGAIN);
     }

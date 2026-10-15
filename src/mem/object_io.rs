@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub(crate) struct State {
     locked: AtomicBool,
     reserved: AtomicBool,
+    unavailable: AtomicBool,
     generation: AtomicU64,
 }
 
@@ -13,6 +14,7 @@ impl State {
         Self {
             locked: AtomicBool::new(false),
             reserved: AtomicBool::new(false),
+            unavailable: AtomicBool::new(false),
             generation: AtomicU64::new(1),
         }
     }
@@ -57,6 +59,9 @@ impl<K: PartialEq> Registry<K> {
 #[derive(Clone)]
 pub(crate) struct IoLock(Arc<State>);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Unavailable;
+
 impl IoLock {
     pub(crate) fn from_allocated(gate: Arc<State>) -> Self {
         Self(gate)
@@ -67,24 +72,38 @@ impl IoLock {
     pub(crate) fn is_reserved(&self) -> bool {
         self.0.reserved.load(Ordering::Acquire)
     }
+    pub(crate) fn is_unavailable(&self) -> bool {
+        self.0.unavailable.load(Ordering::Acquire)
+    }
     /// Caller serializes cache publication through its cache/VM lock.
     pub(crate) fn advance_generation(&self) {
         self.0.generation.fetch_add(1, Ordering::AcqRel);
     }
     /// A resource owner must not wait for an I/O caller that may itself be
     /// waiting for that owner's reply. Failed admission leaves ownership alone.
-    pub(crate) fn try_lock(&self) -> Option<IoGuard> {
-        self.0
+    pub(crate) fn try_lock(&self) -> Result<Option<IoGuard>, Unavailable> {
+        if self.is_unavailable() {
+            return Err(Unavailable);
+        }
+        let guard = self
+            .0
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .ok()
-            .map(|_| IoGuard(self.0.clone()))
+            .map(|_| IoGuard(self.0.clone()));
+        // An unavailable owner can release between the first check and CAS.
+        if self.is_unavailable() {
+            drop(guard);
+            Err(Unavailable)
+        } else {
+            Ok(guard)
+        }
     }
     /// Waiting must cooperate with the scheduler; this is not an IRQ spinlock.
-    pub(crate) fn lock(&self, mut wait: impl FnMut()) -> IoGuard {
+    pub(crate) fn lock(&self, mut wait: impl FnMut()) -> Result<IoGuard, Unavailable> {
         loop {
-            if let Some(guard) = self.try_lock() {
-                return guard;
+            if let Some(guard) = self.try_lock()? {
+                return Ok(guard);
             }
             wait();
         }
@@ -106,6 +125,18 @@ impl IoGuard {
 /// Excludes backing I/O and page publication until commit or cancellation.
 pub(crate) struct Reservation {
     guard: IoGuard,
+}
+
+impl Reservation {
+    /// Latch failure under the caller's cache/VM publication exclusion, after
+    /// revoking mappings which must no longer expose this backing. Dropping
+    /// the reservation releases admission, but never clears this failure.
+    /// This primitive alone does not perform revocation or resolve storage I/O.
+    pub(crate) fn mark_unavailable(&self) {
+        if !self.guard.0.unavailable.swap(true, Ordering::AcqRel) {
+            self.guard.0.generation.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 }
 
 impl Drop for Reservation {
