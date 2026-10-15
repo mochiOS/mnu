@@ -718,9 +718,14 @@ fn memory_map_impl(
                     Ok(identity) => identity,
                     Err(error) => return error,
                 };
-                Arc::new(crate::mem::vm_object::VmObject::provider(
-                    provider, identity,
-                ))
+                let object = match crate::mem::vm_object::VmObject::provider(provider, identity) {
+                    Ok(object) => object,
+                    Err(error) => return error,
+                };
+                match Arc::try_new(object) {
+                    Ok(object) => object,
+                    Err(_) => return ENOMEM,
+                }
             }
             crate::task::KernelObject::VmObject(object) => {
                 if object.memory_identity().is_none() {

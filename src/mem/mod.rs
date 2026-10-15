@@ -14,6 +14,7 @@ pub mod gdt;
 pub mod paging;
 pub(crate) mod cow_access;
 pub(crate) mod object_io;
+pub(crate) mod object_io_native;
 pub(crate) mod range_plan;
 pub(crate) mod shared_pages;
 pub mod shared_memory;

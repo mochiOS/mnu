@@ -125,6 +125,8 @@ enum VmObjectSource {
     Provider {
         object: Arc<ProviderObject>,
         identity: u64,
+        // Keep the canonical backing gate alive across faults and I/O gaps.
+        _io_lock: super::object_io::IoLock,
     },
 }
 
@@ -183,16 +185,33 @@ impl VmObject {
         }
     }
 
-    pub fn provider(object: Arc<ProviderObject>, identity: u64) -> Self {
-        Self {
-            source: VmObjectSource::Provider { object, identity },
-        }
+    pub fn provider(object: Arc<ProviderObject>, identity: u64) -> Result<Self, u64> {
+        let key = ObjectKey::Provider {
+            endpoint_thread_id: object.endpoint_thread_id,
+            endpoint_slot: object.endpoint_slot,
+            endpoint_generation: object.endpoint_generation,
+            identity,
+        };
+        let io_lock = PROVIDER_IO.lock().try_get(
+            key,
+            crate::mem::object_io_native::new_lock,
+            crate::syscall::ENOMEM,
+        )?;
+        Ok(Self {
+            source: VmObjectSource::Provider {
+                object,
+                identity,
+                _io_lock: io_lock,
+            },
+        })
     }
 
     pub(crate) fn object_key(&self) -> ObjectKey {
         match &self.source {
             VmObjectSource::Memory(memory) => ObjectKey::Memory(memory.id()),
-            VmObjectSource::Provider { object, identity } => ObjectKey::Provider {
+            VmObjectSource::Provider {
+                object, identity, ..
+            } => ObjectKey::Provider {
                 endpoint_thread_id: object.endpoint_thread_id,
                 endpoint_slot: object.endpoint_slot,
                 endpoint_generation: object.endpoint_generation,
@@ -325,7 +344,7 @@ impl VmObject {
             .ok_or(crate::syscall::EINVAL)?;
 
         let _io_guard = if matches!(&self.source, VmObjectSource::Provider { .. }) {
-            Some(lock_provider_key(self.object_key()))
+            Some(lock_provider_key(self.object_key())?)
         } else {
             None
         };
@@ -538,7 +557,7 @@ impl VmObject {
         // Retain ordering through the lower write and cache update. The
         // registry lock is released before waiting or calling provider IPC.
         let _io_guard = if matches!(self.source, VmObjectSource::Provider { .. }) {
-            Some(lock_provider_key(self.object_key()))
+            Some(lock_provider_key(self.object_key())?)
         } else {
             None
         };
@@ -690,7 +709,10 @@ pub(crate) fn update_provider_range(
     );
 }
 
-pub(crate) fn lock_provider_io(object: &ProviderObject, identity: u64) -> super::object_io::IoGuard {
+pub(crate) fn lock_provider_io(
+    object: &ProviderObject,
+    identity: u64,
+) -> Result<super::object_io::IoGuard, u64> {
     lock_provider_key(ObjectKey::Provider {
         endpoint_thread_id: object.endpoint_thread_id,
         endpoint_slot: object.endpoint_slot,
@@ -736,11 +758,15 @@ pub(crate) fn overlay_provider_range(
     Ok(())
 }
 
-fn lock_provider_key(key: ObjectKey) -> super::object_io::IoGuard {
-    let gate = PROVIDER_IO.lock().get(key);
-    gate.lock(|| {
+fn lock_provider_key(key: ObjectKey) -> Result<super::object_io::IoGuard, u64> {
+    let gate = PROVIDER_IO.lock().try_get(
+        key,
+        crate::mem::object_io_native::new_lock,
+        crate::syscall::ENOMEM,
+    )?;
+    Ok(gate.lock(|| {
         let _ = crate::task::yield_now();
-    })
+    }))
 }
 
 fn invalidate_object(object: ObjectKey) {

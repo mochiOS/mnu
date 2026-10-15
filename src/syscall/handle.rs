@@ -264,9 +264,13 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
         let position = offset + done as u64;
         let result = match &object {
             KernelObject::Provider(provider) => {
-                let _guard = identity.map(|identity| {
-                    crate::mem::vm_object::lock_provider_io(provider, identity)
-                });
+                let _guard = match identity
+                    .map(|identity| crate::mem::vm_object::lock_provider_io(provider, identity))
+                    .transpose()
+                {
+                    Ok(guard) => guard,
+                    Err(error) => return if done == 0 { error } else { done as u64 },
+                };
                 if write {
                     provider_write_at(provider, position, &data[..chunk]).map(|count| {
                         if let Some(identity) = identity {
@@ -648,7 +652,7 @@ fn provider_read_shared(
         }
         let mut response = [0u8; wire::RESPONSE_HEADER_LEN + wire::READ_POSITION_LEN];
         let result = (|| -> Result<usize, u64> {
-            let _io_guard = crate::mem::vm_object::lock_provider_io(provider, identity);
+            let _io_guard = crate::mem::vm_object::lock_provider_io(provider, identity)?;
             let reply_length = crate::syscall::ipc::call_provider_with_handle_from_kernel(
                 provider_endpoint(provider),
                 &encoded,
@@ -736,8 +740,13 @@ fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         let data = {
             // User-buffer faults may load this same backing object. Release the
             // I/O guard before copying to user memory to avoid recursive locking.
-            let _io_guard =
-                identity.map(|identity| crate::mem::vm_object::lock_provider_io(provider, identity));
+            let _io_guard = match identity
+                .map(|identity| crate::mem::vm_object::lock_provider_io(provider, identity))
+                .transpose()
+            {
+                Ok(guard) => guard,
+                Err(error) => return if total == 0 { error } else { total as u64 },
+            };
             match provider_read_chunk(provider, identity, chunk, &mut response_storage) {
                 Ok(data) => data,
                 Err(error) => return if total == 0 { error } else { total as u64 },
@@ -814,8 +823,13 @@ fn provider_write_impl(
         }
         // Faulting the source buffer may load this same backing object. Only
         // serialize the provider operation and resident-page update afterward.
-        let _io_guard =
-            identity.map(|identity| crate::mem::vm_object::lock_provider_io(provider, identity));
+        let _io_guard = match identity
+            .map(|identity| crate::mem::vm_object::lock_provider_io(provider, identity))
+            .transpose()
+        {
+            Ok(guard) => guard,
+            Err(error) => return if total == 0 { error } else { total as u64 },
+        };
         let request = mnu_abi::provider::RequestHeader {
             opcode: if byte_end.is_some() {
                 mnu_abi::provider::OP_WRITE_BOUNDED
@@ -923,8 +937,9 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
         return Err(ENOTSUP);
     };
     let identity = provider_cache_identity(&provider)?;
-    let _io_guard =
-        identity.map(|identity| crate::mem::vm_object::lock_provider_io(&provider, identity));
+    let _io_guard = identity
+        .map(|identity| crate::mem::vm_object::lock_provider_io(&provider, identity))
+        .transpose()?;
     let maximum = if identity.is_some() {
         mnu_abi::provider::MAX_POSITIONED_READ_LEN
     } else {
