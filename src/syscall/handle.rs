@@ -1871,7 +1871,7 @@ pub fn process_terminate(raw: u64, exit_code: u64) -> u64 {
         return EBADF;
     };
     let process_id = process.id();
-    if crate::task::with_process(process_id, |_| ()).is_none() {
+    if process.is_exited() || crate::task::with_process(process_id, |_| ()).is_none() {
         return ESRCH;
     }
     if crate::syscall::security::current_process_id() == Some(process_id) {
@@ -1887,8 +1887,20 @@ pub fn process_terminate(raw: u64, exit_code: u64) -> u64 {
         crate::task::terminate_thread(thread);
     }
     let cleanup = crate::task::release_process_borrowed_mappings(process_id);
-    crate::task::mark_process_exited(process_id, exit_code);
-    cleanup.map(|()| SUCCESS).unwrap_or_else(|error| error)
+    if !crate::task::mark_process_exited(process_id, exit_code) {
+        return ESRCH;
+    }
+    // Terminal publication succeeded. Reporting cleanup failure as termination
+    // failure would make callers lose the winning termination cause. Deferred
+    // process reclaim retains the address space and retries mapping revocation.
+    if let Err(error) = cleanup {
+        crate::warn!(
+            "Borrowed mapping cleanup deferred for {:?}: {:#x}",
+            process_id,
+            error
+        );
+    }
+    SUCCESS
 }
 
 pub fn launch_get(key: u64) -> u64 {

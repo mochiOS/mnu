@@ -813,11 +813,16 @@ impl Process {
         self.exit_code
     }
 
-    /// 終了状態へ遷移
-    pub fn mark_exited(&mut self, exit_code: u64) {
+    /// Publish the terminal state once, while holding the process table lock.
+    /// Retained lifecycle handles must never observe a replacement exit code.
+    pub fn mark_exited(&mut self, exit_code: u64) -> bool {
+        if self.exit_code.is_some() {
+            return false;
+        }
         self.state = ProcessState::Zombie;
         self.exit_code = Some(exit_code);
         self.object.mark_exited(exit_code);
+        true
     }
 
     /// ページテーブルアドレスを取得
@@ -1573,16 +1578,19 @@ pub(crate) fn resize_shared_memory(
 }
 
 /// プロセスを終了状態（Zombie）へ遷移させる
-pub fn mark_process_exited(id: ProcessId, exit_code: u64) {
+pub fn mark_process_exited(id: ProcessId, exit_code: u64) -> bool {
     {
         let mut table = PROCESS_TABLE.lock();
         let Some(proc) = table.get_mut(id) else {
-            return;
+            return false;
         };
-        proc.mark_exited(exit_code);
+        if !proc.mark_exited(exit_code) {
+            return false;
+        }
     }
     wake_process_exit_waiters(id);
     defer_process_reclaim(id);
+    true
 }
 
 fn destroy_exited_process(process: Process) -> (ProcessId, u64) {
