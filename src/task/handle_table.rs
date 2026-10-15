@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use super::fd_table::FileHandle;
 use super::process::ProcessObject;
 
-pub const PROCESS_MAX_OBJECT_HANDLES: usize = 4096;
+pub const PROCESS_MAX_OBJECT_HANDLES: usize = mnu_abi::PROCESS_MAX_OBJECT_HANDLES;
 
 pub struct ProviderObject {
     pub endpoint_thread_id: u64,

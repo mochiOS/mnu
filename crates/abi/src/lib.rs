@@ -560,6 +560,9 @@ pub struct ClockInfo {
 /// Maximum number of generic kernel object handles carried by one IPC message.
 pub const IPC_MAX_OBJECT_HANDLES: usize = 4;
 
+/// Native object Handle labels occupy the inclusive range 1..=this capacity.
+pub const PROCESS_MAX_OBJECT_HANDLES: usize = 4096;
+
 pub const HANDLE_RIGHT_READ: u64 = 1 << 0;
 pub const HANDLE_RIGHT_WRITE: u64 = 1 << 1;
 pub const HANDLE_RIGHT_SEND: u64 = 1 << 2;
