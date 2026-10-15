@@ -1,6 +1,7 @@
 //! Native, owned mapping/cache extent coordination. No VM lock is retained by
-//! the owner. This is NOT a storage transaction: publication remains fallible
-//! and must not be used as an unconditional post-storage-commit operation.
+//! the owner. External I/O requires full suspension before begin_external,
+//! followed by an explicit unchanged/publication outcome. Losing an in-flight
+//! owner quarantines the backing; this module does not perform storage I/O.
 use super::{
     mapping_targets::Targets,
     paging, tlb_shootdown,
@@ -16,6 +17,7 @@ use alloc::{sync::Arc, vec::Vec};
 struct Page {
     record: paging::RecordedUserPage,
     zero: Option<(u64, usize)>,
+    affected: bool,
 }
 
 struct Work {
@@ -25,11 +27,15 @@ struct Work {
     targets: Targets,
     extent: PreparedExtent,
     publication: Publication,
+    external: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Publication {
     Prepared,
+    InFlight,
+    Unchanged,
+    Unavailable,
     Requested,
     Published,
 }
@@ -46,6 +52,26 @@ impl ExtentTransaction {
     /// file path, or provider identity. A future public entry must validate a
     /// resource-control capability before reaching this constructor.
     pub(crate) fn prepare(object: &VmObject, old_length: u64, length: u64) -> Result<Self, u64> {
+        Self::prepare_with_scope(object, old_length, length, false)
+    }
+
+    /// Suspend every mapping, including unaffected prefixes, before external
+    /// work can begin. Dropping before begin_external still cancels normally.
+    /// Authority must be validated at the future resource-control entrypoint.
+    pub(crate) fn prepare_external(
+        object: &VmObject,
+        old_length: u64,
+        length: u64,
+    ) -> Result<Self, u64> {
+        Self::prepare_with_scope(object, old_length, length, true)
+    }
+
+    fn prepare_with_scope(
+        object: &VmObject,
+        old_length: u64,
+        length: u64,
+        external: bool,
+    ) -> Result<Self, u64> {
         // Reserve cancellation storage BEFORE edits, including failed prepare.
         let ticket = Ticket::new(None).map_err(|_| crate::syscall::ENOMEM)?;
         let mut owner = ticket.defer_on_drop(&PENDING);
@@ -54,8 +80,18 @@ impl ExtentTransaction {
                 Arc::try_new(bytes).map_err(|_| crate::syscall::ENOMEM)
             })?;
             let (start, end) = extent.revocation().unwrap_or((0, 0));
+            let affected = external
+                .then(|| {
+                    Targets::capture(table, object.object_key(), start, end, extent.boundary())
+                })
+                .transpose()?;
+            let (low, high) = if external {
+                (0, u64::MAX & !4095)
+            } else {
+                (start, end)
+            };
             let targets =
-                Targets::capture(table, object.object_key(), start, end, extent.boundary())?;
+                Targets::capture(table, object.object_key(), low, high, extent.boundary())?;
             let mut locations = Vec::new();
             for (root, start, end) in targets.ranges() {
                 let mut cursor = start;
@@ -74,7 +110,10 @@ impl ExtentTransaction {
                     locations
                         .try_reserve(1)
                         .map_err(|_| crate::syscall::ENOMEM)?;
-                    locations.push((root, address));
+                    let changed = affected
+                        .as_ref()
+                        .is_none_or(|targets| targets.contains(root, address, address + 4096));
+                    locations.push((root, address, changed));
                     cursor = address + 4096;
                 }
             }
@@ -87,9 +126,10 @@ impl ExtentTransaction {
                 targets,
                 extent,
                 publication: Publication::Prepared,
+                external,
             });
             let work = owner.value_mut().as_mut().ok_or(crate::syscall::EINVAL)?;
-            for (root, address) in locations {
+            for (root, address, affected) in locations {
                 // SAFETY: same retained roots, reservation and VM exclusion.
                 if let Some(page) = unsafe { paging::suspend_user_page(root, address) }
                     .map_err(|_| crate::syscall::EFAULT)?
@@ -97,16 +137,14 @@ impl ExtentTransaction {
                     work.pages.push(Page {
                         record: page.into_record(),
                         zero: None,
+                        affected,
                     });
                     // Publish the record into the cancellation owner BEFORE
                     // any later check can fail. Push cannot allocate here.
                     let page = work.pages.last_mut().ok_or(crate::syscall::EINVAL)?;
-                    if let Some(boundary) = work
-                        .targets
-                        .preserved()
-                        .iter()
-                        .find(|boundary| boundary.table == root && boundary.address == address)
-                    {
+                    if let Some(boundary) = work.targets.preserved().iter().find(|boundary| {
+                        affected && boundary.table == root && boundary.address == address
+                    }) {
                         page.zero = Some(
                             page.record
                                 .suffix_address(boundary.zero_from)
@@ -126,6 +164,44 @@ impl ExtentTransaction {
         Ok(Self { owner: Some(owner) })
     }
 
+    /// Record the uncertainty boundary BEFORE issuing external mutation. No
+    /// VM lock is held over that mutation. Once begun, owner loss cannot mean
+    /// cancellation: cleanup must discard all suspended mappings instead.
+    pub(crate) fn begin_external(&mut self) -> Result<(), u64> {
+        let owner = self.owner.as_mut().ok_or(crate::syscall::EINVAL)?;
+        process::with_mapping_table(|_| {
+            let work = owner.value_mut().as_mut().ok_or(crate::syscall::EINVAL)?;
+            if !work.external || work.publication != Publication::Prepared {
+                return Err(crate::syscall::EINVAL);
+            }
+            if !work.pages.iter().all(|page| work.current(page)) {
+                return Err(crate::syscall::EFAULT);
+            }
+            work.extent.preflight()?;
+            work.publication = Publication::InFlight;
+            Ok(())
+        })
+    }
+
+    /// The resource owner confirms storage is unchanged, not merely that an
+    /// I/O request returned an error. Keep that decision across cleanup retry.
+    pub(crate) fn confirm_unchanged(&mut self) -> Result<(), u64> {
+        let owner = self.owner.as_mut().ok_or(crate::syscall::EINVAL)?;
+        process::with_mapping_table(|_| {
+            let work = owner.value_mut().as_mut().ok_or(crate::syscall::EINVAL)?;
+            if !matches!(
+                work.publication,
+                Publication::InFlight | Publication::Unchanged
+            ) {
+                return Err(crate::syscall::EINVAL);
+            }
+            work.publication = Publication::Unchanged;
+            work.resolve()
+        })?;
+        self.release_completed();
+        Ok(())
+    }
+
     /// Fallible LOCAL publication only. The owner retains admission on every
     /// error. Once cache publication succeeds, drop/retry always completes the
     /// new extent rather than restoring removed mappings to the old extent.
@@ -137,8 +213,8 @@ impl ExtentTransaction {
     /// remaining cache/PTE check can fail. Subsequent failure or owner drop
     /// retries publication; it must never restore the old extent.
     /// This neither starts nor acknowledges external I/O. Its outcome must
-    /// already be resolved by the caller; unconfirmed in-flight owner death
-    /// still requires a separate protocol before exposing a public API.
+    /// already be resolved by the caller. A future public API must authenticate
+    /// that resource owner rather than trust an arbitrary consumer's report.
     pub(crate) fn request_publication(&mut self) -> Result<(), u64> {
         self.finish(true)
     }
@@ -147,18 +223,36 @@ impl ExtentTransaction {
         let owner = self.owner.as_mut().ok_or(crate::syscall::EINVAL)?;
         process::with_mapping_table(|_| {
             let work = owner.value_mut().as_mut().ok_or(crate::syscall::EINVAL)?;
-            if request_publication && work.publication == Publication::Prepared {
+            if work.publication == Publication::Unchanged {
+                return Err(crate::syscall::EINVAL);
+            }
+            if work.publication == Publication::InFlight && !request_publication {
+                return Err(crate::syscall::EINVAL);
+            }
+            if work.publication == Publication::Unavailable {
+                return Err(crate::syscall::EIO);
+            }
+            if request_publication
+                && matches!(
+                    work.publication,
+                    Publication::Prepared | Publication::InFlight
+                )
+            {
                 work.publication = Publication::Requested;
             }
             work.publish_cache()?;
             work.resolve()
         })?;
+        self.release_completed();
+        Ok(())
+    }
+
+    fn release_completed(&mut self) {
         // Every PTE is finished. Disarm enqueue and release pins/admission
         // outside the VM lock; root/provider destruction can run other cleanup.
         if let Some(owner) = self.owner.take() {
             drop(owner.into_ticket());
         }
-        Ok(())
     }
 }
 
@@ -177,7 +271,16 @@ impl Work {
 
     fn progress(&mut self) -> Result<(), u64> {
         match self.publication {
-            Publication::Prepared => self.resolve(),
+            Publication::InFlight => {
+                // Only external/full-suspension preparation can enter this
+                // phase, after successful all-CPU TLB acknowledgement.
+                self.extent.mark_unavailable();
+                self.publication = Publication::Unavailable;
+                self.resolve()
+            }
+            Publication::Prepared | Publication::Unchanged | Publication::Unavailable => {
+                self.resolve()
+            }
             Publication::Requested | Publication::Published => {
                 self.publish_cache()?;
                 self.resolve()
@@ -195,10 +298,11 @@ impl Work {
 
     fn resolve(&mut self) -> Result<(), u64> {
         let published = match self.publication {
-            Publication::Prepared => false,
+            Publication::Prepared | Publication::Unchanged | Publication::Unavailable => false,
             Publication::Published => true,
-            // An irrevocable request cannot fall through to cancellation.
-            Publication::Requested => return Err(crate::syscall::EAGAIN),
+            // Neither an uncertain outcome nor an irrevocable request may
+            // fall through to cancellation.
+            Publication::InFlight | Publication::Requested => return Err(crate::syscall::EAGAIN),
         };
         while let Some(page) = self.pages.pop() {
             if !self.current(&page) {
@@ -216,18 +320,28 @@ impl Work {
                     }
                 }
             }
-            let Page { record, zero } = page;
+            let Page {
+                record,
+                zero,
+                affected,
+            } = page;
             // SAFETY: selected root is pinned, VM exclusion is held, and
             // published release is reachable only after all-CPU TLB ack.
             let result = unsafe {
-                if !published || zero.is_some() {
+                if self.publication != Publication::Unavailable
+                    && (!published || !affected || zero.is_some())
+                {
                     record.try_restore()
                 } else {
                     record.try_release()
                 }
             };
             if let Err(record) = result {
-                self.pages.push(Page { record, zero });
+                self.pages.push(Page {
+                    record,
+                    zero,
+                    affected,
+                });
                 return Err(crate::syscall::EFAULT);
             }
         }

@@ -96,6 +96,14 @@ impl VmObject {
 }
 
 impl PreparedExtent {
+    /// The VM coordinator must already have suspended ALL mappings and
+    /// acknowledged all CPUs, not just the resize-affected subset. Retain
+    /// reservation until their records are discarded. No storage is queried.
+    pub(crate) fn mark_unavailable(&self) {
+        let _cache = PAGE_CACHE.lock();
+        self._io_guard.mark_unavailable();
+    }
+
     pub(crate) fn revocation(&self) -> Option<(u64, u64)> {
         self.plan
             .invalidate
