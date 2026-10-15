@@ -1531,88 +1531,31 @@ where
 /// No names, POSIX descriptors or caller process identities select mappings.
 /// Mapping admission, faults, COW, protection, unmap, usercopy, address waits
 /// and detached-image context validation serialize through PROCESS_TABLE.
-/// Registry pins retain unpublished roots until all revocation work finishes.
+/// Owned target pins retain published and unpublished roots through revocation.
 pub(crate) fn resize_shared_memory(
     memory: &crate::mem::shared_memory::SharedMemory,
     length: u64,
 ) -> core::result::Result<(), u64> {
     use crate::mem::{
-        mapping_preservation_native::{PreservedPage, Preserving},
+        mapping_preservation_native::Preserving,
+        mapping_targets::Targets,
         mapping_revocation as transaction, mapping_revocation_native::Native,
     };
     let table = PROCESS_TABLE.lock();
     let boundary = memory.length().min(length);
     memory.resize_transaction(length, |start, end, commit| {
-        let roots = crate::mem::detached_roots::snapshot().map_err(|_| crate::syscall::ENOMEM)?;
-        let mut ranges = Vec::new();
-        let mut preserved = Vec::new();
-        for root in &roots {
-            for mapping in root
-                .mappings()
-                .iter()
-                .filter(|mapping| {
-                    mapping.identity == crate::mem::vm_object::ObjectKey::Memory(memory.id())
-                })
-            {
-                if let Some((low, high)) = transaction::virtual_overlap(
-                    mapping.start,
-                    mapping.length,
-                    mapping.offset,
-                    start,
-                    end,
-                )
-                .map_err(|_| crate::syscall::EINVAL)?
-                {
-                    ranges.try_reserve(1).map_err(|_| crate::syscall::ENOMEM)?;
-                    ranges.push((root.table(), low, high));
-                    if let Some(page) = PreservedPage::for_mapping(
-                        root.table(), mapping.start, mapping.length, mapping.offset, boundary,
-                    )? {
-                        preserved.try_reserve(1).map_err(|_| crate::syscall::ENOMEM)?;
-                        preserved.push(page);
-                    }
-                }
-            }
-        }
-        for process in table.iter() {
-            let Some(page_table) = process.page_table() else {
-                continue;
-            };
-            for region in process.memory_regions() {
-                if region
-                    .backing()
-                    .file_object()
-                    .and_then(|object| object.memory_identity())
-                    != Some(memory.id())
-                {
-                    continue;
-                }
-                let overlap = transaction::virtual_overlap(
-                    region.start(),
-                    region.len(),
-                    region.backing().file_offset(),
-                    start,
-                    end,
-                )
-                .map_err(|_| crate::syscall::EINVAL)?;
-                if let Some((low, high)) = overlap {
-                    ranges.try_reserve(1).map_err(|_| crate::syscall::ENOMEM)?;
-                    ranges.push((page_table, low, high));
-                    if let Some(page) = PreservedPage::for_mapping(
-                        page_table, region.start(), region.len(),
-                        region.backing().file_offset(), boundary,
-                    )? {
-                        preserved.try_reserve(1).map_err(|_| crate::syscall::ENOMEM)?;
-                        preserved.push(page);
-                    }
-                }
-            }
-        }
+        let targets = Targets::capture(
+            &table,
+            crate::mem::vm_object::ObjectKey::Memory(memory.id()),
+            start,
+            end,
+            boundary,
+        )?;
         // SAFETY: user mapping exclusion plus the retained table guard
         // keeps every selected PTE and page-table hierarchy stable.
-        let native = unsafe { Native::with_detached(&table, &roots) };
-        let mut backend = Preserving::new(native, &preserved)?;
-        transaction::revoke_with(ranges, &mut backend, || Ok(commit.commit()))
+        let native = unsafe { Native::for_targets(&table, &targets) };
+        let mut backend = Preserving::new(native, targets.preserved())?;
+        transaction::revoke_with(targets.ranges(), &mut backend, || Ok(commit.commit()))
             .map_err(|error| match error {
                 transaction::Error::InvalidRange => crate::syscall::EINVAL,
                 transaction::Error::Allocation => crate::syscall::ENOMEM,
