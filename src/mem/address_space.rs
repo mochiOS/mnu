@@ -56,6 +56,7 @@ impl core::fmt::Debug for AddressSpaceObject {
 pub enum CloneError {
     MissingPageTable,
     BorrowedMapping,
+    BackingBusy,
     Allocation,
 }
 
@@ -80,6 +81,16 @@ impl CloneSource {
             return Err(CloneError::BorrowedMapping);
         }
         let table = process.page_table().ok_or(CloneError::MissingPageTable)?;
+        // The caller retains the mapping lock through COW publication. Backing
+        // reservations must start under that same lock: no new detached root
+        // may escape a coordinator's already-selected revocation set.
+        for region in process.memory_regions() {
+            if let Some(object) = region.backing().file_object() {
+                object
+                    .with_memory_generation(object.memory_generation(), || Ok(()))
+                    .map_err(|_| CloneError::BackingBusy)?;
+            }
+        }
         let mut excluded = Vec::new();
         for buffer in process.dma_buffers() {
             let end = buffer.end().ok_or(CloneError::BorrowedMapping)?;

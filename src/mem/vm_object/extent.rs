@@ -23,6 +23,8 @@ impl VmObject {
     /// Reserve a unique boundary buffer before changing external storage or
     /// mappings. Allocation policy stays with the native coordinator; tests
     /// can inject failure without replacing the production cache algorithm.
+    /// The coordinator must hold its mapping/process lock during preparation
+    /// so admission checks for new/detached address spaces cannot race it.
     pub(crate) fn prepare_extent(
         &self,
         old_length: u64,

@@ -249,6 +249,8 @@ pub fn clone_address_space() -> u64 {
         let source = match CloneSource::capture(process) {
             Ok(source) => source,
             Err(CloneError::BorrowedMapping) => return EPERM,
+            Err(CloneError::BackingBusy) => return EAGAIN,
+            Err(CloneError::Allocation) => return ENOMEM,
             Err(_) => return ENOSYS,
         };
         let cloned = source.clone_image();
