@@ -269,6 +269,9 @@ fn select_next_thread() -> Option<(ThreadId, usize)> {
 ///
 /// スケジューラを呼び出して次のスレッドに切り替える
 pub fn yield_now() {
+    // Waiting backing I/O and transient faults must also make deferred VM
+    // cancellation progress. Flush only tries the VM lock and never waits/IPC.
+    crate::mem::extent_transaction::flush();
     if !is_scheduler_enabled() {
         return;
     }

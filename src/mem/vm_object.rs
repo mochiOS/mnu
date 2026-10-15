@@ -8,6 +8,7 @@ use crate::interrupt::spinlock::SpinLock;
 use crate::task::ProviderObject;
 #[path = "vm_object/extent.rs"]
 mod extent;
+pub(crate) use extent::PreparedExtent;
 
 pub const PAGE_BYTES: usize = 4096;
 

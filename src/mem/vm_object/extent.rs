@@ -83,6 +83,17 @@ impl VmObject {
 }
 
 impl PreparedExtent {
+    pub(crate) fn revocation(&self) -> Option<(u64, u64)> {
+        self.plan
+            .invalidate
+            .as_ref()
+            .map(|range| (range.start, range.end))
+    }
+
+    pub(crate) fn boundary(&self) -> u64 {
+        self.old_length.min(self.plan.length)
+    }
+
     /// No IPC or allocation occurs here. All fallible checks precede changes;
     /// a rejected epoch leaves the cache/frame bytes/dirty ranges untouched.
     /// This is only the cache commit, not an external-storage transaction.

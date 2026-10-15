@@ -30,6 +30,7 @@ pub(crate) mod mapping_revocation_native;
 pub(crate) mod mapping_preservation_native;
 pub(crate) mod mapping_admission;
 pub(crate) mod mapping_targets;
+pub(crate) mod extent_transaction;
 pub(crate) mod detached_roots;
 pub(crate) mod root_lifetime;
 pub(crate) mod root_lifetime_native;

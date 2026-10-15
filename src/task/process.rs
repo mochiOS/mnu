@@ -1510,6 +1510,14 @@ where
     table.get_mut(id).map(f)
 }
 
+pub(crate) fn with_mapping_table<R>(f: impl FnOnce(&ProcessTable) -> R) -> R {
+    f(&PROCESS_TABLE.lock())
+}
+
+pub(crate) fn try_with_mapping_table<R>(f: impl FnOnce(&ProcessTable) -> R) -> Option<R> {
+    PROCESS_TABLE.try_lock().map(|table| f(&table))
+}
+
 /// 名前からプロセスIDを検索
 pub fn find_process_id_by_name(name: &str) -> Option<ProcessId> {
     let table = PROCESS_TABLE.lock();
