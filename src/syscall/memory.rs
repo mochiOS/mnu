@@ -155,6 +155,7 @@ pub fn protect(addr: u64, len: u64, access: u64) -> u64 {
                 return Err(EACCES);
             }
         }
+        crate::mem::mapping_admission::check(process.memory_regions(), start, end)?;
         let changed = protect_memory_pages(
             process, table_phys, start, end, present, writable, executable,
         );

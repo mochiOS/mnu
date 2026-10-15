@@ -885,6 +885,9 @@ fn memory_map_impl(
                 Some(backing) => backing,
                 None => return Err(EINVAL),
             };
+            // Reservations and new mapping admission share PROCESS_TABLE.
+            // Do not publish metadata for a backing being changed by its owner.
+            object.with_memory_generation(object.memory_generation(), || Ok(()))?;
             let region = crate::task::MemoryRegion::file_backed(
                 map_start,
                 size,
@@ -966,6 +969,11 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
             }
         }
         let owns_frames = mmio.is_none();
+        crate::mem::mapping_admission::check(
+            process.memory_regions(),
+            unmap_start,
+            unmap_end,
+        )?;
         let metadata = if owns_frames {
             Some(
                 process
