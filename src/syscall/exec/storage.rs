@@ -1,5 +1,17 @@
 //! Owned syscall input, prepared before any destructive image transition.
+use alloc::string::String;
 use alloc::vec::Vec;
+
+/// Prepare text before creating or committing image state. Replacements whose
+/// authorization already owns this text move that ownership instead.
+pub(super) fn text(value: &str) -> Result<String, u64> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(value.len())
+        .map_err(|_| mnu_abi::ENOMEM)?;
+    owned.push_str(value);
+    Ok(owned)
+}
 
 pub(super) fn from_user(pointer: u64, length: usize) -> Result<Vec<u8>, u64> {
     let mut bytes = crate::util::object_snapshot::zeroed(length)?;

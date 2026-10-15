@@ -744,6 +744,10 @@ fn exec_with_data(
 ) -> u64 {
     let is_boot_init = launch.is_bootstrap();
     let native_startup = launch.startup();
+    let owned_identity = match storage::text(exec_path) {
+        Ok(identity) => identity,
+        Err(errno) => return errno,
+    };
     crate::debug!("exec: name={}", process_name);
     let aslr_seed = next_aslr_seed(process_name);
 
@@ -916,7 +920,7 @@ fn exec_with_data(
         proc.set_memory_regions(deferred_zero_regions);
         proc.set_stack_bottom(stack_base_vaddr);
         proc.set_stack_top(stack_end_vaddr + 4096);
-        proc.set_exe_path(exec_path);
+        proc.set_exe_path(owned_identity);
         crate::debug!(
             "[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}",
             proc.name(),
@@ -1223,7 +1227,7 @@ fn replace_current_process_image(
         process.set_memory_regions(deferred_zero_regions);
         process.set_stack_bottom(stack_base_vaddr);
         process.set_stack_top(stack_end_vaddr + 4096);
-        process.set_exe_path(identity);
+        process.set_exe_path(authorization.path);
         process.set_capabilities_for_exec(authorization.capabilities);
         process.set_kernel_authorities_for_exec(crate::capability::KernelAuthoritySet::empty());
         process.set_application_identity(authorization.identity);
@@ -1569,7 +1573,7 @@ fn create_from_address_space(
     process.set_kernel_authorities_for_exec(authorization.kernel_authorities);
     process.set_application_identity(authorization.identity);
     process.set_image_digest(authorization.executable_digest);
-    process.set_exe_path(request.identity);
+    process.set_exe_path(authorization.path);
     if image.install(&mut process).is_err() {
         return EINVAL;
     }

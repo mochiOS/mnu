@@ -932,9 +932,9 @@ impl Process {
         &self.exe_path
     }
 
-    pub fn set_exe_path(&mut self, path: &str) {
-        self.exe_path.clear();
-        self.exe_path.push_str(path);
+    /// Publish an already owned image identity without allocating during commit.
+    pub fn set_exe_path(&mut self, path: String) {
+        self.exe_path = path;
     }
 
     pub fn resource_limits(&self) -> ResourceLimits {
