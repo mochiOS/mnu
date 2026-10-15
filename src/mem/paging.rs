@@ -537,90 +537,9 @@ pub fn has_user_page_entry_in_table(table_phys: u64, page_addr: u64) -> bool {
     .unwrap_or(false)
 }
 
-/// A temporarily non-present user PTE; its mapping frame reference remains
-/// owned until restore or release. Never expose this token through a syscall.
-pub(crate) struct SuspendedUserPage {
-    entry: *mut PageTableEntry,
-    original: PageTableEntry,
-}
-
-/// # Safety
-/// The caller holds the process/mapping lock and keeps this page table alive
-/// through restore/release. No other writer may edit the captured leaf.
-pub(crate) unsafe fn suspend_user_page(
-    table_phys: u64,
-    page_addr: u64,
-) -> Result<Option<SuspendedUserPage>> {
-    if table_phys == 0
-        || table_phys & 4095 != 0
-        || page_addr & 4095 != 0
-        || page_addr >= 0x0000_8000_0000_0000
-    {
-        return Err(Kernel::Memory(Memory::InvalidAddress));
-    }
-    if physical_memory_offset().is_none() {
-        return Err(Kernel::Memory(Memory::NotMapped));
-    }
-    let _smap_guard = crate::cpu::SmapSmepGuard::new();
-    Ok(with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
-        if entry.is_unused() || !entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
-            return None;
-        }
-        let original = entry.clone();
-        let mut flags = entry.flags();
-        flags.remove(PageTableFlags::PRESENT);
-        entry.set_addr(entry.addr(), flags);
-        Some(SuspendedUserPage { entry, original })
-    })
-    .flatten())
-}
-
-impl SuspendedUserPage {
-    /// Validate physical access before the synchronization/commit barrier.
-    /// The suspension retains this frame; no physical memory is touched here.
-    pub(crate) fn suffix_address(&self, offset: usize) -> Result<(u64, usize)> {
-        if offset > 4096 {
-            return Err(Kernel::Memory(Memory::InvalidAddress));
-        }
-        let length = 4096 - offset;
-        let start = physical_memory_offset()
-            .and_then(|base| base.checked_add(self.original.addr().as_u64()))
-            .and_then(|base| base.checked_add(offset as u64))
-            .filter(|start| start.checked_add(length as u64).is_some())
-            .ok_or(Kernel::Memory(Memory::NotMapped))?;
-        Ok((start, length))
-    }
-
-    /// # Safety
-    /// The suspension's mapping lock is still held and the table is alive.
-    pub(crate) unsafe fn restore(self) {
-        let _smap_guard = crate::cpu::SmapSmepGuard::new();
-        unsafe {
-            *self.entry = self.original;
-        }
-    }
-
-    /// # Safety
-    /// As for restore, and all CPUs have acknowledged invalidation after the
-    /// suspension. Only then may the mapping's physical-frame reference drop.
-    pub(crate) unsafe fn release(self) {
-        let frame = self.original.addr().as_u64();
-        unsafe {
-            self.detach();
-        }
-        release_user_frame(frame);
-    }
-
-    /// # Safety
-    /// Same synchronization/lifetime requirements as release. The physical
-    /// resource remains owned externally (for example a device MMIO aperture).
-    pub(crate) unsafe fn detach(self) {
-        let _smap_guard = crate::cpu::SmapSmepGuard::new();
-        unsafe {
-            (*self.entry).set_unused();
-        }
-    }
-}
+#[path = "paging/suspension.rs"]
+mod suspension;
+pub(crate) use suspension::{suspend_user_page, RecordedUserPage, SuspendedUserPage};
 
 #[inline(never)]
 pub fn protect_user_page_if_mapped(
