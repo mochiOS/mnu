@@ -20,6 +20,16 @@ pub(crate) struct PreparedExtent {
     published: bool,
 }
 
+// The entry borrow binds this check to the caller's PAGE_CACHE guard. Never
+// retain a Vec index or an entry reference across external work/unlocking.
+struct BoundaryCheck<'a> {
+    index: usize,
+    entry: &'a CachedPage,
+    zero_start: usize,
+    physical: Option<u64>,
+    within: usize,
+}
+
 impl VmObject {
     /// Reserve a unique boundary buffer before changing external storage or
     /// mappings. Allocation policy stays with the native coordinator; tests
@@ -94,6 +104,62 @@ impl PreparedExtent {
         self.old_length.min(self.plan.length)
     }
 
+    /// Validate without changing bytes, dirty ranges, epochs or buffer
+    /// ownership. This is not authorization to mutate external storage: the
+    /// coordinator still needs storage-outcome/owner-death handling.
+    pub(crate) fn preflight(&mut self) -> Result<(), u64> {
+        let cache = PAGE_CACHE.lock();
+        self.check(&cache).map(|_| ())
+    }
+
+    fn check<'a>(&mut self, cache: &'a [CachedPage]) -> Result<Option<BoundaryCheck<'a>>, u64> {
+        if self.published {
+            return Err(crate::syscall::EINVAL);
+        }
+        if self.gate.generation() != self.epoch {
+            return Err(crate::syscall::EAGAIN);
+        }
+        let Some(zero) = &self.plan.zero else {
+            return Ok(None);
+        };
+        let Some(index) = cache.iter().position(|entry| {
+            entry.key.object == self.object
+                && entry.key.page_index == zero.start / PAGE_BYTES as u64
+        }) else {
+            return Ok(None);
+        };
+        let entry = &cache[index];
+        let boundary = self.boundary.as_mut().ok_or(crate::syscall::EINVAL)?;
+        Arc::get_mut(boundary).ok_or(crate::syscall::EINVAL)?;
+        let physical = entry
+            .frame_phys
+            .map(|frame| {
+                crate::mem::paging::physical_memory_offset()
+                    .and_then(|offset| offset.checked_add(frame))
+                    .filter(|start| start.checked_add(PAGE_BYTES as u64 - 1).is_some())
+                    .ok_or(crate::syscall::EIO)
+            })
+            .transpose()?;
+        let page_start = entry
+            .key
+            .page_index
+            .checked_mul(PAGE_BYTES as u64)
+            .ok_or(crate::syscall::EINVAL)?;
+        let within = self
+            .plan
+            .length
+            .checked_sub(page_start)
+            .ok_or(crate::syscall::EINVAL)?
+            .min(PAGE_BYTES as u64) as usize;
+        Ok(Some(BoundaryCheck {
+            index,
+            entry,
+            zero_start: (zero.start % PAGE_BYTES as u64) as usize,
+            physical,
+            within,
+        }))
+    }
+
     /// No IPC or allocation occurs here. All fallible checks precede changes;
     /// a rejected epoch leaves the cache/frame bytes/dirty ranges untouched.
     /// This is only the cache commit, not an external-storage transaction.
@@ -106,49 +172,35 @@ impl PreparedExtent {
     /// Failure retains the reservation too, allowing PTE rollback first.
     /// This is still a fallible local-cache operation, not storage commit.
     pub(crate) fn publish(&mut self) -> Result<(), u64> {
-        if self.published {
-            return Err(crate::syscall::EINVAL);
-        }
         let mut cache = PAGE_CACHE.lock();
-        if self.gate.generation() != self.epoch {
-            return Err(crate::syscall::EAGAIN);
-        }
+        let checked = self.check(&cache)?;
         if self.plan.length == self.old_length {
             self.published = true;
             return Ok(());
         }
-        let boundary_index = self.plan.zero.as_ref().and_then(|range| {
-            cache.iter().position(|entry| {
-                entry.key.object == self.object
-                    && entry.key.page_index == range.start / PAGE_BYTES as u64
-            })
-        });
-        if let Some(index) = boundary_index {
-            let entry = &cache[index];
-            let zero = self.plan.zero.as_ref().ok_or(crate::syscall::EINVAL)?;
-            let zero_start = (zero.start % PAGE_BYTES as u64) as usize;
-            let mut boundary = self.boundary.take().ok_or(crate::syscall::EINVAL)?;
-            let bytes = Arc::get_mut(&mut boundary).ok_or(crate::syscall::EINVAL)?;
-            let physical = match entry.frame_phys {
-                Some(frame) => {
-                    let address = crate::mem::paging::physical_memory_offset()
-                        .and_then(|offset| offset.checked_add(frame))
-                        .filter(|start| start.checked_add(PAGE_BYTES as u64 - 1).is_some())
-                        .ok_or(crate::syscall::EIO)?;
-                    for (offset, byte) in bytes.iter_mut().enumerate() {
-                        // No Rust references to storage also owned by mappings.
-                        *byte = unsafe {
-                            core::ptr::read_volatile((address + offset as u64) as *const u8)
-                        };
-                    }
-                    Some(address)
+        if let Some(BoundaryCheck {
+            index,
+            entry,
+            zero_start,
+            physical,
+            within,
+        }) = checked
+        {
+            let boundary = self.boundary.as_mut().ok_or(crate::syscall::EINVAL)?;
+            let bytes = Arc::get_mut(boundary).ok_or(crate::syscall::EINVAL)?;
+            if let Some(address) = physical {
+                for (offset, byte) in bytes.iter_mut().enumerate() {
+                    // No Rust references to storage also owned by mappings.
+                    *byte =
+                        unsafe { core::ptr::read_volatile((address + offset as u64) as *const u8) };
                 }
-                None => {
-                    bytes.copy_from_slice(entry.bytes.as_slice());
-                    None
-                }
-            };
+            } else {
+                bytes.copy_from_slice(entry.bytes.as_slice());
+            }
             bytes[zero_start..].fill(0);
+            // Cloning this private Arc cannot allocate. Retain ownership in
+            // self too: every failed check above leaves a reusable buffer.
+            let replacement = boundary.clone();
             // Every check is complete. PTE suspension/TLB acknowledgement are
             // the caller's exclusion contract, including private COW aliases.
             if let Some(address) = physical {
@@ -157,8 +209,6 @@ impl PreparedExtent {
                 }
             }
             let entry = &mut cache[index];
-            let within = (self.plan.length - entry.key.page_index * PAGE_BYTES as u64)
-                .min(PAGE_BYTES as u64) as usize;
             entry.valid_len = if self.plan.length < self.old_length {
                 entry.valid_len.min(within)
             } else {
@@ -168,7 +218,7 @@ impl PreparedExtent {
                 let end = end.min(entry.valid_len);
                 (start < end).then_some((start, end))
             });
-            entry.bytes = boundary;
+            entry.bytes = replacement;
             entry.version = entry.version.wrapping_add(1);
         }
         // Growth must discard negative EOF cache entries too; otherwise newly

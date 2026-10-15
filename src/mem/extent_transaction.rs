@@ -111,6 +111,9 @@ impl ExtentTransaction {
             if !work.pages.is_empty() {
                 tlb_shootdown::invalidate_all().map_err(|_| crate::syscall::EIO)?;
             }
+            // Surface cache-address/buffer errors before handing back an
+            // unlocked owner. No external-storage permission is implied.
+            work.extent.preflight()?;
             Ok::<_, u64>(())
         })?;
         Ok(Self { owner: Some(owner) })
