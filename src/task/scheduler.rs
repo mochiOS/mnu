@@ -468,11 +468,18 @@ impl Drop for ImageQuiescence {
 /// image preparation. Do not release the old VM until every sibling has left
 /// its CPU, including an outgoing stack/context handoff.
 pub(crate) fn retire_image_siblings(process: super::ProcessId, owner: ThreadId) {
+    retire_process_threads(process, Some(owner));
+}
+
+/// Creation must be excluded by the image gate or the process STOPPING state.
+/// Never release mappings or publish process exit until remote CPU references,
+/// including outgoing stack/context handoffs, have disappeared.
+pub(crate) fn retire_process_threads(process: super::ProcessId, owner: Option<ThreadId>) {
     // No allocation may fail after image preparation has completed.
     let mut siblings = [None; super::thread::ThreadQueue::MAX_THREADS];
     let mut count = 0;
     crate::task::for_each_thread(|thread| {
-        if thread.process_id() == process && thread.id() != owner {
+        if thread.process_id() == process && Some(thread.id()) != owner {
             siblings[count] = Some(thread.id());
             count += 1;
         }
@@ -506,27 +513,19 @@ pub(crate) fn retire_image_siblings(process: super::ProcessId, owner: ThreadId) 
 pub fn exit_current_task(exit_code: u64) -> ! {
     if let Some(current_id) = current_thread_id() {
         crate::debug!("Exiting thread {:?} with code {}", current_id, exit_code);
-        let current_pid = with_thread(current_id, |thread| thread.process_id());
+        if let Some(pid) = super::thread::begin_thread_exit(current_id) {
+            retire_process_threads(pid, Some(current_id));
+            if let Err(error) = crate::task::release_process_borrowed_mappings(pid) {
+                crate::warn!(
+                    "Borrowed mapping cleanup deferred for {:?}: {:#x}",
+                    pid,
+                    error
+                );
+            }
+            crate::task::mark_process_exited(pid, exit_code);
+        }
 
         set_thread_state(current_id, ThreadState::Terminated);
-
-        if let Some(pid) = current_pid {
-            let mut has_other_live_threads = false;
-            crate::task::for_each_thread(|thread| {
-                if thread.process_id() == pid
-                    && thread.id() != current_id
-                    && thread.state() != ThreadState::Terminated
-                {
-                    has_other_live_threads = true;
-                }
-            });
-            if !has_other_live_threads {
-                if let Err(error) = crate::task::release_process_borrowed_mappings(pid) {
-                    crate::warn!("Borrowed mapping cleanup deferred for {:?}: {:#x}", pid, error);
-                }
-                crate::task::mark_process_exited(pid, exit_code);
-            }
-        }
 
         // 現在のスレッドをクリア（先にクリアしないとschedule()が正しく動作しない）
         set_current_thread(None, None);
@@ -706,21 +705,24 @@ pub fn start_scheduling() -> ! {
 
 /// 現在のプロセス全体を終了させる。
 ///
-/// `ProcessExit` と致命的な例外は POSIX `_exit` と同じく、呼び出し元
-/// スレッドだけでなく同一プロセスの全スレッドを終了させる。
+/// `ProcessExit` と致命的な例外は、呼び出し元スレッドだけでなく
+/// 同一プロセスの全スレッドを終了させる。
 /// スレッド単体の終了には `ThreadExit` を使う。
 pub fn exit_current_process(exit_code: i32) -> ! {
     if let Some(current_id) = current_thread_id() {
-        if let Some(current_pid) = with_thread(current_id, |thread| thread.process_id()) {
-            let mut siblings = alloc::vec::Vec::new();
-            crate::task::for_each_thread(|thread| {
-                if thread.process_id() == current_pid && thread.id() != current_id {
-                    siblings.push(thread.id());
-                }
-            });
-            for sibling in siblings {
-                terminate_thread(sibling);
+        let object = with_thread(current_id, |thread| thread.process_id())
+            .and_then(|pid| crate::task::with_process(pid, |process| process.process_object()));
+        if let Some(object) = object.filter(|object| object.begin_termination()) {
+            let pid = object.id();
+            retire_process_threads(pid, Some(current_id));
+            if let Err(error) = crate::task::release_process_borrowed_mappings(pid) {
+                crate::warn!(
+                    "Borrowed mapping cleanup deferred for {:?}: {:#x}",
+                    pid,
+                    error
+                );
             }
+            crate::task::mark_process_exited(pid, exit_code as u64);
         }
     }
     exit_current_task(exit_code as u64)

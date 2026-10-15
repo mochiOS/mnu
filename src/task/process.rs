@@ -445,6 +445,10 @@ pub struct ProcessObject {
 }
 
 impl ProcessObject {
+    // Internal admission barrier, not a published lifecycle state. Waiters
+    // continue to observe RUNNING until every execution context is stopped.
+    const STOPPING: u8 = 3;
+
     fn new(id: ProcessId) -> Self {
         Self {
             id,
@@ -485,6 +489,23 @@ impl ProcessObject {
 
     pub fn is_exited(&self) -> bool {
         self.state.load(Ordering::Acquire) == mnu_abi::PROCESS_STATE_EXITED as u8
+    }
+
+    pub(crate) fn accepts_threads(&self) -> bool {
+        self.state.load(Ordering::Acquire) == mnu_abi::PROCESS_STATE_RUNNING as u8
+    }
+
+    /// Elect one termination owner without allocating or publishing exit early.
+    /// Thread admission checks the same state under the thread queue lock.
+    pub(crate) fn begin_termination(&self) -> bool {
+        self.state
+            .compare_exchange(
+                mnu_abi::PROCESS_STATE_RUNNING as u8,
+                Self::STOPPING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     pub fn exit_code(&self) -> u64 {

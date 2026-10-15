@@ -1506,6 +1506,9 @@ impl ThreadQueue {
             (p.resource_limits(), p.process_object())
         })
         {
+            if !object.accepts_threads() {
+                return None;
+            }
             let current_threads = self
                 .threads
                 .iter()
@@ -2022,6 +2025,32 @@ pub fn set_thread_state(id: ThreadId, state: ThreadState) -> bool {
 pub fn process_execution_ticks(process: &super::process::ProcessObject) -> (u64, u64) {
     let _queue = THREAD_QUEUE.lock();
     (process.user_cpu_ticks(), process.kernel_cpu_ticks())
+}
+
+/// Mark exit and elect the last thread under one queue lock. A creator which
+/// passed admission before STOPPING must publish under this same lock, so it
+/// is either included in termination or refused at push. An external owner
+/// which already claimed STOPPING is responsible for terminal publication.
+pub(super) fn begin_thread_exit(id: ThreadId) -> Option<ProcessId> {
+    let mut queue = THREAD_QUEUE.lock();
+    let (pid, object) = {
+        let thread = queue.get(id)?;
+        (thread.process_id(), thread.process_object.clone())
+    };
+    if queue.iter().any(|thread| {
+        thread.process_id() == pid && thread.id() != id && thread.state() != ThreadState::Terminated
+    }) {
+        queue.set_state(id, ThreadState::Terminated);
+        return None;
+    }
+    if object.is_some_and(|object| object.begin_termination()) {
+        // The owner may yield while retiring remote siblings. Keep it
+        // schedulable until it has published exit and can hand off its CPU.
+        Some(pid)
+    } else {
+        queue.set_state(id, ThreadState::Terminated);
+        None
+    }
 }
 
 pub(super) fn mark_thread_terminated(id: ThreadId) -> Option<bool> {

@@ -1877,15 +1877,10 @@ pub fn process_terminate(raw: u64, exit_code: u64) -> u64 {
     if crate::syscall::security::current_process_id() == Some(process_id) {
         crate::task::scheduler::exit_current_process(exit_code as i32);
     }
-    let mut threads = alloc::vec::Vec::new();
-    crate::task::for_each_thread(|thread| {
-        if thread.process_id() == process_id {
-            threads.push(thread.id());
-        }
-    });
-    for thread in threads {
-        crate::task::terminate_thread(thread);
+    if !process.begin_termination() {
+        return if process.is_exited() { ESRCH } else { EAGAIN };
     }
+    crate::task::scheduler::retire_process_threads(process_id, None);
     let cleanup = crate::task::release_process_borrowed_mappings(process_id);
     if !crate::task::mark_process_exited(process_id, exit_code) {
         return ESRCH;
