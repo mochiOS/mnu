@@ -15,8 +15,48 @@ pub(crate) trait Backend {
     /// Must wait for every CPU capable of retaining old translations.
     fn synchronize(&mut self) -> Result<(), Self::Error>;
     /// Clear the suspended entry and release its retained mapping reference.
-    /// Called only after successful synchronization while the VM lock is held.
+    /// Called only after successful synchronization under backend exclusion
+    /// (the retained VM lock for Native).
     fn release(&mut self, page: Self::Page);
+}
+
+impl<B: Backend + ?Sized> Backend for &mut B {
+    type Page = B::Page;
+    type Error = B::Error;
+    fn next_page(&mut self, table: u64, start: u64, end: u64) -> Result<Option<u64>, B::Error> {
+        (**self).next_page(table, start, end)
+    }
+    fn suspend(&mut self, table: u64, address: u64) -> Result<Option<B::Page>, B::Error> {
+        (**self).suspend(table, address)
+    }
+    fn restore(&mut self, page: B::Page) {
+        (**self).restore(page);
+    }
+    fn synchronize(&mut self) -> Result<(), B::Error> {
+        (**self).synchronize()
+    }
+    fn release(&mut self, page: B::Page) {
+        (**self).release(page);
+    }
+}
+
+/// Own the backend and every suspended mapping until commit or cancellation.
+/// Dropping an unfinished journal restores ownership before dropping backend
+/// leases. The backend must retain its exclusion/root lifetimes throughout;
+/// in particular Native still requires its original mapping-lock scope. This
+/// type alone does not authorize unlocking VM or waiting for external I/O.
+#[must_use = "drop restores the original mappings; commit explicitly to release them"]
+pub(crate) struct Suspension<B: Backend> {
+    backend: B,
+    pages: Vec<B::Page>,
+}
+
+impl<B: Backend> Drop for Suspension<B> {
+    fn drop(&mut self) {
+        while let Some(page) = self.pages.pop() {
+            self.backend.restore(page);
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -50,80 +90,89 @@ pub(crate) fn revoke_with<B: Backend, T>(
     backend: &mut B,
     commit: impl FnOnce() -> Result<T, B::Error>,
 ) -> Result<T, Error<B::Error>> {
-    let mut plan = Vec::new();
-    for (table, start, end) in ranges {
-        if start >= end || table & 4095 != 0 || start & 4095 != 0 || end & 4095 != 0 {
-            return Err(Error::InvalidRange);
-        }
-        plan.try_reserve(1).map_err(|_| Error::Allocation)?;
-        plan.push((table, start, end));
-    }
-    // The same PTE must not be suspended/released twice. Distinct page tables
-    // may use identical virtual ranges; overlapping ranges within one cannot.
-    plan.sort_unstable();
-    if plan
-        .windows(2)
-        .any(|pair| pair[0].0 == pair[1].0 && pair[1].1 < pair[0].2)
-    {
-        return Err(Error::InvalidRange);
-    }
-    // Discover first: allocation and walk errors must leave every PTE intact.
-    // Storage scales with allocated leaves, not the virtual reservation size.
-    let mut pages = Vec::new();
-    for (table, start, end) in plan {
-        let mut cursor = start;
-        while cursor < end {
-            let Some(address) = backend
-                .next_page(table, cursor, end)
-                .map_err(Error::Backend)?
-            else {
-                break;
-            };
-            if address < cursor || address >= end || address & 4095 != 0 {
+    Suspension::new(ranges, backend)?.commit_with(|_| commit())
+}
+
+impl<B: Backend> Suspension<B> {
+    /// Reserve all storage before the first edit, then suspend and acknowledge
+    /// every selected translation before handing ownership to the caller.
+    pub(crate) fn new(
+        ranges: impl IntoIterator<Item = (u64, u64, u64)>,
+        mut backend: B,
+    ) -> Result<Self, Error<B::Error>> {
+        let mut plan = Vec::new();
+        for (table, start, end) in ranges {
+            if start >= end || table & 4095 != 0 || start & 4095 != 0 || end & 4095 != 0 {
                 return Err(Error::InvalidRange);
             }
-            pages.try_reserve(1).map_err(|_| Error::Allocation)?;
-            pages.push((table, address));
-            cursor = address + 4096;
+            plan.try_reserve(1).map_err(|_| Error::Allocation)?;
+            plan.push((table, start, end));
         }
-    }
-    let mut suspended = Vec::new();
-    suspended
-        .try_reserve_exact(pages.len())
-        .map_err(|_| Error::Allocation)?;
-    for (table, address) in pages {
-        match backend.suspend(table, address) {
-            Ok(Some(page)) => suspended.push(page),
-            Ok(None) => {}
-            Err(error) => {
-                for page in suspended.into_iter().rev() {
-                    backend.restore(page);
+        // The same PTE must not be suspended/released twice. Distinct page tables
+        // may use identical virtual ranges; overlapping ranges within one cannot.
+        plan.sort_unstable();
+        if plan
+            .windows(2)
+            .any(|pair| pair[0].0 == pair[1].0 && pair[1].1 < pair[0].2)
+        {
+            return Err(Error::InvalidRange);
+        }
+        // Discover first: allocation and walk errors must leave every PTE intact.
+        // Storage scales with allocated leaves, not the virtual reservation size.
+        let mut pages = Vec::new();
+        for (table, start, end) in plan {
+            let mut cursor = start;
+            while cursor < end {
+                let Some(address) = backend
+                    .next_page(table, cursor, end)
+                    .map_err(Error::Backend)?
+                else {
+                    break;
+                };
+                if address < cursor || address >= end || address & 4095 != 0 {
+                    return Err(Error::InvalidRange);
                 }
-                return Err(Error::Backend(error));
+                pages.try_reserve(1).map_err(|_| Error::Allocation)?;
+                pages.push((table, address));
+                cursor = address + 4096;
             }
         }
-    }
-    if !suspended.is_empty() {
-        if let Err(error) = backend.synchronize() {
-            for page in suspended.into_iter().rev() {
-                backend.restore(page);
+        let mut suspended = Vec::new();
+        suspended
+            .try_reserve_exact(pages.len())
+            .map_err(|_| Error::Allocation)?;
+        let mut journal = Self {
+            backend,
+            pages: suspended,
+        };
+        for (table, address) in pages {
+            if let Some(page) = journal
+                .backend
+                .suspend(table, address)
+                .map_err(Error::Backend)?
+            {
+                journal.pages.push(page);
             }
-            return Err(Error::Backend(error));
         }
-    }
-    let result = match commit() {
-        Ok(result) => result,
-        Err(error) => {
-            for page in suspended.into_iter().rev() {
-                backend.restore(page);
-            }
-            return Err(Error::Backend(error));
+        if !journal.pages.is_empty() {
+            journal.backend.synchronize().map_err(Error::Backend)?;
         }
-    };
-    for page in suspended {
-        backend.release(page);
+        Ok(journal)
     }
-    Ok(result)
+
+    /// All translations are suspended and synchronized. A failed operation
+    /// must leave backing unchanged; automatic rollback restores every PTE.
+    /// Backend exclusion rules apply to both the callback and final release.
+    pub(crate) fn commit_with<T>(
+        mut self,
+        commit: impl FnOnce(&mut B) -> Result<T, B::Error>,
+    ) -> Result<T, Error<B::Error>> {
+        let result = commit(&mut self.backend).map_err(Error::Backend)?;
+        for page in self.pages.drain(..) {
+            self.backend.release(page);
+        }
+        Ok(result)
+    }
 }
 
 /// Select the virtual overlap of a backing-object range, checking all additions
