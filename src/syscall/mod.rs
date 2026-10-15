@@ -466,6 +466,19 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     map_borrowed_range_for_process(pid, virt_addr, fb_base, required, cache)
 }
 
+/// Retry only a temporary backing reservation, after resident-copy guards have
+/// been released. Every attempt revalidates the original root and permissions.
+fn retry_usercopy<T>(
+    mut operation: impl FnMut() -> crate::result::Result<T>,
+) -> crate::result::Result<T> {
+    loop {
+        match operation() {
+            Err(crate::Kernel::Memory(crate::result::Memory::Busy)) => crate::task::yield_now(),
+            result => return result,
+        }
+    }
+}
+
 /// ユーザー空間からバイト列をコピーする（コピー先はカーネル空間）。
 pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
     if dst.is_empty() {
@@ -478,9 +491,9 @@ pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
     if src_ptr == 0 {
         return Err(EFAULT);
     }
-    let mut result = copy_out_of_current_root(user_pt, src_ptr, dst);
+    let mut result = retry_usercopy(|| copy_out_of_current_root(user_pt, src_ptr, dst));
     if result.is_err() && fault_in_user_range(user_pt, src_ptr, dst.len() as u64, false) {
-        result = copy_out_of_current_root(user_pt, src_ptr, dst);
+        result = retry_usercopy(|| copy_out_of_current_root(user_pt, src_ptr, dst));
     }
     result.map_err(|err| {
         let (syscall_num, syscall_args) = last_syscall_snapshot();
@@ -542,8 +555,15 @@ fn fault_in_user_range(table_phys: u64, address: u64, len: u64, write: bool) -> 
         };
         // Provider fault preparation can do IPC. Drop PROC before it; the
         // final resident copy revalidates and locks the original root again.
-        if !resident && process::handle_user_memory_fault(page, write, false).is_err() {
-            return false;
+        if !resident {
+            match process::handle_user_memory_fault(page, write, false) {
+                Ok(()) => {}
+                Err(fault) if fault.is_retryable() => {
+                    crate::task::yield_now();
+                    continue;
+                }
+                Err(_) => return false,
+            }
         }
         if page == end_page {
             return true;
@@ -562,6 +582,11 @@ fn copy_out_of_current_root(table: u64, address: u64, bytes: &mut [u8]) -> crate
         }
         // Retain the root and exclude protection/unmap/resize until the last
         // translated byte has been copied into kernel-owned storage.
+        crate::mem::mapping_admission::check_access(
+            process.memory_regions(),
+            address,
+            bytes.len() as u64,
+        )?;
         crate::mem::paging::copy_from_user_in_table(table, address, bytes)
     })
     .unwrap_or(Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress)))
@@ -577,6 +602,11 @@ fn copy_into_current_root(table: u64, address: u64, bytes: &[u8]) -> crate::resu
         }
         // Fault preparation may do IPC, but this resident copy must exclude
         // concurrent COW/protection/unmap edits and keep its root alive.
+        crate::mem::mapping_admission::check_access(
+            process.memory_regions(),
+            address,
+            bytes.len() as u64,
+        )?;
         crate::mem::paging::copy_to_user_in_table(table, address, bytes)
     })
     .unwrap_or(Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress)))
@@ -594,9 +624,9 @@ pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
     if dst_ptr == 0 {
         return Err(EFAULT);
     }
-    let mut result = copy_into_current_root(user_pt, dst_ptr, src);
+    let mut result = retry_usercopy(|| copy_into_current_root(user_pt, dst_ptr, src));
     if result.is_err() && fault_in_user_range(user_pt, dst_ptr, src.len() as u64, true) {
-        result = copy_into_current_root(user_pt, dst_ptr, src);
+        result = retry_usercopy(|| copy_into_current_root(user_pt, dst_ptr, src));
     }
     result.map_err(|err| {
         let (syscall_num, syscall_args) = last_syscall_snapshot();

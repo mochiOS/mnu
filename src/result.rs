@@ -45,6 +45,8 @@ pub enum Syscall {
 /// メモリ関連
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Memory {
+    /// 一時的なbacking予約との競合。VMロックを解放してから再試行する。
+    Busy,
     /// 利用可能なメモリがない
     OutOfMemory,
     /// 無効なアドレスへのアクセス
@@ -190,6 +192,7 @@ impl fmt::Display for Memory {
     /// エラーをフォーマット表示
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Memory::Busy => write!(f, "Memory backing is temporarily reserved"),
             Memory::OutOfMemory => write!(f, "Out of memory"),
             Memory::InvalidAddress => write!(f, "Invalid address"),
             Memory::PermissionDenied => write!(f, "Permission denied"),

@@ -327,6 +327,7 @@ pub(crate) fn resolve_user_copy_on_write(table: u64, address: u64) -> crate::res
             return Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress));
         }
         // Serialize COW leaf edits with native protection, unmap and teardown.
+        crate::mem::mapping_admission::check_access(process.memory_regions(), address, 1)?;
         crate::mem::paging::resolve_copy_on_write(table, address)
     })
     .unwrap_or(Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress)))

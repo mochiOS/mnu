@@ -19,3 +19,25 @@ pub(crate) fn check(
     }
     Ok(())
 }
+
+/// Resident kernel accesses use a typed transient condition, not a user fault.
+pub(crate) fn check_access(
+    regions: &[crate::task::MemoryRegion],
+    start: u64,
+    length: u64,
+) -> crate::result::Result<()> {
+    use crate::{Kernel, result::Memory};
+    if length == 0 {
+        return Ok(());
+    }
+    let end = start
+        .checked_add(length)
+        .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
+    check(regions, start, end).map_err(|error| {
+        Kernel::Memory(if error == crate::syscall::EAGAIN {
+            Memory::Busy
+        } else {
+            Memory::InvalidAddress
+        })
+    })
+}

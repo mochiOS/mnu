@@ -843,6 +843,11 @@ pub(super) fn page_fault_handler(
                     return;
                 }
                 Ok(false) => {}
+                Err(crate::Kernel::Memory(crate::result::Memory::Busy)) => {
+                    crate::task::yield_now();
+                    leave_to_user(entered_from_user);
+                    return;
+                }
                 Err(error) => {
                     warn!("copy-on-write fault resolution failed: {:?}", error);
                     copy_on_write_failed = true;
