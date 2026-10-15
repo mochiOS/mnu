@@ -1189,11 +1189,14 @@ fn replace_current_process_image(
             Some(base) => base,
             None => return Err(EINVAL),
         };
-    if !crate::task::remap_kernel_stack_user_table(kernel_stack, new_pt_phys) {
-        return Err(crate::syscall::types::ENOMEM);
-    }
-    crate::task::scheduler::retire_image_siblings(pid, current_tid);
+    let stack_mapping = crate::task::prepare_kernel_stack_user_table(kernel_stack, new_pt_phys)
+        .ok_or(crate::syscall::types::ENOMEM)?;
+    // Quiescence is reversible. In particular, a failed borrowed-PTE/TLB
+    // transaction must resume siblings and keep the old stack alias/owner.
+    let quiescence = crate::task::scheduler::quiesce_image_siblings(pid, current_tid);
     crate::task::release_process_borrowed_mappings(pid)?;
+    crate::task::scheduler::retire_image_siblings(pid, current_tid);
+    stack_mapping.commit();
     crate::task::with_thread_mut(current_tid, |thread| thread.set_fs_base(initial_fs_base));
     let old_pt_phys = crate::task::with_process_mut(pid, |process| {
         let previous = process.page_table();
@@ -1225,6 +1228,7 @@ fn replace_current_process_image(
     }
     new_pt_guard.disarm();
     measurement.record();
+    drop(quiescence);
     drop(transition);
     Ok((new_pt_phys, entry, initial_rsp))
 }

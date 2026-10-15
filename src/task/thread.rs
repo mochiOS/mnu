@@ -4,6 +4,8 @@ use x86_64::VirtAddr;
 
 use super::context::Context;
 use super::ids::{ProcessId, ThreadId, ThreadState};
+mod stack_image;
+pub use stack_image::{prepare_kernel_stack_user_table, PreparedKernelStack};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SyscallUserContext {
@@ -795,63 +797,6 @@ pub fn allocate_kernel_stack_in_table(size: usize, user_page_table: u64) -> Opti
     }
     KSTACK_SLOTS.lock()[slot_index].mapped_pages = page_count as u8;
     Some(base)
-}
-
-pub fn remap_kernel_stack_user_table(base: u64, new_page_table: u64) -> bool {
-    let slot_index = match stack_slot_index(base) {
-        Some(index) => index,
-        None => return false,
-    };
-    let (old_page_table, requested_bytes, page_count, sampled) = {
-        let mut slots = KSTACK_SLOTS.lock();
-        let slot = &mut slots[slot_index];
-        if slot.mapped_pages == 0 || slot.mapped_pages == KSTACK_SLOT_RESERVED {
-            return false;
-        }
-        let state = (
-            slot.user_page_table,
-            slot.requested_bytes,
-            slot.mapped_pages as usize,
-            slot.sampled,
-        );
-        slot.mapped_pages = KSTACK_SLOT_RESERVED;
-        state
-    };
-
-    let mut mapped = 0usize;
-    while mapped < page_count {
-        let address = base + (mapped * KSTACK_PAGE_BYTES) as u64;
-        let Some(physical) = crate::mem::paging::translate_addr(VirtAddr::new(address)) else {
-            break;
-        };
-        if !map_stack_page_in_user_table(new_page_table, address, physical.as_u64()) {
-            break;
-        }
-        mapped += 1;
-    }
-    if mapped != page_count {
-        let _ = unmap_stack_from_table(new_page_table, base, mapped);
-        KSTACK_SLOTS.lock()[slot_index] = KernelStackSlot {
-            user_page_table: old_page_table,
-            requested_bytes,
-            mapped_pages: page_count as u8,
-            sampled,
-        };
-        return false;
-    }
-    if old_page_table != 0 && !unmap_stack_from_table(old_page_table, base, page_count) {
-        crate::audit::log(
-            crate::audit::AuditEventKind::Quarantine,
-            "old kernel stack mapping could not be fully detached during exec",
-        );
-    }
-    KSTACK_SLOTS.lock()[slot_index] = KernelStackSlot {
-        user_page_table: new_page_table,
-        requested_bytes,
-        mapped_pages: page_count as u8,
-        sampled,
-    };
-    true
 }
 
 pub fn free_kernel_stack(base: u64) {
