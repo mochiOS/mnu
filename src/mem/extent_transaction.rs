@@ -5,7 +5,7 @@
 use super::{
     mapping_targets::Targets,
     paging, tlb_shootdown,
-    vm_object::{PreparedExtent, VmObject},
+    vm_object::{ObjectKey, PreparedExtent, VmObject},
 };
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::{
@@ -49,15 +49,15 @@ pub(crate) struct ExtentTransaction {
 
 impl ExtentTransaction {
     /// Internal coordinator only; no caller authority is inferred from a PID,
-    /// file path, or provider identity. A future public entry must validate a
-    /// resource-control capability before reaching this constructor.
+    /// file path, or provider identity. Outward-facing entries must validate
+    /// resource-control authority before reaching a constructor.
     pub(crate) fn prepare(object: &VmObject, old_length: u64, length: u64) -> Result<Self, u64> {
         Self::prepare_with_scope(object, old_length, length, false)
     }
 
     /// Suspend every mapping, including unaffected prefixes, before external
     /// work can begin. Dropping before begin_external still cancels normally.
-    /// Authority must be validated at the future resource-control entrypoint.
+    /// This internal VM-object entry grants no outward-facing authority.
     pub(crate) fn prepare_external(
         object: &VmObject,
         old_length: u64,
@@ -72,26 +72,47 @@ impl ExtentTransaction {
         length: u64,
         external: bool,
     ) -> Result<Self, u64> {
+        Self::prepare_extent(object.object_key(), external, || {
+            object.prepare_extent(old_length, length, |bytes| {
+                Arc::try_new(bytes).map_err(|_| crate::syscall::ENOMEM)
+            })
+        })
+    }
+
+    /// Called only after validating the endpoint owner's RECEIVE Handle.
+    /// An object identity alone, even a known one, grants no update authority.
+    pub(crate) fn prepare_provider(
+        key: ObjectKey,
+        old_length: u64,
+        length: u64,
+    ) -> Result<Self, u64> {
+        Self::prepare_extent(key, true, || {
+            PreparedExtent::prepare_provider(key, old_length, length, |bytes| {
+                Arc::try_new(bytes).map_err(|_| crate::syscall::ENOMEM)
+            })
+        })
+    }
+
+    fn prepare_extent(
+        key: ObjectKey,
+        external: bool,
+        prepare: impl FnOnce() -> Result<PreparedExtent, u64>,
+    ) -> Result<Self, u64> {
         // Reserve cancellation storage BEFORE edits, including failed prepare.
         let ticket = Ticket::new(None).map_err(|_| crate::syscall::ENOMEM)?;
         let mut owner = ticket.defer_on_drop(&PENDING);
         process::with_mapping_table(|table| {
-            let extent = object.prepare_extent(old_length, length, |bytes| {
-                Arc::try_new(bytes).map_err(|_| crate::syscall::ENOMEM)
-            })?;
+            let extent = prepare()?;
             let (start, end) = extent.revocation().unwrap_or((0, 0));
             let affected = external
-                .then(|| {
-                    Targets::capture(table, object.object_key(), start, end, extent.boundary())
-                })
+                .then(|| Targets::capture(table, key, start, end, extent.boundary()))
                 .transpose()?;
             let (low, high) = if external {
                 (0, u64::MAX & !4095)
             } else {
                 (start, end)
             };
-            let targets =
-                Targets::capture(table, object.object_key(), low, high, extent.boundary())?;
+            let targets = Targets::capture(table, key, low, high, extent.boundary())?;
             let mut locations = Vec::new();
             for (root, start, end) in targets.ranges() {
                 let mut cursor = start;
@@ -213,9 +234,25 @@ impl ExtentTransaction {
     /// remaining cache/PTE check can fail. Subsequent failure or owner drop
     /// retries publication; it must never restore the old extent.
     /// This neither starts nor acknowledges external I/O. Its outcome must
-    /// already be resolved by the caller. A future public API must authenticate
-    /// that resource owner rather than trust an arbitrary consumer's report.
+    /// already be resolved by the caller. Native update Handles instead use
+    /// request_external_publication after authenticated owner preparation.
     pub(crate) fn request_publication(&mut self) -> Result<(), u64> {
+        self.finish(true)
+    }
+
+    /// Provider-owned update Handles must cross the uncertainty boundary
+    /// explicitly; the local-only publication API cannot substitute for BEGIN.
+    pub(crate) fn request_external_publication(&mut self) -> Result<(), u64> {
+        let owner = self.owner.as_mut().ok_or(crate::syscall::EINVAL)?;
+        let work = owner.value_mut().as_ref().ok_or(crate::syscall::EINVAL)?;
+        if !work.external
+            || !matches!(
+                work.publication,
+                Publication::InFlight | Publication::Requested | Publication::Published
+            )
+        {
+            return Err(crate::syscall::EINVAL);
+        }
         self.finish(true)
     }
 

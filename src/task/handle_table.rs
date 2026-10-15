@@ -313,6 +313,9 @@ pub enum KernelObject {
     Process(Arc<ProcessObject>),
     Thread(super::ids::ThreadId),
     VmObject(Arc<crate::mem::vm_object::VmObject>),
+    MemoryUpdate(
+        Arc<crate::interrupt::spinlock::SpinLock<crate::mem::extent_transaction::ExtentTransaction>>,
+    ),
     AddressSpace(Arc<crate::mem::address_space::AddressSpaceObject>),
     HandleSnapshot(Arc<super::handle_snapshot::HandleSnapshot>),
     File(Arc<FileHandle>),
@@ -345,6 +348,7 @@ impl KernelObject {
             (Self::Process(left), Self::Process(right)) => Arc::ptr_eq(left, right),
             (Self::Thread(left), Self::Thread(right)) => left == right,
             (Self::VmObject(left), Self::VmObject(right)) => Arc::ptr_eq(left, right),
+            (Self::MemoryUpdate(left), Self::MemoryUpdate(right)) => Arc::ptr_eq(left, right),
             (Self::AddressSpace(left), Self::AddressSpace(right)) => Arc::ptr_eq(left, right),
             (Self::HandleSnapshot(left), Self::HandleSnapshot(right)) => Arc::ptr_eq(left, right),
             (Self::File(left), Self::File(right)) => Arc::ptr_eq(left, right),
@@ -374,6 +378,7 @@ impl core::fmt::Debug for KernelObject {
                 .finish(),
             Self::Thread(thread) => formatter.debug_tuple("Thread").field(thread).finish(),
             Self::VmObject(id) => formatter.debug_tuple("VmObject").field(id).finish(),
+            Self::MemoryUpdate(_) => formatter.write_str("MemoryUpdate(..)"),
             Self::AddressSpace(image) => formatter.debug_tuple("AddressSpace").field(image).finish(),
             Self::HandleSnapshot(snapshot) => formatter
                 .debug_tuple("HandleSnapshot")

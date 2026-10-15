@@ -11,8 +11,10 @@ pub(crate) struct PreparedExtent {
     // Keep I/O excluded until commit or cancellation, including delayed reply
     // publication by an earlier writer. Never wait in a provider's request path.
     _io_guard: super::super::object_io::Reservation,
-    // Preparation must keep the provider object alive through publication.
-    _provider: Arc<ProviderObject>,
+    // VM-origin preparation retains its provider through publication. An
+    // endpoint-owner update retains the canonical gate without fabricating an
+    // open description (and therefore without a synthetic OP_RELEASE).
+    _provider: Option<Arc<ProviderObject>>,
     old_length: u64,
     old_capacity: u64,
     plan: byte_extent::ResizePlan,
@@ -48,6 +50,46 @@ impl VmObject {
         else {
             return Err(crate::syscall::EINVAL);
         };
+        PreparedExtent::prepare(
+            self.object_key(),
+            _io_lock.clone(),
+            Some(object.clone()),
+            old_length,
+            length,
+            allocate,
+        )
+    }
+}
+
+impl PreparedExtent {
+    /// Internal provider-owner path. The native caller must first resolve a
+    /// RECEIVE capability for this exact endpoint namespace. This does not
+    /// fabricate an open description or send a synthetic provider release.
+    pub(crate) fn prepare_provider(
+        key: ObjectKey,
+        old_length: u64,
+        length: u64,
+        allocate: impl FnOnce([u8; PAGE_BYTES]) -> Result<Arc<[u8; PAGE_BYTES]>, u64>,
+    ) -> Result<Self, u64> {
+        if !matches!(key, ObjectKey::Provider { identity, .. } if identity != 0) {
+            return Err(crate::syscall::EINVAL);
+        }
+        let gate = PROVIDER_IO.lock().try_get(
+            key,
+            crate::mem::object_io_native::new_lock,
+            crate::syscall::ENOMEM,
+        )?;
+        Self::prepare(key, gate, None, old_length, length, allocate)
+    }
+
+    fn prepare(
+        key: ObjectKey,
+        gate: super::super::object_io::IoLock,
+        provider: Option<Arc<ProviderObject>>,
+        old_length: u64,
+        length: u64,
+        allocate: impl FnOnce([u8; PAGE_BYTES]) -> Result<Arc<[u8; PAGE_BYTES]>, u64>,
+    ) -> Result<Self, u64> {
         let geometry = |length| {
             byte_extent::plan(
                 old_length,
@@ -59,7 +101,7 @@ impl VmObject {
         };
         let old_capacity = geometry(old_length)?.capacity;
         let plan = geometry(length)?;
-        let io_guard = _io_lock
+        let io_guard = gate
             .try_lock()
             .map_err(|_| crate::syscall::EIO)?
             .ok_or(crate::syscall::EAGAIN)?;
@@ -78,14 +120,14 @@ impl VmObject {
         // Allocation failure above must not invalidate any prepared pages.
         let cache = PAGE_CACHE.lock();
         let io_guard = io_guard.reserve();
-        let epoch = _io_lock.generation();
+        let epoch = gate.generation();
         drop(cache);
         Ok(PreparedExtent {
-            object: self.object_key(),
+            object: key,
             epoch,
-            gate: _io_lock.clone(),
+            gate,
             _io_guard: io_guard,
-            _provider: object.clone(),
+            _provider: provider,
             old_length,
             old_capacity,
             plan,
@@ -93,9 +135,6 @@ impl VmObject {
             published: false,
         })
     }
-}
-
-impl PreparedExtent {
     /// The VM coordinator must already have suspended ALL mappings and
     /// acknowledged all CPUs, not just the resize-affected subset. Retain
     /// reservation until their records are discarded. No storage is queried.

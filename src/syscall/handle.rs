@@ -7,6 +7,8 @@ mod capture;
 pub use capture::table_capture;
 mod provider_reference;
 pub use provider_reference::count as provider_object_reference_count;
+mod memory_update;
+pub use memory_update::create as provider_memory_update_create;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
@@ -316,7 +318,8 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
     done as u64
 }
 
-/// Sends an opaque bounded control request to a user-space-backed object.
+/// Controls a native update owner, or sends an opaque bounded control request
+/// to a user-space-backed object.
 /// The kernel enforces handle rights and memory safety but does not interpret
 /// the provider-owned control code or payload.
 pub fn control(
@@ -331,6 +334,11 @@ pub fn control(
         Ok(object) => object,
         Err(error) => return error,
     };
+    if let KernelObject::MemoryUpdate(update) = &object {
+        return memory_update::control(
+            update, control_code, input, input_length, output, output_length,
+        );
+    }
     let KernelObject::Provider(provider) = object else {
         return ENOTSUP;
     };

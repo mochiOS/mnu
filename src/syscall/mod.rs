@@ -863,6 +863,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ProviderObjectCreate as u64 => {
             handle::provider_object_create(arg0, arg1, arg2)
         }
+        x if x == SyscallNumber::ProviderMemoryUpdateCreate as u64 => {
+            handle::provider_memory_update_create(arg0, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::ProviderObjectIdentify as u64 => {
             handle::provider_object_identify(arg0)
         }

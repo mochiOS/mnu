@@ -8,6 +8,7 @@ pub mod capability;
 pub mod diagnostic;
 pub mod handle_snapshot;
 pub mod memory_map;
+pub mod memory_update;
 
 /// プロセス作成時に渡すメタデータのABIです。
 pub mod exec;
@@ -259,6 +260,15 @@ pub enum SyscallNumber {
     /// target leaves the current image and sibling threads intact. No policy
     /// or resource-limit identity is interpreted or stored by this operation.
     ProcessImageReplaceBounded = 696,
+    /// Prepares an owned provider-memory extent update. Arguments: caller-local
+    /// endpoint RECEIVE Handle, nonzero memory identity, old length, new length.
+    /// Endpoint authority scopes the identity; no PID/FD/path or provider RPC.
+    /// Suspends all matching mappings and acknowledges remote TLBs before
+    /// returning a private CONTROL-only Handle (no TRANSFER or DUPLICATE).
+    /// HandleControl(memory_update::*) resolves the outcome with empty payloads.
+    /// Close before BEGIN cancels; close after BEGIN without confirmation
+    /// quarantines backing data. No external mutation may precede BEGIN.
+    ProviderMemoryUpdateCreate = 697,
     CheckGravityExist = 999,
 }
 
