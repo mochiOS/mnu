@@ -35,7 +35,7 @@ struct LowerReadOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ObjectKey {
+pub(crate) enum ObjectKey {
     Memory(u64),
     Provider {
         endpoint_thread_id: u64,
@@ -180,7 +180,7 @@ impl VmObject {
         }
     }
 
-    fn object_key(&self) -> ObjectKey {
+    pub(crate) fn object_key(&self) -> ObjectKey {
         match &self.source {
             VmObjectSource::Memory(memory) => ObjectKey::Memory(memory.id()),
             VmObjectSource::Provider { object, identity } => ObjectKey::Provider {

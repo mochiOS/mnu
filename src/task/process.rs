@@ -1545,7 +1545,9 @@ pub(crate) fn resize_shared_memory(
             for mapping in root
                 .mappings()
                 .iter()
-                .filter(|mapping| mapping.identity == memory.id())
+                .filter(|mapping| {
+                    mapping.identity == crate::mem::vm_object::ObjectKey::Memory(memory.id())
+                })
             {
                 if let Some((low, high)) = transaction::virtual_overlap(
                     mapping.start,

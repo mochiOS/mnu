@@ -1,5 +1,6 @@
 //! Owned, not-yet-published VM roots. Weak discovery does not extend lifetime;
 //! snapshot pins keep physical tables alive during backing revocation.
+use super::vm_object::ObjectKey;
 use crate::interrupt::spinlock::SpinLock;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -9,7 +10,7 @@ static ROOTS: SpinLock<Vec<Weak<Root>>> = SpinLock::new(Vec::new());
 const MAX_ROOTS: usize = 65536;
 
 pub(crate) struct Mapping {
-    pub identity: u64,
+    pub identity: ObjectKey,
     pub start: u64,
     pub length: u64,
     pub offset: u64,
@@ -34,7 +35,7 @@ impl Root {
             if let Some(identity) = region
                 .backing()
                 .file_object()
-                .and_then(|object| object.memory_identity())
+                .map(|object| object.object_key())
             {
                 root.mappings.try_reserve(1).map_err(|_| ())?;
                 root.mappings.push(Mapping {
