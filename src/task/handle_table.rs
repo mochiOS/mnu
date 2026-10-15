@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::fd_table::FileHandle;
 use super::process::ProcessObject;
+mod provider_release;
 
 pub const PROCESS_MAX_OBJECT_HANDLES: usize = mnu_abi::PROCESS_MAX_OBJECT_HANDLES;
 
@@ -15,6 +16,7 @@ pub struct ProviderObject {
     pub endpoint_generation: u64,
     pub object_id: u64,
     registered: AtomicBool,
+    release_ticket: Option<provider_release::Ticket>,
     io_options: AtomicU64,
     memory_identity: AtomicU64,
     memory_identity_unavailable: AtomicBool,
@@ -55,18 +57,16 @@ pub(crate) struct ProviderRelease {
     pub object_id: u64,
 }
 
-static PENDING_PROVIDER_RELEASES: crate::interrupt::spinlock::SpinLock<Vec<ProviderRelease>> =
-    crate::interrupt::spinlock::SpinLock::new(Vec::new());
+static PENDING_PROVIDER_RELEASES: crate::interrupt::spinlock::SpinLock<provider_release::Pending> =
+    crate::interrupt::spinlock::SpinLock::new(provider_release::Pending::new());
 
-pub(crate) fn take_provider_releases() -> Vec<ProviderRelease> {
-    core::mem::take(&mut *PENDING_PROVIDER_RELEASES.lock())
+pub(crate) fn take_provider_releases() -> provider_release::Pending {
+    let pending = core::mem::take(&mut *PENDING_PROVIDER_RELEASES.lock());
+    pending.reversed()
 }
 
-pub(crate) fn requeue_provider_releases(releases: &mut Vec<ProviderRelease>) {
-    if releases.is_empty() {
-        return;
-    }
-    PENDING_PROVIDER_RELEASES.lock().append(releases);
+pub(crate) fn requeue_provider_release(ticket: provider_release::Ticket) {
+    PENDING_PROVIDER_RELEASES.lock().push(ticket);
 }
 
 impl Drop for ProviderObject {
@@ -82,12 +82,9 @@ impl Drop for ProviderObject {
         if !self.registered.load(Ordering::Acquire) {
             return;
         }
-        PENDING_PROVIDER_RELEASES.lock().push(ProviderRelease {
-            endpoint_thread_id: self.endpoint_thread_id,
-            endpoint_slot: self.endpoint_slot,
-            endpoint_generation: self.endpoint_generation,
-            object_id: self.object_id,
-        });
+        if let Some(ticket) = self.release_ticket.take() {
+            PENDING_PROVIDER_RELEASES.lock().push(ticket);
+        }
     }
 }
 
@@ -97,18 +94,25 @@ impl ProviderObject {
         endpoint_slot: u16,
         endpoint_generation: u64,
         object_id: u64,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, u64> {
+        let release_ticket = provider_release::Ticket::new(ProviderRelease {
+            endpoint_thread_id,
+            endpoint_slot,
+            endpoint_generation,
+            object_id,
+        })?;
+        Ok(Self {
             endpoint_thread_id,
             endpoint_slot,
             endpoint_generation,
             object_id,
             registered: AtomicBool::new(false),
+            release_ticket: Some(release_ticket),
             io_options: AtomicU64::new(0),
             memory_identity: AtomicU64::new(0),
             memory_identity_unavailable: AtomicBool::new(false),
             signal_state: crate::interrupt::spinlock::SpinLock::new(ProviderSignalState::default()),
-        }
+        })
     }
 
     fn key(&self) -> ProviderKey {
@@ -627,7 +631,7 @@ mod tests {
 
     #[test]
     fn provider_objects_are_opaque_and_share_identity_across_duplicates() {
-        let provider = Arc::new(ProviderObject::new(31, 4, 8, 99));
+        let provider = Arc::new(ProviderObject::new(31, 4, 8, 99).unwrap());
         let mut table = ObjectHandleTable::new_boxed();
         let source = table
             .insert(ObjectHandleEntry::new(
@@ -656,7 +660,7 @@ mod tests {
 
     #[test]
     fn provider_readiness_signals_are_generic_and_level_triggered() {
-        let provider = ProviderObject::new(41, 5, 9, 101);
+        let provider = ProviderObject::new(41, 5, 9, 101).unwrap();
 
         assert_eq!(provider.signals(), 0);
         provider.update_signals(

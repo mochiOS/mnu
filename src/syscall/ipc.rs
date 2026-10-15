@@ -1643,8 +1643,11 @@ pub(crate) fn send_provider_from_kernel(endpoint: IpcEndpoint, data: &[u8]) -> b
     if data.len() > ipc_max_msg_size() || !endpoint_is_valid(endpoint) {
         return false;
     }
+    // Release notifications expect no reply. Reuse an existing sender, or the
+    // already supported kernel/no-sender value; never allocate endpoint maps
+    // while reclaiming a reference under memory pressure.
     let sender = crate::task::current_thread_id()
-        .and_then(|thread| ensure_endpoint_for_thread(thread.as_u64()))
+        .and_then(|thread| endpoint_handle_for_thread(thread.as_u64()))
         .unwrap_or(0);
     let mut mailboxes = lock_mailboxes();
     if !endpoint_is_valid(endpoint) {
