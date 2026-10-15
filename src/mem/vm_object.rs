@@ -380,6 +380,7 @@ impl VmObject {
             let key = self.page_key(page_index);
 
             let mut cache = PAGE_CACHE.lock();
+            ensure_unreserved(key.object)?;
             let entry_index = if let Some(index) = cache.iter().position(|entry| entry.key == key) {
                 index
             } else {
@@ -438,6 +439,7 @@ impl VmObject {
         let key = self.page_key(page_index);
 
         let mut cache = PAGE_CACHE.lock();
+        ensure_unreserved(key.object)?;
 
         let entry = cache
             .iter_mut()
@@ -487,6 +489,7 @@ impl VmObject {
             let key = self.page_key(page_index);
 
             let mut cache = PAGE_CACHE.lock();
+            ensure_unreserved(key.object)?;
 
             let entry_index = if let Some(index) = cache.iter().position(|entry| entry.key == key) {
                 index
@@ -644,6 +647,7 @@ impl core::fmt::Debug for VmObject {
 
 fn cached_page(key: PageKey) -> Result<Option<(Arc<[u8; PAGE_BYTES]>, usize)>, u64> {
     let mut cache = PAGE_CACHE.lock();
+    ensure_unreserved(key.object)?;
     let Some(entry) = cache.iter_mut().find(|entry| entry.key == key) else {
         return Ok(None);
     };
@@ -686,7 +690,8 @@ fn copy_to_frame(frame_phys: u64, offset: usize, input: &[u8]) -> Result<(), u64
 }
 
 fn cache_entry_is_evictable(entry: &CachedPage) -> bool {
-    entry.dirty_range.is_none()
+    !backing_is_reserved(entry.key.object)
+        && entry.dirty_range.is_none()
         && entry
             .frame_phys
             .is_none_or(|phys| !crate::mem::paging::user_frame_has_multiple_owners(phys))
@@ -743,6 +748,7 @@ pub(crate) fn overlay_provider_range(
         identity,
     };
     let mut cache = PAGE_CACHE.lock();
+    ensure_unreserved(key)?;
     for entry in cache.iter_mut().filter(|entry| entry.key.object == key) {
         let page_start = entry
             .key
@@ -979,6 +985,7 @@ fn cache_or_snapshot_page(
 
     let mut cache = PAGE_CACHE.lock();
 
+    ensure_unreserved(key.object)?;
     if let Some(existing) = cache.iter_mut().find(|entry| entry.key == key) {
         existing.last_used = next_cache_access();
 
@@ -1037,6 +1044,22 @@ fn cache_mutation_epoch(object: ObjectKey) -> u64 {
         .map_or(0, |gate| gate.generation())
 }
 
+fn backing_is_reserved(object: ObjectKey) -> bool {
+    PROVIDER_IO
+        .lock()
+        .existing(&object)
+        .is_some_and(|gate| gate.is_reserved())
+}
+
+/// Caller serializes admission with extent reservation through PAGE_CACHE.
+fn ensure_unreserved(object: ObjectKey) -> Result<(), u64> {
+    if backing_is_reserved(object) {
+        Err(crate::syscall::EAGAIN)
+    } else {
+        Ok(())
+    }
+}
+
 fn with_cache_generation<T>(
     gate: &super::object_io::IoLock,
     generation: u64,
@@ -1045,7 +1068,7 @@ fn with_cache_generation<T>(
     // The mapping/process lock is held by the final installer. Taking the
     // cache lock here excludes mutation until its PTE has been published.
     let _cache = PAGE_CACHE.lock();
-    if gate.generation() != generation {
+    if gate.is_reserved() || gate.generation() != generation {
         return Err(crate::syscall::EAGAIN);
     }
     install()

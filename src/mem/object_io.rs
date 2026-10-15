@@ -4,6 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub(crate) struct State {
     locked: AtomicBool,
+    reserved: AtomicBool,
     generation: AtomicU64,
 }
 
@@ -11,6 +12,7 @@ impl State {
     pub(crate) const fn new() -> Self {
         Self {
             locked: AtomicBool::new(false),
+            reserved: AtomicBool::new(false),
             generation: AtomicU64::new(1),
         }
     }
@@ -62,6 +64,9 @@ impl IoLock {
     pub(crate) fn generation(&self) -> u64 {
         self.0.generation.load(Ordering::Acquire)
     }
+    pub(crate) fn is_reserved(&self) -> bool {
+        self.0.reserved.load(Ordering::Acquire)
+    }
     /// Caller serializes cache publication through its cache/VM lock.
     pub(crate) fn advance_generation(&self) {
         self.0.generation.fetch_add(1, Ordering::AcqRel);
@@ -87,6 +92,28 @@ impl IoLock {
 }
 
 pub(crate) struct IoGuard(Arc<State>);
+
+impl IoGuard {
+    /// Caller holds its cache/publication lock while starting the reservation.
+    /// Exclude new page admission and invalidate outstanding snapshots.
+    pub(crate) fn reserve(self) -> Reservation {
+        self.0.reserved.store(true, Ordering::Release);
+        self.0.generation.fetch_add(1, Ordering::AcqRel);
+        Reservation { guard: self }
+    }
+}
+
+/// Excludes backing I/O and page publication until commit or cancellation.
+pub(crate) struct Reservation {
+    guard: IoGuard,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.guard.0.reserved.store(false, Ordering::Release);
+        // IoGuard drops afterward, so new I/O cannot enter a reserved backing.
+    }
+}
 
 impl Drop for IoGuard {
     fn drop(&mut self) {
