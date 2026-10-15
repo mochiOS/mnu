@@ -14,6 +14,7 @@ mod image;
 mod launch;
 mod captured_handles;
 mod storage;
+mod initial_mappings;
 
 use image::{map_elf_image, ElfImageLayout};
 use launch::ImageLaunch;
@@ -1256,7 +1257,7 @@ fn replace_current_process_image(
         phdr_vaddr,
         phentsize,
         phnum,
-        deferred_zero_regions,
+        mut deferred_zero_regions,
     } = match map_elf_image(data, new_pt_phys, &mut measurement) {
         Ok(layout) => layout,
         Err(errno) => return Err(errno),
@@ -1315,6 +1316,7 @@ fn replace_current_process_image(
         Ok(base) => base,
         Err(errno) => return Err(errno),
     };
+    initial_mappings::prepare(new_pt_phys, startup, &mut deferred_zero_regions)?;
     // Admission precedes every destructive old-image operation, including
     // sibling retirement, borrowed mapping revocation, TLS/context edits and
     // launch-Handle retention. Failed preparation drops only the new root.
@@ -1425,7 +1427,8 @@ fn process_image_replace_impl(
     const MAX_EXECUTABLE_BYTES: usize = 64 * 1024 * 1024;
     const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::HEADER_LEN
         + mnu_abi::process_image::MAX_RELOCATIONS * 8
-        + mnu_abi::process_image::MAX_STACK_BYTES;
+        + mnu_abi::process_image::MAX_STACK_BYTES
+        + mnu_abi::process_image::MAX_MAPPINGS * mnu_abi::process_image::MAPPING_LEN;
 
     if !caller_has_process_spawn_capability() {
         return EPERM;
@@ -1587,7 +1590,14 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         value: value.value,
     }));
     let startup = match request.startup {
-        mnu_abi::process_create::InitialState::Image(startup) => startup,
+        mnu_abi::process_create::InitialState::Image(startup) => {
+            // Mapping plans are currently an image-replacement operation.
+            // Never accept and silently ignore a requested initial mapping.
+            if startup.mappings().next().is_some() {
+                return EINVAL;
+            }
+            startup
+        }
         mnu_abi::process_create::InitialState::Context(context) => {
             return create_from_address_space(
                 image_handle,

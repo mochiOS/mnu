@@ -5,6 +5,9 @@
 
 pub const MAGIC: [u8; 4] = *b"MIMG";
 pub const VERSION: u16 = 1;
+pub const MAPPED_VERSION: u16 = 2;
+pub const MAPPING_LEN: usize = 48;
+pub const MAX_MAPPINGS: usize = 16;
 pub const HEADER_LEN: usize = 32;
 pub const RELOCATION_LEN: usize = 8;
 pub const MAX_STACK_BYTES: usize = 4096;
@@ -51,6 +54,7 @@ pub enum Error {
     InvalidStackPointer,
     InvalidRelocation,
     DuplicateRelocation,
+    InvalidMapping,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,9 +62,22 @@ pub struct StartupImage<'a> {
     initial_stack_pointer: u32,
     stack: &'a [u8],
     relocations: &'a [u8],
+    mappings: &'a [u8],
 }
 
 impl<'a> StartupImage<'a> {
+    pub fn mappings(self) -> impl Iterator<Item = InitialMapping> + 'a {
+        self.mappings
+            .chunks_exact(MAPPING_LEN)
+            .map(|record| InitialMapping {
+                address: read_u64(record, 0).unwrap(),
+                length: read_u64(record, 8).unwrap(),
+                access: read_u64(record, 16).unwrap(),
+                options: read_u64(record, 24).unwrap(),
+                backing_handle: read_u64(record, 32).unwrap(),
+                backing_offset: read_u64(record, 40).unwrap(),
+            })
+    }
     pub const fn initial_stack_pointer(self) -> u32 {
         self.initial_stack_pointer
     }
@@ -134,16 +151,20 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
         return Err(Error::BufferTooSmall);
     }
     if input[0..4] != MAGIC
-        || read_u16(input, 4) != Some(VERSION)
+        || !matches!(read_u16(input, 4), Some(VERSION | MAPPED_VERSION))
         || read_u16(input, 6) != Some(HEADER_LEN as u16)
         || read_u32(input, 8) != Some(0)
-        || input[24..HEADER_LEN].iter().any(|byte| *byte != 0)
+        || input[28..HEADER_LEN].iter().any(|byte| *byte != 0)
     {
         return Err(Error::InvalidHeader);
     }
     let initial_stack_pointer = read_u32(input, 12).ok_or(Error::InvalidHeader)?;
     let stack_len = read_u32(input, 16).ok_or(Error::InvalidHeader)? as usize;
     let relocation_count = read_u32(input, 20).ok_or(Error::InvalidHeader)? as usize;
+    let mapping_count = read_u32(input, 24).ok_or(Error::InvalidHeader)? as usize;
+    if mapping_count > MAX_MAPPINGS || (read_u16(input, 4) == Some(VERSION) && mapping_count != 0) {
+        return Err(Error::InvalidHeader);
+    }
     if stack_len == 0
         || stack_len > MAX_STACK_BYTES
         || stack_len & 7 != 0
@@ -154,8 +175,11 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
     let relocations_len = relocation_count
         .checked_mul(RELOCATION_LEN)
         .ok_or(Error::InvalidLength)?;
-    let stack_start = HEADER_LEN
+    let mapping_start = HEADER_LEN
         .checked_add(relocations_len)
+        .ok_or(Error::InvalidLength)?;
+    let stack_start = mapping_start
+        .checked_add(mapping_count * MAPPING_LEN)
         .ok_or(Error::InvalidLength)?;
     let expected_len = stack_start
         .checked_add(stack_len)
@@ -166,7 +190,8 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
     if initial_stack_pointer as usize >= stack_len || initial_stack_pointer & 7 != 0 {
         return Err(Error::InvalidStackPointer);
     }
-    let relocations = &input[HEADER_LEN..stack_start];
+    let relocations = &input[HEADER_LEN..mapping_start];
+    let mappings = &input[mapping_start..stack_start];
     let stack = &input[stack_start..];
     for index in 0..relocation_count {
         let relocation = relocation_at(relocations, index).ok_or(Error::InvalidRelocation)?;
@@ -187,11 +212,108 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
             }
         }
     }
-    Ok(StartupImage {
+    let image = StartupImage {
         initial_stack_pointer,
         stack,
         relocations,
-    })
+        mappings,
+    };
+    for (index, mapping) in image.mappings().enumerate() {
+        mapping.validate()?;
+        if image.mappings().take(index).any(|other| {
+            mapping.address < other.address + other.length
+                && other.address < mapping.address + mapping.length
+        }) {
+            return Err(Error::InvalidMapping);
+        }
+    }
+    Ok(image)
+}
+
+/// Exact, non-replacing VM reservations for ProcessImageReplace. The kernel
+/// interprets no purpose or key. Backing zero selects anonymous storage;
+/// nonzero backing selects caller-owned RAM with ordinary MAP/READ authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InitialMapping {
+    pub address: u64,
+    pub length: u64,
+    pub access: u64,
+    pub options: u64,
+    pub backing_handle: u64,
+    pub backing_offset: u64,
+}
+
+impl InitialMapping {
+    fn validate(self) -> Result<(), Error> {
+        if self.address == 0
+            || self.address & 4095 != 0
+            || self.length == 0
+            || self.length & 4095 != 0
+            || self
+                .address
+                .checked_add(self.length)
+                .is_none_or(|end| end > (1u64 << 47))
+            || self.access & !crate::MEMORY_ACCESS_ALL != 0
+            || self.access & (crate::MEMORY_ACCESS_WRITE | crate::MEMORY_ACCESS_EXECUTE)
+                == crate::MEMORY_ACCESS_WRITE | crate::MEMORY_ACCESS_EXECUTE
+            || self.options & !crate::MEMORY_MAP_SHARED != 0
+            || self.backing_offset & 4095 != 0
+            || self.backing_offset.checked_add(self.length).is_none()
+            || (self.backing_handle == 0 && self.backing_offset != 0)
+        {
+            return Err(Error::InvalidMapping);
+        }
+        Ok(())
+    }
+}
+
+/// Extend a validated stack image in place. Addresses stored in opaque stack
+/// bytes are unchanged; only the wire envelope grows. Failure leaves it intact.
+pub fn attach_mappings(
+    output: &mut [u8],
+    length: usize,
+    mappings: &[InitialMapping],
+) -> Result<usize, Error> {
+    let source = output.get(..length).ok_or(Error::InvalidLength)?;
+    let image = decode(source)?;
+    if image.mappings().next().is_some() || mappings.len() > MAX_MAPPINGS {
+        return Err(Error::InvalidMapping);
+    }
+    for (index, mapping) in mappings.iter().enumerate() {
+        mapping.validate()?;
+        if mappings[..index].iter().any(|other| {
+            mapping.address < other.address + other.length
+                && other.address < mapping.address + mapping.length
+        }) {
+            return Err(Error::InvalidMapping);
+        }
+    }
+    let insertion = HEADER_LEN + image.relocations.len();
+    let added = mappings.len() * MAPPING_LEN;
+    let end = length.checked_add(added).ok_or(Error::InvalidLength)?;
+    if end > output.len() {
+        return Err(Error::BufferTooSmall);
+    }
+    output.copy_within(insertion..length, insertion + added);
+    output[4..6].copy_from_slice(&MAPPED_VERSION.to_le_bytes());
+    output[24..28].copy_from_slice(&(mappings.len() as u32).to_le_bytes());
+    for (index, mapping) in mappings.iter().enumerate() {
+        for (word, value) in [
+            mapping.address,
+            mapping.length,
+            mapping.access,
+            mapping.options,
+            mapping.backing_handle,
+            mapping.backing_offset,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let offset = insertion + index * MAPPING_LEN + word * 8;
+            output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    Ok(end)
 }
 
 pub fn encode(
