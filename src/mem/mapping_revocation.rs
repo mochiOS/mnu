@@ -33,6 +33,23 @@ pub(crate) fn revoke<B: Backend>(
     ranges: impl IntoIterator<Item = (u64, u64, u64)>,
     backend: &mut B,
 ) -> Result<(), Error<B::Error>> {
+    revoke_with(ranges, backend, || Ok(()))
+}
+
+/// Run a backing/cache commit after every selected translation is suspended
+/// and remote CPUs have acknowledged invalidation, but before releasing any
+/// retained frame. An unsuccessful commit must leave backing unchanged; its
+/// error restores all original mappings and is returned as `Error::Backend`.
+///
+/// The caller must keep the mapping/population exclusion held throughout.
+/// `commit` must not wait for IPC, reenter VM mapping operations or access the
+/// suspended virtual addresses. Prepare allocations and external I/O before
+/// entering this transaction; this callback only publishes local state.
+pub(crate) fn revoke_with<B: Backend, T>(
+    ranges: impl IntoIterator<Item = (u64, u64, u64)>,
+    backend: &mut B,
+    commit: impl FnOnce() -> Result<T, B::Error>,
+) -> Result<T, Error<B::Error>> {
     let mut plan = Vec::new();
     for (table, start, end) in ranges {
         if start >= end || table & 4095 != 0 || start & 4095 != 0 || end & 4095 != 0 {
@@ -86,19 +103,27 @@ pub(crate) fn revoke<B: Backend>(
             }
         }
     }
-    if suspended.is_empty() {
-        return Ok(());
-    }
-    if let Err(error) = backend.synchronize() {
-        for page in suspended.into_iter().rev() {
-            backend.restore(page);
+    if !suspended.is_empty() {
+        if let Err(error) = backend.synchronize() {
+            for page in suspended.into_iter().rev() {
+                backend.restore(page);
+            }
+            return Err(Error::Backend(error));
         }
-        return Err(Error::Backend(error));
     }
+    let result = match commit() {
+        Ok(result) => result,
+        Err(error) => {
+            for page in suspended.into_iter().rev() {
+                backend.restore(page);
+            }
+            return Err(Error::Backend(error));
+        }
+    };
     for page in suspended {
         backend.release(page);
     }
-    Ok(())
+    Ok(result)
 }
 
 /// Select the virtual overlap of a backing-object range, checking all additions
