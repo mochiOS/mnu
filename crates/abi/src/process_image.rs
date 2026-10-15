@@ -6,12 +6,20 @@
 pub const MAGIC: [u8; 4] = *b"MIMG";
 pub const VERSION: u16 = 1;
 pub const MAPPED_VERSION: u16 = 2;
+pub const CONTEXT_VERSION: u16 = 3;
+pub const CONTEXT_UPDATE_LEN: usize = 24;
+pub const MAX_CONTEXT_UPDATES: usize = 1024;
 pub const MAPPING_LEN: usize = 48;
 pub const MAX_MAPPINGS: usize = 16;
 pub const HEADER_LEN: usize = 32;
 pub const RELOCATION_LEN: usize = 8;
 pub const MAX_STACK_BYTES: usize = 4096;
 pub const MAX_RELOCATIONS: usize = MAX_STACK_BYTES / core::mem::size_of::<u64>();
+pub const MAX_IMAGE_BYTES: usize = HEADER_LEN
+    + MAX_RELOCATIONS * RELOCATION_LEN
+    + MAX_MAPPINGS * MAPPING_LEN
+    + MAX_CONTEXT_UPDATES * CONTEXT_UPDATE_LEN
+    + MAX_STACK_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -55,6 +63,7 @@ pub enum Error {
     InvalidRelocation,
     DuplicateRelocation,
     InvalidMapping,
+    InvalidContext,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,9 +72,19 @@ pub struct StartupImage<'a> {
     stack: &'a [u8],
     relocations: &'a [u8],
     mappings: &'a [u8],
+    context: &'a [u8],
 }
 
 impl<'a> StartupImage<'a> {
+    pub fn context_updates(self) -> impl Iterator<Item = ContextUpdate> + Clone + 'a {
+        self.context
+            .chunks_exact(CONTEXT_UPDATE_LEN)
+            .map(|record| ContextUpdate {
+                kind: read_u32(record, 0).unwrap(),
+                key: read_u64(record, 8).unwrap(),
+                value: read_u64(record, 16).unwrap(),
+            })
+    }
     pub fn mappings(self) -> impl Iterator<Item = InitialMapping> + 'a {
         self.mappings
             .chunks_exact(MAPPING_LEN)
@@ -151,10 +170,12 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
         return Err(Error::BufferTooSmall);
     }
     if input[0..4] != MAGIC
-        || !matches!(read_u16(input, 4), Some(VERSION | MAPPED_VERSION))
+        || !matches!(
+            read_u16(input, 4),
+            Some(VERSION | MAPPED_VERSION | CONTEXT_VERSION)
+        )
         || read_u16(input, 6) != Some(HEADER_LEN as u16)
         || read_u32(input, 8) != Some(0)
-        || input[28..HEADER_LEN].iter().any(|byte| *byte != 0)
     {
         return Err(Error::InvalidHeader);
     }
@@ -162,6 +183,12 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
     let stack_len = read_u32(input, 16).ok_or(Error::InvalidHeader)? as usize;
     let relocation_count = read_u32(input, 20).ok_or(Error::InvalidHeader)? as usize;
     let mapping_count = read_u32(input, 24).ok_or(Error::InvalidHeader)? as usize;
+    let context_count = read_u32(input, 28).ok_or(Error::InvalidHeader)? as usize;
+    if context_count > MAX_CONTEXT_UPDATES
+        || (read_u16(input, 4) != Some(CONTEXT_VERSION) && context_count != 0)
+    {
+        return Err(Error::InvalidHeader);
+    }
     if mapping_count > MAX_MAPPINGS || (read_u16(input, 4) == Some(VERSION) && mapping_count != 0) {
         return Err(Error::InvalidHeader);
     }
@@ -178,8 +205,11 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
     let mapping_start = HEADER_LEN
         .checked_add(relocations_len)
         .ok_or(Error::InvalidLength)?;
-    let stack_start = mapping_start
+    let context_start = mapping_start
         .checked_add(mapping_count * MAPPING_LEN)
+        .ok_or(Error::InvalidLength)?;
+    let stack_start = context_start
+        .checked_add(context_count * CONTEXT_UPDATE_LEN)
         .ok_or(Error::InvalidLength)?;
     let expected_len = stack_start
         .checked_add(stack_len)
@@ -191,7 +221,8 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
         return Err(Error::InvalidStackPointer);
     }
     let relocations = &input[HEADER_LEN..mapping_start];
-    let mappings = &input[mapping_start..stack_start];
+    let mappings = &input[mapping_start..context_start];
+    let context = &input[context_start..stack_start];
     let stack = &input[stack_start..];
     for index in 0..relocation_count {
         let relocation = relocation_at(relocations, index).ok_or(Error::InvalidRelocation)?;
@@ -217,6 +248,7 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
         stack,
         relocations,
         mappings,
+        context,
     };
     for (index, mapping) in image.mappings().enumerate() {
         mapping.validate()?;
@@ -227,7 +259,88 @@ pub fn decode(input: &[u8]) -> Result<StartupImage<'_>, Error> {
             return Err(Error::InvalidMapping);
         }
     }
+    for (index, update) in image.context_updates().enumerate() {
+        update.validate()?;
+        if read_u32(context, index * CONTEXT_UPDATE_LEN + 4) != Some(0)
+            || image.context_updates().take(index).any(|previous| {
+                previous.key == update.key && previous.is_handle() == update.is_handle()
+            })
+        {
+            return Err(Error::InvalidContext);
+        }
+    }
     Ok(image)
+}
+
+/// Opaque per-image context edits. Handle edits select an existing reference
+/// in this same process; they create no Handle and grant no additional rights.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextUpdate {
+    pub kind: u32,
+    pub key: u64,
+    pub value: u64,
+}
+
+impl ContextUpdate {
+    pub const SET_HANDLE: u32 = 1;
+    pub const REMOVE_HANDLE: u32 = 2;
+    pub const SET_VALUE: u32 = 3;
+    pub const REMOVE_VALUE: u32 = 4;
+
+    pub const fn is_handle(self) -> bool {
+        matches!(self.kind, Self::SET_HANDLE | Self::REMOVE_HANDLE)
+    }
+
+    fn validate(self) -> Result<(), Error> {
+        match self.kind {
+            Self::SET_HANDLE
+                if self.value > 0 && self.value <= crate::PROCESS_MAX_OBJECT_HANDLES as u64 =>
+            {
+                Ok(())
+            }
+            Self::SET_VALUE => Ok(()),
+            Self::REMOVE_HANDLE | Self::REMOVE_VALUE if self.value == 0 => Ok(()),
+            _ => Err(Error::InvalidContext),
+        }
+    }
+}
+
+/// Add a validated context edit set without mutating the source on failure.
+/// Call after optional mappings: stack bytes and their relocations stay opaque.
+pub fn attach_context(
+    output: &mut [u8],
+    length: usize,
+    updates: &[ContextUpdate],
+) -> Result<usize, Error> {
+    let image = decode(output.get(..length).ok_or(Error::InvalidLength)?)?;
+    if !image.context.is_empty() || updates.len() > MAX_CONTEXT_UPDATES {
+        return Err(Error::InvalidContext);
+    }
+    for (index, update) in updates.iter().enumerate() {
+        update.validate()?;
+        if updates[..index].iter().any(|previous| {
+            previous.key == update.key && previous.is_handle() == update.is_handle()
+        }) {
+            return Err(Error::InvalidContext);
+        }
+    }
+    let insertion = length - image.stack.len();
+    let added = updates.len() * CONTEXT_UPDATE_LEN;
+    let end = length.checked_add(added).ok_or(Error::InvalidLength)?;
+    if end > output.len() {
+        return Err(Error::BufferTooSmall);
+    }
+    output.copy_within(insertion..length, insertion + added);
+    output[4..6].copy_from_slice(&CONTEXT_VERSION.to_le_bytes());
+    output[28..32].copy_from_slice(&(updates.len() as u32).to_le_bytes());
+    for (index, update) in updates.iter().enumerate() {
+        let offset = insertion + index * CONTEXT_UPDATE_LEN;
+        output[offset..offset + 4].copy_from_slice(&update.kind.to_le_bytes());
+        output[offset + 4..offset + 8].fill(0);
+        output[offset + 8..offset + 16].copy_from_slice(&update.key.to_le_bytes());
+        output[offset + 16..offset + 24].copy_from_slice(&update.value.to_le_bytes());
+    }
+    Ok(end)
 }
 
 /// Exact, non-replacing VM reservations for ProcessImageReplace. The kernel
@@ -276,7 +389,10 @@ pub fn attach_mappings(
 ) -> Result<usize, Error> {
     let source = output.get(..length).ok_or(Error::InvalidLength)?;
     let image = decode(source)?;
-    if image.mappings().next().is_some() || mappings.len() > MAX_MAPPINGS {
+    if image.mappings().next().is_some()
+        || !image.context.is_empty()
+        || mappings.len() > MAX_MAPPINGS
+    {
         return Err(Error::InvalidMapping);
     }
     for (index, mapping) in mappings.iter().enumerate() {

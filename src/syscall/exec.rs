@@ -1194,6 +1194,22 @@ fn replace_current_process_image(
     // Quiescence is reversible. In particular, a failed borrowed-PTE/TLB
     // transaction must resume siblings and keep the old stack alias/owner.
     let quiescence = crate::task::scheduler::quiesce_image_siblings(pid, current_tid);
+    // Copy opaque metadata only after sibling Handle/context mutation stops.
+    // Preparation is fallible and leaves the live context entirely untouched.
+    let next_context = if startup.context_updates().next().is_some() {
+        Some(
+            crate::task::with_process(pid, |process| {
+                process
+                    .launch_context()
+                    .patched(startup.context_updates(), |handle| {
+                        process.object_handles().get(handle).is_some()
+                    })
+            })
+            .ok_or(EINVAL)??,
+        )
+    } else {
+        None
+    };
     crate::task::release_process_borrowed_mappings(pid)?;
     crate::task::scheduler::retire_image_siblings(pid, current_tid);
     stack_mapping.commit();
@@ -1212,6 +1228,9 @@ fn replace_current_process_image(
         process.set_kernel_authorities_for_exec(crate::capability::KernelAuthoritySet::empty());
         process.set_application_identity(authorization.identity);
         process.set_image_digest(authorization.executable_digest);
+        if let Some(context) = next_context {
+            *process.launch_context_mut() = context;
+        }
         process.retain_launch_context_handles_for_exec();
         previous
     })
@@ -1284,10 +1303,7 @@ fn process_image_replace_impl(
 
     const MAX_IDENTITY_BYTES: usize = 256;
     const MAX_EXECUTABLE_BYTES: usize = 64 * 1024 * 1024;
-    const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::HEADER_LEN
-        + mnu_abi::process_image::MAX_RELOCATIONS * 8
-        + mnu_abi::process_image::MAX_STACK_BYTES
-        + mnu_abi::process_image::MAX_MAPPINGS * mnu_abi::process_image::MAPPING_LEN;
+    const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::MAX_IMAGE_BYTES;
 
     if !caller_has_process_spawn_capability() {
         return EPERM;
@@ -1452,7 +1468,7 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         mnu_abi::process_create::InitialState::Image(startup) => {
             // Mapping plans are currently an image-replacement operation.
             // Never accept and silently ignore a requested initial mapping.
-            if startup.mappings().next().is_some() {
+            if startup.mappings().next().is_some() || startup.context_updates().next().is_some() {
                 return EINVAL;
             }
             startup
