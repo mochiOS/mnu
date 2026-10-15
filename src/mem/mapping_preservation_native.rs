@@ -50,11 +50,25 @@ impl PreservedPage {
     }
 }
 
-/// Native already retains the mapping-lock/root borrow. Keeping the wrapper
-/// separate avoids enlarging journals for ordinary unmap/revocation paths.
-pub(crate) struct Preserving<'a> {
-    inner: Native<'a>,
-    preserved: &'a [PreservedPage],
+/// Only backends which retain owned RAM frames can preserve writable suffixes.
+/// Exclusion and root lifetimes remain the backend's responsibility.
+pub(crate) trait FrameBackend:
+    Backend<Page = paging::SuspendedUserPage, Error = u64>
+{
+    fn owns_ram_frames(&self) -> bool;
+}
+
+impl FrameBackend for Native<'_> {
+    fn owns_ram_frames(&self) -> bool {
+        Native::owns_ram_frames(self)
+    }
+}
+
+/// Keep either a borrowed or owned boundary plan alongside its backend. This
+/// does not relax that backend's mapping-lock/exclusion requirements.
+pub(crate) struct Preserving<B, P> {
+    inner: B,
+    preserved: P,
 }
 
 pub(crate) struct Page {
@@ -62,17 +76,23 @@ pub(crate) struct Page {
     zero: Option<(u64, usize)>,
 }
 
-impl<'a> Preserving<'a> {
-    pub(crate) fn new(inner: Native<'a>, preserved: &'a [PreservedPage]) -> Result<Self, u64> {
+impl<B: FrameBackend, P: AsRef<[PreservedPage]>> Preserving<B, P> {
+    pub(crate) fn new(inner: B, preserved: P) -> Result<Self, u64> {
         // Borrowed/MMIO mappings must never be treated as writable RAM.
         if !inner.owns_ram_frames() {
             return Err(crate::syscall::EINVAL);
         }
         Ok(Self { inner, preserved })
     }
+
+    /// Local publication can mutate the retained backing state without moving
+    /// its exclusion lease out before the journal finishes its PTE work.
+    pub(crate) fn inner_mut(&mut self) -> &mut B {
+        &mut self.inner
+    }
 }
 
-impl Backend for Preserving<'_> {
+impl<B: FrameBackend, P: AsRef<[PreservedPage]>> Backend for Preserving<B, P> {
     type Page = Page;
     type Error = u64;
 
@@ -82,6 +102,7 @@ impl Backend for Preserving<'_> {
     fn suspend(&mut self, table: u64, address: u64) -> Result<Option<Page>, u64> {
         let mut matches = self
             .preserved
+            .as_ref()
             .iter()
             .filter(|entry| entry.table == table && entry.address == address);
         let selected = matches.next();
