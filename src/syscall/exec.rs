@@ -15,6 +15,7 @@ mod launch;
 mod captured_handles;
 mod storage;
 mod initial_mappings;
+mod bootstrap_stack;
 
 use image::{map_elf_image, ElfImageLayout};
 use launch::ImageLaunch;
@@ -228,18 +229,18 @@ fn aslr_offset_pages(seed: u64, max_pages: u64) -> u64 {
     }
 }
 
-fn read_nul_args_from_user(
-    args_ptr: u64,
+fn read_nul_identity_fields(
+    fields_ptr: u64,
     max_total_bytes: usize,
-    max_args: usize,
+    max_fields: usize,
 ) -> Result<Vec<String>, u64> {
     use crate::syscall::types::EINVAL;
 
-    if args_ptr == 0 {
+    if fields_ptr == 0 {
         return Ok(Vec::new());
     }
     let mut storage = alloc::vec![0u8; max_total_bytes];
-    crate::syscall::copy_from_user(args_ptr, &mut storage)?;
+    crate::syscall::copy_from_user(fields_ptr, &mut storage)?;
     if let Some(end) = storage.windows(2).position(|w| w == [0, 0]) {
         storage.truncate(end + 2);
     }
@@ -251,7 +252,7 @@ fn read_nul_args_from_user(
         }
         let text = core::str::from_utf8(s).map_err(|_| EINVAL)?;
         out.push(String::from(text));
-        if out.len() >= max_args {
+        if out.len() >= max_fields {
             break;
         }
     }
@@ -463,7 +464,7 @@ pub fn authorize_exec_syscall(
         Ok(path) => path,
         Err(_) => return EINVAL,
     };
-    let identity_items = match read_nul_args_from_user(identity_ptr, 1024, 7) {
+    let identity_items = match read_nul_identity_fields(identity_ptr, 1024, 7) {
         Ok(items) => items,
         Err(errno) => return errno,
     };
@@ -633,8 +634,6 @@ pub(crate) fn launch_bootstrap_image(
         &data,
         name,
         path,
-        &[],
-        &[],
         Some(initial_caps),
         Some(initial_kernel_authorities),
         Some(requested_privilege),
@@ -677,117 +676,6 @@ pub(crate) fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u6
             Err(mapping_error_errno(e))
         }
     }
-}
-
-#[inline(never)]
-fn build_initial_user_stack(
-    aslr_seed: u64,
-    argv: &[&str],
-    envp: &[&str],
-    execfn: &str,
-    auxv_entries: &[(u64, u64)],
-) -> Result<InitialUserStack, u64> {
-    let exec = crate::config::kernel().exec;
-    let stack_end_vaddr = exec.stack_top_base.saturating_sub(
-        aslr_offset_pages(aslr_seed ^ 0x53a9_1e2d, exec.stack_aslr_max_pages) * 4096,
-    );
-    let stack_base_vaddr = stack_end_vaddr - (exec.user_stack_size_pages as u64 * 4096);
-
-    let mut string_block = Vec::new();
-    let mut argv_offsets = Vec::new();
-    for arg in argv {
-        argv_offsets.push(string_block.len());
-        string_block.extend_from_slice(arg.as_bytes());
-        string_block.push(0);
-    }
-
-    let mut envp_offsets = Vec::new();
-    for env in envp {
-        envp_offsets.push(string_block.len());
-        string_block.extend_from_slice(env.as_bytes());
-        string_block.push(0);
-    }
-
-    let random_offset = string_block.len();
-    let mut rng = aslr_seed
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
-    for _ in 0..16 {
-        rng = rng
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        string_block.push((rng >> 33) as u8);
-    }
-
-    let execfn_offset = string_block.len();
-    string_block.extend_from_slice(execfn.as_bytes());
-    string_block.push(0);
-
-    let string_area_len = string_block.len();
-    let pointers_bytes =
-        8 + (argv.len() * 8) + 8 + (envp.len() * 8) + 8 + (auxv_entries.len() * 16) + 16;
-    let total_data_needed = string_area_len + pointers_bytes;
-    let padding_len = (16 - (total_data_needed % 16)) % 16;
-    let total_size = total_data_needed + padding_len;
-
-    if total_size > 4096 {
-        crate::warn!("Arguments too large for single page stack setup");
-        return Err(crate::syscall::types::EINVAL);
-    }
-
-    let string_area_base = stack_end_vaddr - string_area_len as u64;
-    let random_addr = string_area_base + random_offset as u64;
-    let execfn_addr = string_area_base + execfn_offset as u64;
-    let initial_rsp = stack_end_vaddr - total_size as u64;
-
-    let mut page_data = Vec::new();
-    let page_offset = total_size % 4096;
-    let unused_space = if page_offset == 0 {
-        0
-    } else {
-        4096 - page_offset
-    };
-    page_data.resize(unused_space, 0);
-
-    page_data.extend_from_slice(&(argv.len() as u64).to_ne_bytes());
-    for off in argv_offsets {
-        let ptr = string_area_base + off as u64;
-        page_data.extend_from_slice(&ptr.to_ne_bytes());
-    }
-    page_data.extend_from_slice(&0u64.to_ne_bytes());
-
-    for off in envp_offsets {
-        let ptr = string_area_base + off as u64;
-        page_data.extend_from_slice(&ptr.to_ne_bytes());
-    }
-    page_data.extend_from_slice(&0u64.to_ne_bytes());
-
-    for (key, value) in auxv_entries {
-        let resolved_value = match *key {
-            25 => random_addr, // AT_RANDOM
-            31 => execfn_addr, // AT_EXECFN
-            _ => *value,
-        };
-        page_data.extend_from_slice(&key.to_ne_bytes());
-        page_data.extend_from_slice(&resolved_value.to_ne_bytes());
-    }
-    page_data.extend_from_slice(&0u64.to_ne_bytes());
-    page_data.extend_from_slice(&0u64.to_ne_bytes());
-
-    page_data.resize(page_data.len() + padding_len, 0);
-    page_data.extend_from_slice(&string_block);
-
-    if page_data.len() != 4096 {
-        crate::warn!("internal: page_data.len() != 4096: {}", page_data.len());
-        return Err(crate::syscall::types::EINVAL);
-    }
-
-    Ok(InitialUserStack {
-        stack_base_vaddr,
-        stack_end_vaddr,
-        initial_rsp,
-        page_data,
-    })
 }
 
 fn build_relocatable_user_stack(
@@ -845,8 +733,6 @@ fn exec_with_data(
     data: &[u8],
     process_name: &str,
     exec_path: &str,
-    args: &[&str],
-    envp: &[&str],
     initial_caps: Option<CapabilitySet>,
     initial_kernel_authorities: Option<KernelAuthoritySet>,
     requested_privilege: Option<crate::task::PrivilegeLevel>,
@@ -909,42 +795,11 @@ fn exec_with_data(
         let stack = if let Some(startup) = native_startup {
             build_relocatable_user_stack(aslr_seed, startup, phdr_vaddr, phentsize, phnum, entry)
         } else {
-            let base_name = exec_path.rsplit('/').next().unwrap_or(process_name);
-            let argv0 = base_name.strip_suffix(".elf").unwrap_or(base_name);
-            let mut all_args: Vec<&str> = Vec::new();
-            all_args.push(argv0);
-            for a in args {
-                all_args.push(a);
-            }
-            if process_name.ends_with("busybox.elf") {
-                let argv1 = all_args.get(1).copied().unwrap_or("");
-                crate::info!(
-                    "busybox argv: argc={}, argv0='{}', argv1='{}'",
-                    all_args.len(),
-                    argv0,
-                    argv1
-                );
-            }
-            let auxv_entries = [
-                (3u64, phdr_vaddr),
-                (4u64, phentsize),
-                (5u64, phnum),
-                (6u64, 4096u64),
-                (7u64, 0u64),
-                (8u64, 0u64),
-                (9u64, entry),
-                (11u64, 0u64),
-                (12u64, 0u64),
-                (13u64, 0u64),
-                (14u64, 0u64),
-                (16u64, 0u64),
-                (17u64, 100u64),
-                (23u64, 0u64),
-                (25u64, 0u64),
-                (31u64, 0u64),
-                (0u64, 0u64),
-            ];
-            build_initial_user_stack(aslr_seed, &all_args, envp, exec_path, &auxv_entries)
+            let exec = crate::config::kernel().exec;
+            let end = exec.stack_top_base.saturating_sub(
+                aslr_offset_pages(aslr_seed ^ 0x53a9_1e2d, exec.stack_aslr_max_pages) * 4096,
+            );
+            bootstrap_stack::empty(end, exec.user_stack_size_pages)
         };
         let InitialUserStack {
             stack_base_vaddr,
@@ -1626,8 +1481,6 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         &executable,
         request.label,
         request.identity,
-        &[],
-        &[],
         Some(authorization.capabilities),
         Some(authorization.kernel_authorities),
         Some(privilege),
