@@ -6,6 +6,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ProviderObject;
+#[path = "vm_object/extent.rs"]
+mod extent;
 
 pub const PAGE_BYTES: usize = 4096;
 
@@ -24,8 +26,6 @@ impl From<u64> for VmPageError {
 
 const MAX_CACHED_PAGES: usize = 256;
 const MAX_READ_BATCH_BYTES: usize = 256 * 1024;
-
-static PAGE_CACHE_MUTATION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
 struct LowerReadOutcome {
@@ -87,7 +87,7 @@ pub struct PreparedSharedPage {
 
 enum PreparedGeneration {
     Memory(Arc<super::shared_memory::SharedMemory>, u64),
-    Provider(u64),
+    Provider(super::object_io::IoLock, u64),
 }
 
 impl PreparedSharedPage {
@@ -108,7 +108,9 @@ impl PreparedSharedPage {
             PreparedGeneration::Memory(memory, generation) => {
                 memory.with_generation(*generation, install)
             }
-            PreparedGeneration::Provider(generation) => with_cache_generation(*generation, install),
+            PreparedGeneration::Provider(gate, generation) => {
+                with_cache_generation(gate, *generation, install)
+            }
         }
     }
 }
@@ -163,7 +165,7 @@ impl VmObject {
     pub(crate) fn memory_generation(&self) -> Option<u64> {
         match &self.source {
             VmObjectSource::Memory(memory) => Some(memory.generation()),
-            VmObjectSource::Provider { .. } => Some(cache_mutation_epoch()),
+            VmObjectSource::Provider { _io_lock, .. } => Some(_io_lock.generation()),
         }
     }
 
@@ -178,8 +180,8 @@ impl VmObject {
             (VmObjectSource::Memory(memory), Some(generation)) => {
                 memory.with_generation(generation, install)
             }
-            (VmObjectSource::Provider { .. }, Some(generation)) => {
-                with_cache_generation(generation, install)
+            (VmObjectSource::Provider { _io_lock, .. }, Some(generation)) => {
+                with_cache_generation(_io_lock, generation, install)
             }
             _ => Err(crate::syscall::EINVAL),
         }
@@ -276,7 +278,7 @@ impl VmObject {
             if let Some(page) = cached_page(key)? {
                 return Ok(page);
             }
-            let epoch = cache_mutation_epoch();
+            let epoch = cache_mutation_epoch(key.object);
             let mut page = [0u8; PAGE_BYTES];
             let outcome = read_lower_until(&self.source, offset, &mut page);
             if let Some(errno) = outcome.error {
@@ -369,8 +371,11 @@ impl VmObject {
                 generation: PreparedGeneration::Memory(memory.clone(), generation),
             });
         }
+        let VmObjectSource::Provider { _io_lock, .. } = &self.source else {
+            return Err(VmPageError::Operation(crate::syscall::EINVAL));
+        };
         loop {
-            let epoch = cache_mutation_epoch();
+            let epoch = _io_lock.generation();
             let (loaded, loaded_len) = self.fault_page_with_len(page_index)?;
             let key = self.page_key(page_index);
 
@@ -380,7 +385,7 @@ impl VmObject {
             } else {
                 // Loading and final frame preparation take separate cache locks.
                 // An invalidated snapshot must not repopulate the missing entry.
-                if cache_mutation_epoch() != epoch {
+                if _io_lock.generation() != epoch {
                     continue;
                 }
                 cache.push(CachedPage {
@@ -414,7 +419,7 @@ impl VmObject {
             cache[entry_index].last_used = next_cache_access();
             return Ok(PreparedSharedPage {
                 frame_phys,
-                generation: PreparedGeneration::Provider(cache_mutation_epoch()),
+                generation: PreparedGeneration::Provider(_io_lock.clone(), _io_lock.generation()),
             });
         }
     }
@@ -446,7 +451,7 @@ impl VmObject {
         entry.version = entry.version.wrapping_add(1);
         entry.last_used = next_cache_access();
 
-        bump_cache_mutation_epoch();
+        bump_cache_mutation_epoch(key.object);
 
         Ok(())
     }
@@ -476,7 +481,7 @@ impl VmObject {
 
             let count = core::cmp::min(input.len() - staged, PAGE_BYTES - page_offset);
 
-            let epoch = cache_mutation_epoch();
+            let epoch = cache_mutation_epoch(self.object_key());
             let (loaded, loaded_len) = self.page_with_len(page_index)?;
 
             let key = self.page_key(page_index);
@@ -486,7 +491,7 @@ impl VmObject {
             let entry_index = if let Some(index) = cache.iter().position(|entry| entry.key == key) {
                 index
             } else {
-                if cache_mutation_epoch() != epoch {
+                if cache_mutation_epoch(key.object) != epoch {
                     continue;
                 }
                 cache.push(CachedPage {
@@ -531,7 +536,7 @@ impl VmObject {
             entry.version = entry.version.wrapping_add(1);
             entry.last_used = next_cache_access();
 
-            bump_cache_mutation_epoch();
+            bump_cache_mutation_epoch(key.object);
 
             staged += count;
         }
@@ -779,7 +784,7 @@ fn invalidate_object(object: ObjectKey) {
                 .is_some_and(crate::mem::paging::user_frame_has_multiple_owners)
     });
 
-    bump_cache_mutation_epoch();
+    bump_cache_mutation_epoch(object);
 }
 
 fn update_cached_range(object: ObjectKey, offset: u64, input: &[u8]) {
@@ -863,7 +868,7 @@ fn update_cached_range(object: ObjectKey, offset: u64, input: &[u8]) {
         entry.last_used = next_cache_access();
     }
 
-    bump_cache_mutation_epoch();
+    bump_cache_mutation_epoch(object);
 }
 
 fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> LowerReadOutcome {
@@ -984,7 +989,7 @@ fn cache_or_snapshot_page(
         return Ok(None);
     };
 
-    if cache_mutation_epoch() != expected_epoch {
+    if cache_mutation_epoch(key.object) != expected_epoch {
         // This is not a capacity bypass: the lower bytes may predate a write
         // or invalidation. The loader must retry, not return those bytes.
         return Err(crate::syscall::EAGAIN);
@@ -1025,23 +1030,29 @@ fn cache_or_snapshot_page(
     Ok(Some((bytes, valid_len)))
 }
 
-fn cache_mutation_epoch() -> u64 {
-    PAGE_CACHE_MUTATION_EPOCH.load(Ordering::Acquire)
+fn cache_mutation_epoch(object: ObjectKey) -> u64 {
+    PROVIDER_IO
+        .lock()
+        .existing(&object)
+        .map_or(0, |gate| gate.generation())
 }
 
 fn with_cache_generation<T>(
+    gate: &super::object_io::IoLock,
     generation: u64,
     install: impl FnOnce() -> Result<T, u64>,
 ) -> Result<T, u64> {
     // The mapping/process lock is held by the final installer. Taking the
     // cache lock here excludes mutation until its PTE has been published.
     let _cache = PAGE_CACHE.lock();
-    if cache_mutation_epoch() != generation {
+    if gate.generation() != generation {
         return Err(crate::syscall::EAGAIN);
     }
     install()
 }
 
-fn bump_cache_mutation_epoch() {
-    PAGE_CACHE_MUTATION_EPOCH.fetch_add(1, Ordering::AcqRel);
+fn bump_cache_mutation_epoch(object: ObjectKey) {
+    if let Some(gate) = PROVIDER_IO.lock().existing(&object) {
+        gate.advance_generation();
+    }
 }
