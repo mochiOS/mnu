@@ -82,7 +82,12 @@ pub struct VmObject {
 /// Pins a cache frame while a fault resolves its backing outside task locks.
 pub struct PreparedSharedPage {
     frame_phys: u64,
-    memory_generation: Option<(Arc<super::shared_memory::SharedMemory>, u64)>,
+    generation: PreparedGeneration,
+}
+
+enum PreparedGeneration {
+    Memory(Arc<super::shared_memory::SharedMemory>, u64),
+    Provider(u64),
 }
 
 impl PreparedSharedPage {
@@ -99,9 +104,11 @@ impl PreparedSharedPage {
             )
             .map_err(|_| crate::syscall::ENOMEM)
         };
-        match &self.memory_generation {
-            Some((memory, generation)) => memory.with_generation(*generation, install),
-            None => install(),
+        match &self.generation {
+            PreparedGeneration::Memory(memory, generation) => {
+                memory.with_generation(*generation, install)
+            }
+            PreparedGeneration::Provider(generation) => with_cache_generation(*generation, install),
         }
     }
 }
@@ -154,12 +161,12 @@ impl VmObject {
     pub(crate) fn memory_generation(&self) -> Option<u64> {
         match &self.source {
             VmObjectSource::Memory(memory) => Some(memory.generation()),
-            _ => None,
+            VmObjectSource::Provider { .. } => Some(cache_mutation_epoch()),
         }
     }
 
     /// Validate a snapshot taken before loading private page bytes, and keep
-    /// RAM backing stable throughout the final PTE installation.
+    /// backing generation stable throughout the final PTE installation.
     pub(crate) fn with_memory_generation<T>(
         &self,
         generation: Option<u64>,
@@ -169,7 +176,9 @@ impl VmObject {
             (VmObjectSource::Memory(memory), Some(generation)) => {
                 memory.with_generation(generation, install)
             }
-            (VmObjectSource::Provider { .. }, None) => install(),
+            (VmObjectSource::Provider { .. }, Some(generation)) => {
+                with_cache_generation(generation, install)
+            }
             _ => Err(crate::syscall::EINVAL),
         }
     }
@@ -338,7 +347,7 @@ impl VmObject {
                 .map_err(|error| self.page_error(error))?;
             return Ok(PreparedSharedPage {
                 frame_phys,
-                memory_generation: Some((memory.clone(), generation)),
+                generation: PreparedGeneration::Memory(memory.clone(), generation),
             });
         }
         loop {
@@ -386,7 +395,7 @@ impl VmObject {
             cache[entry_index].last_used = next_cache_access();
             return Ok(PreparedSharedPage {
                 frame_phys,
-                memory_generation: None,
+                generation: PreparedGeneration::Provider(cache_mutation_epoch()),
             });
         }
     }
@@ -992,6 +1001,19 @@ fn cache_or_snapshot_page(
 
 fn cache_mutation_epoch() -> u64 {
     PAGE_CACHE_MUTATION_EPOCH.load(Ordering::Acquire)
+}
+
+fn with_cache_generation<T>(
+    generation: u64,
+    install: impl FnOnce() -> Result<T, u64>,
+) -> Result<T, u64> {
+    // The mapping/process lock is held by the final installer. Taking the
+    // cache lock here excludes mutation until its PTE has been published.
+    let _cache = PAGE_CACHE.lock();
+    if cache_mutation_epoch() != generation {
+        return Err(crate::syscall::EAGAIN);
+    }
+    install()
 }
 
 fn bump_cache_mutation_epoch() {
