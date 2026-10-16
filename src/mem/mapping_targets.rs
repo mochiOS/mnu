@@ -6,6 +6,7 @@ use super::{
     root_lifetime::Pin, vm_object::ObjectKey,
 };
 use alloc::vec::Vec;
+use mnu_abi::status::Error;
 
 pub(crate) struct Targets {
     identity: ObjectKey,
@@ -23,9 +24,9 @@ impl Targets {
         start: u64,
         end: u64,
         boundary: u64,
-    ) -> Result<Self, u64> {
+    ) -> Result<Self, Error> {
         if start > end || start & 4095 != 0 || end & 4095 != 0 {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument);
         }
         let mut targets = Self {
             identity,
@@ -36,7 +37,7 @@ impl Targets {
         if start == end {
             return Ok(targets);
         }
-        let detached = super::detached_roots::snapshot().map_err(|_| crate::syscall::ENOMEM)?;
+        let detached = super::detached_roots::snapshot().map_err(|_| Error::ResourceUnavailable)?;
         for root in &detached {
             for mapping in root
                 .mappings()
@@ -85,7 +86,7 @@ impl Targets {
             .windows(2)
             .any(|pair| pair[0].0 == pair[1].0 && pair[1].1 < pair[0].2)
         {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument);
         }
         Ok(targets)
     }
@@ -99,37 +100,36 @@ impl Targets {
         start: u64,
         end: u64,
         boundary: u64,
-    ) -> Result<(), u64> {
+    ) -> Result<(), Error> {
         if table == 0
             || (table | address | length | offset) & 4095 != 0
             || !address
                 .checked_add(length)
                 .is_some_and(|end| end <= 0x0000_8000_0000_0000)
         {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument);
         }
         let Some((low, high)) = virtual_overlap(address, length, offset, start, end)
-            .map_err(|_| crate::syscall::EINVAL)?
+            .map_err(|_| Error::InvalidArgument)?
         else {
             return Ok(());
         };
-        let preserved = PreservedPage::for_mapping(table, address, length, offset, boundary)
-            .map_err(mnu_abi::status::Error::into_raw)?
+        let preserved = PreservedPage::for_mapping(table, address, length, offset, boundary)?
             .filter(|page| page.address >= low && page.address < high);
         self.ranges
             .try_reserve(1)
-            .map_err(|_| crate::syscall::ENOMEM)?;
+            .map_err(|_| Error::ResourceUnavailable)?;
         if preserved.is_some() {
             self.preserved
                 .try_reserve(1)
-                .map_err(|_| crate::syscall::ENOMEM)?;
+                .map_err(|_| Error::ResourceUnavailable)?;
         }
         if !self.roots.iter().any(|(root, _)| *root == table) {
             self.roots
                 .try_reserve(1)
-                .map_err(|_| crate::syscall::ENOMEM)?;
+                .map_err(|_| Error::ResourceUnavailable)?;
             let pin =
-                super::root_lifetime_native::pin(table).map_err(|_| crate::syscall::ENOMEM)?;
+                super::root_lifetime_native::pin(table).map_err(|_| Error::ResourceUnavailable)?;
             self.roots.push((table, pin));
         }
         self.ranges.push((table, low, high));

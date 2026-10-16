@@ -118,13 +118,15 @@ impl ExtentTransaction {
             let (start, end) = extent.revocation().unwrap_or((0, 0));
             let affected = external
                 .then(|| Targets::capture(table, key, start, end, extent.boundary()))
-                .transpose()?;
+                .transpose()
+                .map_err(mnu_abi::status::Error::into_raw)?;
             let (low, high) = if external {
                 (0, u64::MAX & !4095)
             } else {
                 (start, end)
             };
-            let targets = Targets::capture(table, key, low, high, extent.boundary())?;
+            let targets = Targets::capture(table, key, low, high, extent.boundary())
+                .map_err(mnu_abi::status::Error::into_raw)?;
             let mut locations = Vec::new();
             for (root, start, end) in targets.ranges() {
                 let mut cursor = start;
