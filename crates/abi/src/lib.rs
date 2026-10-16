@@ -952,8 +952,6 @@ pub const EIO: u64 = (-5i64) as u64;
 pub const ENXIO: u64 = (-6i64) as u64;
 /// 不正なファイルディスクリプタ
 pub const EBADF: u64 = (-9i64) as u64;
-/// 子プロセスが存在しない
-pub const ECHILD: u64 = (-10i64) as u64;
 /// 受信/送信できない（キュー空/満杯）
 pub const EAGAIN: u64 = (-11i64) as u64;
 /// メモリ不足
@@ -976,10 +974,6 @@ pub const EMFILE: u64 = (-24i64) as u64;
 pub const EFBIG: u64 = (-27i64) as u64;
 /// ディスク/ストレージに空きがない
 pub const ENOSPC: u64 = (-28i64) as u64;
-/// 読み取り専用ファイルシステム
-pub const EROFS: u64 = (-30i64) as u64;
-/// デバイスでない
-pub const ENOTTY: u64 = (-25i64) as u64;
 /// パイプが壊れている
 pub const EPIPE: u64 = (-32i64) as u64;
 /// 引数が範囲外
