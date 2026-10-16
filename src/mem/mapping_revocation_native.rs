@@ -1,5 +1,6 @@
 //! Native adapter used only inside the process-table/mapping lock scope.
 use super::{mapping_revocation::Backend, paging, tlb_shootdown};
+use mnu_abi::status::Error;
 
 pub(crate) struct Native<'a> {
     // Retain the borrow for the entire suspension/synchronization transaction.
@@ -93,29 +94,29 @@ impl<'a> Native<'a> {
 
 impl Backend for Native<'_> {
     type Page = paging::SuspendedUserPage;
-    type Error = u64;
+    type Error = Error;
 
-    fn next_page(&mut self, table: u64, start: u64, end: u64) -> Result<Option<u64>, u64> {
+    fn next_page(&mut self, table: u64, start: u64, end: u64) -> Result<Option<u64>, Error> {
         if !self.owns(table, start, end) {
-            return Err(crate::syscall::EFAULT);
+            return Err(Error::InvalidAddress);
         }
         // SAFETY: the retained mapping lock excludes all writers and teardown.
         unsafe { paging::next_user_page_entry(table, start, end) }
-            .map_err(|_| crate::syscall::EFAULT)
+            .map_err(|_| Error::InvalidAddress)
     }
 
-    fn suspend(&mut self, table: u64, address: u64) -> Result<Option<Self::Page>, u64> {
+    fn suspend(&mut self, table: u64, address: u64) -> Result<Option<Self::Page>, Error> {
         // Never walk an arbitrary physical address supplied in a plan. It must
         // belong to an address space retained in this locked process table.
         if !address
             .checked_add(4096)
             .is_some_and(|end| self.owns(table, address, end))
         {
-            return Err(crate::syscall::EFAULT);
+            return Err(Error::InvalidAddress);
         }
         // SAFETY: Native::new's caller excludes writers/faults/teardown and
         // retains the locked process table throughout this transaction.
-        unsafe { paging::suspend_user_page(table, address) }.map_err(|_| crate::syscall::EFAULT)
+        unsafe { paging::suspend_user_page(table, address) }.map_err(|_| Error::InvalidAddress)
     }
 
     fn restore(&mut self, page: Self::Page) {
@@ -125,8 +126,8 @@ impl Backend for Native<'_> {
         }
     }
 
-    fn synchronize(&mut self) -> Result<(), u64> {
-        tlb_shootdown::invalidate_all().map_err(|_| crate::syscall::EIO)
+    fn synchronize(&mut self) -> Result<(), Error> {
+        tlb_shootdown::invalidate_all().map_err(|_| Error::BackingFailure)
     }
 
     fn release(&mut self, page: Self::Page) {

@@ -114,7 +114,7 @@ fn install_dma_buffer(
                     InstallError::Retained(match error {
                         transaction::Error::InvalidRange => EINVAL,
                         transaction::Error::Allocation => ENOMEM,
-                        transaction::Error::Backend(error) => error,
+                        transaction::Error::Backend(error) => error.into_raw(),
                     })
                 },
             )?;
@@ -232,7 +232,7 @@ pub fn free(handle: u64) -> u64 {
             |error| match error {
                 transaction::Error::InvalidRange => EINVAL,
                 transaction::Error::Allocation => ENOMEM,
-                transaction::Error::Backend(error) => error,
+                transaction::Error::Backend(error) => error.into_raw(),
             },
         )?;
         // Failure above restores mappings and retains their ownership record.

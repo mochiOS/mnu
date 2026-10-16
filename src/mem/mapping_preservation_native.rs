@@ -5,6 +5,7 @@ use super::{
     mapping_revocation_native::Native,
     paging,
 };
+use mnu_abi::status::Error;
 
 pub(crate) struct PreservedPage {
     pub table: u64,
@@ -19,7 +20,7 @@ impl PreservedPage {
         length: u64,
         offset: u64,
         boundary: u64,
-    ) -> Result<Option<Self>, u64> {
+    ) -> Result<Option<Self>, Error> {
         if boundary & 4095 == 0 {
             return Ok(None);
         }
@@ -29,18 +30,18 @@ impl PreservedPage {
             || offset & 4095 != 0
             || length & 4095 != 0
         {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument);
         }
         let page = boundary & !4095;
-        let end = page.checked_add(4096).ok_or(crate::syscall::EINVAL)?;
+        let end = page.checked_add(4096).ok_or(Error::InvalidArgument)?;
         let Some((address, high)) =
             mapping_revocation::virtual_overlap(start, length, offset, page, end)
-                .map_err(|_| crate::syscall::EINVAL)?
+                .map_err(|_| Error::InvalidArgument)?
         else {
             return Ok(None);
         };
         if high - address != 4096 {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument);
         }
         Ok(Some(Self {
             table,
@@ -53,7 +54,7 @@ impl PreservedPage {
 /// Only backends which retain owned RAM frames can preserve writable suffixes.
 /// Exclusion and root lifetimes remain the backend's responsibility.
 pub(crate) trait FrameBackend:
-    Backend<Page = paging::SuspendedUserPage, Error = u64>
+    Backend<Page = paging::SuspendedUserPage, Error = Error>
 {
     fn owns_ram_frames(&self) -> bool;
 }
@@ -77,10 +78,10 @@ pub(crate) struct Page {
 }
 
 impl<B: FrameBackend, P: AsRef<[PreservedPage]>> Preserving<B, P> {
-    pub(crate) fn new(inner: B, preserved: P) -> Result<Self, u64> {
+    pub(crate) fn new(inner: B, preserved: P) -> Result<Self, Error> {
         // Borrowed/MMIO mappings must never be treated as writable RAM.
         if !inner.owns_ram_frames() {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument);
         }
         Ok(Self { inner, preserved })
     }
@@ -94,12 +95,12 @@ impl<B: FrameBackend, P: AsRef<[PreservedPage]>> Preserving<B, P> {
 
 impl<B: FrameBackend, P: AsRef<[PreservedPage]>> Backend for Preserving<B, P> {
     type Page = Page;
-    type Error = u64;
+    type Error = Error;
 
-    fn next_page(&mut self, table: u64, start: u64, end: u64) -> Result<Option<u64>, u64> {
+    fn next_page(&mut self, table: u64, start: u64, end: u64) -> Result<Option<u64>, Error> {
         self.inner.next_page(table, start, end)
     }
-    fn suspend(&mut self, table: u64, address: u64) -> Result<Option<Page>, u64> {
+    fn suspend(&mut self, table: u64, address: u64) -> Result<Option<Page>, Error> {
         let mut matches = self
             .preserved
             .as_ref()
@@ -107,7 +108,7 @@ impl<B: FrameBackend, P: AsRef<[PreservedPage]>> Backend for Preserving<B, P> {
             .filter(|entry| entry.table == table && entry.address == address);
         let selected = matches.next();
         if matches.next().is_some() {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument);
         }
         let Some(original) = self.inner.suspend(table, address)? else {
             return Ok(None);
@@ -117,7 +118,7 @@ impl<B: FrameBackend, P: AsRef<[PreservedPage]>> Backend for Preserving<B, P> {
                 Ok(range) => Some(range),
                 Err(_) => {
                     self.inner.restore(original);
-                    return Err(crate::syscall::EFAULT);
+                    return Err(Error::InvalidAddress);
                 }
             },
             None => None,
@@ -127,7 +128,7 @@ impl<B: FrameBackend, P: AsRef<[PreservedPage]>> Backend for Preserving<B, P> {
     fn restore(&mut self, page: Page) {
         self.inner.restore(page.original);
     }
-    fn synchronize(&mut self) -> Result<(), u64> {
+    fn synchronize(&mut self) -> Result<(), Error> {
         self.inner.synchronize()
     }
     fn release(&mut self, page: Page) {

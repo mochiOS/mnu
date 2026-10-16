@@ -1017,7 +1017,7 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
             .map_err(|error| match error {
                 transaction::Error::InvalidRange => EINVAL,
                 transaction::Error::Allocation => ENOMEM,
-                transaction::Error::Backend(error) => error,
+                transaction::Error::Backend(error) => error.into_raw(),
             })?;
         // Metadata is committed only after successful revocation. Failure
         // restores PTEs and leaves the original ranges/frame ownership intact.

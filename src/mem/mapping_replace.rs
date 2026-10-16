@@ -66,7 +66,7 @@ pub(crate) fn replace(
     transaction::revoke([(table, start, end)], &mut backend).map_err(|error| match error {
         transaction::Error::InvalidRange => EINVAL,
         transaction::Error::Allocation => ENOMEM,
-        transaction::Error::Backend(error) => error,
+        transaction::Error::Backend(error) => error.into_raw(),
     })?;
     // Nothing fallible or allocating remains after old frame references retire.
     process.set_memory_regions(retained);

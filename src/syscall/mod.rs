@@ -225,7 +225,7 @@ fn map_borrowed_range_for_process(
                 .map_err(|error| match error {
                     transaction::Error::InvalidRange => EINVAL,
                     transaction::Error::Allocation => ENOMEM,
-                    transaction::Error::Backend(error) => error,
+                    transaction::Error::Backend(error) => error.into_raw(),
                 })?;
             // If revocation fails, retain metadata for the restored partial
             // mapping. Never leave live PTEs without an ownership record.

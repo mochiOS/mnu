@@ -1644,12 +1644,13 @@ pub(crate) fn resize_shared_memory(
         // SAFETY: user mapping exclusion plus the retained table guard
         // keeps every selected PTE and page-table hierarchy stable.
         let native = unsafe { Native::for_targets(&table, &targets) };
-        let mut backend = Preserving::new(native, targets.preserved())?;
+        let mut backend = Preserving::new(native, targets.preserved())
+            .map_err(mnu_abi::status::Error::into_raw)?;
         transaction::revoke_with(targets.ranges(), &mut backend, || Ok(commit.commit()))
             .map_err(|error| match error {
                 transaction::Error::InvalidRange => crate::syscall::EINVAL,
                 transaction::Error::Allocation => crate::syscall::ENOMEM,
-                transaction::Error::Backend(error) => error,
+                transaction::Error::Backend(error) => error.into_raw(),
             })
     })
 }
@@ -1762,7 +1763,7 @@ pub fn release_process_borrowed_mappings(pid: ProcessId) -> core::result::Result
         transaction::revoke(ranges, &mut backend).map_err(|error| match error {
             transaction::Error::InvalidRange => crate::syscall::EINVAL,
             transaction::Error::Allocation => crate::syscall::ENOMEM,
-            transaction::Error::Backend(error) => error,
+            transaction::Error::Backend(error) => error.into_raw(),
         })?;
         proc.take_mmio_mappings();
         let dma_buffers = proc.take_dma_buffers();

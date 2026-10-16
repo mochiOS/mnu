@@ -113,7 +113,8 @@ impl Targets {
         else {
             return Ok(());
         };
-        let preserved = PreservedPage::for_mapping(table, address, length, offset, boundary)?
+        let preserved = PreservedPage::for_mapping(table, address, length, offset, boundary)
+            .map_err(mnu_abi::status::Error::into_raw)?
             .filter(|page| page.address >= low && page.address < high);
         self.ranges
             .try_reserve(1)
