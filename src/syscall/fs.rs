@@ -1,8 +1,6 @@
 //! ファイルシステム関連のシステムコール
 
-use super::types::{
-    EACCES, EAGAIN, EBADF, EFAULT, EINVAL, ENOTSUP,
-};
+use mnu_abi::status::Error;
 use crate::task::fd_table::{FileHandle, FileHandleCap};
 use alloc::vec::Vec;
 
@@ -103,14 +101,14 @@ pub(crate) fn stream_signals(handle: &FileHandle) -> Result<u64, u64> {
 
 pub(crate) fn stream_signals_for_capacity(handle: &FileHandle, minimum: u32) -> Result<u64, u64> {
     let Some((stream_id, write_end)) = handle.stream_endpoint() else {
-        return Err(EBADF);
+        return Err(Error::InvalidArgument.into_raw());
     };
     if minimum != 0 && (!write_end || minimum as usize > PIPE_BUFFER_CAP) {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument.into_raw());
     }
     let table = PIPE_TABLE.lock();
     let Some(Some(stream)) = table.get(stream_id) else {
-        return Err(EBADF);
+        return Err(Error::InvalidArgument.into_raw());
     };
     Ok(if minimum == 0 {
         stream.signals(write_end)
@@ -124,11 +122,11 @@ pub(crate) fn register_stream_waiter(
     waiter: crate::task::ThreadId,
 ) -> Result<usize, u64> {
     let Some((stream_id, _)) = handle.stream_endpoint() else {
-        return Err(EBADF);
+        return Err(Error::InvalidArgument.into_raw());
     };
     let mut table = PIPE_TABLE.lock();
     let Some(Some(stream)) = table.get_mut(stream_id) else {
-        return Err(EBADF);
+        return Err(Error::InvalidArgument.into_raw());
     };
     if !stream.waiters.contains(&waiter) {
         if stream.waiters.try_reserve(1).is_err() {
@@ -149,18 +147,18 @@ pub(crate) fn remove_stream_waiter(stream_id: usize, waiter: crate::task::Thread
 pub(crate) fn file_handle_options(handle: &FileHandle) -> Result<u64, u64> {
     let open = handle.open.lock();
     if open.pipe_id.is_none() {
-        return Err(ENOTSUP);
+        return Err(Error::InvalidArgument.into_raw());
     }
     Ok(open.io_options)
 }
 
 pub(crate) fn set_file_handle_options(handle: &FileHandle, options: u64) -> Result<(), u64> {
     if options & !mnu_abi::HANDLE_OPTIONS_ALL != 0 {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument.into_raw());
     }
     let mut open = handle.open.lock();
     if open.pipe_id.is_none() {
-        return Err(ENOTSUP);
+        return Err(Error::InvalidArgument.into_raw());
     }
     open.io_options = options;
     Ok(())
@@ -168,20 +166,20 @@ pub(crate) fn set_file_handle_options(handle: &FileHandle, options: u64) -> Resu
 
 pub(crate) fn read_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> u64 {
     if buf_ptr == 0 {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
     if len == 0 {
         return 0;
     }
     if !crate::syscall::validate_user_ptr(buf_ptr, len) {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
     if !handle.cap.contains(FileHandleCap::READ) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let open = handle.open.lock();
     let Some(pipe_id) = open.pipe_id else {
-        return ENOTSUP;
+        return Error::InvalidArgument.into_raw();
     };
     let io_options = open.io_options;
     drop(open);
@@ -194,19 +192,19 @@ fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
         Err(_) => MAX_IO_BYTES,
     };
     let Some(current) = crate::task::current_thread_id() else {
-        return EBADF;
+        return Error::NotReady.into_raw();
     };
     loop {
         let mut table = PIPE_TABLE.lock();
         let Some(Some(pipe)) = table.get_mut(pipe_id) else {
-            return EBADF;
+            return Error::InvalidArgument.into_raw();
         };
         if pipe.data.is_empty() {
             if pipe.writers == 0 {
                 return 0;
             }
             if (io_options & mnu_abi::HANDLE_OPTION_NONBLOCKING) != 0 {
-                return EAGAIN;
+                return Error::NotReady.into_raw();
             }
             if !pipe.waiters.contains(&current) {
                 if pipe.waiters.try_reserve(1).is_err() {
@@ -217,15 +215,15 @@ fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
             drop(table);
             if super::upcall::current_has_deliverable_upcall() {
                 remove_stream_waiter(pipe_id, current);
-                return EAGAIN;
+                return Error::NotReady.into_raw();
             }
             let _ = crate::task::sleep_thread_unless_woken(current);
             crate::task::yield_now();
             continue;
         }
         let take = core::cmp::min(pipe.data.len(), target_len);
-        if crate::syscall::copy_to_user(buf_ptr, &pipe.data[..take]).is_err() {
-            return EFAULT;
+        if let Err(error) = crate::syscall::copy_to_user_native(buf_ptr, &pipe.data[..take]) {
+            return error.into_raw();
         }
         pipe.data.drain(0..take);
         pipe.waiters.retain(|waiter| *waiter != current);
@@ -238,20 +236,20 @@ fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
 
 pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> u64 {
     if buf_ptr == 0 {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
     if len == 0 {
         return 0;
     }
     if !crate::syscall::validate_user_ptr(buf_ptr, len) {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
     if !handle.cap.contains(FileHandleCap::WRITE) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let open = handle.open.lock();
     let Some(pipe_id) = open.pipe_id else {
-        return ENOTSUP;
+        return Error::InvalidArgument.into_raw();
     };
     let io_options = open.io_options;
     drop(open);
@@ -265,20 +263,20 @@ pub(crate) fn read_stream_handle(
     options: u64,
 ) -> u64 {
     if !handle.cap.contains(FileHandleCap::READ) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     if length == 0 {
         return 0;
     }
     if buffer == 0 || !crate::syscall::validate_user_ptr(buffer, length) {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
     let open = handle.open.lock();
     let Some(stream_id) = open.pipe_id else {
-        return ENOTSUP;
+        return Error::InvalidArgument.into_raw();
     };
     if open.pipe_write {
-        return EBADF;
+        return Error::InvalidArgument.into_raw();
     }
     let io_options = open.io_options
         | if options & mnu_abi::STREAM_IO_TRY != 0 {
@@ -297,14 +295,14 @@ pub(crate) fn write_stream_handle(
     options: u64,
 ) -> u64 {
     if !handle.cap.contains(FileHandleCap::WRITE) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let open = handle.open.lock();
     let Some(stream_id) = open.pipe_id else {
-        return ENOTSUP;
+        return Error::InvalidArgument.into_raw();
     };
     if !open.pipe_write {
-        return EBADF;
+        return Error::InvalidArgument.into_raw();
     }
     let io_options = open.io_options
         | if options & mnu_abi::STREAM_IO_TRY != 0 {
@@ -324,10 +322,10 @@ pub(crate) fn write_stream_handle(
 
 fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete: bool) -> u64 {
     let Ok(len_usize) = usize::try_from(len) else {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     };
     if complete && len_usize > PIPE_BUFFER_CAP {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if len_usize == 0 {
         return 0;
@@ -339,16 +337,16 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
     }
     tmp.resize(temporary_length, 0);
     crate::performance::record_vfs_temporary_buffer(tmp.len());
-    if let Err(errno) = crate::syscall::copy_from_user(buf_ptr, &mut tmp) {
-        return errno;
+    if let Err(error) = crate::syscall::copy_from_user_native(buf_ptr, &mut tmp) {
+        return error.into_raw();
     }
     let Some(current) = crate::task::current_thread_id() else {
-        return EBADF;
+        return Error::NotReady.into_raw();
     };
     loop {
         let mut table = PIPE_TABLE.lock();
         let Some(Some(pipe)) = table.get_mut(pipe_id) else {
-            return EBADF;
+            return Error::InvalidArgument.into_raw();
         };
         if pipe.readers == 0 {
             return mnu_abi::status::Error::PeerClosed.into_raw();
@@ -371,7 +369,7 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
             return count as u64;
         }
         if (io_options & mnu_abi::HANDLE_OPTION_NONBLOCKING) != 0 {
-            return EAGAIN;
+            return Error::NotReady.into_raw();
         }
         if !pipe.waiters.contains(&current) {
             if pipe.waiters.try_reserve(1).is_err() {
@@ -382,7 +380,7 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
         drop(table);
         if super::upcall::current_has_deliverable_upcall() {
             remove_stream_waiter(pipe_id, current);
-            return EAGAIN;
+            return Error::NotReady.into_raw();
         }
         let _ = crate::task::sleep_thread_unless_woken(current);
         crate::task::yield_now();

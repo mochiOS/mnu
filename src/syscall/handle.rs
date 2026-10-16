@@ -214,27 +214,27 @@ pub fn write_bounded(raw: u64, buffer: u64, length: u64, byte_end: u64) -> u64 {
 
 pub fn stream_read(raw: u64, buffer: u64, length: u64, options: u64) -> u64 {
     if options & !mnu_abi::STREAM_READ_OPTIONS_ALL != 0 {
-        return EINVAL;
+        return mnu_abi::status::Error::InvalidArgument.into_raw();
     }
-    match object(raw, HandleRights::READ) {
+    match object_native(raw, HandleRights::READ) {
         Ok(KernelObject::File(file)) => {
             crate::syscall::fs::read_stream_handle(&file, buffer, length, options)
         }
-        Ok(_) => ENOTSUP,
-        Err(error) => error,
+        Ok(_) => mnu_abi::status::Error::InvalidArgument.into_raw(),
+        Err(error) => error.into_raw(),
     }
 }
 
 pub fn stream_write(raw: u64, buffer: u64, length: u64, options: u64) -> u64 {
     if options & !mnu_abi::STREAM_WRITE_OPTIONS_ALL != 0 {
-        return EINVAL;
+        return mnu_abi::status::Error::InvalidArgument.into_raw();
     }
-    match object(raw, HandleRights::WRITE) {
+    match object_native(raw, HandleRights::WRITE) {
         Ok(KernelObject::File(file)) => {
             crate::syscall::fs::write_stream_handle(&file, buffer, length, options)
         }
-        Ok(_) => ENOTSUP,
-        Err(error) => error,
+        Ok(_) => mnu_abi::status::Error::InvalidArgument.into_raw(),
+        Err(error) => error.into_raw(),
     }
 }
 
