@@ -989,43 +989,48 @@ fn memory_map_impl(
 
 /// Removes native virtual-memory mappings from the current address space.
 pub fn memory_unmap(addr: u64, length: u64) -> u64 {
-    if addr == 0 || length == 0 {
-        return EINVAL;
+    use mnu_abi::status::Error;
+
+    if length == 0 {
+        return Error::InvalidArgument.into_raw();
+    }
+    if addr == 0 {
+        return Error::InvalidAddress.into_raw();
     }
     let unmap_start = addr & !4095;
     let unmap_end = match addr.checked_add(length).and_then(page_align_up) {
         Some(v) => v,
-        None => return EINVAL,
+        None => return Error::InvalidAddress.into_raw(),
     };
     let unmap_len = match unmap_end.checked_sub(unmap_start) {
         Some(v) if v > 0 => v,
-        _ => return EINVAL,
+        _ => return Error::InvalidAddress.into_raw(),
     };
     if !is_user_range(unmap_start, unmap_len) {
-        return EINVAL;
+        return Error::InvalidAddress.into_raw();
     }
 
     let tid = match current_thread_id() {
         Some(t) => t,
-        None => return ENOSYS,
+        None => return Error::NotReady.into_raw(),
     };
     let pid = match crate::task::with_thread(tid, |t| t.process_id()) {
         Some(p) => p,
-        None => return ENOSYS,
+        None => return Error::NotReady.into_raw(),
     };
     let outcome = crate::task::with_process_mut(pid, |process| {
         use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
-        let table = process.page_table().ok_or(ENOSYS)?;
+        let table = process.page_table().ok_or_else(|| Error::NotReady.into_raw())?;
         if process
             .find_dma_buffer_by_addr(unmap_start, unmap_len)
             .is_some()
         {
-            return Err(EPERM);
+            return Err(Error::AccessDenied.into_raw());
         }
         let mmio = process.find_mmio_mapping_by_addr(unmap_start, unmap_len);
         if let Some(mapping) = mmio {
             if mapping.virt_start() != unmap_start || mapping.len() != unmap_len {
-                return Err(EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
         }
         let owns_frames = mmio.is_none();
@@ -1040,8 +1045,12 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
                 process
                     .prepare_remove_memory_range(unmap_start, unmap_len)
                     .map_err(|error| match error {
-                        crate::task::process::MemoryRangeError::InvalidRange => EINVAL,
-                        crate::task::process::MemoryRangeError::Allocation => ENOMEM,
+                        crate::task::process::MemoryRangeError::InvalidRange => {
+                            Error::InvalidArgument.into_raw()
+                        }
+                        crate::task::process::MemoryRangeError::Allocation => {
+                            Error::ResourceUnavailable.into_raw()
+                        }
                     })?,
             )
         } else {
@@ -1052,8 +1061,8 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
         let mut backend = unsafe { Native::for_process(process, owns_frames) };
         transaction::revoke([(table, unmap_start, unmap_end)], &mut backend)
             .map_err(|error| match error {
-                transaction::Error::InvalidRange => EINVAL,
-                transaction::Error::Allocation => ENOMEM,
+                transaction::Error::InvalidRange => Error::InvalidArgument.into_raw(),
+                transaction::Error::Allocation => Error::ResourceUnavailable.into_raw(),
                 transaction::Error::Backend(error) => error.into_raw(),
             })?;
         // Metadata is committed only after successful revocation. Failure
@@ -1069,7 +1078,7 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
     let removed = match outcome {
         Some(Ok(removed)) => removed,
         Some(Err(error)) => return error,
-        None => return ENOSYS,
+        None => return Error::NotReady.into_raw(),
     };
     // Provider writeback may do IPC: never perform it under PROCESS_TABLE.
     for region in removed {
