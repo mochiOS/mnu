@@ -1030,9 +1030,9 @@ pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u
         None => return EINVAL,
     };
     let (endpoint_thread_id, endpoint_slot, endpoint_generation) =
-        match crate::syscall::ipc::resolve_provider_endpoint(endpoint) {
+        match crate::syscall::ipc::resolve_provider_endpoint_native(endpoint) {
             Ok(endpoint) => endpoint,
-            Err(error) => return error,
+            Err(error) => return error.into_raw(),
         };
     let provider = match ProviderObject::new(
         endpoint_thread_id,
