@@ -362,7 +362,7 @@ pub fn prepare_interrupt_return(frame: &mut [u64; 20]) {
     let mut context = read_interrupt_context(frame);
     prepare_context(&mut context);
     if !valid_user_return(&context) {
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     }
     write_interrupt_context(frame, context);
 }
@@ -472,7 +472,7 @@ fn resume_context(context: UserUpcallContext) -> ! {
     if !valid_user_return(&context)
         || !super::syscall_entry::current_thread_user_page_table().is_some_and(|root| root != 0)
     {
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     }
     let fs_base = crate::task::current_thread_id()
         .and_then(|id| crate::task::with_thread(id, |thread| thread.fs_base()))

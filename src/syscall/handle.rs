@@ -1947,7 +1947,7 @@ pub fn process_terminate(raw: u64, exit_code: u64) -> u64 {
         return Error::NotFound.into_raw();
     }
     if crate::syscall::security::current_process_id() == Some(process_id) {
-        crate::task::scheduler::exit_current_process(exit_code as i32);
+        crate::task::scheduler::exit_current_process(exit_code);
     }
     if !process.begin_termination() {
         return if process.is_exited() {

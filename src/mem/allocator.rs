@@ -519,7 +519,7 @@ fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
     if crate::task::scheduler::is_scheduler_enabled() && crate::task::current_thread_id().is_some()
     {
         crate::warn!("OOM: terminating current process to recover");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     }
     // 回復不能: 割り込みを無効化してシステムを停止
     #[cfg(target_arch = "x86_64")]

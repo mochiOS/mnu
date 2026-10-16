@@ -708,7 +708,7 @@ pub fn start_scheduling() -> ! {
 /// `ProcessExit` と致命的な例外は、呼び出し元スレッドだけでなく
 /// 同一プロセスの全スレッドを終了させる。
 /// スレッド単体の終了には `ThreadExit` を使う。
-pub fn exit_current_process(exit_code: i32) -> ! {
+pub fn exit_current_process(exit_code: u64) -> ! {
     if let Some(current_id) = current_thread_id() {
         let object = with_thread(current_id, |thread| thread.process_id())
             .and_then(|pid| crate::task::with_process(pid, |process| process.process_object()));
@@ -722,8 +722,8 @@ pub fn exit_current_process(exit_code: i32) -> ! {
                     error
                 );
             }
-            crate::task::mark_process_exited(pid, exit_code as u64);
+            crate::task::mark_process_exited(pid, exit_code);
         }
     }
-    exit_current_task(exit_code as u64)
+    exit_current_task(exit_code)
 }

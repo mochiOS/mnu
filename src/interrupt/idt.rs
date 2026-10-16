@@ -204,7 +204,7 @@ extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame)
     error!("{:#?}", stack_frame);
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -269,7 +269,7 @@ extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
     error!("{:#?}", stack_frame);
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -295,7 +295,7 @@ extern "x86-interrupt" fn bound_range_exceeded_handler(stack_frame: InterruptSta
     error!("{:#?}", stack_frame);
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -584,7 +584,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -610,7 +610,7 @@ extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptSta
     error!("{:#?}", stack_frame);
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -655,7 +655,7 @@ extern "x86-interrupt" fn invalid_tss_handler(stack_frame: InterruptStackFrame, 
     error!("{:#?}", stack_frame);
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -686,7 +686,7 @@ extern "x86-interrupt" fn segment_not_present_handler(
     error!("{:#?}", stack_frame);
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -719,7 +719,7 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
 
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -774,7 +774,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         // unrestricted physical-memory reads through the active kernel CR3.
         error!("User-mode protection diagnostics are redacted in this path");
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -951,7 +951,7 @@ pub(super) fn page_fault_handler(
 
         error!("Terminating faulting user process");
         debug!("{:#?}", stack_frame);
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         // カーネルモードでのページフォルト: システム全体を停止
         error!("FATAL: Page fault in kernel mode!");
@@ -1041,7 +1041,7 @@ extern "x86-interrupt" fn x87_floating_point_handler(stack_frame: InterruptStack
     error!("{:#?}", stack_frame);
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -1073,7 +1073,7 @@ extern "x86-interrupt" fn alignment_check_handler(
     error!("{:#?}", stack_frame);
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -1111,7 +1111,7 @@ extern "x86-interrupt" fn simd_floating_point_handler(stack_frame: InterruptStac
     error!("{:#?}", stack_frame);
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }
@@ -1137,7 +1137,7 @@ extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFram
     error!("{:#?}", stack_frame);
     if is_user_mode {
         error!("Terminating faulting user process");
-        crate::task::scheduler::exit_current_process(-1);
+        crate::task::scheduler::exit_current_process(u64::MAX);
     } else {
         halt_cpu();
     }

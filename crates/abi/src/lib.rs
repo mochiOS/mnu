@@ -73,6 +73,8 @@ pub enum SyscallNumber {
     BlockRead = 555,
     BlockWrite = 556,
     IpcEndpointOwner = 557,
+    /// Terminates the caller's process, preserving all 64 bits of the opaque
+    /// terminal value. Compatibility layers interpret their own exit status.
     ProcessExit = 574,
     ThreadCreate = 577,
     ThreadExit = 578,
