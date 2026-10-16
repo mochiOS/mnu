@@ -147,6 +147,10 @@ pub enum SyscallNumber {
     ProcessHandleResume = 645,
     ProcessHandleTerminate = 646,
     HandleWaitMany = 647,
+    /// Associates an opaque key with an existing caller-owned Handle. Does
+    /// not duplicate, transfer or change rights. Native failures are
+    /// InvalidArgument (selector), ResourceUnavailable (context storage),
+    /// and NotReady (execution context).
     ContextHandleSet = 648,
     StreamPairCreate = 649,
     HandleOptionsGet = 650,
@@ -160,8 +164,13 @@ pub enum SyscallNumber {
     ThreadHandleStatus = 658,
     ProcessHandleOpenById = 659,
     DebugWrite = 660,
+    /// Removes an opaque Handle association, not its owned reference.
+    /// Missing keys succeed; absent execution context is native NotReady.
     ContextHandleRemove = 661,
+    /// Replaces an opaque scalar without interpreting its bits. Native
+    /// failures are ResourceUnavailable (storage) and NotReady (context).
     ContextValueSet = 662,
+    /// Missing keys succeed; absent execution context is native NotReady.
     ContextValueRemove = 663,
     /// Reads the caller's reference rights, including an empty rights set.
     /// Requires possession only. Native failures are InvalidArgument for an

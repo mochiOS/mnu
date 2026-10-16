@@ -1947,62 +1947,66 @@ pub fn launch_get(key: u64) -> u64 {
 /// process-context key, replacing the previous association for that key. The
 /// kernel assigns no meaning to either the key or the object.
 pub fn context_handle_set(key: u64, raw: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
-    let handle = match decode_handle(raw) {
-        Ok(handle) => handle,
-        Err(error) => return error,
+    let handle = match u32::try_from(raw).ok().and_then(ObjectHandle::from_raw) {
+        Some(handle) => handle,
+        None => return Error::InvalidArgument.into_raw(),
     };
     crate::task::with_process_mut(process_id, |process| {
         if process.object_handles().get(handle).is_none() {
-            return EBADF;
+            return Error::InvalidArgument.into_raw();
         }
         if !process.launch_context_mut().set(key, handle) {
-            return ENOSPC;
+            return Error::ResourceUnavailable.into_raw();
         }
         SUCCESS
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 pub fn context_handle_remove(key: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
     crate::task::with_process_mut(process_id, |process| {
         process.launch_context_mut().take(key);
         SUCCESS
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 pub fn context_value_set(key: u64, value: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
     crate::task::with_process_mut(process_id, |process| {
         if !process.launch_context_mut().set_value(key, value) {
-            return ENOSPC;
+            return Error::ResourceUnavailable.into_raw();
         }
         SUCCESS
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 pub fn context_value_remove(key: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
     crate::task::with_process_mut(process_id, |process| {
         process.launch_context_mut().remove_value(key);
         SUCCESS
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 pub fn rights_get(raw: u64) -> u64 {
