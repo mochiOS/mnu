@@ -189,6 +189,7 @@ pub enum SyscallNumber {
     /// No arguments. Requires process.spawn; no process or thread is created.
     /// Sibling execution contexts are temporarily quiesced; borrowed MMIO
     /// mappings cannot be captured.
+    /// Failures use status::Error, never POSIX errno values.
     AddressSpaceClone = 679,
     /// Reads metadata for the caller's own Handle table. No object references
     /// are acquired. Arguments: HandleInfo buffer, record capacity. (0, 0)

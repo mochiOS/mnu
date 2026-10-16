@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{EAGAIN, EFAULT, EINVAL, ENOMEM, ENOSPC, ENOSYS, EPERM, ESRCH, SUCCESS};
+use super::types::{EAGAIN, EFAULT, EINVAL, ENOMEM, ENOSYS, EPERM, ESRCH, SUCCESS};
 use crate::task::ThreadId;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -221,20 +221,21 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
 /// Creates a VM image, never a process, thread, or inherited authority table.
 pub fn clone_address_space() -> u64 {
     use crate::mem::address_space::{CloneError, CloneSource};
+    use mnu_abi::status::Error;
     if !caller_has_process_spawn_capability() {
-        return EPERM;
+        return Error::AccessDenied.into_raw();
     }
     let Some(pid) = crate::syscall::security::current_process_id() else {
-        return ENOSYS;
+        return Error::NotReady.into_raw();
     };
     // Exclude in-flight construction and new admission through completion of
     // the image. A count sampled without this gate can miss a new runnable
     // thread published after the check but before COW capture.
     let Some(_capture) = crate::task::image_transition::begin_image_transition(pid) else {
-        return EAGAIN;
+        return Error::NotReady.into_raw();
     };
     let Some(owner) = crate::task::current_thread_id() else {
-        return ENOSYS;
+        return Error::NotReady.into_raw();
     };
     let _quiescence = crate::task::scheduler::quiesce_image_siblings(pid, owner);
     // CONTROL authorizes eventual image consumption; MAP/READ/WRITE do not
@@ -248,20 +249,23 @@ pub fn clone_address_space() -> u64 {
         // to a concurrent backing revocation between capture and cloning.
         let source = match CloneSource::capture(process) {
             Ok(source) => source,
-            Err(CloneError::BorrowedMapping) => return EPERM,
+            Err(CloneError::BorrowedMapping) => return Error::AccessDenied.into_raw(),
             Err(CloneError::Backing(error)) => return error.into_raw(),
-            Err(CloneError::Allocation) => return ENOMEM,
-            Err(_) => return ENOSYS,
+            Err(CloneError::Allocation) => return Error::ResourceUnavailable.into_raw(),
+            Err(CloneError::MissingPageTable) => return Error::NotReady.into_raw(),
         };
         let cloned = source.clone_image();
         // Failed cloning may also have write-protected some source PTEs.
         // Retain every image/frame reference until remote invalidation ends.
         if crate::mem::tlb_shootdown::invalidate_all().is_err() {
-            return crate::syscall::EIO;
+            return Error::BackingFailure.into_raw();
         }
         let image = match cloned {
-            Ok(image) => Arc::new(crate::mem::address_space::AddressSpaceObject::new(image)),
-            Err(_) => return ENOMEM,
+            Ok(image) => match Arc::try_new(crate::mem::address_space::AddressSpaceObject::new(image)) {
+                Ok(image) => image,
+                Err(_) => return Error::ResourceUnavailable.into_raw(),
+            },
+            Err(_) => return Error::ResourceUnavailable.into_raw(),
         };
         process
             .object_handles_mut()
@@ -270,9 +274,9 @@ pub fn clone_address_space() -> u64 {
                 rights,
             ))
             .map(|handle| handle.raw() as u64)
-            .unwrap_or(ENOSPC)
+            .unwrap_or(Error::ResourceUnavailable.into_raw())
     })
-    .unwrap_or(ENOSYS)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 /// Suspends every thread in the current process until a holder of a process
