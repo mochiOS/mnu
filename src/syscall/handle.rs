@@ -1927,20 +1927,21 @@ pub fn process_terminate(raw: u64, exit_code: u64) -> u64 {
 }
 
 pub fn launch_get(key: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
     crate::task::with_process(process_id, |process| {
         let Some(handle) = process.launch_context().get(key) else {
-            return EBADF;
+            return Error::NotFound.into_raw();
         };
         if process.object_handles().get(handle).is_none() {
-            return EBADF;
+            return Error::InvalidArgument.into_raw();
         }
         handle.raw() as u64
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 /// Associates one of the caller's existing object handles with an opaque
@@ -2096,20 +2097,21 @@ pub fn stream_pair_create(output: u64) -> u64 {
 }
 
 pub fn launch_value_get(key: u64, output: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
     let value = match crate::task::with_process(process_id, |process| {
         process.launch_context().value(key)
     })
-    .flatten()
     {
-        Some(value) => value,
-        None => return EBADF,
+        Some(Some(value)) => value,
+        Some(None) => return Error::NotFound.into_raw(),
+        None => return Error::NotReady.into_raw(),
     };
-    match crate::syscall::write_user_u64(output, value) {
+    match crate::syscall::copy_to_user_native(output, &value.to_ne_bytes()) {
         Ok(()) => SUCCESS,
-        Err(error) => error,
+        Err(error) => error.into_raw(),
     }
 }

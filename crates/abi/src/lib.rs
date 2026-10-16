@@ -121,6 +121,9 @@ pub enum SyscallNumber {
     /// InvalidArgument for selectors/rights, AccessDenied for authority,
     /// ResourceUnavailable for table capacity, NotReady for missing context.
     HandleDuplicate = 627,
+    /// Borrows a selector already owned by the caller, without duplication.
+    /// Native failures: NotFound (key), InvalidArgument (stale selector),
+    /// NotReady (execution context). Keys remain opaque to the kernel.
     LaunchHandleGet = 628,
     IpcCreateHandle = 629,
     IpcSendObjectHandles = 630,
@@ -139,6 +142,9 @@ pub enum SyscallNumber {
     /// Failures use status::Error: invalid selector/kind is InvalidArgument,
     /// foreign endpoint is AccessDenied, absent execution context is NotReady.
     ProviderObjectIdentify = 638,
+    /// Copies all scalar bits to caller storage; the return value is status.
+    /// Native failures: NotFound (key), NotReady (execution context), or the
+    /// native usercopy failure. No output copy is attempted for a missing key.
     LaunchValueGet = 639,
     ClockRead = 640,
     ProcessHandleOpen = 641,
