@@ -290,6 +290,8 @@ pub enum SyscallNumber {
     /// Args: caller-local endpoint RECEIVE Handle, nonzero memory identity.
     /// Returns WAIT|TRANSFER only. Readable means a retry can consume it; peer
     /// closed means consumed/unavailable. It grants no mutation permission.
+    /// Failures use status::Error; invalid/stale endpoint selectors are
+    /// InvalidArgument and absent RECEIVE authority is AccessDenied.
     ProviderMemoryAdmissionCreate = 698,
     /// Copies a bounded byte snapshot between two addresses in the caller's
     /// current address space. Args: destination, source, byte length. Returns

@@ -8,15 +8,16 @@ use crate::mem::{
 use crate::syscall::{EAGAIN, EINVAL, ENOMEM, ENOSPC, ENOSYS, SUCCESS};
 use crate::task::{HandleRights, KernelObject, ObjectHandleEntry};
 use alloc::sync::{Arc, Weak};
+use mnu_abi::status::Error;
 
-fn provider_key(endpoint: u64, identity: u64) -> Result<ObjectKey, u64> {
+fn provider_key(endpoint: u64, identity: u64) -> Result<ObjectKey, Error> {
     if identity == 0 {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
-    // This existing resolver enforces caller-table RECEIVE and exact live
+    // The resolver enforces caller-table RECEIVE and exact live
     // thread/slot/generation. Client FileHandle CONTROL is not owner authority.
     let (endpoint_thread_id, endpoint_slot, endpoint_generation) =
-        crate::syscall::ipc::resolve_provider_endpoint(endpoint)?;
+        crate::syscall::ipc::resolve_provider_endpoint_native(endpoint)?;
     Ok(ObjectKey::Provider {
         endpoint_thread_id,
         endpoint_slot,
@@ -27,12 +28,9 @@ fn provider_key(endpoint: u64, identity: u64) -> Result<ObjectKey, u64> {
 
 pub fn create_admission(endpoint: u64, identity: u64) -> u64 {
     let result = (|| {
-        let process_id = super::current_process()?;
-        let admission = Arc::try_new(
-            ProviderAdmission::new(provider_key(endpoint, identity)?)
-                .map_err(mnu_abi::status::Error::into_raw)?,
-        )
-        .map_err(|_| ENOMEM)?;
+        let process_id = crate::syscall::security::current_process_id().ok_or(Error::NotReady)?;
+        let admission = Arc::try_new(ProviderAdmission::new(provider_key(endpoint, identity)?)?)
+            .map_err(|_| Error::ResourceUnavailable)?;
         crate::task::with_process_mut(process_id, |process| {
             process
                 .object_handles_mut()
@@ -41,11 +39,11 @@ pub fn create_admission(endpoint: u64, identity: u64) -> u64 {
                     HandleRights::WAIT.union(HandleRights::TRANSFER),
                 ))
                 .map(|handle| handle.raw() as u64)
-                .ok_or(ENOSPC)
+                .ok_or(Error::ResourceUnavailable)
         })
-        .ok_or(EINVAL)?
+        .ok_or(Error::NotReady)?
     })();
-    result.unwrap_or_else(|error| error)
+    result.unwrap_or_else(Error::into_raw)
 }
 
 pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64, admission: u64) -> u64 {
@@ -55,7 +53,7 @@ pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64, admiss
     };
     let key = match provider_key(endpoint, identity) {
         Ok(key) => key,
-        Err(error) => return error,
+        Err(error) => return error.into_raw(),
     };
     let prepared = if admission == 0 {
         ExtentTransaction::prepare_provider(key, old_length, length)

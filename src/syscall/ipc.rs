@@ -376,6 +376,30 @@ pub(crate) fn resolve_provider_endpoint(raw: u64) -> Result<(u64, u16, u64), u64
     ))
 }
 
+pub(crate) fn resolve_provider_endpoint_native(
+    raw: u64,
+) -> Result<(u64, u16, u64), mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+    let object = crate::syscall::handle::object_native(raw, HandleRights::RECEIVE)?;
+    let KernelObject::IpcEndpoint {
+        thread_id,
+        slot,
+        generation,
+    } = object else {
+        return Err(Error::InvalidArgument);
+    };
+    let endpoint = IpcEndpoint {
+        thread_id,
+        slot,
+        generation,
+    };
+    if !endpoint_is_valid(endpoint) {
+        // A stale generation cannot become valid by waiting or retrying.
+        return Err(Error::InvalidArgument);
+    }
+    Ok((thread_id, slot, generation))
+}
+
 fn resolve_call_destination(raw: u64) -> Result<(u64, u64, u32), u64> {
     if raw <= crate::task::PROCESS_MAX_OBJECT_HANDLES as u64 {
         let endpoint = process_local_endpoint(raw, HandleRights::SEND)?;
