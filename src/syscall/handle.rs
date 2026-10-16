@@ -1618,6 +1618,25 @@ fn remove_provider_waiters(waiter: crate::task::ThreadId, providers: &[Arc<Provi
     }
 }
 
+/// Own every explicit subscription until the object wait leaves kernel mode.
+/// Cleanup is idempotent, including after partial deadline admission.
+struct ObjectWaitRegistrations {
+    thread: crate::task::ThreadId,
+    endpoints: alloc::vec::Vec<crate::syscall::ipc::IpcEndpoint>,
+    streams: alloc::vec::Vec<usize>,
+    providers: alloc::vec::Vec<Arc<ProviderObject>>,
+}
+
+impl Drop for ObjectWaitRegistrations {
+    fn drop(&mut self) {
+        crate::task::remove_process_exit_waiters(self.thread);
+        remove_endpoint_waiters(self.thread, &self.endpoints);
+        remove_stream_waiters(self.thread, &self.streams);
+        remove_provider_waiters(self.thread, &self.providers);
+        crate::syscall::time::disarm_thread_deadline(self.thread);
+    }
+}
+
 fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) -> Result<(), u64> {
     let bytes = unsafe {
         core::slice::from_raw_parts(items.as_ptr().cast::<u8>(), core::mem::size_of_val(items))
@@ -1629,6 +1648,8 @@ fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) ->
 /// interested native signal. The return value is the ready item's index.
 /// `deadline_nanoseconds` is an absolute monotonic-clock value; zero polls and
 /// `u64::MAX` waits indefinitely.
+/// Wait-local storage is reserved before subscription; allocation failure is
+/// native ResourceUnavailable. All return paths remove subscriptions/deadlines.
 pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_ptr: u64) -> u64 {
     let guard = if guard_ptr == 0 {
         None
@@ -1660,7 +1681,11 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
     if byte_len != 0 && !crate::syscall::validate_user_ptr(items_ptr, byte_len as u64) {
         return EFAULT;
     }
-    let mut items = alloc::vec![mnu_abi::HandleWaitItem::default(); count];
+    let mut items = alloc::vec::Vec::new();
+    if items.try_reserve_exact(count).is_err() {
+        return mnu_abi::status::Error::ResourceUnavailable.into_raw();
+    }
+    items.resize(count, mnu_abi::HandleWaitItem::default());
     if byte_len != 0 {
         let bytes =
             unsafe { core::slice::from_raw_parts_mut(items.as_mut_ptr().cast::<u8>(), byte_len) };
@@ -1672,14 +1697,30 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         Some(thread) => thread,
         None => return EINVAL,
     };
-    let mut registered_endpoints = alloc::vec::Vec::new();
-    let mut registered_streams = alloc::vec::Vec::new();
-    let mut registered_providers = alloc::vec::Vec::new();
+    let mut registrations = ObjectWaitRegistrations {
+        thread: current,
+        endpoints: alloc::vec::Vec::new(),
+        streams: alloc::vec::Vec::new(),
+        providers: alloc::vec::Vec::new(),
+    };
+    let registered_endpoints = &mut registrations.endpoints;
+    let registered_streams = &mut registrations.streams;
+    let registered_providers = &mut registrations.providers;
     let mut endpoint_lifetimes = alloc::vec::Vec::new();
     let mut admission_waiters = alloc::vec::Vec::<memory_update::AdmissionWaiter>::new();
     let mut admission_sources = alloc::vec::Vec::new();
-    if admission_sources.try_reserve_exact(items.len()).is_err() {
-        return super::ENOMEM;
+    let mut targets = alloc::vec::Vec::new();
+    // Each item contributes at most one target/subscription of each kind.
+    // Reserve before admitting any waiter; no push in the wait loop allocates.
+    if registered_endpoints.try_reserve_exact(count).is_err()
+        || registered_streams.try_reserve_exact(count).is_err()
+        || registered_providers.try_reserve_exact(count).is_err()
+        || endpoint_lifetimes.try_reserve_exact(count).is_err()
+        || admission_waiters.try_reserve_exact(count).is_err()
+        || admission_sources.try_reserve_exact(count).is_err()
+        || targets.try_reserve_exact(count).is_err()
+    {
+        return mnu_abi::status::Error::ResourceUnavailable.into_raw();
     }
     for item in &items {
         let source = match object(u64::from(item.handle), HandleRights::WAIT) {
@@ -1709,7 +1750,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         endpoint_lifetimes.clear();
         admission_waiters.clear();
         crate::syscall::time::disarm_thread_deadline(current);
-        let mut targets = alloc::vec::Vec::with_capacity(items.len());
+        targets.clear();
         let mut ready = None;
         for (index, item) in items.iter_mut().enumerate() {
             match wait_item_signal(item, admission_sources[index].as_ref()) {
@@ -1780,16 +1821,13 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                 Err(error) => error,
             };
         }
-        for target in targets {
+        for target in targets.drain(..) {
             match target {
                 WaitTarget::MemoryAdmission(admission) => {
                     let registered = (|| {
                         let endpoint = memory_update::admission_endpoint(&admission);
                         let observation =
                             crate::syscall::ipc::lifetime::observe(endpoint, current)?;
-                        admission_waiters
-                            .try_reserve(1)
-                            .map_err(|_| super::ENOMEM)?;
                         let waiter = memory_update::AdmissionWaiter::register(admission, current)?;
                         admission_waiters.push(waiter);
                         endpoint_lifetimes.push(observation);
