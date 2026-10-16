@@ -14,7 +14,7 @@ pub use memory_update::create_admission as provider_memory_admission_create;
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
 use super::{
-    EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EIO, ENOSYS, ENOTSUP, ESRCH,
+    EACCES, EBADF, EFAULT, EINVAL, EIO, ENOSYS, ENOTSUP, ESRCH,
     SUCCESS,
 };
 
@@ -1652,6 +1652,8 @@ fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) ->
 /// native ResourceUnavailable. All return paths remove subscriptions/deadlines.
 /// Array-size validation and usercopy preserve native status::Error categories;
 /// the optional guard descriptor is copied once, before checking its predicate.
+/// Poll/deadline expiry and pending upcalls return NotReady; exhausted local
+/// process/provider subscription slots or deadline storage are ResourceUnavailable.
 pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_ptr: u64) -> u64 {
     use mnu_abi::status::Error;
     let guard = if guard_ptr == 0 {
@@ -1800,7 +1802,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         // The caller decides whether that notification requires another wait.
         if super::upcall::current_has_deliverable_upcall() {
             return match copy_wait_items_to_user(items_ptr, &items) {
-                Ok(()) => EAGAIN,
+                Ok(()) => Error::NotReady.into_raw(),
                 Err(error) => error,
             };
         }
@@ -1809,10 +1811,10 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                 && crate::syscall::time::monotonic_nanoseconds() >= deadline_nanoseconds)
         {
             if items.is_empty() {
-                return EAGAIN;
+                return Error::NotReady.into_raw();
             }
             return match copy_wait_items_to_user(items_ptr, &items) {
-                Ok(()) => EAGAIN,
+                Ok(()) => Error::NotReady.into_raw(),
                 Err(error) => error,
             };
         }
@@ -1842,7 +1844,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                         remove_endpoint_waiters(current, &registered_endpoints);
                         remove_stream_waiters(current, &registered_streams);
                         remove_provider_waiters(current, &registered_providers);
-                        return EAGAIN;
+                        return Error::ResourceUnavailable.into_raw();
                     }
                 }
                 WaitTarget::IpcEndpoint(endpoint) => {
@@ -1885,7 +1887,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                         remove_endpoint_waiters(current, &registered_endpoints);
                         remove_stream_waiters(current, &registered_streams);
                         remove_provider_waiters(current, &registered_providers);
-                        return EAGAIN;
+                        return Error::ResourceUnavailable.into_raw();
                     }
                     registered_providers.push(provider);
                 }
@@ -1898,7 +1900,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
             remove_endpoint_waiters(current, &registered_endpoints);
             remove_stream_waiters(current, &registered_streams);
             remove_provider_waiters(current, &registered_providers);
-            return EAGAIN;
+            return Error::ResourceUnavailable.into_raw();
         }
 
         // Recheck after waiter registration so exits racing with registration
