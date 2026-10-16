@@ -1064,36 +1064,25 @@ pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u
 /// Returns the opaque identifier of a provider object only to the exact
 /// endpoint thread that created it.
 pub fn provider_object_identify(raw: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
-    };
-    let handle = match decode_handle(raw) {
-        Ok(handle) => handle,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let provider = match object_native(raw, HandleRights::empty()) {
+        Ok(KernelObject::Provider(provider)) => provider,
+        Ok(_) => return Error::InvalidArgument.into_raw(),
+        Err(error) => return error.into_raw(),
     };
     let current = match crate::task::current_thread_id()
         .and_then(|thread| crate::syscall::ipc::endpoint_for_thread(thread.as_u64()))
     {
         Some(endpoint) => endpoint,
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
-    crate::task::with_process(process_id, |process| {
-        let Some(entry) = process.object_handles().get(handle) else {
-            return EBADF;
-        };
-        let KernelObject::Provider(provider) = entry.object() else {
-            return EBADF;
-        };
-        if provider.endpoint_thread_id != current.thread_id
-            || provider.endpoint_slot != current.slot
-            || provider.endpoint_generation != current.generation
-        {
-            return EACCES;
-        }
-        provider.object_id
-    })
-    .unwrap_or(EINVAL)
+    if provider.endpoint_thread_id != current.thread_id
+        || provider.endpoint_slot != current.slot
+        || provider.endpoint_generation != current.generation
+    {
+        return Error::AccessDenied.into_raw();
+    }
+    provider.object_id
 }
 
 /// Updates native readiness signals for an object owned by the caller's

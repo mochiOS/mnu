@@ -126,6 +126,10 @@ pub enum SyscallNumber {
     /// endpoint. Failures use status::Error; duplicate identities within that
     /// endpoint namespace are AlreadyExists, not compatibility errno values.
     ProviderObjectCreate = 637,
+    /// Identifies a caller-held provider reference only on its exact owning
+    /// endpoint thread/slot/generation. No particular resource rights required.
+    /// Failures use status::Error: invalid selector/kind is InvalidArgument,
+    /// foreign endpoint is AccessDenied, absent execution context is NotReady.
     ProviderObjectIdentify = 638,
     LaunchValueGet = 639,
     ClockRead = 640,
