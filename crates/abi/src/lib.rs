@@ -8,6 +8,7 @@ pub mod capability;
 pub mod diagnostic;
 pub mod handle_snapshot;
 pub mod memory_map;
+pub mod memory_copy;
 pub mod memory_update;
 
 /// プロセス作成時に渡すメタデータのABIです。
@@ -275,6 +276,14 @@ pub enum SyscallNumber {
     /// Returns WAIT|TRANSFER only. Readable means a retry can consume it; peer
     /// closed means consumed/unavailable. It grants no mutation permission.
     ProviderMemoryAdmissionCreate = 698,
+    /// Copies a bounded byte snapshot between two addresses in the caller's
+    /// current address space. Args: destination, source, byte length. Returns
+    /// the copied length; at most memory_copy::MAX_BYTES per operation.
+    /// Both ranges require their existing user mapping permissions. No other
+    /// process, Handle, permission changes or caller-specific policy is involved.
+    /// Zero length accesses neither pointer. Overlap is supported within one
+    /// snapshot; failure may leave a destination prefix changed, never rollback.
+    MemoryCopy = 699,
     CheckGravityExist = 999,
 }
 
