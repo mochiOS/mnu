@@ -910,43 +910,48 @@ fn install_received_object_handles(
     mut attachments: ObjectHandleAttachments,
     output_pointer: u64,
 ) -> Result<(), u64> {
-    let process_id = crate::task::thread_to_process_id(receiver_thread_id).ok_or(EINVAL)?;
-    let mut installed = [None; MAX_OBJECT_HANDLES];
-    let mut rights = [0u64; MAX_OBJECT_HANDLES];
+    use mnu_abi::status::Error;
+
     let count = attachments.count;
+    // Reject incomplete attachment metadata before publishing any reference.
+    if count > MAX_OBJECT_HANDLES || attachments.handles[..count].iter().any(Option::is_none) {
+        return Err(Error::BackingFailure.into_raw());
+    }
+    let process_id = crate::task::thread_to_process_id(receiver_thread_id)
+        .ok_or_else(|| Error::NotReady.into_raw())?;
+    let mut installed = [None; MAX_OBJECT_HANDLES];
+    let mut output = [0u8; core::mem::size_of::<mnu_abi::IpcObjectHandles>()];
+    output[0..4].copy_from_slice(&(count as u32).to_le_bytes());
+    output[4..8].copy_from_slice(&attachments.delivery_flags.to_le_bytes());
     let result = crate::task::with_process_mut(process_id, |process| {
         for index in 0..count {
-            let entry = attachments.handles[index].take().ok_or(EINVAL)?;
-            rights[index] = entry.rights().bits();
+            let entry = attachments.handles[index]
+                .take()
+                .ok_or_else(|| Error::BackingFailure.into_raw())?;
+            let rights = entry.rights().bits();
             let Some(handle) = process.object_handles_mut().insert(entry) else {
                 for installed_handle in installed[..index].iter().flatten().copied() {
                     let _ = process.object_handles_mut().close(installed_handle);
                 }
-                return Err(ENOSPC);
+                return Err(Error::ResourceUnavailable.into_raw());
             };
             installed[index] = Some(handle);
+            let offset = 8 + index * 16;
+            output[offset..offset + 4].copy_from_slice(&handle.raw().to_le_bytes());
+            output[offset + 8..offset + 16].copy_from_slice(&rights.to_le_bytes());
         }
         Ok(())
     })
-    .ok_or(EINVAL)?;
+    .ok_or_else(|| Error::NotReady.into_raw())?;
     result?;
 
-    let mut output = [0u8; core::mem::size_of::<mnu_abi::IpcObjectHandles>()];
-    output[0..4].copy_from_slice(&(count as u32).to_le_bytes());
-    output[4..8].copy_from_slice(&attachments.delivery_flags.to_le_bytes());
-    for index in 0..count {
-        let offset = 8 + index * 16;
-        let raw = installed[index].ok_or(EINVAL)?.raw();
-        output[offset..offset + 4].copy_from_slice(&raw.to_le_bytes());
-        output[offset + 8..offset + 16].copy_from_slice(&rights[index].to_le_bytes());
-    }
-    if let Err(error) = crate::syscall::copy_to_user(output_pointer, &output) {
+    if let Err(error) = crate::syscall::copy_to_user_native(output_pointer, &output) {
         let _ = crate::task::with_process_mut(process_id, |process| {
             for handle in installed[..count].iter().flatten().copied() {
                 let _ = process.object_handles_mut().close(handle);
             }
         });
-        return Err(error);
+        return Err(error.into_raw());
     }
     Ok(())
 }
