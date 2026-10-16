@@ -6,7 +6,6 @@ use crate::policy::{
 };
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -306,9 +305,8 @@ fn caller_has_process_spawn_capability() -> bool {
 
 fn parse_requested_exec_grants(
     caps_list: &[String],
-    can_intern: bool,
-) -> Result<(CapabilitySet, KernelAuthoritySet), u64> {
-    use crate::syscall::types::EINVAL;
+) -> Result<(CapabilitySet, KernelAuthoritySet), mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
 
     let mut caps = CapabilitySet::empty();
     let mut authorities = KernelAuthoritySet::empty();
@@ -321,16 +319,16 @@ fn parse_requested_exec_grants(
         // authorization: the policy authority has already evaluated their
         // policy classification, and the ABI registry prevents arbitrary
         // names from creating kernel capability IDs here.
-        let cap = if can_intern || mnu_abi::capability::metadata(spec.as_str()).is_some() {
+        let cap = if mnu_abi::capability::metadata(spec.as_str()).is_some() {
             Capability::intern(spec.as_str())
         } else {
             Capability::from_str(spec.as_str())
         };
         let Some(cap) = cap else {
-            return Err(EINVAL);
+            return Err(Error::InvalidArgument);
         };
         if matches!(cap, Capability::MemoryPhysMap) {
-            return Err(EINVAL);
+            return Err(Error::InvalidArgument);
         }
         caps.insert(cap);
     }
@@ -470,15 +468,15 @@ pub fn authorize_exec_syscall(
     caps_ptr: u64,
     caps_total_len: u64,
 ) -> u64 {
-    use crate::syscall::types::{EACCES, EINVAL};
+    use mnu_abi::status::Error;
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::CapabilitiesManage,
     ]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
         Ok(path) => path,
-        Err(_) => return EINVAL,
+        Err(error) => return error.into_raw(),
     };
     let identity_items = match read_nul_identity_fields(identity_ptr, 1024, 7) {
         Ok(items) => items,
@@ -509,12 +507,12 @@ pub fn authorize_exec_syscall(
             };
         } else if let Some(value) = item.strip_prefix(EXECUTABLE_DIGEST_PREFIX) {
             if executable_digest.is_some() {
-                return EINVAL;
+                return Error::InvalidArgument.into_raw();
             }
             executable_digest = decode_subject_key_id(value);
         } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_KIND_PREFIX) {
             if authorization_kind.is_some() {
-                return EINVAL;
+                return Error::InvalidArgument.into_raw();
             }
             authorization_kind = match value {
                 EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE => {
@@ -525,7 +523,7 @@ pub fn authorize_exec_syscall(
             };
         } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_CLASS_PREFIX) {
             if execution_class.is_some() {
-                return EINVAL;
+                return Error::InvalidArgument.into_raw();
             }
             execution_class = match value {
                 "privileged" => Some(ExecutionClass::Privileged),
@@ -533,7 +531,7 @@ pub fn authorize_exec_syscall(
                 _ => None,
             };
         } else {
-            return EINVAL;
+            return Error::InvalidArgument.into_raw();
         }
     }
     let (
@@ -554,39 +552,39 @@ pub fn authorize_exec_syscall(
         execution_class,
     )
     else {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     };
     if !valid_security_identity(package) || !valid_security_identity(developer) {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let caps_list = match read_nul_caps_from_user(caps_ptr, caps_total_len) {
         Ok(caps) => caps,
         Err(error) => return error.into_raw(),
     };
-    let (capabilities, kernel_authorities) = match parse_requested_exec_grants(&caps_list, false) {
+    let (capabilities, kernel_authorities) = match parse_requested_exec_grants(&caps_list) {
         Ok(grants) => grants,
-        Err(_) => return EINVAL,
+        Err(error) => return error.into_raw(),
     };
     let (target_thread, target_pid) = if requester_endpoint == 0 {
         let Some(thread) = crate::task::current_thread_id() else {
-            return EINVAL;
+            return Error::NotReady.into_raw();
         };
         let Some(pid) = crate::syscall::security::current_process_id() else {
-            return EINVAL;
+            return Error::NotReady.into_raw();
         };
         (thread, pid)
     } else {
         let Some(requester_tid) = crate::syscall::ipc::resolve_sender_thread_id(requester_endpoint)
         else {
-            return EINVAL;
+            return Error::InvalidArgument.into_raw();
         };
         let thread = crate::task::ThreadId::from_u64(requester_tid);
         let Some(pid) = crate::task::with_thread(thread, |thread| thread.process_id()) else {
-            return EINVAL;
+            return Error::NotReady.into_raw();
         };
         (thread, pid)
     };
-    let allowed = crate::task::with_process(target_pid, |process| match authorization_kind {
+    let allowed = match crate::task::with_process(target_pid, |process| match authorization_kind {
         crate::task::process::PendingExecKind::ImageReplace => {
             capabilities.is_subset_of(process.capabilities())
                 && kernel_authorities.is_subset_of(process.kernel_authorities())
@@ -594,11 +592,21 @@ pub fn authorize_exec_syscall(
         crate::task::process::PendingExecKind::Spawn => process
             .capabilities()
             .contains(crate::capability::Capability::ProcessSpawn),
-    })
-    .unwrap_or(false);
+    }) {
+        Some(allowed) => allowed,
+        None => return Error::NotReady.into_raw(),
+    };
     if !allowed {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
+    let package = match storage::text(package) {
+        Ok(package) => package,
+        Err(error) => return error.into_raw(),
+    };
+    let developer = match storage::text(developer) {
+        Ok(developer) => developer,
+        Err(error) => return error.into_raw(),
+    };
     let authorization = crate::task::process::PendingExecSecurity {
         path,
         authorized_thread: target_thread,
@@ -606,8 +614,8 @@ pub fn authorize_exec_syscall(
         capabilities,
         kernel_authorities,
         identity: crate::task::process::ApplicationIdentity::new(
-            package.to_string(),
-            developer.to_string(),
+            package,
+            developer,
             subject_key,
             provenance,
         ),
@@ -619,9 +627,9 @@ pub fn authorize_exec_syscall(
     })
     .is_none()
     {
-        return EINVAL;
+        return Error::NotReady.into_raw();
     }
-    crate::syscall::types::SUCCESS
+    0
 }
 
 /// Launches the boot-selected initial image from the authenticated initfs only.

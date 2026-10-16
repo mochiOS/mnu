@@ -120,23 +120,28 @@ fn current_process_name_for_log() -> Option<String> {
 }
 
 /// ユーザー空間の null 終端文字列を最大長付きで読み取り、カーネル所有の `String` を返す。
-pub fn read_user_cstring(ptr: u64, max_len: usize) -> Result<String, u64> {
+pub fn read_user_cstring(ptr: u64, max_len: usize) -> Result<String, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+
     if ptr == 0 || max_len == 0 {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
 
-    let mut bytes = Vec::with_capacity(max_len);
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(max_len)
+        .map_err(|_| Error::ResourceUnavailable)?;
     for i in 0..max_len {
-        let addr = ptr.checked_add(i as u64).ok_or(EFAULT)?;
+        let addr = ptr.checked_add(i as u64).ok_or(Error::InvalidAddress)?;
         let mut one = [0u8; 1];
-        copy_from_user(addr, &mut one)?;
+        copy_from_user_native(addr, &mut one)?;
         let b = one[0];
         if b == 0 {
-            return String::from_utf8(bytes).map_err(|_| EINVAL);
+            return String::from_utf8(bytes).map_err(|_| Error::InvalidArgument);
         }
         bytes.push(b);
     }
-    Err(EINVAL)
+    Err(Error::InvalidArgument)
 }
 
 pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
