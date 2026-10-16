@@ -28,6 +28,8 @@ pub enum Error {
     AlreadyExists = 8,
     /// No entry is registered for the requested opaque identity.
     NotFound = 9,
+    /// The peer endpoint no longer accepts data from this object.
+    PeerClosed = 10,
 }
 
 impl Error {
@@ -49,6 +51,7 @@ impl Error {
             7 => Some(Self::NotReady),
             8 => Some(Self::AlreadyExists),
             9 => Some(Self::NotFound),
+            10 => Some(Self::PeerClosed),
             _ => None,
         }
     }

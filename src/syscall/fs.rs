@@ -1,7 +1,7 @@
 //! ファイルシステム関連のシステムコール
 
 use super::types::{
-    EACCES, EAGAIN, EBADF, EFAULT, EINVAL, ENOTSUP, EPIPE,
+    EACCES, EAGAIN, EBADF, EFAULT, EINVAL, ENOTSUP,
 };
 use crate::task::fd_table::{FileHandle, FileHandleCap};
 use alloc::vec::Vec;
@@ -340,7 +340,7 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
             return EBADF;
         };
         if pipe.readers == 0 {
-            return EPIPE;
+            return mnu_abi::status::Error::PeerClosed.into_raw();
         }
         let available = PIPE_BUFFER_CAP.saturating_sub(pipe.data.len());
         let count = if complete {
