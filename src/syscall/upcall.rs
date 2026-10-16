@@ -2,7 +2,7 @@ use crate::task::{
     HandleRights, KernelObject, ObjectHandleEntry, ThreadUpcallError, UserUpcallContext,
 };
 
-use super::{EAGAIN, EFAULT, EINVAL, ESRCH, SUCCESS, SavedSyscallFrame};
+use super::{SUCCESS, SavedSyscallFrame};
 
 const THREAD_HANDLE_RIGHTS: HandleRights = HandleRights::WAIT
     .union(HandleRights::SIGNAL)
@@ -10,8 +10,12 @@ const THREAD_HANDLE_RIGHTS: HandleRights = HandleRights::WAIT
     .union(HandleRights::TRANSFER);
 
 pub fn install(config_ptr: u64, config_len: u64) -> u64 {
-    if config_ptr == 0 || config_len != core::mem::size_of::<mnu_abi::ThreadUpcallConfig>() as u64 {
-        return EINVAL;
+    use mnu_abi::status::Error;
+    if config_len != core::mem::size_of::<mnu_abi::ThreadUpcallConfig>() as u64 {
+        return Error::InvalidArgument.into_raw();
+    }
+    if config_ptr == 0 {
+        return Error::InvalidAddress.into_raw();
     }
     let mut config = mnu_abi::ThreadUpcallConfig::default();
     let bytes = unsafe {
@@ -20,8 +24,8 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
             core::mem::size_of::<mnu_abi::ThreadUpcallConfig>(),
         )
     };
-    if super::copy_from_user(config_ptr, bytes).is_err() {
-        return EFAULT;
+    if let Err(error) = super::copy_from_user_native(config_ptr, bytes) {
+        return error.into_raw();
     }
     if config.entry == 0
         || config.stack_size < 16
@@ -30,18 +34,18 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
         || !super::validate_user_ptr(config.entry, 1)
         || !super::validate_user_ptr(config.stack_base, config.stack_size)
     {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if config.defer_word != 0 {
         if config.defer_word & 3 != 0 || !super::is_canonical_user_range(config.defer_word, 4) {
-            return EINVAL;
+            return Error::InvalidArgument.into_raw();
         }
         if let Err(error) = super::address_wait::read_upcall_defer_word(config.defer_word) {
             return error;
         }
     }
     let Some(stack_end) = config.stack_base.checked_add(config.stack_size) else {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     };
     // Exception callbacks have a seventh C argument at RSP+8. Leave another
     // sixteen bytes above the return slot while retaining RSP % 16 == 8.
@@ -52,13 +56,13 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
     };
     let stack_top = (stack_end & !0xf).saturating_sub(frame_bytes);
     if stack_top < config.stack_base {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
-    if super::copy_to_user(stack_top, &0u64.to_ne_bytes()).is_err() {
-        return EFAULT;
+    if let Err(error) = super::copy_to_user_native(stack_top, &0u64.to_ne_bytes()) {
+        return error.into_raw();
     }
     let Some(thread_id) = crate::task::current_thread_id() else {
-        return ESRCH;
+        return Error::NotReady.into_raw();
     };
     crate::task::with_thread_mut(thread_id, |thread| {
         thread.install_upcall(
@@ -70,10 +74,10 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
     })
     .map(|result| match result {
         Ok(()) => SUCCESS,
-        Err(ThreadUpcallError::Active) => EAGAIN,
-        Err(_) => EINVAL,
+        Err(ThreadUpcallError::Active) => Error::NotReady.into_raw(),
+        Err(_) => Error::InvalidArgument.into_raw(),
     })
-    .unwrap_or(ESRCH)
+    .unwrap_or_else(|| Error::NotReady.into_raw())
 }
 
 pub fn create_thread_handle() -> u64 {

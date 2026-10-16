@@ -1711,9 +1711,9 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                 guard.expected,
             ) {
                 Ok(waiter) => Some(waiter),
-                Err(EAGAIN) => {
+                Err(error) if error == mnu_abi::status::Error::NotReady.into_raw() => {
                     return match copy_wait_items_to_user(items_ptr, &items) {
-                        Ok(()) => EAGAIN,
+                        Ok(()) => error,
                         Err(error) => error,
                     };
                 }
@@ -1725,7 +1725,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
             match super::address_wait::read_guard_value(guard.address) {
                 Ok(value) if value != guard.expected => {
                     return match copy_wait_items_to_user(items_ptr, &items) {
-                        Ok(()) => EAGAIN,
+                        Ok(()) => mnu_abi::status::Error::NotReady.into_raw(),
                         Err(error) => error,
                     };
                 }

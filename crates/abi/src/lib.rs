@@ -167,8 +167,16 @@ pub enum SyscallNumber {
     /// HANDLE_OPTIONS_ALL bits fail with native InvalidArgument before lookup;
     /// selector, authority and context failures match HandleOptionsGet.
     HandleOptionsSet = 651,
+    /// Waits on a naturally aligned caller memory value using a native
+    /// deadline. Failures use status::Error; successful AddressWaitResult
+    /// values distinguish wakeup, predicate change and deadline completion.
     WaitOnAddress = 652,
+    /// Wakes subscribers sharing the validated memory identity. Returns a
+    /// count, or status::Error; a zero maximum succeeds without dereferencing.
     WakeAddress = 653,
+    /// Configures the current thread's generic callback and optional defer
+    /// word. Failures use status::Error; active delivery is native NotReady.
+    /// Input/defer-word/stack-copy failures preserve their native categories.
     ThreadUpcallInstall = 654,
     /// Requests return through the calling thread's active token. Native
     /// failures are InvalidArgument (token) and NotReady (execution context).
@@ -269,6 +277,7 @@ pub enum SyscallNumber {
     /// Arguments: address, expected, value size, monotonic deadline,
     /// nonzero AddressWaitGuard pointer. WakeAddress on either value releases
     /// the same waiter. Neither value carries kernel-interpreted policy.
+    /// Failures use status::Error, including copying the guard descriptor.
     WaitOnAddressGuarded = 684,
     /// Describes one native clock without reading its timestamp. Arguments:
     /// ClockId, ClockInfo output pointer, exact ClockInfo byte length.
