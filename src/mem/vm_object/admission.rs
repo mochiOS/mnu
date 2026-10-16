@@ -1,34 +1,32 @@
 //! Transferable queue ownership, without authority to modify backing data.
-use super::*;
 use super::super::object_io::{IntentError, IoIntent};
+use super::*;
+use mnu_abi::status::Error;
 
 pub(crate) struct ProviderAdmission {
     key: ObjectKey,
     intent: SpinLock<IoIntent>,
 }
 
-fn error(error: IntentError) -> u64 {
+fn error(error: IntentError) -> Error {
     match error {
-        IntentError::Unavailable => crate::syscall::EIO,
-        IntentError::NoMemory => crate::syscall::ENOMEM,
-        IntentError::Exhausted => crate::syscall::EAGAIN,
-        IntentError::Consumed => crate::syscall::EINVAL,
+        IntentError::Unavailable => Error::BackingFailure,
+        IntentError::NoMemory => Error::ResourceUnavailable,
+        IntentError::Exhausted => Error::LimitExceeded,
+        IntentError::Consumed => Error::InvalidArgument,
     }
 }
 
 impl ProviderAdmission {
-    pub(crate) fn new(key: ObjectKey) -> Result<Self, u64> {
+    pub(crate) fn new(key: ObjectKey) -> Result<Self, Error> {
         if !matches!(key, ObjectKey::Provider { identity, .. } if identity != 0) {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument);
         }
-        let gate = PROVIDER_IO
-            .lock()
-            .try_get(
-                key,
-                crate::mem::object_io_native::new_lock,
-                mnu_abi::status::Error::ResourceUnavailable,
-            )
-            .map_err(mnu_abi::status::Error::into_raw)?;
+        let gate = PROVIDER_IO.lock().try_get(
+            key,
+            crate::mem::object_io_native::new_lock,
+            Error::ResourceUnavailable,
+        )?;
         let intent = gate.intent().map_err(error)?;
         Ok(Self {
             key,
@@ -51,15 +49,15 @@ impl ProviderAdmission {
 
     /// Only an authenticated endpoint owner can reach this native consumption
     /// path. Matching the full key prevents use with another resource/endpoint.
-    pub(crate) fn acquire(&self, key: ObjectKey) -> Result<ProviderIoGuard, u64> {
+    pub(crate) fn acquire(&self, key: ObjectKey) -> Result<ProviderIoGuard, Error> {
         if self.key != key {
-            return Err(crate::syscall::EACCES);
+            return Err(Error::AccessDenied);
         }
-        let mut intent = self.intent.try_lock().ok_or(crate::syscall::EAGAIN)?;
+        let mut intent = self.intent.try_lock().ok_or(Error::NotReady)?;
         let guard = intent
             .try_acquire()
             .map_err(error)?
-            .ok_or(crate::syscall::EAGAIN)?;
+            .ok_or(Error::NotReady)?;
         Ok(ProviderIoGuard { key, _guard: guard })
     }
 
@@ -74,7 +72,7 @@ impl ProviderAdmission {
         }
     }
 
-    pub(crate) fn register_waiter(&self, waiter: u64, maximum: usize) -> Result<(), u64> {
+    pub(crate) fn register_waiter(&self, waiter: u64, maximum: usize) -> Result<(), Error> {
         self.intent
             .lock()
             .register_waiter(waiter, maximum)

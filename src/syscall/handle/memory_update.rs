@@ -1,6 +1,5 @@
 //! Private update ownership for a provider endpoint's memory namespace. Only
 //! the endpoint RECEIVE capability selects authority; identifiers are opaque.
-use alloc::sync::{Arc, Weak};
 use crate::interrupt::spinlock::SpinLock;
 use crate::mem::{
     extent_transaction::ExtentTransaction,
@@ -8,6 +7,7 @@ use crate::mem::{
 };
 use crate::syscall::{EAGAIN, EINVAL, ENOMEM, ENOSPC, ENOSYS, SUCCESS};
 use crate::task::{HandleRights, KernelObject, ObjectHandleEntry};
+use alloc::sync::{Arc, Weak};
 
 fn provider_key(endpoint: u64, identity: u64) -> Result<ObjectKey, u64> {
     if identity == 0 {
@@ -28,8 +28,11 @@ fn provider_key(endpoint: u64, identity: u64) -> Result<ObjectKey, u64> {
 pub fn create_admission(endpoint: u64, identity: u64) -> u64 {
     let result = (|| {
         let process_id = super::current_process()?;
-        let admission = Arc::try_new(ProviderAdmission::new(provider_key(endpoint, identity)?)?)
-            .map_err(|_| ENOMEM)?;
+        let admission = Arc::try_new(
+            ProviderAdmission::new(provider_key(endpoint, identity)?)
+                .map_err(mnu_abi::status::Error::into_raw)?,
+        )
+        .map_err(|_| ENOMEM)?;
         crate::task::with_process_mut(process_id, |process| {
             process
                 .object_handles_mut()
@@ -65,7 +68,9 @@ pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64, admiss
             };
             // Consumption drops the intent lock BEFORE VM/process exclusion.
             // The acquired guard itself carries its authenticated backing key.
-            let guard = admission.acquire(key)?;
+            let guard = admission
+                .acquire(key)
+                .map_err(mnu_abi::status::Error::into_raw)?;
             ExtentTransaction::prepare_admitted(guard, old_length, length)
         })()
     };
@@ -116,7 +121,9 @@ impl AdmissionWaiter {
         admission: Arc<ProviderAdmission>,
         waiter: crate::task::ThreadId,
     ) -> Result<Self, u64> {
-        admission.register_waiter(waiter.as_u64(), crate::task::ThreadQueue::MAX_THREADS)?;
+        admission
+            .register_waiter(waiter.as_u64(), crate::task::ThreadQueue::MAX_THREADS)
+            .map_err(mnu_abi::status::Error::into_raw)?;
         Ok(Self {
             admission: Arc::downgrade(&admission),
             waiter,
