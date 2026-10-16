@@ -26,10 +26,10 @@ pub fn read(
     let length = usize::try_from(length)
         .ok()
         .filter(|length| *length <= maximum)
-        .ok_or(mnu_abi::EFBIG)?;
-    let mut bytes = zeroed(length)?;
+        .ok_or(mnu_abi::status::Error::LimitExceeded.into_raw())?;
+    let mut bytes = zeroed_native(length).map_err(mnu_abi::status::Error::into_raw)?;
     if copy(&mut bytes)? != length {
-        return Err(mnu_abi::EIO);
+        return Err(mnu_abi::status::Error::BackingFailure.into_raw());
     }
     Ok(bytes)
 }
