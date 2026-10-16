@@ -15,31 +15,10 @@ pub enum Kernel {
     Device(Device),
     /// ELFエラー
     Elf(Elf),
-    /// syscall / VFS エラー
-    Syscall(Syscall),
     /// 無効なパラメータ
     InvalidParam,
     /// 未実装の機能
     NotImplemented,
-}
-
-/// syscall / VFS の標準エラー
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Syscall {
-    NotImplemented,
-    Unsupported,
-    InvalidSyscall,
-    InvalidArgument,
-    InvalidPointer,
-    PermissionDenied,
-    NotFound,
-    AlreadyExists,
-    BadFd,
-    NotDirectory,
-    IsDirectory,
-    NoMemory,
-    NoSpace,
-    IoError,
 }
 
 /// メモリ関連
@@ -68,8 +47,6 @@ pub enum Process {
     InvalidPid,
     /// プロセスが見つからない
     ProcessNotFound,
-    /// ゾンビプロセス
-    ZombieProcess,
     /// プロセス数の上限に達した
     MaxProcessesReached,
     /// 権限不足
@@ -80,31 +57,8 @@ pub enum Process {
     Timeout,
     /// 暴走プロセス検出
     RogueProcessDetected,
-    /// サービス関連
-    Service(Service),
     /// プロセス作成完了
     CreationOk,
-}
-
-/// サービス関連
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Service {
-    /// サービスが見つからない
-    NotFound,
-    /// サービスの起動失敗
-    StartFailure,
-    /// サービスの停止失敗
-    StopFailure,
-    /// サービスの応答なし
-    NoResponse,
-    /// サービスの権限不足
-    InsufficientPrivilege,
-    /// サービスの不正な状態
-    InvalidState,
-    /// サービスの競合
-    Conflict,
-    /// 未登録のサービス
-    Unregistered,
 }
 
 /// ELF関連
@@ -181,7 +135,6 @@ impl fmt::Display for Kernel {
             Kernel::Process(e) => write!(f, "Process error: {:?}", e),
             Kernel::Device(e) => write!(f, "Device error: {:?}", e),
             Kernel::Elf(e) => write!(f, "ELF error: {:?}", e),
-            Kernel::Syscall(e) => write!(f, "Syscall error: {:?}", e),
             Kernel::InvalidParam => write!(f, "Invalid parameter"),
             Kernel::NotImplemented => write!(f, "Not implemented"),
         }
@@ -219,9 +172,6 @@ pub fn handle_kernel_error(error: Kernel) {
         Kernel::Device(dev_err) => {
             crate::warn!("Device error: {:?}", dev_err);
         }
-        Kernel::Syscall(sys_err) => {
-            crate::warn!("Syscall error: {:?}", sys_err);
-        }
         _ => {
             crate::warn!("Unknown error: {:?}", error);
         }
@@ -233,5 +183,4 @@ pub fn handle_kernel_error(error: Kernel) {
 /// 結果型のエイリアス
 pub type KernelErr = Kernel;
 pub type KernelState = KernelErr;
-pub type SyscallErr = Syscall;
 pub type Result<T> = core::result::Result<T, KernelState>;
