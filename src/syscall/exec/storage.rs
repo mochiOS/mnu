@@ -13,12 +13,6 @@ pub(super) fn text(value: &str) -> Result<String, u64> {
     Ok(owned)
 }
 
-pub(super) fn from_user(pointer: u64, length: usize) -> Result<Vec<u8>, u64> {
-    let mut bytes = crate::util::object_snapshot::zeroed(length)?;
-    crate::syscall::copy_from_user(pointer, &mut bytes)?;
-    Ok(bytes)
-}
-
 pub(super) fn from_user_native(
     pointer: u64,
     length: usize,

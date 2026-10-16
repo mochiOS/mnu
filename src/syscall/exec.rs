@@ -1313,66 +1313,67 @@ fn process_image_replace_impl(
     startup_len: u64,
     byte_ceiling: u64,
 ) -> u64 {
-    use crate::syscall::types::{EACCES, EINVAL, EPERM};
+    use mnu_abi::status::Error;
 
     const MAX_IDENTITY_BYTES: usize = 256;
     const MAX_EXECUTABLE_BYTES: usize = 64 * 1024 * 1024;
     const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::MAX_IMAGE_BYTES;
 
     if !caller_has_process_spawn_capability() {
-        return EPERM;
+        return Error::AccessDenied.into_raw();
     }
     let Ok(identity_len) = usize::try_from(identity_len) else {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     };
     let Ok(startup_len) = usize::try_from(startup_len) else {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     };
     if identity_len == 0
         || identity_len > MAX_IDENTITY_BYTES
         || startup_len == 0
         || startup_len > MAX_STARTUP_IMAGE_BYTES
     {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
 
-    let identity_bytes = match storage::from_user(identity_ptr, identity_len) {
+    let identity_bytes = match storage::from_user_native(identity_ptr, identity_len) {
         Ok(bytes) => bytes,
-        Err(errno) => return errno,
+        Err(error) => return error.into_raw(),
     };
     if identity_bytes.contains(&0) {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let identity = match core::str::from_utf8(&identity_bytes) {
         Ok(identity) => identity,
-        Err(_) => return EINVAL,
+        Err(_) => return Error::InvalidArgument.into_raw(),
     };
 
-    let startup_bytes = match storage::from_user(startup_ptr, startup_len) {
+    let startup_bytes = match storage::from_user_native(startup_ptr, startup_len) {
         Ok(bytes) => bytes,
-        Err(errno) => return errno,
+        Err(error) => return error.into_raw(),
     };
     let startup = match mnu_abi::process_image::decode(&startup_bytes) {
         Ok(startup) => startup,
-        Err(_) => return EINVAL,
+        Err(_) => return Error::InvalidArgument.into_raw(),
     };
 
     let Some(pid) = crate::syscall::security::current_process_id() else {
-        return EACCES;
+        return Error::NotReady.into_raw();
     };
     let Some(thread) = crate::task::current_thread_id() else {
-        return EACCES;
+        return Error::NotReady.into_raw();
     };
-    let Some(authorization) = crate::task::with_process_mut(pid, |process| {
+    let authorization = match crate::task::with_process_mut(pid, |process| {
         process.take_exec_authorization(identity, thread)
-    })
-    .flatten() else {
-        return EACCES;
+    }) {
+        Some(Some(authorization)) => authorization,
+        Some(None) => return Error::AccessDenied.into_raw(),
+        None => return Error::NotReady.into_raw(),
     };
     if authorization.kind != crate::task::process::PendingExecKind::ImageReplace
         || authorization.execution_class != ExecutionClass::Unprivileged
     {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
 
     let executable = match crate::syscall::handle::read_all(image_handle, MAX_EXECUTABLE_BYTES) {
@@ -1381,7 +1382,7 @@ fn process_image_replace_impl(
     };
     let digest: [u8; 32] = Sha256::digest(&executable).into();
     if digest != authorization.executable_digest {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
 
     let (page_table, entry, stack_pointer) = match replace_current_process_image(
