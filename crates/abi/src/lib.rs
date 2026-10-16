@@ -249,6 +249,8 @@ pub enum SyscallNumber {
     /// excludes only this query's temporary reference. Weak registrations do
     /// not count. Only the exact creating endpoint thread/slot/generation may
     /// inspect its namespace. A sample is not a lifetime pin or revocation.
+    /// Failures use `status::Error`: absent execution context is NotReady;
+    /// invalid or unknown namespace-local identities are InvalidArgument.
     ProviderObjectReferenceCount = 691,
     /// Reads public logical processor counts. Arguments: ProcessorInfo output
     /// pointer and exact byte length. No scheduling or compatibility policy.
