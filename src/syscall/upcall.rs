@@ -2,7 +2,7 @@ use crate::task::{
     HandleRights, KernelObject, ObjectHandleEntry, ThreadUpcallError, UserUpcallContext,
 };
 
-use super::{EAGAIN, EBADF, EFAULT, EINVAL, ENOSPC, ESRCH, SUCCESS, SavedSyscallFrame};
+use super::{EAGAIN, EFAULT, EINVAL, ESRCH, SUCCESS, SavedSyscallFrame};
 
 const THREAD_HANDLE_RIGHTS: HandleRights = HandleRights::WAIT
     .union(HandleRights::SIGNAL)
@@ -77,11 +77,12 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
 }
 
 pub fn create_thread_handle() -> u64 {
+    use mnu_abi::status::Error;
     let Some(thread_id) = crate::task::current_thread_id() else {
-        return ESRCH;
+        return Error::NotReady.into_raw();
     };
     let Some(process_id) = crate::task::with_thread(thread_id, |thread| thread.process_id()) else {
-        return ESRCH;
+        return Error::NotReady.into_raw();
     };
     crate::task::with_process_mut(process_id, |process| {
         process
@@ -91,18 +92,19 @@ pub fn create_thread_handle() -> u64 {
                 THREAD_HANDLE_RIGHTS,
             ))
             .map(|handle| u64::from(handle.raw()))
-            .unwrap_or(ENOSPC)
+            .unwrap_or_else(|| Error::ResourceUnavailable.into_raw())
     })
-    .unwrap_or(ESRCH)
+    .unwrap_or_else(|| Error::NotReady.into_raw())
 }
 
 pub fn interrupt(handle: u64, payload: u64) -> u64 {
-    let object = match super::handle::object(handle, HandleRights::SIGNAL) {
+    use mnu_abi::status::Error;
+    let object = match super::handle::object_native(handle, HandleRights::SIGNAL) {
         Ok(object) => object,
-        Err(error) => return error,
+        Err(error) => return error.into_raw(),
     };
     let KernelObject::Thread(thread_id) = object else {
-        return EBADF;
+        return Error::InvalidArgument.into_raw();
     };
     let result = crate::task::with_thread_mut(thread_id, |thread| thread.enqueue_upcall(payload));
     match result {
@@ -110,22 +112,23 @@ pub fn interrupt(handle: u64, payload: u64) -> u64 {
             crate::task::wake_registered_waiter(thread_id);
             SUCCESS
         }
-        Some(Err(ThreadUpcallError::QueueFull)) => ENOSPC,
-        Some(Err(_)) => EINVAL,
-        None => ESRCH,
+        Some(Err(ThreadUpcallError::QueueFull)) => Error::ResourceUnavailable.into_raw(),
+        Some(Err(_)) => Error::InvalidArgument.into_raw(),
+        None => Error::NotFound.into_raw(),
     }
 }
 
 pub fn thread_status(handle: u64, output: u64) -> u64 {
+    use mnu_abi::status::Error;
     if output == 0 {
-        return EINVAL;
+        return Error::InvalidAddress.into_raw();
     }
-    let object = match super::handle::object(handle, HandleRights::WAIT) {
+    let object = match super::handle::object_native(handle, HandleRights::WAIT) {
         Ok(object) => object,
-        Err(error) => return error,
+        Err(error) => return error.into_raw(),
     };
     let KernelObject::Thread(thread_id) = object else {
-        return EBADF;
+        return Error::InvalidArgument.into_raw();
     };
     let Some(status) = crate::task::with_thread(thread_id, |thread| mnu_abi::ThreadStatus {
         thread_id: thread.id().as_u64(),
@@ -139,7 +142,7 @@ pub fn thread_status(handle: u64, output: u64) -> u64 {
         },
         reserved: 0,
     }) else {
-        return ESRCH;
+        return Error::NotFound.into_raw();
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -147,9 +150,9 @@ pub fn thread_status(handle: u64, output: u64) -> u64 {
             core::mem::size_of::<mnu_abi::ThreadStatus>(),
         )
     };
-    match super::copy_to_user(output, bytes) {
+    match super::copy_to_user_native(output, bytes) {
         Ok(()) => SUCCESS,
-        Err(error) => error,
+        Err(error) => error.into_raw(),
     }
 }
 

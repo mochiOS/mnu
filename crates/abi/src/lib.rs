@@ -171,8 +171,16 @@ pub enum SyscallNumber {
     WakeAddress = 653,
     ThreadUpcallInstall = 654,
     ThreadUpcallReturn = 655,
+    /// Retains the calling thread with WAIT/SIGNAL/DUPLICATE/TRANSFER rights.
+    /// Native failures: NotReady (caller context), ResourceUnavailable (table).
     ThreadHandleCreate = 656,
+    /// Queues an opaque payload through a caller-owned SIGNAL Thread Handle.
+    /// Native failures: InvalidArgument (selector/kind), AccessDenied (rights),
+    /// NotReady (caller), NotFound (retired target), ResourceUnavailable (queue).
     ThreadInterrupt = 657,
+    /// Writes native lifecycle metadata through a caller-owned WAIT Handle.
+    /// A retired target is native NotFound, not a POSIX ESRCH. Other failures
+    /// use status::Error, including native output-copy errors.
     ThreadHandleStatus = 658,
     ProcessHandleOpenById = 659,
     DebugWrite = 660,
