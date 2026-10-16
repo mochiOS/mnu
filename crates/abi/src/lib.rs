@@ -170,6 +170,8 @@ pub enum SyscallNumber {
     WaitOnAddress = 652,
     WakeAddress = 653,
     ThreadUpcallInstall = 654,
+    /// Requests return through the calling thread's active token. Native
+    /// failures are InvalidArgument (token) and NotReady (execution context).
     ThreadUpcallReturn = 655,
     /// Retains the calling thread with WAIT/SIGNAL/DUPLICATE/TRANSFER rights.
     /// Native failures: NotReady (caller context), ResourceUnavailable (table).
@@ -284,15 +286,18 @@ pub enum SyscallNumber {
     /// Read the current thread's interrupted context using its active upcall
     /// token. Arguments: token, output pointer, exact ThreadUpcallSnapshot size.
     /// No PID, thread Handle, or caller-supplied return context is accepted.
+    /// Failures use status::Error. Failed copies do not consume the token.
     ThreadUpcallInspect = 688,
     /// Return to an explicitly selected user context. Arguments: active token,
     /// ThreadUpcallSnapshot pointer, exact byte length. Validation and commit
     /// are atomic; invalid input leaves delivery and saved state unchanged.
+    /// Failures use status::Error, preserving native input-copy failures.
     ThreadUpcallReturnContext = 689,
     /// Replace only the calling thread's user CPU context, without an upcall
     /// token. Arguments: ThreadUpcallSnapshot pointer, exact byte length.
     /// Validates user addresses, flags and CPU-supported x87/SSE state before
-    /// committing. Rejects an active upcall or pending restoration (EAGAIN).
+    /// committing. An active upcall or pending restoration is native NotReady.
+    /// Other failures use status::Error, including native input-copy failures.
     /// Does not change TLS, Handles, credentials, or another thread's state.
     ThreadContextRestore = 690,
     /// Samples strong references to an object owned by the calling endpoint.

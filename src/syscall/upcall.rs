@@ -157,85 +157,89 @@ pub fn thread_status(handle: u64, output: u64) -> u64 {
 }
 
 pub fn return_from_context(token: u64, context_ptr: u64, context_len: u64) -> u64 {
+    use mnu_abi::status::Error;
     let Some(thread_id) = crate::task::current_thread_id() else {
-        return ESRCH;
+        return Error::NotReady.into_raw();
     };
-    if context_ptr == 0
-        || context_len != core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>() as u64
-    {
-        return EINVAL;
+    if context_len != core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>() as u64 {
+        return Error::InvalidArgument.into_raw();
     }
-    if !matches!(
-        crate::task::with_thread(thread_id, |thread| thread.upcall_snapshot(token)),
-        Some(Ok(_))
-    ) {
-        return EINVAL;
+    if context_ptr == 0 {
+        return Error::InvalidAddress.into_raw();
+    }
+    match crate::task::with_thread(thread_id, |thread| thread.upcall_snapshot(token)) {
+        Some(Ok(_)) => {}
+        Some(Err(_)) => return Error::InvalidArgument.into_raw(),
+        None => return Error::NotReady.into_raw(),
     }
     let mut snapshot = core::mem::MaybeUninit::<mnu_abi::ThreadUpcallSnapshot>::zeroed();
     let bytes = unsafe {
         core::slice::from_raw_parts_mut(snapshot.as_mut_ptr().cast::<u8>(), context_len as usize)
     };
-    if let Err(error) = super::copy_from_user(context_ptr, bytes) {
-        return error;
+    if let Err(error) = super::copy_from_user_native(context_ptr, bytes) {
+        return error.into_raw();
     }
     // All fields are integers/byte arrays; every initialized bit pattern
     // is a Rust value. Hardware validity is checked before committing it.
     let snapshot = unsafe { snapshot.assume_init() };
     let Some(context) = return_context(&snapshot) else {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     };
     crate::task::with_thread_mut(thread_id, |thread| {
         thread.request_upcall_return_context(token, context, snapshot.fx_state)
     })
     .map(|result| match result {
         Ok(()) => SUCCESS,
-        Err(_) => EINVAL,
+        Err(_) => Error::InvalidArgument.into_raw(),
     })
-    .unwrap_or(ESRCH)
+    .unwrap_or_else(|| Error::NotReady.into_raw())
 }
 
 pub fn restore_context(context_ptr: u64, context_len: u64) -> u64 {
+    use mnu_abi::status::Error;
     let Some(thread_id) = crate::task::current_thread_id() else {
-        return ESRCH;
+        return Error::NotReady.into_raw();
     };
-    if context_ptr == 0
-        || context_len != core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>() as u64
-    {
-        return EINVAL;
+    if context_len != core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>() as u64 {
+        return Error::InvalidArgument.into_raw();
+    }
+    if context_ptr == 0 {
+        return Error::InvalidAddress.into_raw();
     }
     let mut snapshot = core::mem::MaybeUninit::<mnu_abi::ThreadUpcallSnapshot>::zeroed();
     let bytes = unsafe {
         core::slice::from_raw_parts_mut(snapshot.as_mut_ptr().cast::<u8>(), context_len as usize)
     };
-    if let Err(error) = super::copy_from_user(context_ptr, bytes) {
-        return error;
+    if let Err(error) = super::copy_from_user_native(context_ptr, bytes) {
+        return error.into_raw();
     }
     let snapshot = unsafe { snapshot.assume_init() };
     let Some(context) = return_context(&snapshot).filter(|context| context.user_rsp >= 16) else {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     };
     crate::task::with_thread_mut(thread_id, |thread| {
         thread.request_context_restore(context, snapshot.fx_state)
     })
     .map(|result| match result {
         Ok(()) => SUCCESS,
-        Err(ThreadUpcallError::Active) => EAGAIN,
-        Err(_) => EINVAL,
+        Err(ThreadUpcallError::Active) => Error::NotReady.into_raw(),
+        Err(_) => Error::InvalidArgument.into_raw(),
     })
-    .unwrap_or(ESRCH)
+    .unwrap_or_else(|| Error::NotReady.into_raw())
 }
 
 pub fn return_from(token: u64) -> u64 {
+    use mnu_abi::status::Error;
     let Some(thread_id) = crate::task::current_thread_id() else {
-        return ESRCH;
+        return Error::NotReady.into_raw();
     };
     crate::task::with_thread_mut(thread_id, |thread| thread.request_upcall_return(token))
         .map(|result| match result {
             Ok(()) => SUCCESS,
-            Err(ThreadUpcallError::InvalidToken) => EINVAL,
-            Err(_) => EAGAIN,
+            Err(ThreadUpcallError::InvalidToken) => Error::InvalidArgument.into_raw(),
+            Err(_) => Error::NotReady.into_raw(),
         })
-        .unwrap_or(ESRCH)
+        .unwrap_or_else(|| Error::NotReady.into_raw())
 }
 
 fn return_context(snapshot: &mnu_abi::ThreadUpcallSnapshot) -> Option<UserUpcallContext> {
@@ -282,16 +286,17 @@ fn return_context(snapshot: &mnu_abi::ThreadUpcallSnapshot) -> Option<UserUpcall
 }
 
 pub fn inspect(token: u64, output: u64, length: u64) -> u64 {
+    use mnu_abi::status::Error;
     if length != core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>() as u64 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let Some(id) = crate::task::current_thread_id() else {
-        return ESRCH;
+        return Error::NotReady.into_raw();
     };
     let snapshot = match crate::task::with_thread(id, |thread| thread.upcall_snapshot(token)) {
         Some(Ok((context, fx_state))) => snapshot_context(context, fx_state),
-        Some(Err(_)) => return EINVAL,
-        None => return ESRCH,
+        Some(Err(_)) => return Error::InvalidArgument.into_raw(),
+        None => return Error::NotReady.into_raw(),
     };
     // Snapshot under the thread lock, then drop it before faultable usercopy.
     // Neither a failed copy nor edits to the output consume or alter delivery.
@@ -301,9 +306,9 @@ pub fn inspect(token: u64, output: u64, length: u64) -> u64 {
             core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>(),
         )
     };
-    match super::copy_to_user(output, bytes) {
+    match super::copy_to_user_native(output, bytes) {
         Ok(()) => SUCCESS,
-        Err(error) => error,
+        Err(error) => error.into_raw(),
     }
 }
 
