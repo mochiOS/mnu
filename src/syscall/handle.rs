@@ -14,7 +14,7 @@ pub use memory_update::create_admission as provider_memory_admission_create;
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
 use super::{
-    EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EIO, ENOSPC, ENOSYS, ENOTSUP, ESRCH,
+    EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EIO, ENOSYS, ENOTSUP, ESRCH,
     SUCCESS,
 };
 
@@ -1242,13 +1242,13 @@ pub(super) fn retain_created_process(
 }
 
 fn insert_process_handle(target: crate::task::ProcessId, rights: HandleRights) -> u64 {
+    use mnu_abi::status::Error;
     let Some(target_object) = crate::task::with_process(target, |process| process.process_object())
     else {
-        return ESRCH;
+        return Error::NotFound.into_raw();
     };
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    let Some(process_id) = crate::syscall::security::current_process_id() else {
+        return Error::NotReady.into_raw();
     };
     crate::task::with_process_mut(process_id, |process| {
         process
@@ -1258,35 +1258,36 @@ fn insert_process_handle(target: crate::task::ProcessId, rights: HandleRights) -
                 rights,
             ))
             .map(|handle| handle.raw() as u64)
-            .unwrap_or(ENOSPC)
+            .unwrap_or_else(|| Error::ResourceUnavailable.into_raw())
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or_else(|| Error::NotReady.into_raw())
 }
 
 /// Creates a process handle for the process owning an authenticated IPC
 /// endpoint. No caller-supplied process identifier is accepted.
 pub fn process_open(endpoint: u64, requested_rights: u64) -> u64 {
+    use mnu_abi::status::Error;
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessInspect,
     ]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let rights = match HandleRights::from_bits(requested_rights) {
         Some(rights) if PROCESS_ADMIN_HANDLE_RIGHTS.contains(rights) => rights,
-        _ => return EINVAL,
+        _ => return Error::InvalidArgument.into_raw(),
     };
     if rights.contains(HandleRights::SIGNAL)
         && !crate::syscall::security::caller_has_any_capability(&[
             crate::capability::Capability::ProcessKill,
         ])
     {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let Some(thread_id) = crate::syscall::ipc::resolve_endpoint_handle(endpoint) else {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     };
     let Some(target) = crate::task::thread_to_process_id(thread_id) else {
-        return ESRCH;
+        return Error::NotFound.into_raw();
     };
     insert_process_handle(target, rights)
 }
@@ -1294,24 +1295,25 @@ pub fn process_open(endpoint: u64, requested_rights: u64) -> u64 {
 /// Creates a native handle for a process identifier. Process identifiers are
 /// generic kernel identities; requested control rights are capability-gated.
 pub fn process_open_by_id(process_id: u64, requested_rights: u64) -> u64 {
+    use mnu_abi::status::Error;
     if process_id == 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessInspect,
     ]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let rights = match HandleRights::from_bits(requested_rights) {
         Some(rights) if PROCESS_ADMIN_HANDLE_RIGHTS.contains(rights) => rights,
-        _ => return EINVAL,
+        _ => return Error::InvalidArgument.into_raw(),
     };
     if rights.contains(HandleRights::SIGNAL)
         && !crate::syscall::security::caller_has_any_capability(&[
             crate::capability::Capability::ProcessKill,
         ])
     {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     insert_process_handle(crate::task::ProcessId::from_u64(process_id), rights)
 }

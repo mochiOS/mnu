@@ -147,6 +147,8 @@ pub enum SyscallNumber {
     /// native usercopy failure. No output copy is attempted for a missing key.
     LaunchValueGet = 639,
     ClockRead = 640,
+    /// Retains an endpoint owner's Process under ProcessInspect authority;
+    /// SIGNAL additionally requires ProcessKill. Failures use status::Error.
     ProcessHandleOpen = 641,
     /// Observes a retained WAIT Process Handle, including after its process
     /// table record is reclaimed. Failures use status::Error.
@@ -203,6 +205,9 @@ pub enum SyscallNumber {
     /// A retired target is native NotFound, not a POSIX ESRCH. Other failures
     /// use status::Error, including native output-copy errors.
     ThreadHandleStatus = 658,
+    /// Retains a Process by native identity with the same capability gates as
+    /// ProcessHandleOpen. Missing targets are native NotFound; absent caller
+    /// context is NotReady, and Handle storage failure is ResourceUnavailable.
     ProcessHandleOpenById = 659,
     DebugWrite = 660,
     /// Removes an opaque Handle association, not its owned reference.
