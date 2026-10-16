@@ -1412,48 +1412,49 @@ fn process_image_replace_impl(
 /// argv/envp convention, credentials, child relationship, or service discovery
 /// is supplied by this entry point. The caller explicitly resumes the result.
 pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: u64) -> u64 {
-    use crate::syscall::types::{EACCES, EINVAL, EPERM};
+    use mnu_abi::status::Error;
 
     if !caller_has_process_spawn_capability() {
-        return EPERM;
+        return Error::AccessDenied.into_raw();
     }
     let length = match usize::try_from(request_len) {
         Ok(length) if length > 0 && length <= mnu_abi::process_create::MAX_REQUEST_BYTES => length,
-        _ => return EINVAL,
+        _ => return Error::InvalidArgument.into_raw(),
     };
-    let bytes = match storage::from_user(request_ptr, length) {
+    let bytes = match storage::from_user_native(request_ptr, length) {
         Ok(bytes) => bytes,
-        Err(errno) => return errno,
+        Err(error) => return error.into_raw(),
     };
     let request = match mnu_abi::process_create::decode(&bytes) {
         Ok(request) => request,
-        Err(_) => return EINVAL,
+        Err(_) => return Error::InvalidArgument.into_raw(),
     };
     let Some(owner) = crate::syscall::security::current_process_id() else {
-        return EACCES;
+        return Error::NotReady.into_raw();
     };
     let Some(thread) = crate::task::current_thread_id() else {
-        return EACCES;
+        return Error::NotReady.into_raw();
     };
-    let Some(authorization) = crate::task::with_process_mut(owner, |process| {
+    let authorization = match crate::task::with_process_mut(owner, |process| {
         process.take_exec_authorization(request.identity, thread)
-    })
-    .flatten() else {
-        return EACCES;
+    }) {
+        Some(Some(authorization)) => authorization,
+        Some(None) => return Error::AccessDenied.into_raw(),
+        None => return Error::NotReady.into_raw(),
     };
     if authorization.kind != crate::task::process::PendingExecKind::Spawn {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let mut specs = Vec::new();
     if specs.try_reserve_exact(request.handles().count()).is_err() {
-        return crate::syscall::types::ENOMEM;
+        return Error::ResourceUnavailable.into_raw();
     }
     for grant in request.handles() {
         let Some(source) = crate::task::ObjectHandle::from_raw(grant.source) else {
-            return EINVAL;
+            return Error::InvalidArgument.into_raw();
         };
         let Some(rights) = crate::task::HandleRights::from_bits(grant.rights) else {
-            return EINVAL;
+            return Error::InvalidArgument.into_raw();
         };
         specs.push(InheritedHandleSpec {
             key: grant.key,
@@ -1472,7 +1473,7 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
     };
     let mut values = Vec::new();
     if values.try_reserve_exact(request.values().count()).is_err() {
-        return crate::syscall::types::ENOMEM;
+        return Error::ResourceUnavailable.into_raw();
     }
     values.extend(request.values().map(|value| InheritedValueSpec {
         key: value.key,
@@ -1483,7 +1484,7 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
             // Mapping plans are currently an image-replacement operation.
             // Never accept and silently ignore a requested initial mapping.
             if startup.mappings().next().is_some() || startup.context_updates().next().is_some() {
-                return EINVAL;
+                return Error::InvalidArgument.into_raw();
             }
             startup
         }
@@ -1504,7 +1505,7 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
     };
     let digest: [u8; 32] = Sha256::digest(&executable).into();
     if digest != authorization.executable_digest {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let privilege = match authorization.execution_class {
         ExecutionClass::Privileged => crate::task::PrivilegeLevel::Service,

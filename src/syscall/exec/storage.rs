@@ -18,3 +18,12 @@ pub(super) fn from_user(pointer: u64, length: usize) -> Result<Vec<u8>, u64> {
     crate::syscall::copy_from_user(pointer, &mut bytes)?;
     Ok(bytes)
 }
+
+pub(super) fn from_user_native(
+    pointer: u64,
+    length: usize,
+) -> Result<Vec<u8>, mnu_abi::status::Error> {
+    let mut bytes = crate::util::object_snapshot::zeroed_native(length)?;
+    crate::syscall::copy_from_user_native(pointer, &mut bytes)?;
+    Ok(bytes)
+}
