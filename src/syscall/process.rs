@@ -18,9 +18,16 @@ fn caller_has_process_spawn_capability() -> bool {
 }
 
 pub fn get_thread_security_context(sender_endpoint: u64, output: u64, output_len: u64) -> u64 {
+    use mnu_abi::status::Error;
+
     if output_len < core::mem::size_of::<mnu_abi::ThreadSecurityContext>() as u64 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
+    let missing = if sender_endpoint == 0 {
+        Error::NotReady
+    } else {
+        Error::NotFound
+    };
     let thread_id = if sender_endpoint == 0 {
         crate::task::current_thread_id().map(|thread_id| thread_id.as_u64())
     } else {
@@ -28,15 +35,15 @@ pub fn get_thread_security_context(sender_endpoint: u64, output: u64, output_len
             crate::capability::Capability::CapabilitiesManage,
             crate::capability::Capability::ProcessInspect,
         ]) {
-            return EPERM;
+            return Error::AccessDenied.into_raw();
         }
         crate::syscall::ipc::resolve_sender_thread_id(sender_endpoint)
     };
     let Some(thread_id) = thread_id else {
-        return EINVAL;
+        return missing.into_raw();
     };
     let Some(pid) = crate::task::thread_to_process_id(thread_id) else {
-        return EINVAL;
+        return missing.into_raw();
     };
     let Some(context) = crate::task::with_process(pid, |process| {
         let mut context = mnu_abi::ThreadSecurityContext::default();
@@ -62,7 +69,7 @@ pub fn get_thread_security_context(sender_endpoint: u64, output: u64, output_len
         }
         context
     }) else {
-        return EINVAL;
+        return missing.into_raw();
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -70,9 +77,9 @@ pub fn get_thread_security_context(sender_endpoint: u64, output: u64, output_len
             core::mem::size_of::<mnu_abi::ThreadSecurityContext>(),
         )
     };
-    crate::syscall::copy_to_user(output, bytes)
+    crate::syscall::copy_to_user_native(output, bytes)
         .map(|_| SUCCESS)
-        .unwrap_or_else(|error| error)
+        .unwrap_or_else(|error| error.into_raw())
 }
 
 /// ユーザー空間の上限アドレス (x86-64 canonical hole 下側)
