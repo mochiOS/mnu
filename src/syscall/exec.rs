@@ -333,31 +333,34 @@ fn parse_requested_exec_grants(
 fn export_inherited_handles(
     source_process: Option<crate::task::ProcessId>,
     specs: &[InheritedHandleSpec],
-) -> Result<Vec<InheritedHandleGrant>, u64> {
-    use crate::syscall::types::{EACCES, EBADF, EINVAL};
+) -> Result<Vec<InheritedHandleGrant>, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
 
     if specs.is_empty() {
         return Ok(Vec::new());
     }
-    let source_process = source_process.ok_or(EINVAL)?;
+    let source_process = source_process.ok_or(Error::NotReady)?;
     let mut grants = Vec::new();
     grants
         .try_reserve_exact(specs.len())
-        .map_err(|_| crate::syscall::types::ENOMEM)?;
+        .map_err(|_| Error::ResourceUnavailable)?;
     crate::task::with_process(source_process, |process| {
         for spec in specs {
-            let source = process.object_handles().get(spec.source).ok_or(EBADF)?;
+            let source = process
+                .object_handles()
+                .get(spec.source)
+                .ok_or(Error::InvalidArgument)?;
             if !source
                 .rights()
                 .contains(crate::task::HandleRights::TRANSFER)
                 || !source.rights().contains(spec.rights)
             {
-                return Err(EACCES);
+                return Err(Error::AccessDenied);
             }
             let entry = process
                 .object_handles()
                 .export_restricted(spec.source, spec.rights)
-                .ok_or(EACCES)?;
+                .ok_or(Error::AccessDenied)?;
             grants.push(InheritedHandleGrant {
                 key: spec.key,
                 target: spec.target,
@@ -366,7 +369,7 @@ fn export_inherited_handles(
         }
         Ok(grants)
     })
-    .ok_or(EINVAL)?
+    .ok_or(Error::NotReady)?
 }
 
 fn install_inherited_handles(
@@ -1459,7 +1462,7 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         export_inherited_handles(Some(owner), &specs)
     } {
         Ok(grants) => grants,
-        Err(errno) => return errno,
+        Err(error) => return error.into_raw(),
     };
     let mut values = Vec::new();
     if values.try_reserve_exact(request.values().count()).is_err() {
