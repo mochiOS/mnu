@@ -102,9 +102,20 @@ impl SharedMemory {
         generation: u64,
         install: impl FnOnce() -> Result<T, u64>,
     ) -> Result<T, u64> {
+        // Migration adapter: callback failures keep their original domain.
+        // The generation gate itself has no userspace error-number policy.
+        self.with_generation_native(generation, || Ok(install()))
+            .map_err(|_| crate::syscall::EAGAIN)?
+    }
+
+    pub(crate) fn with_generation_native<T>(
+        &self,
+        generation: u64,
+        install: impl FnOnce() -> Result<T, mnu_abi::status::Error>,
+    ) -> Result<T, mnu_abi::status::Error> {
         let _pages = self.pages.lock();
         if self.generation.load(Ordering::Relaxed) != generation {
-            return Err(crate::syscall::EAGAIN);
+            return Err(mnu_abi::status::Error::NotReady);
         }
         install()
     }

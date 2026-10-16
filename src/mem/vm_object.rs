@@ -193,6 +193,24 @@ impl VmObject {
         }
     }
 
+    /// Typed generation gate for native VM editors. It holds the same backing
+    /// exclusion as page installation, without translating through errno.
+    pub(crate) fn with_memory_generation_native<T>(
+        &self,
+        generation: Option<u64>,
+        install: impl FnOnce() -> Result<T, mnu_abi::status::Error>,
+    ) -> Result<T, mnu_abi::status::Error> {
+        match (&self.source, generation) {
+            (VmObjectSource::Memory(memory), Some(generation)) => {
+                memory.with_generation_native(generation, install)
+            }
+            (VmObjectSource::Provider { _io_lock, .. }, Some(generation)) => {
+                with_cache_generation_native(_io_lock, generation, install)
+            }
+            _ => Err(mnu_abi::status::Error::InvalidArgument),
+        }
+    }
+
     /// Removing an existing mapping needs no usable backing bytes. The caller
     /// holds mapping exclusion through removal; an extent owner still excludes
     /// edits until it has resolved its suspended PTEs and released reservation.
@@ -1125,14 +1143,27 @@ fn with_cache_generation<T>(
     generation: u64,
     install: impl FnOnce() -> Result<T, u64>,
 ) -> Result<T, u64> {
+    // Keep old callback statuses untouched until their callers are migrated.
+    with_cache_generation_native(gate, generation, || Ok(install()))
+        .map_err(|error| match error {
+            mnu_abi::status::Error::NotReady => crate::syscall::EAGAIN,
+            _ => crate::syscall::EIO,
+        })?
+}
+
+fn with_cache_generation_native<T>(
+    gate: &super::object_io::IoLock,
+    generation: u64,
+    install: impl FnOnce() -> Result<T, mnu_abi::status::Error>,
+) -> Result<T, mnu_abi::status::Error> {
     // The mapping/process lock is held by the final installer. Taking the
     // cache lock here excludes mutation until its PTE has been published.
     let _cache = PAGE_CACHE.lock();
     if gate.is_unavailable() {
-        return Err(crate::syscall::EIO);
+        return Err(mnu_abi::status::Error::BackingFailure);
     }
     if gate.is_reserved() || gate.generation() != generation {
-        return Err(crate::syscall::EAGAIN);
+        return Err(mnu_abi::status::Error::NotReady);
     }
     install()
 }
