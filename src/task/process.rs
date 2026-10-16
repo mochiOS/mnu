@@ -1046,6 +1046,8 @@ impl Process {
         let end = start.checked_add(len)?;
         let mut retained = Vec::new();
         let mut removed = Vec::new();
+        retained.try_reserve(self.memory_regions.len().checked_mul(2)?).ok()?;
+        removed.try_reserve(self.memory_regions.len()).ok()?;
         for region in &self.memory_regions {
             use super::memory_range::{Range, cut};
             let pieces = cut(

@@ -29,6 +29,7 @@ pub(crate) mod sparse_page_walk;
 pub(crate) mod mapping_revocation_native;
 pub(crate) mod mapping_preservation_native;
 pub(crate) mod mapping_admission;
+pub(crate) mod mapping_replace;
 pub(crate) mod mapping_targets;
 pub(crate) mod extent_transaction;
 pub(crate) mod detached_roots;

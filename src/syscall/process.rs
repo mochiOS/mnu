@@ -678,7 +678,11 @@ fn memory_map_impl(
         return EINVAL;
     }
     let exact = options & mnu_abi::MEMORY_MAP_EXACT != 0;
+    let replace = options & mnu_abi::MEMORY_MAP_REPLACE != 0;
     let shared = options & mnu_abi::MEMORY_MAP_SHARED != 0;
+    if replace && !exact {
+        return EINVAL;
+    }
     if exact && (addr == 0 || addr & 4095 != 0) {
         return EINVAL;
     }
@@ -783,7 +787,7 @@ fn memory_map_impl(
             None => return Err(ENOMEM),
         };
 
-        if let Some(ceiling) = byte_ceiling.filter(|&value| value != u64::MAX) {
+        if let Some(ceiling) = byte_ceiling.filter(|&value| value != u64::MAX && !replace) {
             use crate::mem::mapping_usage;
             // PROCESS_TABLE retains the root and excludes every mapping/PTE
             // writer. Do not use heap_end: it is a placement cursor, not use.
@@ -832,7 +836,7 @@ fn memory_map_impl(
         };
         let map_start = if exact {
             let candidate = requested.ok_or(EINVAL)?;
-            if !range_is_available(candidate) {
+            if !is_user_range(candidate, size) || (!replace && !range_is_available(candidate)) {
                 return Err(EINVAL);
             }
             candidate
@@ -857,15 +861,16 @@ fn memory_map_impl(
             return Err(EINVAL);
         }
 
-        if anonymous {
+        let region = if anonymous {
             // Shared reservations retain one backing object across clones,
             // including pages neither process has faulted yet. Its storage
             // is populated lazily by the existing RAM-object pager.
-            let region = if shared {
-                let memory = Arc::new(crate::mem::shared_memory::SharedMemory::new(
+            if shared {
+                let memory = Arc::try_new(crate::mem::shared_memory::SharedMemory::new(
                     size, size / 4096,
-                )?);
-                let object = Arc::new(crate::mem::vm_object::VmObject::shared_memory(memory));
+                )?).map_err(|_| ENOMEM)?;
+                let object = Arc::try_new(crate::mem::vm_object::VmObject::shared_memory(memory))
+                    .map_err(|_| ENOMEM)?;
                 crate::task::MemoryRegion::file_backed(
                     map_start, size, access, options, object, 0, writable, true,
                     mnu_abi::MEMORY_ACCESS_ALL,
@@ -874,10 +879,6 @@ fn memory_map_impl(
                 crate::task::MemoryRegion::anonymous(
                     map_start, size, access, options, writable, false,
                 )
-            };
-            if !process.add_memory_region(region) {
-                crate::debug!("process::memory_map overlap");
-                return Err(EINVAL);
             }
             // Both private and shared reservations use zero-fill faults;
             // access permissions never force eager physical allocation.
@@ -889,7 +890,7 @@ fn memory_map_impl(
             // Reservations and new mapping admission share PROCESS_TABLE.
             // Do not publish metadata for a backing being changed by its owner.
             object.with_memory_generation(object.memory_generation(), || Ok(()))?;
-            let region = crate::task::MemoryRegion::file_backed(
+            crate::task::MemoryRegion::file_backed(
                 map_start,
                 size,
                 access,
@@ -899,11 +900,16 @@ fn memory_map_impl(
                 writable,
                 shared,
                 max_access,
-            );
+            )
+        };
+        let removed = if replace {
+            crate::mem::mapping_replace::replace(process, region, byte_ceiling)?
+        } else {
             if !process.add_memory_region(region) {
                 return Err(EINVAL);
             }
-        }
+            Vec::new()
+        };
 
         if process.heap_start() == 0 {
             process.set_heap_start(placement_base);
@@ -918,11 +924,27 @@ fn memory_map_impl(
             process.set_heap_end(new_heap_end);
         }
 
-        Ok(map_start)
+        Ok((map_start, removed))
     });
 
     match result {
-        Some(Ok(va)) => va,
+        Some(Ok((va, removed))) => {
+            // Reuse the unmap writeback contract, outside PROCESS_TABLE. The
+            // removed slices retain their original backing and offsets; an
+            // overlapping new mapping never redirects this cleanup.
+            for region in removed {
+                if region.is_shared() && region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE) {
+                    if let Some(object) = region.backing().file_object() {
+                        if let Err(error) = object.flush_unmapped_range(
+                            region.backing().file_offset(), region.len(),
+                        ) {
+                            return error;
+                        }
+                    }
+                }
+            }
+            va
+        }
         Some(Err(e)) => e,
         None => ENOMEM,
     }

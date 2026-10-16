@@ -43,7 +43,10 @@ pub const MEMORY_ACCESS_ALL: u64 = MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE | ME
 /// a nonzero handle names a mappable kernel object.
 pub const MEMORY_MAP_EXACT: u64 = 1 << 0;
 pub const MEMORY_MAP_SHARED: u64 = 1 << 1;
-pub const MEMORY_MAP_OPTIONS_ALL: u64 = MEMORY_MAP_EXACT | MEMORY_MAP_SHARED;
+/// Replace existing ordinary mappings at the exact requested virtual range.
+/// Requires EXACT; borrowed device/DMA mappings cannot be overwritten.
+pub const MEMORY_MAP_REPLACE: u64 = 1 << 2;
+pub const MEMORY_MAP_OPTIONS_ALL: u64 = MEMORY_MAP_EXACT | MEMORY_MAP_SHARED | MEMORY_MAP_REPLACE;
 /// Byte-sized RAM backing whose creator receives CONTROL for extent changes.
 /// Zero options retain fixed, nonempty, page-aligned creation.
 pub const MEMORY_OBJECT_RESIZABLE: u64 = 1;
