@@ -10,7 +10,7 @@ pub(crate) mod lifetime;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
-use super::{EACCES, EAGAIN, EFAULT, EINVAL, EMSGSIZE, ENOSPC};
+use super::{EACCES, EAGAIN, EFAULT, EINVAL, EMSGSIZE};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
@@ -248,14 +248,16 @@ pub fn resolve_sender_thread_id(sender: u64) -> Option<u64> {
 }
 
 pub fn create(flags: u64, _reserved: u64) -> u64 {
+    use mnu_abi::status::Error;
+
     if flags != 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let thread_id = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
-    ensure_endpoint_for_thread(thread_id).unwrap_or(EINVAL)
+    ensure_endpoint_for_thread(thread_id).unwrap_or_else(|| Error::ResourceUnavailable.into_raw())
 }
 
 /// Creates a process-local IPC endpoint handle.
@@ -263,20 +265,22 @@ pub fn create(flags: u64, _reserved: u64) -> u64 {
 /// Unlike the transitional global endpoint number returned by `create`, this
 /// value is meaningful only in the caller's object-handle table.
 pub fn create_handle(flags: u64, _reserved: u64) -> u64 {
+    use mnu_abi::status::Error;
+
     if flags != 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let thread_id = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
     let process_id = match crate::task::thread_to_process_id(thread_id) {
         Some(process_id) => process_id,
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
     let endpoint = match endpoint_for_thread(thread_id) {
         Some(endpoint) => endpoint,
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
     let endpoint_rights = endpoint_rights_for_process(process_id.as_u64());
     let mut rights = HandleRights::DUPLICATE.union(HandleRights::TRANSFER);
@@ -301,9 +305,9 @@ pub fn create_handle(flags: u64, _reserved: u64) -> u64 {
             .object_handles_mut()
             .insert(entry)
             .map(|handle| handle.raw() as u64)
-            .unwrap_or(ENOSPC)
+            .unwrap_or_else(|| Error::ResourceUnavailable.into_raw())
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or_else(|| Error::NotReady.into_raw())
 }
 
 pub(crate) fn endpoint_wait_ready(endpoint: IpcEndpoint) -> Result<bool, u64> {

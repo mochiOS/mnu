@@ -85,6 +85,8 @@ pub enum SyscallNumber {
     /// status::Error; compatibility layers select operation-specific errno.
     MemoryProtect = 584,
     MemorySync = 586,
+    /// Creates or obtains the caller thread's opaque endpoint identifier.
+    /// Failures use status::Error, not compatibility errno values.
     IpcCreate = 587,
     IpcCall = 588,
     IpcReply = 589,
@@ -123,6 +125,8 @@ pub enum SyscallNumber {
     /// Native failures: NotFound (key), InvalidArgument (stale selector),
     /// NotReady (execution context). Keys remain opaque to the kernel.
     LaunchHandleGet = 628,
+    /// Creates a caller-local endpoint reference. SEND/RECEIVE/WAIT are
+    /// bounded by existing IPC capabilities. Failures use status::Error.
     IpcCreateHandle = 629,
     IpcSendObjectHandles = 630,
     IpcRecvObjectHandles = 631,
