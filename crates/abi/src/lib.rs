@@ -10,6 +10,7 @@ pub mod handle_snapshot;
 pub mod memory_map;
 pub mod memory_copy;
 pub mod memory_update;
+pub mod status;
 
 /// プロセス作成時に渡すメタデータのABIです。
 pub mod exec;

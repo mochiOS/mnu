@@ -1,13 +1,13 @@
 //! Own-address-space byte copying without entering a userspace exception path.
 
-use super::types::EINVAL;
+use mnu_abi::status::Error;
 
 pub fn copy(destination: u64, source: u64, length: u64) -> u64 {
     let Ok(length) = usize::try_from(length) else {
-        return EINVAL;
+        return Error::LimitExceeded.into_raw();
     };
     if length > mnu_abi::memory_copy::MAX_BYTES {
-        return EINVAL;
+        return Error::LimitExceeded.into_raw();
     }
     if length == 0 {
         return 0;
