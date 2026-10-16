@@ -1122,15 +1122,16 @@ impl Mailbox {
         Some(idx)
     }
 
-    fn enqueue_message(&mut self, message: Box<Message>) -> Result<(), ()> {
+    /// Rejected messages remain caller-owned so their attached resources can
+    /// be released after the mailbox lock is dropped. None means corrupted
+    /// storage has already been retired by quarantine.
+    fn enqueue_message(&mut self, message: Box<Message>) -> Result<(), Option<Box<Message>>> {
         let Some(slot_idx) = self.reserve_slot(message.is_reply) else {
-            release_message(message);
-            return Err(());
+            return Err(Some(message));
         };
         self.slots[slot_idx] = Some(message);
         if self.enqueue_slot(slot_idx).is_err() {
-            let _ = self.free_slot(slot_idx);
-            return Err(());
+            return Err(self.take_slot(slot_idx));
         }
         Ok(())
     }
@@ -2079,7 +2080,11 @@ fn send_to_thread_id_with_attachments(
         release_message(message);
         return super::ESRCH;
     }
-    if boxes[idx].enqueue_message(message).is_err() {
+    if let Err(rejected) = boxes[idx].enqueue_message(message) {
+        drop(boxes);
+        if let Some(message) = rejected {
+            release_message(message);
+        }
         return EAGAIN;
     }
     crate::debug!(
