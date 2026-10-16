@@ -1089,6 +1089,7 @@ pub fn provider_object_identify(raw: u64) -> u64 {
 /// provider endpoint. The object identifier is meaningful only inside that
 /// endpoint and cannot address objects owned by another provider.
 pub fn provider_object_signal(object_id: u64, set: u64, clear: u64) -> u64 {
+    use mnu_abi::status::Error;
     let supported = mnu_abi::HANDLE_SIGNAL_READABLE
         | mnu_abi::HANDLE_SIGNAL_WRITABLE
         | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
@@ -1098,13 +1099,13 @@ pub fn provider_object_signal(object_id: u64, set: u64, clear: u64) -> u64 {
         || clear & !supported != 0
         || set & clear != 0
     {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let current = match crate::task::current_thread_id()
         .and_then(|thread| crate::syscall::ipc::endpoint_for_thread(thread.as_u64()))
     {
         Some(endpoint) => endpoint,
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
     let Some(provider) = crate::task::handle_table::provider_object(
         current.thread_id,
@@ -1112,7 +1113,7 @@ pub fn provider_object_signal(object_id: u64, set: u64, clear: u64) -> u64 {
         current.generation,
         object_id,
     ) else {
-        return EBADF;
+        return Error::InvalidArgument.into_raw();
     };
     provider.update_signals(set, clear);
     SUCCESS

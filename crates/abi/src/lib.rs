@@ -158,6 +158,9 @@ pub enum SyscallNumber {
     HandleRightsGet = 664,
     ProcessImageReplace = 665,
     HandleSameObject = 666,
+    /// Updates readiness bits in the calling endpoint's provider namespace.
+    /// Failures use status::Error: unsupported/overlapping bits or unknown
+    /// local identity is InvalidArgument; absent execution context is NotReady.
     ProviderObjectSignal = 667,
     HandleControl = 668,
     ProcessSuspendCurrent = 669,
