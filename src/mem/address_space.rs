@@ -10,7 +10,8 @@ use crate::task::{MemoryRegion, Process};
 pub enum ConsumeError {
     Consumed,
     Authorization,
-    BackingBusy,
+    /// Preserve the cause; only NotReady is temporary backing contention.
+    Backing(mnu_abi::status::Error),
     Context,
 }
 
@@ -45,7 +46,7 @@ impl AddressSpaceObject {
             if let Some(object) = region.backing().file_object() {
                 object
                     .with_memory_generation_native(object.memory_generation(), || Ok(()))
-                    .map_err(|_| ConsumeError::BackingBusy)?;
+                    .map_err(ConsumeError::Backing)?;
             }
         }
         let table = image.table.ok_or(ConsumeError::Consumed)?;
@@ -67,7 +68,8 @@ impl core::fmt::Debug for AddressSpaceObject {
 pub enum CloneError {
     MissingPageTable,
     BorrowedMapping,
-    BackingBusy,
+    /// Preserve the cause; only NotReady is temporary backing contention.
+    Backing(mnu_abi::status::Error),
     Allocation,
 }
 
@@ -99,7 +101,7 @@ impl CloneSource {
             if let Some(object) = region.backing().file_object() {
                 object
                     .with_memory_generation_native(object.memory_generation(), || Ok(()))
-                    .map_err(|_| CloneError::BackingBusy)?;
+                    .map_err(CloneError::Backing)?;
             }
         }
         let mut excluded = Vec::new();
