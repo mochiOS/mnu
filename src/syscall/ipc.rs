@@ -487,7 +487,7 @@ pub fn call(
         let status = send_call_to_thread_id(
             dest_thread_id, sender, call_id, req_ptr, req_len, delivery_flags,
         );
-        if status != EAGAIN {
+        if status != mnu_abi::status::Error::NotReady.into_raw() {
             break status;
         }
         crate::task::yield_now();
@@ -579,7 +579,7 @@ pub fn call_object_handles(
             true,
             attachments,
         );
-        if status != EAGAIN {
+        if status != mnu_abi::status::Error::NotReady.into_raw() {
             break status;
         }
         crate::task::yield_now();
@@ -2008,6 +2008,9 @@ fn send_to_thread_id_with_kind(
     )
 }
 
+/// Native send failures distinguish queue pressure (NotReady) from an
+/// allocation failure (ResourceUnavailable), which must not be retried as
+/// though the receiver merely needed to drain its mailbox.
 #[allow(clippy::too_many_arguments)]
 fn send_to_thread_id_with_attachments(
     dest_thread_id: u64,
@@ -2019,26 +2022,30 @@ fn send_to_thread_id_with_attachments(
     expects_reply: bool,
     object_handles: ObjectHandleAttachments,
 ) -> u64 {
+    use mnu_abi::status::Error;
+
     if dest_thread_id == 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
 
-    let len = len as usize;
+    let Ok(len) = usize::try_from(len) else {
+        return Error::LimitExceeded.into_raw();
+    };
     if len > ipc_max_msg_size() {
-        return EINVAL;
+        return Error::LimitExceeded.into_raw();
     }
     if len > 0 && buf_ptr == 0 {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
 
     let (idx, dest_generation) =
         match crate::task::thread_slot_index_and_generation_by_u64(dest_thread_id) {
             Some(v) => v,
-            None => return EINVAL,
+            None => return Error::NotFound.into_raw(),
         };
 
     if idx >= MAX_THREADS || idx > (u16::MAX as usize) {
-        return EINVAL;
+        return Error::BackingFailure.into_raw();
     }
 
     #[cfg(feature = "performance-instrumentation")]
@@ -2050,7 +2057,7 @@ fn send_to_thread_id_with_attachments(
     // - 送信時点と受信時点で世代不一致なら古いメッセージとして破棄される。
 
     let Some(mut message) = allocate_message() else {
-        return EAGAIN;
+        return Error::ResourceUnavailable.into_raw();
     };
     message.from = sender_handle;
     message.to = dest_thread_id;
@@ -2064,9 +2071,9 @@ fn send_to_thread_id_with_attachments(
 
     // ユーザー空間から、キューが所有する領域へ直接コピーする。
     if len > 0 && buf_ptr != 0 {
-        if let Err(err) = crate::syscall::copy_from_user(buf_ptr, &mut message.data[..len]) {
+        if let Err(err) = crate::syscall::copy_from_user_native(buf_ptr, &mut message.data[..len]) {
             release_message(message);
-            return err;
+            return err.into_raw();
         }
         record_ipc_copy(len);
     }
@@ -2078,14 +2085,14 @@ fn send_to_thread_id_with_attachments(
     }) {
         drop(boxes);
         release_message(message);
-        return super::ESRCH;
+        return Error::NotFound.into_raw();
     }
     if let Err(rejected) = boxes[idx].enqueue_message(message) {
         drop(boxes);
         if let Some(message) = rejected {
             release_message(message);
         }
-        return EAGAIN;
+        return Error::NotReady.into_raw();
     }
     crate::debug!(
         "[IPC SEND] from={} to={} len={}",
