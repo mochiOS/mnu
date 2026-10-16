@@ -1,6 +1,7 @@
 //! タスク関連システムコール
 
-use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS};
+use super::types::{EFAULT, EINVAL};
+use mnu_abi::status::Error;
 
 pub fn yield_now() -> u64 {
     crate::task::yield_now();
@@ -88,12 +89,14 @@ pub fn get_thread_id_by_name(name_ptr: u64, name_len: u64) -> u64 {
 
 /// thread_create syscall.
 ///
-/// Creates a new usermode thread in the current process. Returns the new TID or an errno.
+/// Creates a new usermode thread in the current process. Returns its native
+/// identity or a status::Error; POSIX thread policy remains in userspace.
 pub fn thread_create(context_ptr: u64, context_len: u64) -> u64 {
-    if context_ptr == 0
-        || context_len != core::mem::size_of::<mnu_abi::ThreadCreateContext>() as u64
-    {
-        return EINVAL;
+    if context_len != core::mem::size_of::<mnu_abi::ThreadCreateContext>() as u64 {
+        return Error::InvalidArgument.into_raw();
+    }
+    if context_ptr == 0 {
+        return Error::InvalidAddress.into_raw();
     }
     let mut context = mnu_abi::ThreadCreateContext::default();
     let context_bytes = unsafe {
@@ -102,33 +105,33 @@ pub fn thread_create(context_ptr: u64, context_len: u64) -> u64 {
             core::mem::size_of::<mnu_abi::ThreadCreateContext>(),
         )
     };
-    if crate::syscall::copy_from_user(context_ptr, context_bytes).is_err() {
-        return EFAULT;
+    if let Err(error) = crate::syscall::copy_from_user_native(context_ptr, context_bytes) {
+        return error.into_raw();
     }
     if context.entry == 0
         || context.stack_pointer < 16
         || context.flags != 0
         || context.reserved != [0; 3]
     {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if !crate::syscall::validate_user_ptr(context.entry, 1)
         || !crate::syscall::validate_user_ptr(context.stack_pointer - 16, 16)
         || (context.thread_local_base != 0
             && !crate::syscall::validate_user_ptr(context.thread_local_base, 8))
     {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
     let current_tid = match crate::task::current_thread_id() {
         Some(tid) => tid,
-        None => return ENOSYS,
+        None => return Error::NotReady.into_raw(),
     };
     let pid = match crate::task::with_thread(current_tid, |t| t.process_id()) {
         Some(pid) => pid,
-        None => return ENOSYS,
+        None => return Error::NotReady.into_raw(),
     };
     let Some(_creation) = crate::task::image_transition::begin_thread_creation(pid) else {
-        return super::types::EAGAIN;
+        return Error::NotReady.into_raw();
     };
     let kstack_size = crate::config::kernel().exec.kernel_thread_stack_size;
     let page_table = crate::task::with_process(pid, |process| process.page_table())
@@ -136,7 +139,7 @@ pub fn thread_create(context_ptr: u64, context_len: u64) -> u64 {
         .unwrap_or(0);
     let kstack = match crate::task::allocate_kernel_stack_in_table(kstack_size, page_table) {
         Some(a) => a,
-        None => return ENOMEM,
+        None => return Error::ResourceUnavailable.into_raw(),
     };
     let registers = context.registers;
     let user_context = crate::task::thread::SyscallUserContext {
@@ -170,7 +173,7 @@ pub fn thread_create(context_ptr: u64, context_len: u64) -> u64 {
         Some(tid) => tid.as_u64(),
         None => {
             crate::task::free_kernel_stack(kstack);
-            ENOSYS
+            Error::ResourceUnavailable.into_raw()
         }
     }
 }
