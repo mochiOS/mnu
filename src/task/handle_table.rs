@@ -424,20 +424,24 @@ impl ObjectHandleEntry {
 
 #[derive(Clone, Debug)]
 pub struct ObjectHandleTable {
-    entries: BTreeMap<ObjectHandle, ObjectHandleEntry>,
+    // Sorted by selector; reserve storage before publishing a new reference.
+    entries: Vec<(ObjectHandle, ObjectHandleEntry)>,
     next: u32,
 }
 
 impl ObjectHandleTable {
     pub fn new_boxed() -> Box<Self> {
         Box::new(Self {
-            entries: BTreeMap::new(),
+            entries: Vec::new(),
             next: 1,
         })
     }
 
     pub fn get(&self, handle: ObjectHandle) -> Option<ObjectHandleEntry> {
-        self.entries.get(&handle).cloned()
+        self.entries
+            .binary_search_by_key(&handle, |(handle, _)| *handle)
+            .ok()
+            .map(|index| self.entries[index].1.clone())
     }
 
     /// Captures transferable references and all metadata under the caller's
@@ -462,7 +466,7 @@ impl ObjectHandleTable {
     }
 
     pub fn insert(&mut self, entry: ObjectHandleEntry) -> Option<ObjectHandle> {
-        if self.entries.len() >= PROCESS_MAX_OBJECT_HANDLES {
+        if self.entries.len() >= PROCESS_MAX_OBJECT_HANDLES || self.entries.try_reserve(1).is_err() {
             return None;
         }
         for _ in 0..PROCESS_MAX_OBJECT_HANDLES {
@@ -473,8 +477,11 @@ impl ObjectHandleTable {
                 raw + 1
             };
             let handle = ObjectHandle(raw);
-            if let alloc::collections::btree_map::Entry::Vacant(slot) = self.entries.entry(handle) {
-                slot.insert(entry);
+            if let Err(index) = self
+                .entries
+                .binary_search_by_key(&handle, |(handle, _)| *handle)
+            {
+                self.entries.insert(index, (handle, entry));
                 return Some(handle);
             }
         }
@@ -482,7 +489,16 @@ impl ObjectHandleTable {
     }
 
     pub fn close(&mut self, handle: ObjectHandle) -> bool {
-        self.entries.remove(&handle).is_some()
+        match self
+            .entries
+            .binary_search_by_key(&handle, |(handle, _)| *handle)
+        {
+            Ok(index) => {
+                self.entries.remove(index);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Installs an explicitly transferred object without replacing any entry.
@@ -493,16 +509,21 @@ impl ObjectHandleTable {
         {
             return false;
         }
-        if let alloc::collections::btree_map::Entry::Vacant(slot) = self.entries.entry(handle) {
-            slot.insert(entry);
-            true
-        } else {
-            false
+        let Err(index) = self
+            .entries
+            .binary_search_by_key(&handle, |(handle, _)| *handle)
+        else {
+            return false;
+        };
+        if self.entries.try_reserve(1).is_err() {
+            return false;
         }
+        self.entries.insert(index, (handle, entry));
+        true
     }
 
     pub fn retain(&mut self, mut keep: impl FnMut(ObjectHandle) -> bool) {
-        self.entries.retain(|handle, _| keep(*handle));
+        self.entries.retain(|(handle, _)| keep(*handle));
     }
 
     pub fn duplicate_restricted(
