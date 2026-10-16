@@ -1497,9 +1497,37 @@ enum WaitTarget {
     MemoryAdmission(Arc<crate::mem::vm_object::ProviderAdmission>),
 }
 
+// Retain ordinary object identity across retries. Admission ownership is the
+// queue position itself, so retain only its identity, never its owning Arc.
+enum WaitSource {
+    Object(KernelObject),
+    MemoryAdmission(Weak<crate::mem::vm_object::ProviderAdmission>),
+}
+
+impl WaitSource {
+    fn capture(object: KernelObject) -> Self {
+        match object {
+            KernelObject::MemoryAdmission(admission) => {
+                Self::MemoryAdmission(Arc::downgrade(&admission))
+            }
+            object => Self::Object(object),
+        }
+    }
+
+    fn matches(&self, object: &KernelObject) -> bool {
+        match self {
+            Self::Object(source) => source.is_same_object(object),
+            Self::MemoryAdmission(source) => {
+                matches!(object, KernelObject::MemoryAdmission(admission)
+                    if Weak::ptr_eq(source, &Arc::downgrade(admission)))
+            }
+        }
+    }
+}
+
 fn wait_item_signal(
     item: &mut mnu_abi::HandleWaitItem,
-    admission_source: Option<&Weak<crate::mem::vm_object::ProviderAdmission>>,
+    source: &WaitSource,
 ) -> Result<(WaitTarget, bool), u64> {
     use mnu_abi::status::Error;
     if item.interests == 0 {
@@ -1507,14 +1535,10 @@ fn wait_item_signal(
     }
     let object = object_native(u64::from(item.handle), HandleRights::WAIT)
         .map_err(Error::into_raw)?;
-    if let Some(source) = admission_source {
-        // Keep identity, not ownership, across sleep. A closed/reused Handle
-        // label cannot redirect this wait to an unrelated object.
-        if !matches!(&object, KernelObject::MemoryAdmission(admission)
-            if Weak::ptr_eq(source, &Arc::downgrade(admission)))
-        {
-            return Err(Error::InvalidArgument.into_raw());
-        }
+    // Revalidate authority, but never retarget a pending wait after Handle
+    // close/reuse. Admission identity stays weak so close can cancel its ticket.
+    if !source.matches(&object) {
+        return Err(Error::InvalidArgument.into_raw());
     }
     if item.minimum_write_bytes != 0
         && (!matches!(&object, KernelObject::File(_))
@@ -1706,7 +1730,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
     let registered_providers = &mut registrations.providers;
     let mut endpoint_lifetimes = alloc::vec::Vec::new();
     let mut admission_waiters = alloc::vec::Vec::<memory_update::AdmissionWaiter>::new();
-    let mut admission_sources = alloc::vec::Vec::new();
+    let mut sources = alloc::vec::Vec::new();
     let mut targets = alloc::vec::Vec::new();
     // Each item contributes at most one target/subscription of each kind.
     // Reserve before admitting any waiter; no push in the wait loop allocates.
@@ -1715,18 +1739,17 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         || registered_providers.try_reserve_exact(count).is_err()
         || endpoint_lifetimes.try_reserve_exact(count).is_err()
         || admission_waiters.try_reserve_exact(count).is_err()
-        || admission_sources.try_reserve_exact(count).is_err()
+        || sources.try_reserve_exact(count).is_err()
         || targets.try_reserve_exact(count).is_err()
     {
         return mnu_abi::status::Error::ResourceUnavailable.into_raw();
     }
     for item in &items {
         let source = match object_native(u64::from(item.handle), HandleRights::WAIT) {
-            Ok(KernelObject::MemoryAdmission(admission)) => Some(Arc::downgrade(&admission)),
-            Ok(_) => None,
+            Ok(object) => WaitSource::capture(object),
             Err(error) => return error.into_raw(),
         };
-        admission_sources.push(source);
+        sources.push(source);
     }
     let deadline_tick = if matches!(
         deadline_nanoseconds,
@@ -1751,7 +1774,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         targets.clear();
         let mut ready = None;
         for (index, item) in items.iter_mut().enumerate() {
-            match wait_item_signal(item, admission_sources[index].as_ref()) {
+            match wait_item_signal(item, &sources[index]) {
                 Ok((_, true)) if ready.is_none() => ready = Some(index),
                 Ok((target, _)) => {
                     targets.push(target);
@@ -1908,7 +1931,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         // cannot be missed. A pending wakeup prevents sleeping in that case.
         let mut became_ready = false;
         for (index, item) in items.iter_mut().enumerate() {
-            match wait_item_signal(item, admission_sources[index].as_ref()) {
+            match wait_item_signal(item, &sources[index]) {
                 Ok((_, is_ready)) => became_ready |= is_ready,
                 Err(error) => {
                     crate::task::remove_process_exit_waiters(current);

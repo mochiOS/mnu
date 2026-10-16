@@ -172,6 +172,8 @@ pub enum SyscallNumber {
     /// local wait-storage exhaustion is ResourceUnavailable. Invalid target
     /// kind or interests is InvalidArgument, a retired endpoint is NotFound.
     /// Resource-specific native failures are preserved.
+    /// Target identity is fixed during admission; selector authority is
+    /// revalidated, and close/reuse cannot redirect the pending wait.
     HandleWaitMany = 647,
     /// Associates an opaque key with an existing caller-owned Handle. Does
     /// not duplicate, transfer or change rights. Native failures are
