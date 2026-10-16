@@ -171,6 +171,9 @@ impl ProviderObject {
         if state.waiters.len() >= super::ThreadQueue::MAX_THREADS {
             return false;
         }
+        if state.waiters.try_reserve(1).is_err() {
+            return false;
+        }
         state.waiters.push(waiter);
         true
     }
