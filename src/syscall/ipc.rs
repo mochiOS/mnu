@@ -163,14 +163,18 @@ pub fn endpoint_owner_process(handle: u64) -> u64 {
 
 /// Resolve only a generation-checked IPC endpoint. This grants no object
 /// authority and exposes no credentials, parent relationship or service policy.
-pub fn endpoint_execution_identity(handle: u64) -> Result<mnu_abi::ExecutionIdentity, u64> {
+pub fn endpoint_execution_identity(
+    handle: u64,
+) -> Result<mnu_abi::ExecutionIdentity, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::ProcessInspect,
     ]) {
-        return Err(EACCES);
+        return Err(Error::AccessDenied);
     }
-    let record = endpoint_record_from_handle(handle).ok_or(EINVAL)?;
-    let process = crate::task::thread_to_process_id(record.thread_id).ok_or(super::ESRCH)?;
+    let record = endpoint_record_from_handle(handle).ok_or(Error::NotFound)?;
+    let process = crate::task::thread_to_process_id(record.thread_id).ok_or(Error::NotFound)?;
     Ok(mnu_abi::ExecutionIdentity {
         process_id: process.as_u64(),
         thread_id: record.thread_id,
