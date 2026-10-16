@@ -312,7 +312,6 @@ pub enum KernelObject {
         slot: u16,
         generation: u64,
     },
-    Event(u64),
     Process(Arc<ProcessObject>),
     Thread(super::ids::ThreadId),
     VmObject(Arc<crate::mem::vm_object::VmObject>),
@@ -348,7 +347,6 @@ impl KernelObject {
                     && left_slot == right_slot
                     && left_generation == right_generation
             }
-            (Self::Event(left), Self::Event(right)) => left == right,
             (Self::Process(left), Self::Process(right)) => Arc::ptr_eq(left, right),
             (Self::Thread(left), Self::Thread(right)) => left == right,
             (Self::VmObject(left), Self::VmObject(right)) => Arc::ptr_eq(left, right),
@@ -376,7 +374,6 @@ impl core::fmt::Debug for KernelObject {
                 .field("slot", slot)
                 .field("generation", generation)
                 .finish(),
-            Self::Event(id) => formatter.debug_tuple("Event").field(id).finish(),
             Self::Process(process) => formatter
                 .debug_tuple("Process")
                 .field(&process.id())

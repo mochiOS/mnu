@@ -4,7 +4,6 @@ pub mod address_wait;
 pub mod capability;
 pub mod diagnostic;
 pub mod dma;
-pub mod event;
 pub mod exec;
 pub mod execution;
 pub mod fs;
@@ -957,10 +956,6 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::CapRestrict as u64 => {
             capability::restrict_capability(arg0, arg1, arg2, arg3)
         }
-        x if x == SyscallNumber::EventCreate as u64 => event::create(arg0, arg1),
-        x if x == SyscallNumber::EventWait as u64 => event::wait(arg0, arg1, arg2),
-        x if x == SyscallNumber::EventSignal as u64 => event::signal(arg0, arg1, arg2),
-        x if x == SyscallNumber::EventPoll as u64 => event::poll(arg0, arg1, arg2),
         x if x == SyscallNumber::TimeNow as u64 => time::get_ticks(),
         x if x == SyscallNumber::ClockRead as u64 => time::clock_read(arg0, arg1),
         x if x == SyscallNumber::ClockDescribe as u64 => time::clock_describe(arg0, arg1, arg2),

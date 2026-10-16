@@ -99,10 +99,6 @@ const SYS_CAP_DROP: u64 = mnu_abi::SyscallNumber::CapDrop as u64;
 const SYS_CAP_TRANSFER: u64 = mnu_abi::SyscallNumber::CapTransfer as u64;
 const SYS_CAP_QUERY: u64 = mnu_abi::SyscallNumber::CapQuery as u64;
 const SYS_CAP_RESTRICT: u64 = mnu_abi::SyscallNumber::CapRestrict as u64;
-const SYS_EVENT_CREATE: u64 = mnu_abi::SyscallNumber::EventCreate as u64;
-const SYS_EVENT_WAIT: u64 = mnu_abi::SyscallNumber::EventWait as u64;
-const SYS_EVENT_SIGNAL: u64 = mnu_abi::SyscallNumber::EventSignal as u64;
-const SYS_EVENT_POLL: u64 = mnu_abi::SyscallNumber::EventPoll as u64;
 const SYS_TIME_NOW: u64 = mnu_abi::SyscallNumber::TimeNow as u64;
 const SYS_PERFORMANCE_SNAPSHOT: u64 = mnu_abi::SyscallNumber::PerformanceSnapshot as u64;
 const SYS_SLEEP: u64 = mnu_abi::SyscallNumber::Sleep as u64;
@@ -502,22 +498,6 @@ pub fn cap_query(ptr: u64, len: u64) -> u64 {
 
 pub fn cap_restrict(src_ptr: u64, src_len: u64, dst_ptr: u64, dst_len: u64) -> u64 {
     unsafe { syscall4(SYS_CAP_RESTRICT, src_ptr, src_len, dst_ptr, dst_len) }
-}
-
-pub fn event_create(flags: u64) -> u64 {
-    unsafe { syscall2(SYS_EVENT_CREATE, flags, 0) }
-}
-
-pub fn event_wait(event: u64, timeout: u64) -> u64 {
-    unsafe { syscall3(SYS_EVENT_WAIT, event, timeout, 0) }
-}
-
-pub fn event_signal(event: u64) -> u64 {
-    unsafe { syscall3(SYS_EVENT_SIGNAL, event, 0, 0) }
-}
-
-pub fn event_poll(ids_ptr: u64, count: u64, timeout: u64) -> u64 {
-    unsafe { syscall3(SYS_EVENT_POLL, ids_ptr, count, timeout) }
 }
 
 pub fn time_now() -> u64 {

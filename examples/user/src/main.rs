@@ -27,7 +27,7 @@ const MEMORY_SYNC_TEST_PATH: &[u8] = b"/tmp/init.msync-test";
 const PASS_LINE: &[u8] = b"USERLAND SELF-TEST PASS\n";
 const FAIL_LINE: &[u8] = b"USERLAND SELF-TEST FAIL\n";
 const STAGE_MEMORY: &[u8] = b"stage: memory\n";
-const STAGE_EVENT: &[u8] = b"stage: event\n";
+const STAGE_ADDRESS_WAIT: &[u8] = b"stage: native address wait\n";
 const STAGE_IPC_SR: &[u8] = b"stage: ipc send/recv\n";
 const STAGE_IPC_PP: &[u8] = b"stage: ipc ping/pong\n";
 const STAGE_CAP: &[u8] = b"stage: capability\n";
@@ -39,10 +39,6 @@ const FS_TICK_HZ_LINE: &[u8] = b" tick_hz=";
 const FS_ELAPSED_MS_LINE: &[u8] = b" elapsed_ms=";
 const FS_ROOTFS_READ_PREFIX: &[u8] = b"fs.cext read[";
 const FS_LABEL_SUFFIX: &[u8] = b"]: ";
-const EVENT_SIGNAL_A_FAIL: &[u8] = b"event: signal a failed\n";
-const EVENT_WAIT_A_FAIL: &[u8] = b"event: wait a failed\n";
-const EVENT_SIGNAL_B_FAIL: &[u8] = b"event: signal b failed\n";
-const EVENT_POLL_FAIL: &[u8] = b"event: poll failed\n";
 static THREAD_TEST_DONE: AtomicBool = AtomicBool::new(false);
 static THREAD_TEST_READY: AtomicBool = AtomicBool::new(false);
 static THREAD_TEST_RELEASE: AtomicBool = AtomicBool::new(false);
@@ -275,43 +271,24 @@ fn run_memory_tests() -> bool {
     true
 }
 
-fn run_event_tests() -> u64 {
-    let event_a = user::event_create(0);
-    let event_b = user::event_create(0);
-    if is_error(event_a) || is_error(event_b) {
+fn run_native_wait_tests() -> u64 {
+    use core::sync::atomic::AtomicU32;
+    use mochi_user_syscall::{self as syscall, AddressWaitResult, SyscallNumber};
+
+    let word = AtomicU32::new(0);
+    let address = (&word as *const AtomicU32) as u64;
+    if syscall::call4(SyscallNumber::WaitOnAddress, address, 1, 4, 0)
+        != Ok(AddressWaitResult::ValueChanged as u64)
+    {
         return 31;
     }
-
-    if !expect_success(user::event_signal(event_b)) {
-        let _ = user::debug_write(
-            EVENT_SIGNAL_A_FAIL.as_ptr() as u64,
-            EVENT_SIGNAL_A_FAIL.len() as u64,
-        );
+    if syscall::call4(SyscallNumber::WaitOnAddress, address, 0, 4, 0)
+        != Ok(AddressWaitResult::DeadlineReached as u64)
+    {
         return 32;
     }
-    if !expect_success(user::event_wait(event_b, 0)) {
-        let _ = user::debug_write(
-            EVENT_WAIT_A_FAIL.as_ptr() as u64,
-            EVENT_WAIT_A_FAIL.len() as u64,
-        );
+    if syscall::call2(SyscallNumber::WakeAddress, address, u64::MAX) != Ok(0) {
         return 33;
-    }
-
-    if !expect_success(user::event_signal(event_b)) {
-        let _ = user::debug_write(
-            EVENT_SIGNAL_B_FAIL.as_ptr() as u64,
-            EVENT_SIGNAL_B_FAIL.len() as u64,
-        );
-        return 34;
-    }
-    let ids = [event_b, event_a];
-    let polled = user::event_poll(ids.as_ptr() as u64, ids.len() as u64, 0);
-    if polled != event_b {
-        let _ = user::debug_write(
-            EVENT_POLL_FAIL.as_ptr() as u64,
-            EVENT_POLL_FAIL.len() as u64,
-        );
-        return 35;
     }
     0
 }
@@ -635,10 +612,13 @@ fn run_all_tests() -> u64 {
     if !run_memory_tests() {
         return 2;
     }
-    let _ = user::debug_write(STAGE_EVENT.as_ptr() as u64, STAGE_EVENT.len() as u64);
-    let event = run_event_tests();
-    if event != 0 {
-        return event;
+    let _ = user::debug_write(
+        STAGE_ADDRESS_WAIT.as_ptr() as u64,
+        STAGE_ADDRESS_WAIT.len() as u64,
+    );
+    let wait = run_native_wait_tests();
+    if wait != 0 {
+        return wait;
     }
     let _ = user::debug_write(STAGE_IPC_SR.as_ptr() as u64, STAGE_IPC_SR.len() as u64);
     let endpoint = user::ipc_create(0);
