@@ -10,7 +10,7 @@ pub(crate) mod lifetime;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
-use super::{EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EMSGSIZE, ENOSPC};
+use super::{EACCES, EAGAIN, EFAULT, EINVAL, EMSGSIZE, ENOSPC};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
@@ -353,31 +353,26 @@ pub(crate) fn remove_endpoint_waiter(endpoint: IpcEndpoint, waiter: crate::task:
 }
 
 fn process_local_endpoint(raw: u64, required: HandleRights) -> Result<IpcEndpoint, u64> {
-    let raw = u32::try_from(raw).map_err(|_| EBADF)?;
-    let handle = ObjectHandle::from_raw(raw).ok_or(EBADF)?;
-    let process_id = crate::syscall::security::current_process_id().ok_or(EINVAL)?;
-    let entry = crate::task::with_process(process_id, |process| {
-        process.object_handles().get(handle)
-    })
-    .flatten()
-    .ok_or(EBADF)?;
-    if !entry.rights().contains(required) {
-        return Err(EACCES);
-    }
+    use mnu_abi::status::Error;
+
+    let object = crate::syscall::handle::object_native(raw, required)
+        .map_err(Error::into_raw)?;
     let KernelObject::IpcEndpoint {
         thread_id,
         slot,
         generation,
-    } = entry.object()
+    } = object
     else {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument.into_raw());
     };
     let endpoint = IpcEndpoint {
-        thread_id: *thread_id,
-        slot: *slot,
-        generation: *generation,
+        thread_id,
+        slot,
+        generation,
     };
-    endpoint_is_valid(endpoint).then_some(endpoint).ok_or(EINVAL)
+    endpoint_is_valid(endpoint)
+        .then_some(endpoint)
+        .ok_or_else(|| Error::NotFound.into_raw())
 }
 
 pub(crate) fn resolve_provider_endpoint_native(
@@ -405,34 +400,41 @@ pub(crate) fn resolve_provider_endpoint_native(
 }
 
 fn resolve_call_destination(raw: u64) -> Result<(u64, u64, u32), u64> {
+    use mnu_abi::status::Error;
+
     if raw <= crate::task::PROCESS_MAX_OBJECT_HANDLES as u64 {
         let endpoint = process_local_endpoint(raw, HandleRights::SEND)?;
-        let sender_identity = ensure_endpoint_for_thread(endpoint.thread_id).ok_or(EINVAL)?;
+        let sender_identity = ensure_endpoint_for_thread(endpoint.thread_id)
+            .ok_or_else(|| Error::NotReady.into_raw())?;
         return Ok((
             endpoint.thread_id,
             sender_identity,
             mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE,
         ));
     }
-    let record = endpoint_record_from_handle(raw).ok_or(EINVAL)?;
+    let record = endpoint_record_from_handle(raw)
+        .ok_or_else(|| Error::NotFound.into_raw())?;
     if !record.rights.contains(EndpointRights::RECV) {
-        return Err(EACCES);
+        return Err(Error::AccessDenied.into_raw());
     }
     Ok((record.thread_id, raw, 0))
 }
 
 fn resolve_receive_thread(raw: u64, current_thread_id: u64) -> Result<u64, u64> {
+    use mnu_abi::status::Error;
+
     let thread_id = if raw <= crate::task::PROCESS_MAX_OBJECT_HANDLES as u64 {
         process_local_endpoint(raw, HandleRights::RECEIVE)?.thread_id
     } else {
-        let record = endpoint_record_from_handle(raw).ok_or(EINVAL)?;
+        let record = endpoint_record_from_handle(raw)
+            .ok_or_else(|| Error::NotFound.into_raw())?;
         if !record.rights.contains(EndpointRights::RECV) {
-            return Err(EACCES);
+            return Err(Error::AccessDenied.into_raw());
         }
         record.thread_id
     };
     if thread_id != current_thread_id {
-        return Err(EACCES);
+        return Err(Error::AccessDenied.into_raw());
     }
     Ok(thread_id)
 }
