@@ -1,18 +1,21 @@
 //! Preparation in a private target root, never a mutation of the caller's VM.
-use crate::syscall::types::{EACCES, EINVAL, ENOMEM};
 use crate::task::{HandleRights, KernelObject, MemoryRegion};
 use alloc::vec::Vec;
+use mnu_abi::status::Error;
 
 pub(super) fn prepare(
     table: u64,
     startup: mnu_abi::process_image::StartupImage<'_>,
     regions: &mut Vec<MemoryRegion>,
-) -> Result<(), u64> {
+) -> Result<(), Error> {
     regions
         .try_reserve_exact(startup.mappings().count())
-        .map_err(|_| ENOMEM)?;
+        .map_err(|_| Error::ResourceUnavailable)?;
     for mapping in startup.mappings() {
-        let end = mapping.address.checked_add(mapping.length).ok_or(EINVAL)?;
+        let end = mapping
+            .address
+            .checked_add(mapping.length)
+            .ok_or(Error::InvalidArgument)?;
         if crate::mem::paging::is_user_range_occupied_in_table(
             table,
             mapping.address,
@@ -22,7 +25,7 @@ pub(super) fn prepare(
                 .end()
                 .is_none_or(|other_end| mapping.address < other_end && region.start() < end)
         }) {
-            return Err(EINVAL);
+            return Err(Error::InvalidArgument);
         }
         let writable = mapping.access & mnu_abi::MEMORY_ACCESS_WRITE != 0;
         let shared = mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0;
@@ -40,18 +43,20 @@ pub(super) fn prepare(
             if shared && writable {
                 required = required.union(HandleRights::WRITE);
             }
-            let (object, rights) =
-                crate::syscall::handle::object_with_rights(mapping.backing_handle, required)?;
+            let (object, rights) = crate::syscall::handle::object_with_rights_native(
+                mapping.backing_handle,
+                required,
+            )?;
             let KernelObject::VmObject(object) = object else {
-                return Err(EINVAL);
+                return Err(Error::InvalidArgument);
             };
-            let extent = object.memory_length().ok_or(EINVAL)?;
+            let extent = object.memory_length().ok_or(Error::InvalidArgument)?;
             if mapping
                 .backing_offset
                 .checked_add(mapping.length)
                 .is_none_or(|end| end > extent)
             {
-                return Err(EINVAL);
+                return Err(Error::InvalidArgument);
             }
             // Match MemoryMap: private RAM may be copied writable, but cannot
             // become executable. Read-only shared authority cannot be raised
@@ -61,7 +66,7 @@ pub(super) fn prepare(
                 maximum &= !mnu_abi::MEMORY_ACCESS_WRITE;
             }
             if mapping.access & !maximum != 0 {
-                return Err(EACCES);
+                return Err(Error::AccessDenied);
             }
             MemoryRegion::file_backed(
                 mapping.address,

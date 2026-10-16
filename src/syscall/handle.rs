@@ -130,6 +130,15 @@ pub(crate) fn object_native(
     raw: u64,
     required_right: HandleRights,
 ) -> Result<KernelObject, mnu_abi::status::Error> {
+    object_with_rights_native(raw, required_right).map(|(object, _)| object)
+}
+
+/// Return the retained object and its exact granted rights under the same
+/// caller-table access, so later permission ceilings need no second lookup.
+pub(crate) fn object_with_rights_native(
+    raw: u64,
+    required_right: HandleRights,
+) -> Result<(KernelObject, HandleRights), mnu_abi::status::Error> {
     use mnu_abi::status::Error;
     let process_id = crate::syscall::security::current_process_id().ok_or(Error::NotReady)?;
     let handle = u32::try_from(raw)
@@ -144,7 +153,7 @@ pub(crate) fn object_native(
         if !entry.rights().contains(required_right) {
             return Err(Error::AccessDenied);
         }
-        Ok(entry.object().clone())
+        Ok((entry.object().clone(), entry.rights()))
     })
     .unwrap_or(Err(Error::NotReady))
 }

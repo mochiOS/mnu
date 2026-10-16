@@ -1202,7 +1202,8 @@ fn replace_current_process_image(
         Ok(base) => base,
         Err(error) => return Err(error.into_raw()),
     };
-    initial_mappings::prepare(new_pt_phys, startup, &mut deferred_zero_regions)?;
+    initial_mappings::prepare(new_pt_phys, startup, &mut deferred_zero_regions)
+        .map_err(mnu_abi::status::Error::into_raw)?;
     // Admission precedes every destructive old-image operation, including
     // sibling retirement, borrowed mapping revocation, TLS/context edits and
     // launch-Handle retention. Failed preparation drops only the new root.
