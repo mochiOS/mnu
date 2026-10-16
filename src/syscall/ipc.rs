@@ -10,7 +10,7 @@ pub(crate) mod lifetime;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
-use super::{EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EIO, EMSGSIZE, ENOSPC};
+use super::{EACCES, EAGAIN, EBADF, EFAULT, EINVAL, EMSGSIZE, ENOSPC};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
@@ -1806,32 +1806,44 @@ fn call_endpoint_with_attachments_from_kernel(
     reply: &mut [u8],
     mut attachments: ObjectHandleAttachments,
 ) -> Result<usize, u64> {
+    use mnu_abi::status::Error;
+
     if request.len() > ipc_max_msg_size() || reply.len() > ipc_max_msg_size() {
-        return Err(EINVAL);
+        return Err(Error::LimitExceeded.into_raw());
     }
-    let caller = crate::task::current_thread_id().ok_or(EINVAL)?.as_u64();
+    let caller = crate::task::current_thread_id()
+        .ok_or_else(|| Error::NotReady.into_raw())?
+        .as_u64();
     let _lifetime = lifetime::observe(endpoint, crate::task::ThreadId::from_u64(caller))?;
-    let sender = ensure_endpoint_for_thread(caller).ok_or(EINVAL)?;
+    let sender = ensure_endpoint_for_thread(caller)
+        .ok_or_else(|| Error::NotReady.into_raw())?;
     let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let (dest_slot, dest_generation) =
         crate::task::thread_slot_index_and_generation_by_u64(endpoint.thread_id)
             .filter(|(slot, generation)| {
                 *slot as u16 == endpoint.slot && *generation == endpoint.generation
             })
-            .ok_or(EINVAL)?;
+            .ok_or_else(|| Error::NotFound.into_raw())?;
+    // Resolve the reply destination before publishing a request: an absent
+    // caller slot cannot receive a result and must not cause external work.
+    let (caller_slot, caller_generation) =
+        crate::task::thread_slot_index_and_generation_by_u64(caller)
+            .ok_or_else(|| Error::NotReady.into_raw())?;
     loop {
         if !endpoint_is_valid(endpoint) {
-            return Err(super::ESRCH);
+            return Err(Error::NotFound.into_raw());
         }
         let mut mailboxes = lock_mailboxes();
         if !endpoint_is_valid(endpoint) {
-            return Err(super::ESRCH);
+            return Err(Error::NotFound.into_raw());
         }
-        let mailbox = mailboxes.get_mut(dest_slot).ok_or(EINVAL)?;
+        let mailbox = mailboxes
+            .get_mut(dest_slot)
+            .ok_or_else(|| Error::BackingFailure.into_raw())?;
         if let Some(slot) = mailbox.alloc_slot() {
             let Some(message) = mailbox.slots[slot].as_deref_mut() else {
                 mailbox.quarantine("ipc mailbox allocated slot is missing");
-                return Err(EIO);
+                return Err(Error::BackingFailure.into_raw());
             };
             message.from = sender;
             message.to = endpoint.thread_id;
@@ -1846,8 +1858,11 @@ fn call_endpoint_with_attachments_from_kernel(
             message.object_handles = attachments;
             if mailbox.enqueue_slot(slot).is_err() {
                 // Keep ownership while retrying rather than discarding handles.
+                let message = mailbox.slots[slot]
+                    .as_deref_mut()
+                    .ok_or_else(|| Error::BackingFailure.into_raw())?;
                 attachments = core::mem::replace(
-                    &mut mailbox.slots[slot].as_deref_mut().ok_or(EIO)?.object_handles,
+                    &mut message.object_handles,
                     ObjectHandleAttachments::empty(),
                 );
                 mailbox.free_slot(slot);
@@ -1863,12 +1878,12 @@ fn call_endpoint_with_attachments_from_kernel(
         drop(mailboxes);
         crate::task::yield_now();
     }
-    let (caller_slot, caller_generation) =
-        crate::task::thread_slot_index_and_generation_by_u64(caller).ok_or(EINVAL)?;
     loop {
         let received = {
             let mut mailboxes = lock_mailboxes();
-            let mailbox = mailboxes.get_mut(caller_slot).ok_or(EINVAL)?;
+            let mailbox = mailboxes
+                .get_mut(caller_slot)
+                .ok_or_else(|| Error::BackingFailure.into_raw())?;
             let received = mailbox.pop_reply_copy(
                 expected_sender,
                 call_id,
@@ -1887,17 +1902,22 @@ fn call_endpoint_with_attachments_from_kernel(
         }
         if !endpoint_is_valid(endpoint) {
             let mut mailboxes = lock_mailboxes();
-            if mailboxes[caller_slot].waiter == caller {
-                mailboxes[caller_slot].waiter = 0;
+            if let Some(mailbox) = mailboxes.get_mut(caller_slot) {
+                if mailbox.waiter == caller {
+                    mailbox.waiter = 0;
+                }
             }
-            return Err(super::ESRCH);
+            return Err(Error::NotFound.into_raw());
         }
         if crate::task::sleep_thread_unless_woken(crate::task::ThreadId::from_u64(caller)) {
             crate::task::yield_now();
         } else {
             let mut mailboxes = lock_mailboxes();
-            if mailboxes[caller_slot].waiter == caller {
-                mailboxes[caller_slot].waiter = 0;
+            let mailbox = mailboxes
+                .get_mut(caller_slot)
+                .ok_or_else(|| Error::BackingFailure.into_raw())?;
+            if mailbox.waiter == caller {
+                mailbox.waiter = 0;
             }
         }
     }
