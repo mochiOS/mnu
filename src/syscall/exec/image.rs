@@ -1,5 +1,6 @@
-use super::{ExecMeasurement, mapping_error_errno};
+use super::{ExecMeasurement, mapping_error_native};
 use alloc::vec::Vec;
+use mnu_abi::status::Error;
 
 const EM_X86_64: u16 = 0x3e;
 const PAGE_SIZE: u64 = 4096;
@@ -59,35 +60,36 @@ fn deferred_zero_range(
 }
 
 #[inline(never)]
-fn validate_load_segment(data: &[u8], segment: &crate::elf::Elf64Phdr) -> Result<(), u64> {
-    use crate::syscall::types::EINVAL;
-
+fn validate_load_segment(data: &[u8], segment: &crate::elf::Elf64Phdr) -> Result<(), Error> {
     if segment.p_memsz < segment.p_filesz
         || segment.p_vaddr < USER_EXEC_ADDRESS_MIN
         || segment.p_vaddr >= USER_ADDRESS_MAX
     {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
-    let memory_end = segment.p_vaddr.checked_add(segment.p_memsz).ok_or(EINVAL)?;
+    let memory_end = segment
+        .p_vaddr
+        .checked_add(segment.p_memsz)
+        .ok_or(Error::InvalidArgument)?;
     if memory_end > USER_ADDRESS_MAX {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
-    let source_offset = usize::try_from(segment.p_offset).map_err(|_| EINVAL)?;
-    let source_len = usize::try_from(segment.p_filesz).map_err(|_| EINVAL)?;
+    let source_offset = usize::try_from(segment.p_offset).map_err(|_| Error::InvalidArgument)?;
+    let source_len = usize::try_from(segment.p_filesz).map_err(|_| Error::InvalidArgument)?;
     source_offset
         .checked_add(source_len)
         .filter(|end| *end <= data.len())
-        .ok_or(EINVAL)?;
+        .ok_or(Error::InvalidArgument)?;
 
     let alignment = segment.p_align;
     if alignment > 1
         && (!alignment.is_power_of_two()
             || (segment.p_vaddr.wrapping_sub(segment.p_offset) & (alignment - 1)) != 0)
     {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
     if segment.p_flags & (PF_EXECUTE | PF_WRITE) == PF_EXECUTE | PF_WRITE {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
     Ok(())
 }
@@ -96,40 +98,42 @@ fn validate_load_segment(data: &[u8], segment: &crate::elf::Elf64Phdr) -> Result
 fn parse_load_segments(
     data: &[u8],
     measurement: &mut ExecMeasurement,
-) -> Result<(crate::elf::Elf64Ehdr, Vec<crate::elf::Elf64Phdr>), u64> {
-    use crate::syscall::types::EINVAL;
-
+) -> Result<(crate::elf::Elf64Ehdr, Vec<crate::elf::Elf64Phdr>), Error> {
     let header = measurement
         .parse(|| crate::elf::parse_elf_header(data))
         .filter(|header| header.e_entry != 0)
-        .ok_or(EINVAL)?;
+        .ok_or(Error::InvalidArgument)?;
     if header.e_machine != EM_X86_64
         || usize::from(header.e_phentsize) < core::mem::size_of::<crate::elf::Elf64Phdr>()
     {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
 
-    let header_offset = usize::try_from(header.e_phoff).map_err(|_| EINVAL)?;
+    let header_offset = usize::try_from(header.e_phoff).map_err(|_| Error::InvalidArgument)?;
     let header_size = usize::from(header.e_phentsize);
     let mut segments = Vec::new();
     for index in 0..usize::from(header.e_phnum) {
         let offset = index
             .checked_mul(header_size)
             .and_then(|value| header_offset.checked_add(value))
-            .ok_or(EINVAL)?;
+            .ok_or(Error::InvalidArgument)?;
+        offset
+            .checked_add(core::mem::size_of::<crate::elf::Elf64Phdr>())
+            .filter(|end| *end <= data.len())
+            .ok_or(Error::InvalidArgument)?;
         let program_header = measurement
             .parse(|| crate::elf::parse_phdr(data, offset))
-            .ok_or(EINVAL)?;
+            .ok_or(Error::InvalidArgument)?;
         if program_header.p_type == crate::elf::PT_LOAD {
             validate_load_segment(data, &program_header)?;
             segments
                 .try_reserve(1)
-                .map_err(|_| crate::syscall::types::ENOMEM)?;
+                .map_err(|_| Error::ResourceUnavailable)?;
             segments.push(program_header);
         }
     }
     if segments.is_empty() {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
     let entry_is_executable = segments.iter().any(|segment| {
         segment.p_flags & PF_EXECUTE != 0
@@ -140,7 +144,7 @@ fn parse_load_segments(
                 .unwrap_or(false)
     });
     if !entry_is_executable {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
     Ok((header, segments))
 }
@@ -150,20 +154,20 @@ pub(super) fn map_elf_image(
     data: &[u8],
     table_phys: u64,
     measurement: &mut ExecMeasurement,
-) -> Result<ElfImageLayout, u64> {
-    use crate::syscall::types::EINVAL;
-
+) -> Result<ElfImageLayout, Error> {
     let (header, segments) = parse_load_segments(data, measurement)?;
     let load_base = segments[0]
         .p_vaddr
         .checked_sub(segments[0].p_offset)
-        .ok_or(EINVAL)?;
-    let phdr_vaddr = load_base.checked_add(header.e_phoff).ok_or(EINVAL)?;
+        .ok_or(Error::InvalidArgument)?;
+    let phdr_vaddr = load_base
+        .checked_add(header.e_phoff)
+        .ok_or(Error::InvalidArgument)?;
     let mut deferred_zero_regions = Vec::new();
     // Finish metadata allocation before the first page-table mutation.
     deferred_zero_regions
         .try_reserve_exact(segments.len())
-        .map_err(|_| crate::syscall::types::ENOMEM)?;
+        .map_err(|_| Error::ResourceUnavailable)?;
 
     for (index, segment) in segments.iter().enumerate() {
         let source_offset = segment.p_offset as usize;
@@ -183,7 +187,7 @@ pub(super) fn map_elf_image(
                 segment.p_flags & PF_EXECUTE != 0,
             )
         });
-        mapped.map_err(mapping_error_errno)?;
+        mapped.map_err(mapping_error_native)?;
 
         if let Some((start, len)) = deferred {
             deferred_zero_regions.push(crate::task::MemoryRegion::anonymous(

@@ -188,6 +188,15 @@ fn mapping_error_errno(error: crate::Kernel) -> u64 {
     }
 }
 
+fn mapping_error_native(error: crate::Kernel) -> mnu_abi::status::Error {
+    match error {
+        crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => {
+            mnu_abi::status::Error::ResourceUnavailable
+        }
+        _ => mnu_abi::status::Error::InvalidArgument,
+    }
+}
+
 #[inline]
 fn aslr_mix64(mut x: u64) -> u64 {
     x ^= x >> 30;
@@ -794,14 +803,14 @@ fn exec_with_data(
             deferred_zero_regions,
         } = match map_elf_image(data, new_pt_phys, measurement) {
             Ok(layout) => layout,
-            Err(errno) => {
+            Err(error) => {
                 crate::kernel::early_serial("exec: map ELF failed\n");
                 crate::warn!(
                     "exec: invalid or unmappable ELF image '{}': {}",
                     exec_path,
-                    errno
+                    error.into_raw()
                 );
-                return errno;
+                return error.into_raw();
             }
         };
 
@@ -1128,7 +1137,7 @@ fn replace_current_process_image(
         mut deferred_zero_regions,
     } = match map_elf_image(data, new_pt_phys, &mut measurement) {
         Ok(layout) => layout,
-        Err(errno) => return Err(errno),
+        Err(error) => return Err(error.into_raw()),
     };
     let stack =
         build_relocatable_user_stack(aslr_seed, startup, phdr_vaddr, phentsize, phnum, entry);
