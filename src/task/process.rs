@@ -164,6 +164,45 @@ impl MmioMapping {
 }
 
 impl MemoryRegion {
+    /// Copy exact VM metadata without changing backing authority or offsets.
+    pub(crate) fn try_clone(&self) -> core::result::Result<Self, mnu_abi::status::Error> {
+        fn copied<T: Copy>(source: &[T]) -> core::result::Result<Vec<T>, mnu_abi::status::Error> {
+            let mut result = Vec::new();
+            result
+                .try_reserve_exact(source.len())
+                .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)?;
+            result.extend_from_slice(source);
+            Ok(result)
+        }
+        let backing = match &self.backing {
+            MemoryBacking::Anonymous {
+                data, writable, shared,
+            } => MemoryBacking::Anonymous {
+                data: copied(data)?,
+                writable: *writable,
+                shared: *shared,
+            },
+            MemoryBacking::File {
+                object, offset, writable, shared,
+            } => MemoryBacking::File {
+                object: Arc::clone(object),
+                offset: *offset,
+                writable: *writable,
+                shared: *shared,
+            },
+        };
+        Ok(Self {
+            start: self.start,
+            len: self.len,
+            access: self.access,
+            max_access: self.max_access,
+            access_ranges: copied(&self.access_ranges)?,
+            options: self.options,
+            backing,
+            dirty_pages: copied(&self.dirty_pages)?,
+        })
+    }
+
     pub fn file_backed(
         start: u64,
         len: u64,

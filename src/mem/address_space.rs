@@ -107,11 +107,19 @@ impl CloneSource {
         let mut excluded = Vec::new();
         for buffer in process.dma_buffers() {
             let end = buffer.end().ok_or(CloneError::BorrowedMapping)?;
+            excluded.try_reserve(1).map_err(|_| CloneError::Allocation)?;
             excluded.push((buffer.virt_start(), end));
+        }
+        let mut regions = Vec::new();
+        regions
+            .try_reserve_exact(process.memory_regions().len())
+            .map_err(|_| CloneError::Allocation)?;
+        for region in process.memory_regions() {
+            regions.push(region.try_clone().map_err(CloneError::Backing)?);
         }
         Ok(Self {
             table,
-            regions: process.memory_regions().to_vec(),
+            regions,
             excluded,
             heap_start: process.heap_start(),
             heap_end: process.heap_end(),
