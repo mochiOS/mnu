@@ -156,7 +156,12 @@ pub enum SyscallNumber {
     /// deadline admission failure is ResourceUnavailable. Other failures also
     /// use status::Error; no child relationship or POSIX wait status is used.
     ProcessHandleWait = 643,
+    /// Operates on a SIGNAL Process Handle. Failures use status::Error;
+    /// a retired/missing target is NotFound.
     ProcessHandleResume = 645,
+    /// Elects one terminal publication owner through a SIGNAL Process Handle.
+    /// Native NotReady denotes an in-progress owner, NotFound a terminal or
+    /// absent target. Committed exit is not undone by deferred cleanup errors.
     ProcessHandleTerminate = 646,
     HandleWaitMany = 647,
     /// Associates an opaque key with an existing caller-owned Handle. Does
@@ -225,6 +230,8 @@ pub enum SyscallNumber {
     ProviderObjectSignal = 667,
     HandleControl = 668,
     ProcessSuspendCurrent = 669,
+    /// Suspends execution through a SIGNAL Process Handle. Failures use
+    /// status::Error; no eligible thread is NotReady, a retired target NotFound.
     ProcessHandleSuspend = 670,
     /// Creates zero-filled RAM backing and returns a process-local Handle.
     /// Arguments: byte length, options. Zero options select fixed nonempty
