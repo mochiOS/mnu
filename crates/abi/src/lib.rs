@@ -167,6 +167,11 @@ pub enum SyscallNumber {
     /// Native NotReady denotes an in-progress owner, NotFound a terminal or
     /// absent target. Committed exit is not undone by deferred cleanup errors.
     ProcessHandleTerminate = 646,
+    /// Observes readiness through caller-owned WAIT Handles. Failures use
+    /// status::Error: no ready object/deadline expiry/upcall is NotReady;
+    /// local wait-storage exhaustion is ResourceUnavailable. Invalid target
+    /// kind or interests is InvalidArgument, a retired endpoint is NotFound.
+    /// Resource-specific native failures are preserved.
     HandleWaitMany = 647,
     /// Associates an opaque key with an existing caller-owned Handle. Does
     /// not duplicate, transfer or change rights. Native failures are
@@ -287,7 +292,9 @@ pub enum SyscallNumber {
     /// per-call options. STREAM_IO_TRY never changes shared object options.
     StreamRead = 681,
     /// Waits on object readiness with an entry precondition. Arguments:
-    /// HandleWaitItem array, count, deadline, nonzero HandleWaitGuard pointer.
+    /// HandleWaitItem array, count, deadline, optional HandleWaitGuard pointer
+    /// (zero disables the precondition). Uses HandleWaitMany's native errors;
+    /// a changed precondition returns NotReady.
     HandleWaitManyGuarded = 682,
     /// Reads native CPU execution accounting. Arguments: Process Handle (zero
     /// selects only the caller), output pointer, exact ProcessExecutionUsage

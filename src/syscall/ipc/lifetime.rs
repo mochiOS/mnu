@@ -6,10 +6,9 @@
 use super::IpcEndpoint;
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::{ThreadId, ThreadQueue};
+use mnu_abi::status::Error;
 
 const LIMIT: usize = mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS;
-const ESRCH: u64 = (-3i64) as u64;
-const EAGAIN: u64 = (-11i64) as u64;
 
 #[derive(Clone, Copy)]
 struct Entry {
@@ -60,14 +59,17 @@ impl Drop for Observation {
 }
 
 pub(crate) fn observe(endpoint: IpcEndpoint, waiter: ThreadId) -> Result<Observation, u64> {
-    let slot = crate::task::thread_slot_index_by_u64(waiter.as_u64()).ok_or(ESRCH)?;
+    let slot = crate::task::thread_slot_index_by_u64(waiter.as_u64())
+        .ok_or_else(|| Error::NotReady.into_raw())?;
     let mut watchers = WATCHERS.lock();
     // Validate under the subscription lock. A retirement published after this
     // check must see the new entry; an earlier retirement makes it fail here.
     if !super::endpoint_is_valid(endpoint) {
-        return Err(ESRCH);
+        return Err(Error::NotFound.into_raw());
     }
-    let row = watchers.get_mut(slot).ok_or(ESRCH)?;
+    let row = watchers
+        .get_mut(slot)
+        .ok_or_else(|| Error::NotReady.into_raw())?;
     if row.owner != Some(waiter) {
         *row = Row::new();
         row.owner = Some(waiter);
@@ -78,13 +80,16 @@ pub(crate) fn observe(endpoint: IpcEndpoint, waiter: ThreadId) -> Result<Observa
         .flatten()
         .find(|entry| entry.endpoint == endpoint)
     {
-        entry.references = entry.references.checked_add(1).ok_or(EAGAIN)?;
+        entry.references = entry
+            .references
+            .checked_add(1)
+            .ok_or_else(|| Error::ResourceUnavailable.into_raw())?;
     } else {
         let entry = row
             .entries
             .iter_mut()
             .find(|entry| entry.is_none())
-            .ok_or(EAGAIN)?;
+            .ok_or_else(|| Error::ResourceUnavailable.into_raw())?;
         *entry = Some(Entry {
             endpoint,
             references: 1,
