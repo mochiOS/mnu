@@ -1,14 +1,6 @@
 //! Preflight a complete virtual range before changing PTEs or mapping metadata.
 //! The caller holds the mapping/process lock until its edit is committed;
 //! backing reservations start under that same lock. No allocation or IPC.
-pub(crate) fn check(
-    regions: &[crate::task::MemoryRegion],
-    start: u64,
-    end: u64,
-) -> Result<(), u64> {
-    check_range(regions, start, end, false)
-}
-
 /// Native VM editors retain typed backing failures through admission. The
 /// caller holds mapping exclusion until its edit is committed.
 pub(crate) fn check_native(
@@ -38,15 +30,6 @@ pub(crate) fn check_unmap(
     start: u64,
     end: u64,
 ) -> Result<(), u64> {
-    check_range(regions, start, end, true)
-}
-
-fn check_range(
-    regions: &[crate::task::MemoryRegion],
-    start: u64,
-    end: u64,
-    removing: bool,
-) -> Result<(), u64> {
     if start >= end {
         return Err(crate::syscall::EINVAL);
     }
@@ -54,11 +37,7 @@ fn check_range(
         let region_end = region.end().ok_or(crate::syscall::EINVAL)?;
         if start < region_end && region.start() < end {
             if let Some(object) = region.backing().file_object() {
-                if removing {
-                    object.check_mapping_removal()?;
-                } else {
-                    object.with_memory_generation(object.memory_generation(), || Ok(()))?;
-                }
+                object.check_mapping_removal()?;
             }
         }
     }
@@ -78,8 +57,8 @@ pub(crate) fn check_access(
     let end = start
         .checked_add(length)
         .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
-    check(regions, start, end).map_err(|error| {
-        Kernel::Memory(if error == crate::syscall::EAGAIN {
+    check_native(regions, start, end).map_err(|error| {
+        Kernel::Memory(if error == mnu_abi::status::Error::NotReady {
             Memory::Busy
         } else {
             Memory::InvalidAddress
