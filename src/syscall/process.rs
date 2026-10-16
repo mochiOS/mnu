@@ -903,7 +903,8 @@ fn memory_map_impl(
             )
         };
         let removed = if replace {
-            crate::mem::mapping_replace::replace(process, region, byte_ceiling)?
+            crate::mem::mapping_replace::replace(process, region, byte_ceiling)
+                .map_err(mnu_abi::status::Error::into_raw)?
         } else {
             if !process.add_memory_region(region) {
                 return Err(EINVAL);
