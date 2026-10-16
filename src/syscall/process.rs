@@ -318,8 +318,10 @@ pub fn sleep(milliseconds: u64) -> u64 {
     }
     let wait_ticks = crate::interrupt::timer::ms_to_ticks_ceil(milliseconds);
     let target = crate::syscall::time::get_ticks().saturating_add(wait_ticks);
-    crate::syscall::time::sleep_until(target);
-    SUCCESS
+    match crate::syscall::time::sleep_until(target) {
+        Ok(()) => SUCCESS,
+        Err(error) => error.into_raw(),
+    }
 }
 
 /// Resolve a write-authorized COW leaf in the caller's retained VM root.

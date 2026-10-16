@@ -1,6 +1,6 @@
 //! 時間関連システムコール
 
-use super::types::{EAGAIN, EINVAL, SUCCESS};
+use super::types::SUCCESS;
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -312,15 +312,15 @@ pub fn clock_read(clock: u64, instant_ptr: u64) -> u64 {
 /// - `ticks`: 待機する絶対ティック数
 ///
 /// # 戻り値
-/// 成功時は0
-pub fn sleep_until(ticks: u64) -> u64 {
+/// Returns native failures without interpreting a compatibility errno.
+pub fn sleep_until(ticks: u64) -> Result<(), Error> {
     if get_ticks() >= ticks {
-        return SUCCESS;
+        return Ok(());
     }
 
     let current_tid = match crate::task::current_thread_id() {
         Some(tid) => tid,
-        None => return EINVAL,
+        None => return Err(Error::NotReady),
     };
 
     let queued = x86_64::instructions::interrupts::without_interrupts(|| {
@@ -331,11 +331,11 @@ pub fn sleep_until(ticks: u64) -> u64 {
         true
     });
     if !queued {
-        return EAGAIN;
+        return Err(Error::ResourceUnavailable);
     }
 
     while get_ticks() < ticks {
         crate::task::yield_now();
     }
-    SUCCESS
+    Ok(())
 }
