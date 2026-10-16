@@ -195,7 +195,8 @@ pub enum SyscallNumber {
     AddressSpaceClone = 679,
     /// Reads metadata for the caller's own Handle table. No object references
     /// are acquired. Arguments: HandleInfo buffer, record capacity. (0, 0)
-    /// queries the current count; an insufficient buffer returns ENOSPC.
+    /// queries the current count without allocating. Failures use status::Error;
+    /// an insufficient record capacity returns LimitExceeded without copying.
     HandleTableRead = 680,
     /// Reads available stream bytes. Arguments: Handle, destination, length,
     /// per-call options. STREAM_IO_TRY never changes shared object options.

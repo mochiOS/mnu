@@ -451,7 +451,7 @@ impl ObjectHandleTable {
     }
 
     /// Metadata only: neither duplicates objects nor makes another table visible.
-    pub fn describe(&self) -> Vec<mnu_abi::HandleInfo> {
+    pub fn describe(&self) -> impl ExactSizeIterator<Item = mnu_abi::HandleInfo> + '_ {
         self.entries
             .iter()
             .map(|(handle, entry)| mnu_abi::HandleInfo {
@@ -459,7 +459,6 @@ impl ObjectHandleTable {
                 reserved: 0,
                 rights: entry.rights().bits(),
             })
-            .collect()
     }
 
     pub fn insert(&mut self, entry: ObjectHandleEntry) -> Option<ObjectHandle> {
