@@ -1209,7 +1209,8 @@ fn replace_current_process_image(
                         process.object_handles().get(handle).is_some()
                     })
             })
-            .ok_or(EINVAL)??,
+            .ok_or_else(|| mnu_abi::status::Error::NotReady.into_raw())?
+            .map_err(mnu_abi::status::Error::into_raw)?,
         )
     } else {
         None

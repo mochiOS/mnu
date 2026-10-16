@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use mnu_abi::status::Error;
 
 use super::handle_table::ObjectHandle;
 
@@ -48,10 +49,10 @@ impl<T: Copy> Entries<T> {
     fn values(&self) -> impl Iterator<Item = &T> {
         self.0.iter().map(|entry| &entry.1)
     }
-    fn try_copy(&self, capacity: usize) -> Result<Self, u64> {
+    fn try_copy(&self, capacity: usize) -> Result<Self, Error> {
         let mut copy = Vec::new();
         copy.try_reserve_exact(capacity.max(self.len()))
-            .map_err(|_| mnu_abi::ENOMEM)?;
+            .map_err(|_| Error::ResourceUnavailable)?;
         copy.extend_from_slice(&self.0);
         Ok(Self(copy))
     }
@@ -143,7 +144,7 @@ impl LaunchContext {
         &self,
         updates: I,
         mut valid_handle: impl FnMut(ObjectHandle) -> bool,
-    ) -> Result<Self, u64>
+    ) -> Result<Self, Error>
     where
         I: Iterator<Item = mnu_abi::process_image::ContextUpdate> + Clone,
     {
@@ -156,9 +157,9 @@ impl LaunchContext {
                     let handle = u32::try_from(update.value)
                         .ok()
                         .and_then(ObjectHandle::from_raw)
-                        .ok_or(mnu_abi::EBADF)?;
+                        .ok_or(Error::InvalidArgument)?;
                     if !valid_handle(handle) {
-                        return Err(mnu_abi::EBADF);
+                        return Err(Error::InvalidArgument);
                     }
                     handles += usize::from(!self.inherited_handles.contains_key(&update.key));
                 }
@@ -167,7 +168,7 @@ impl LaunchContext {
                         .checked_sub(usize::from(
                             self.inherited_handles.contains_key(&update.key),
                         ))
-                        .ok_or(mnu_abi::EINVAL)?
+                        .ok_or(Error::InvalidArgument)?
                 }
                 U::SET_VALUE => {
                     values += usize::from(!self.inherited_values.contains_key(&update.key))
@@ -175,13 +176,13 @@ impl LaunchContext {
                 U::REMOVE_VALUE => {
                     values = values
                         .checked_sub(usize::from(self.inherited_values.contains_key(&update.key)))
-                        .ok_or(mnu_abi::EINVAL)?
+                        .ok_or(Error::InvalidArgument)?
                 }
-                _ => return Err(mnu_abi::EINVAL),
+                _ => return Err(Error::InvalidArgument),
             }
         }
         if handles > PROCESS_MAX_INHERITED_HANDLES || values > PROCESS_MAX_INHERITED_VALUES {
-            return Err(mnu_abi::ENOSPC);
+            return Err(Error::ResourceUnavailable);
         }
         let mut prepared = Self {
             inherited_handles: self.inherited_handles.try_copy(handles)?,
@@ -204,13 +205,13 @@ impl LaunchContext {
             let installed = match update.kind {
                 U::SET_HANDLE => prepared.set(
                     update.key,
-                    ObjectHandle::from_raw(update.value as u32).ok_or(mnu_abi::EBADF)?,
+                    ObjectHandle::from_raw(update.value as u32).ok_or(Error::InvalidArgument)?,
                 ),
                 U::SET_VALUE => prepared.set_value(update.key, update.value),
                 _ => true,
             };
             if !installed {
-                return Err(mnu_abi::ENOMEM);
+                return Err(Error::ResourceUnavailable);
             }
         }
         Ok(prepared)
