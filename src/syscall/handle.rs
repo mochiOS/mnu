@@ -1317,9 +1317,10 @@ pub fn process_open_by_id(process_id: u64, requested_rights: u64) -> u64 {
 }
 
 fn process_status_for(raw: u64) -> Result<mnu_abi::ProcessStatus, u64> {
-    let object = object(raw, HandleRights::WAIT)?;
+    use mnu_abi::status::Error;
+    let object = object_native(raw, HandleRights::WAIT).map_err(Error::into_raw)?;
     let KernelObject::Process(process) = object else {
-        return Err(EBADF);
+        return Err(Error::InvalidArgument.into_raw());
     };
     let exited = process.is_exited();
     Ok(mnu_abi::ProcessStatus {
@@ -1335,8 +1336,9 @@ fn process_status_for(raw: u64) -> Result<mnu_abi::ProcessStatus, u64> {
 }
 
 fn write_process_status(output: u64, status: mnu_abi::ProcessStatus) -> u64 {
+    use mnu_abi::status::Error;
     if output == 0 {
-        return EINVAL;
+        return Error::InvalidAddress.into_raw();
     }
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -1344,9 +1346,9 @@ fn write_process_status(output: u64, status: mnu_abi::ProcessStatus) -> u64 {
             core::mem::size_of::<mnu_abi::ProcessStatus>(),
         )
     };
-    crate::syscall::copy_to_user(output, bytes)
+    crate::syscall::copy_to_user_native(output, bytes)
         .map(|_| SUCCESS)
-        .unwrap_or_else(|error| error)
+        .unwrap_or_else(Error::into_raw)
 }
 
 pub fn process_status(raw: u64, output: u64) -> u64 {
@@ -1357,18 +1359,23 @@ pub fn process_status(raw: u64, output: u64) -> u64 {
 }
 
 fn process_execution_usage_for(raw: u64) -> Result<mnu_abi::ProcessExecutionUsage, u64> {
+    use mnu_abi::status::Error;
     let process = if raw == 0 {
-        let caller = current_process()?;
-        crate::task::with_process(caller, |process| process.process_object()).ok_or(ESRCH)?
+        let caller = crate::syscall::security::current_process_id()
+            .ok_or_else(|| Error::NotReady.into_raw())?;
+        crate::task::with_process(caller, |process| process.process_object())
+            .ok_or_else(|| Error::NotReady.into_raw())?
     } else {
-        let KernelObject::Process(process) = object(raw, HandleRights::WAIT)? else {
-            return Err(EBADF);
+        let KernelObject::Process(process) =
+            object_native(raw, HandleRights::WAIT).map_err(Error::into_raw)?
+        else {
+            return Err(Error::InvalidArgument.into_raw());
         };
         process
     };
     let ticks_per_second = crate::interrupt::timer::ticks_per_second();
     if ticks_per_second == 0 {
-        return Err(EAGAIN);
+        return Err(Error::NotReady.into_raw());
     }
     let (user_ticks, kernel_ticks) = crate::task::thread::process_execution_ticks(&process);
     Ok(mnu_abi::ProcessExecutionUsage {
@@ -1380,8 +1387,9 @@ fn process_execution_usage_for(raw: u64) -> Result<mnu_abi::ProcessExecutionUsag
 }
 
 pub fn process_execution_read(raw: u64, output: u64, length: u64) -> u64 {
+    use mnu_abi::status::Error;
     if length != core::mem::size_of::<mnu_abi::ProcessExecutionUsage>() as u64 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let usage = match process_execution_usage_for(raw) {
         Ok(usage) => usage,
@@ -1393,9 +1401,9 @@ pub fn process_execution_read(raw: u64, output: u64, length: u64) -> u64 {
             core::mem::size_of::<mnu_abi::ProcessExecutionUsage>(),
         )
     };
-    crate::syscall::copy_to_user(output, bytes)
+    crate::syscall::copy_to_user_native(output, bytes)
         .map(|_| SUCCESS)
-        .unwrap_or_else(|error| error)
+        .unwrap_or_else(Error::into_raw)
 }
 
 /// Waits until the process exits. `deadline_nanoseconds` is an absolute

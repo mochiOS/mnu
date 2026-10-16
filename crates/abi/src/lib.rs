@@ -148,6 +148,8 @@ pub enum SyscallNumber {
     LaunchValueGet = 639,
     ClockRead = 640,
     ProcessHandleOpen = 641,
+    /// Observes a retained WAIT Process Handle, including after its process
+    /// table record is reclaimed. Failures use status::Error.
     ProcessHandleStatus = 642,
     ProcessHandleWait = 643,
     ProcessHandleResume = 645,
@@ -272,6 +274,8 @@ pub enum SyscallNumber {
     /// Reads native CPU execution accounting. Arguments: Process Handle (zero
     /// selects only the caller), output pointer, exact ProcessExecutionUsage
     /// byte length. A nonzero handle must grant WAIT; no PID is accepted.
+    /// Failures use status::Error; unavailable caller/rate is NotReady.
+    /// Output-copy failures retain their native categories.
     ProcessExecutionRead = 683,
     /// Waits on a memory value with a second 64-bit entry precondition.
     /// Arguments: address, expected, value size, monotonic deadline,
