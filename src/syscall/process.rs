@@ -866,9 +866,10 @@ fn memory_map_impl(
             // including pages neither process has faulted yet. Its storage
             // is populated lazily by the existing RAM-object pager.
             if shared {
-                let memory = Arc::try_new(crate::mem::shared_memory::SharedMemory::new(
+                let memory = crate::mem::shared_memory::SharedMemory::new(
                     size, size / 4096,
-                )?).map_err(|_| ENOMEM)?;
+                ).map_err(mnu_abi::status::Error::into_raw)?;
+                let memory = Arc::try_new(memory).map_err(|_| ENOMEM)?;
                 let object = Arc::try_new(crate::mem::vm_object::VmObject::shared_memory(memory))
                     .map_err(|_| ENOMEM)?;
                 crate::task::MemoryRegion::file_backed(

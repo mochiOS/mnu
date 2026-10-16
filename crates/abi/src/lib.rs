@@ -159,6 +159,7 @@ pub enum SyscallNumber {
     /// Arguments: byte length, options. Zero options select fixed nonempty
     /// page-aligned backing; MEMORY_OBJECT_RESIZABLE permits byte extents,
     /// including zero, and grants CONTROL for MemoryObjectResize.
+    /// Failures use status::Error, not compatibility-layer errno values.
     MemoryObjectCreate = 671,
     /// Returns the byte length of a process-local MemoryObject with MAP rights.
     MemoryObjectLength = 672,

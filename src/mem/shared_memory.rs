@@ -24,24 +24,24 @@ impl Drop for OwnedFrame {
 }
 
 impl SharedMemory {
-    pub fn new(length: u64, maximum_pages: u64) -> Result<Self, u64> {
+    pub fn new(length: u64, maximum_pages: u64) -> Result<Self, NativeError> {
         let pages = SharedPages::new(length, PAGE_BYTES, maximum_pages);
         Self::from_pages(pages)
     }
 
     /// Byte extent constructor for explicitly resizable native RAM objects.
-    pub(crate) fn new_resizable(length: u64, maximum_pages: u64) -> Result<Self, u64> {
+    pub(crate) fn new_resizable(length: u64, maximum_pages: u64) -> Result<Self, NativeError> {
         Self::from_pages(SharedPages::new_bytes(length, PAGE_BYTES, maximum_pages))
     }
 
-    fn from_pages(pages: Result<SharedPages<OwnedFrame>, SizeError>) -> Result<Self, u64> {
+    fn from_pages(pages: Result<SharedPages<OwnedFrame>, SizeError>) -> Result<Self, NativeError> {
         let pages = pages.map_err(|error| match error {
-            SizeError::Invalid => crate::syscall::EINVAL,
-            SizeError::LimitExceeded => crate::syscall::ENOMEM,
+            SizeError::Invalid => NativeError::InvalidArgument,
+            SizeError::LimitExceeded => NativeError::ResourceUnavailable,
         })?;
         let id = NEXT_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| crate::syscall::ENOMEM)?;
+            .map_err(|_| NativeError::ResourceUnavailable)?;
         Ok(Self {
             id,
             generation: AtomicU64::new(0),

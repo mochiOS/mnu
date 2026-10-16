@@ -54,14 +54,15 @@ fn current_process() -> Result<crate::task::ProcessId, u64> {
 /// Creates backing owned by the caller, not a view into another process.
 /// Existing Handle duplication and IPC attachment paths enforce attenuation.
 pub fn memory_object_create(length: u64, options: u64) -> u64 {
+    use mnu_abi::status::Error;
     if options & !mnu_abi::MEMORY_OBJECT_RESIZABLE != 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
-    let process_id = match current_process() {
-        Ok(process) => process,
-        Err(error) => return error,
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process) => process,
+        None => return Error::NotReady.into_raw(),
     };
-    crate::task::with_process_mut(process_id, |process| {
+    let result = crate::task::with_process_mut(process_id, |process| {
         let maximum_pages = process.resource_limits().max_mapped_pages as u64;
         let resizable = options & mnu_abi::MEMORY_OBJECT_RESIZABLE != 0;
         let backing = if resizable {
@@ -69,13 +70,11 @@ pub fn memory_object_create(length: u64, options: u64) -> u64 {
         } else {
             crate::mem::shared_memory::SharedMemory::new(length, maximum_pages)
         };
-        let memory = match backing {
-            Ok(memory) => Arc::new(memory),
-            Err(error) => return error,
-        };
-        let object = KernelObject::VmObject(Arc::new(
-            crate::mem::vm_object::VmObject::shared_memory(memory),
-        ));
+        let memory = Arc::try_new(backing?).map_err(|_| Error::ResourceUnavailable)?;
+        let object = KernelObject::VmObject(
+            Arc::try_new(crate::mem::vm_object::VmObject::shared_memory(memory))
+                .map_err(|_| Error::ResourceUnavailable)?,
+        );
         let mut rights = HandleRights::READ
             .union(HandleRights::WRITE)
             .union(HandleRights::MAP)
@@ -88,9 +87,10 @@ pub fn memory_object_create(length: u64, options: u64) -> u64 {
             .object_handles_mut()
             .insert(ObjectHandleEntry::new(object, rights))
             .map(|handle| handle.raw() as u64)
-            .unwrap_or(ENOSPC)
+            .ok_or(Error::ResourceUnavailable)
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Err(Error::NotReady));
+    result.unwrap_or_else(Error::into_raw)
 }
 
 fn decode_handle(raw: u64) -> Result<ObjectHandle, u64> {
