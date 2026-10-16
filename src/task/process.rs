@@ -758,11 +758,14 @@ impl Process {
     /// * `name` - プロセス名
     /// * `privilege` - 権限レベル
     /// * `priority` - プロセスの優先度
-    pub fn new(
+    pub fn try_new(
         name: &str,
         privilege: PrivilegeLevel,
         priority: u8,
-    ) -> Self {
+    ) -> core::result::Result<Self, mnu_abi::status::Error> {
+        use alloc::boxed::Box;
+        use mnu_abi::status::Error;
+
         let mut name_buf = [0u8; 32];
         let bytes = name.as_bytes();
         let len = core::cmp::min(bytes.len(), 32);
@@ -773,9 +776,15 @@ impl Process {
         let heap_start = 0;
 
         let id = ProcessId::new();
-        Self {
+        let object =
+            Arc::try_new(ProcessObject::new(id)).map_err(|_| Error::ResourceUnavailable)?;
+        let object_handles = Box::try_new(ObjectHandleTable::new())
+            .map_err(|_| Error::ResourceUnavailable)?;
+        let launch_context =
+            Box::try_new(LaunchContext::new()).map_err(|_| Error::ResourceUnavailable)?;
+        Ok(Self {
             id,
-            object: Arc::new(ProcessObject::new(id)),
+            object,
             application_identity: None,
             image_digest: None,
             pending_exec_security: None,
@@ -799,13 +808,13 @@ impl Process {
             priority,
             foreground: false,
             exit_code: None,
-            object_handles: ObjectHandleTable::new_boxed(),
-            launch_context: LaunchContext::new_boxed(),
+            object_handles,
+            launch_context,
             memory_regions: alloc::vec::Vec::new(),
             mmio_mappings: Vec::new(),
             dma_buffers: Vec::new(),
             resource_limits: ResourceLimits::default(),
-        }
+        })
     }
 
     /// プロセスIDを取得

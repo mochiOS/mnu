@@ -430,11 +430,15 @@ pub struct ObjectHandleTable {
 }
 
 impl ObjectHandleTable {
-    pub fn new_boxed() -> Box<Self> {
-        Box::new(Self {
+    pub fn new() -> Self {
+        Self {
             entries: Vec::new(),
             next: 1,
-        })
+        }
+    }
+
+    pub fn new_boxed() -> Box<Self> {
+        Box::new(Self::new())
     }
 
     pub fn get(&self, handle: ObjectHandle) -> Option<ObjectHandleEntry> {

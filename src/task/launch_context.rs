@@ -67,11 +67,15 @@ pub struct LaunchContext {
 }
 
 impl LaunchContext {
-    pub fn new_boxed() -> Box<Self> {
-        Box::new(Self {
+    pub fn new() -> Self {
+        Self {
             inherited_handles: Entries::new(),
             inherited_values: Entries::new(),
-        })
+        }
+    }
+
+    pub fn new_boxed() -> Box<Self> {
+        Box::new(Self::new())
     }
 
     pub fn get(&self, key: u64) -> Option<ObjectHandle> {

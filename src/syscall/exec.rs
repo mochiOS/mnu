@@ -932,7 +932,10 @@ fn exec_with_data(
         let privilege = resolve_exec_privilege(requested_privilege);
         const DEFAULT_PROCESS_PRIORITY: u8 = 8;
         let priority = DEFAULT_PROCESS_PRIORITY;
-        let mut proc = crate::task::Process::new(process_name, privilege, priority);
+        let mut proc = match crate::task::Process::try_new(process_name, privilege, priority) {
+            Ok(process) => process,
+            Err(error) => return error.into_raw(),
+        };
         proc.set_image_digest(Sha256::digest(data).into());
         if let Some(identity) = application_identity {
             proc.set_application_identity(identity);
@@ -1604,7 +1607,10 @@ fn create_from_address_space(
         ExecutionClass::Privileged => crate::task::PrivilegeLevel::Service,
         ExecutionClass::Unprivileged => crate::task::PrivilegeLevel::User,
     };
-    let mut process = crate::task::Process::new(request.label, privilege, 8);
+    let mut process = match crate::task::Process::try_new(request.label, privilege, 8) {
+        Ok(process) => process,
+        Err(error) => return error.into_raw(),
+    };
     // Only the explicit grants are installed. No creator table, relationship,
     // resource policy, or execution identity is implicitly inherited.
     if let Err(error) = install_inherited_handles(&mut process, grants) {

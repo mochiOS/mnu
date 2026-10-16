@@ -32,7 +32,13 @@ fn spawn_ap_idle_thread() -> Result<(task::ThreadId, usize)> {
         .ok_or(Kernel::Memory(crate::result::Memory::OutOfMemory))?;
     let seq = AP_IDLE_THREAD_SEQ.fetch_add(1, Ordering::AcqRel) + 1;
     let name = alloc::format!("ap-idle-{}", seq);
-    let idle_process = task::Process::new(&name, task::PrivilegeLevel::Core, 0);
+    let idle_process = match task::Process::try_new(&name, task::PrivilegeLevel::Core, 0) {
+        Ok(process) => process,
+        Err(_) => {
+            task::free_kernel_stack(kernel_stack);
+            return Err(Kernel::Memory(crate::result::Memory::OutOfMemory));
+        }
+    };
     let idle_pid = idle_process.id();
     if task::add_process(idle_process).is_none() {
         task::free_kernel_stack(kernel_stack);
@@ -250,7 +256,8 @@ pub static SECONDARY_CPU_ENTRY: unsafe extern "sysv64" fn(*const BootInfo, u64) 
 
 /// カーネルメインプロセスの作成
 fn create_kernel_proc() -> Result<()> {
-    let kernel_process = task::Process::new("kernel", task::PrivilegeLevel::Core, 0);
+    let kernel_process = task::Process::try_new("kernel", task::PrivilegeLevel::Core, 0)
+        .map_err(|_| Kernel::Memory(crate::result::Memory::OutOfMemory))?;
     let kernel_pid = kernel_process.id();
 
     if task::add_process(kernel_process).is_none() {
