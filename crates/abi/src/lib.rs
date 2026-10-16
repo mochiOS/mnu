@@ -254,6 +254,8 @@ pub enum SyscallNumber {
     /// Returns a private READ/CONTROL/DUPLICATE Handle, without TRANSFER.
     /// HandleReadAt reads immutable handle_snapshot metadata; ProcessCreate
     /// may explicitly select it as its captured grant source.
+    /// Failures use status::Error. Capture allocation or a full caller table
+    /// returns ResourceUnavailable without publishing a partial capture.
     HandleTableCapture = 693,
     /// Writes to a provider with a per-operation exclusive byte end. Arguments:
     /// WRITE Handle, source pointer, byte length, byte end. Provider selects
