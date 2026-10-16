@@ -1,9 +1,10 @@
 //! 時間関連システムコール
 
-use super::types::{EACCES, EAGAIN, EFAULT, EINVAL, SUCCESS};
+use super::types::{EAGAIN, EINVAL, SUCCESS};
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use mnu_abi::status::Error;
 
 static REALTIME_VALID: AtomicBool = AtomicBool::new(false);
 static REALTIME_BASE_SECONDS: AtomicU64 = AtomicU64::new(0);
@@ -209,21 +210,22 @@ pub fn clock_describe(clock: u64, info_ptr: u64, info_len: u64) -> u64 {
     if mnu_abi::ClockId::from_raw(clock).is_none()
         || info_len != core::mem::size_of::<mnu_abi::ClockInfo>() as u64
     {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if info_ptr == 0 {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
     // All current native clocks advance in timer ticks, including realtime
     // interpolation and execution sampling. Query the source, not a POSIX ID.
-    let Some(quantum) = crate::interrupt::timer::tick_ms().checked_mul(1_000_000)
+    let Some(quantum) = crate::interrupt::timer::tick_ms()
+        .checked_mul(1_000_000)
         .filter(|quantum| *quantum != 0)
     else {
-        return EAGAIN;
+        return Error::NotReady.into_raw();
     };
-    match crate::syscall::copy_to_user(info_ptr, &quantum.to_le_bytes()) {
+    match crate::syscall::copy_to_user_native(info_ptr, &quantum.to_le_bytes()) {
         Ok(()) => SUCCESS,
-        Err(error) => error,
+        Err(error) => error.into_raw(),
     }
 }
 
@@ -231,7 +233,7 @@ pub fn clock_describe(clock: u64, info_ptr: u64, info_len: u64) -> u64 {
 /// Realtime still requires SystemTimeRead.
 pub fn clock_read(clock: u64, instant_ptr: u64) -> u64 {
     let Some(clock) = mnu_abi::ClockId::from_raw(clock) else {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     };
     if instant_ptr == 0
         || !crate::syscall::validate_user_ptr(
@@ -239,7 +241,7 @@ pub fn clock_read(clock: u64, instant_ptr: u64) -> u64 {
             core::mem::size_of::<mnu_abi::ClockInstant>() as u64,
         )
     {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
 
     if clock == mnu_abi::ClockId::Realtime
@@ -247,33 +249,33 @@ pub fn clock_read(clock: u64, instant_ptr: u64) -> u64 {
             crate::capability::Capability::SystemTimeRead,
         ])
     {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
 
     let ticks_per_second = crate::interrupt::timer::ticks_per_second();
     if ticks_per_second == 0 {
-        return EAGAIN;
+        return Error::NotReady.into_raw();
     }
     let ticks = match clock {
         mnu_abi::ClockId::Monotonic => get_ticks(),
         mnu_abi::ClockId::ThreadCpu => {
             let Some(thread_id) = crate::task::current_thread_id() else {
-                return EAGAIN;
+                return Error::NotReady.into_raw();
             };
             let Some(ticks) = crate::task::with_thread(thread_id, |thread| thread.cpu_ticks())
             else {
-                return EAGAIN;
+                return Error::NotReady.into_raw();
             };
             ticks
         }
         mnu_abi::ClockId::ProcessCpu => {
             let Some(thread_id) = crate::task::current_thread_id() else {
-                return EAGAIN;
+                return Error::NotReady.into_raw();
             };
-            let Some(ticks) = crate::task::with_thread(thread_id, |thread| thread.process_cpu_ticks())
-                .flatten()
+            let Some(ticks) =
+                crate::task::with_thread(thread_id, |thread| thread.process_cpu_ticks()).flatten()
             else {
-                return EAGAIN;
+                return Error::NotReady.into_raw();
             };
             ticks
         }
@@ -282,7 +284,7 @@ pub fn clock_read(clock: u64, instant_ptr: u64) -> u64 {
     let (seconds, nanoseconds) = match clock {
         mnu_abi::ClockId::Realtime => match realtime() {
             Ok(value) => value,
-            Err(_) => return EAGAIN,
+            Err(_) => return Error::NotReady.into_raw(),
         },
         mnu_abi::ClockId::Monotonic
         | mnu_abi::ClockId::ProcessCpu
@@ -293,20 +295,12 @@ pub fn clock_read(clock: u64, instant_ptr: u64) -> u64 {
                 .saturating_mul(1_000_000),
         ),
     };
-    let instant = mnu_abi::ClockInstant {
-        seconds,
-        nanoseconds: nanoseconds as u32,
-        reserved: 0,
-    };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&instant as *const mnu_abi::ClockInstant).cast::<u8>(),
-            core::mem::size_of::<mnu_abi::ClockInstant>(),
-        )
-    };
-    match crate::syscall::copy_to_user(instant_ptr, bytes) {
+    let mut bytes = [0u8; core::mem::size_of::<mnu_abi::ClockInstant>()];
+    bytes[..8].copy_from_slice(&seconds.to_le_bytes());
+    bytes[8..12].copy_from_slice(&(nanoseconds as u32).to_le_bytes());
+    match crate::syscall::copy_to_user_native(instant_ptr, &bytes) {
         Ok(()) => SUCCESS,
-        Err(e) => e,
+        Err(error) => error.into_raw(),
     }
 }
 

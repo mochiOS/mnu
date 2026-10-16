@@ -18,6 +18,12 @@ pub enum Error {
     ResourceUnavailable = 3,
     /// A backing object failed while resolving the requested operation.
     BackingFailure = 4,
+    /// A selector, length, or option is outside the mechanism's contract.
+    InvalidArgument = 5,
+    /// The caller lacks authority for the requested operation.
+    AccessDenied = 6,
+    /// The source or execution context is not currently ready.
+    NotReady = 7,
 }
 
 impl Error {
@@ -34,6 +40,9 @@ impl Error {
             2 => Some(Self::InvalidAddress),
             3 => Some(Self::ResourceUnavailable),
             4 => Some(Self::BackingFailure),
+            5 => Some(Self::InvalidArgument),
+            6 => Some(Self::AccessDenied),
+            7 => Some(Self::NotReady),
             _ => None,
         }
     }
