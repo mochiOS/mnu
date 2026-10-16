@@ -26,6 +26,8 @@ pub enum Error {
     NotReady = 7,
     /// A resource with the requested identity is already registered.
     AlreadyExists = 8,
+    /// No entry is registered for the requested opaque identity.
+    NotFound = 9,
 }
 
 impl Error {
@@ -46,6 +48,7 @@ impl Error {
             6 => Some(Self::AccessDenied),
             7 => Some(Self::NotReady),
             8 => Some(Self::AlreadyExists),
+            9 => Some(Self::NotFound),
             _ => None,
         }
     }
