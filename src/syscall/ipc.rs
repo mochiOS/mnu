@@ -307,11 +307,14 @@ pub fn create_handle(flags: u64, _reserved: u64) -> u64 {
 }
 
 pub(crate) fn endpoint_wait_ready(endpoint: IpcEndpoint) -> Result<bool, u64> {
+    use mnu_abi::status::Error;
     if !endpoint_is_valid(endpoint) {
-        return Err(EINVAL);
+        return Err(Error::NotFound.into_raw());
     }
     let mailboxes = lock_mailboxes();
-    let mailbox = mailboxes.get(endpoint.slot as usize).ok_or(EINVAL)?;
+    let mailbox = mailboxes
+        .get(endpoint.slot as usize)
+        .ok_or_else(|| Error::InvalidArgument.into_raw())?;
     Ok(mailbox.count > 0)
 }
 

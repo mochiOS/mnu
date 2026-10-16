@@ -14,7 +14,7 @@ pub use memory_update::create_admission as provider_memory_admission_create;
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
 use super::{
-    EACCES, EBADF, EFAULT, EINVAL, EIO, ENOSYS, ENOTSUP, ESRCH,
+    EACCES, EBADF, EFAULT, EINVAL, EIO, ENOSYS, ENOTSUP,
     SUCCESS,
 };
 
@@ -1501,30 +1501,31 @@ fn wait_item_signal(
     item: &mut mnu_abi::HandleWaitItem,
     admission_source: Option<&Weak<crate::mem::vm_object::ProviderAdmission>>,
 ) -> Result<(WaitTarget, bool), u64> {
+    use mnu_abi::status::Error;
     if item.interests == 0 {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument.into_raw());
     }
-    let object = object(u64::from(item.handle), HandleRights::WAIT)
-        .map_err(|error| if admission_source.is_some() { EBADF } else { error })?;
+    let object = object_native(u64::from(item.handle), HandleRights::WAIT)
+        .map_err(Error::into_raw)?;
     if let Some(source) = admission_source {
         // Keep identity, not ownership, across sleep. A closed/reused Handle
         // label cannot redirect this wait to an unrelated object.
         if !matches!(&object, KernelObject::MemoryAdmission(admission)
             if Weak::ptr_eq(source, &Arc::downgrade(admission)))
         {
-            return Err(EBADF);
+            return Err(Error::InvalidArgument.into_raw());
         }
     }
     if item.minimum_write_bytes != 0
         && (!matches!(&object, KernelObject::File(_))
             || item.interests & mnu_abi::HANDLE_SIGNAL_WRITABLE == 0)
     {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument.into_raw());
     }
     match object {
         KernelObject::Process(process) => {
             if item.interests & !mnu_abi::HANDLE_SIGNAL_TERMINATED != 0 {
-                return Err(EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             let process_id = process.id();
             let exited = process.is_exited();
@@ -1541,7 +1542,7 @@ fn wait_item_signal(
             generation,
         } => {
             if item.interests & !mnu_abi::HANDLE_SIGNAL_READABLE != 0 {
-                return Err(EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             let endpoint = crate::syscall::ipc::IpcEndpoint {
                 thread_id,
@@ -1559,10 +1560,10 @@ fn wait_item_signal(
         KernelObject::MemoryAdmission(admission) => {
             let supported = mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
             if item.interests & !supported != 0 {
-                return Err(EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             if !crate::syscall::ipc::endpoint_is_valid(memory_update::admission_endpoint(&admission)) {
-                return Err(ESRCH);
+                return Err(Error::NotFound.into_raw());
             }
             item.observed = admission.signals() & item.interests;
             Ok((WaitTarget::MemoryAdmission(admission), item.observed != 0))
@@ -1572,7 +1573,7 @@ fn wait_item_signal(
                 | mnu_abi::HANDLE_SIGNAL_WRITABLE
                 | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED;
             if item.interests & !supported != 0 {
-                return Err(EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             let signals =
                 crate::syscall::fs::stream_signals_for_capacity(&file, item.minimum_write_bytes)?;
@@ -1585,15 +1586,15 @@ fn wait_item_signal(
                 | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED
                 | mnu_abi::HANDLE_SIGNAL_IDLE;
             if item.interests & !supported != 0 {
-                return Err(EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             if !crate::syscall::ipc::endpoint_is_valid(provider_endpoint(&provider)) {
-                return Err(ESRCH);
+                return Err(Error::NotFound.into_raw());
             }
             item.observed = provider.signals() & item.interests;
             Ok((WaitTarget::Provider(provider), item.observed != 0))
         }
-        _ => Err(ENOTSUP),
+        _ => Err(Error::InvalidArgument.into_raw()),
     }
 }
 
@@ -1720,10 +1721,10 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         return mnu_abi::status::Error::ResourceUnavailable.into_raw();
     }
     for item in &items {
-        let source = match object(u64::from(item.handle), HandleRights::WAIT) {
+        let source = match object_native(u64::from(item.handle), HandleRights::WAIT) {
             Ok(KernelObject::MemoryAdmission(admission)) => Some(Arc::downgrade(&admission)),
             Ok(_) => None,
-            Err(error) => return error,
+            Err(error) => return error.into_raw(),
         };
         admission_sources.push(source);
     }
