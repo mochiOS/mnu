@@ -59,34 +59,38 @@ impl SharedMemory {
         self.pages.lock().contains_range(offset, length)
     }
 
-    fn page(&self, index: u64) -> Result<(Arc<OwnedFrame>, u64), u64> {
+    fn page(&self, index: u64) -> Result<(Arc<OwnedFrame>, u64), NativeError> {
         let mut pages = self.pages.lock();
         let page = Self::populate(&mut pages, index)?;
         Ok((page, self.generation.load(Ordering::Relaxed)))
     }
 
-    fn populate(pages: &mut SharedPages<OwnedFrame>, index: u64) -> Result<Arc<OwnedFrame>, u64> {
+    fn populate(
+        pages: &mut SharedPages<OwnedFrame>,
+        index: u64,
+    ) -> Result<Arc<OwnedFrame>, NativeError> {
         pages
             .page_or_try_insert(index, || {
                 super::frame::allocate_zeroed_frame()
                     .map(|frame| OwnedFrame(frame.start_address().as_u64()))
-                    .map_err(|_| crate::syscall::ENOMEM)
+                    .map_err(|_| NativeError::ResourceUnavailable)
             })
             .map_err(|error| match error {
-                PageError::OutOfBounds => crate::syscall::EINVAL,
+                PageError::OutOfBounds => NativeError::InvalidArgument,
                 PageError::Allocation(error) => error,
             })
     }
 
     /// Retains a frame for the caller; release it with `release_user_frame`.
-    pub fn retain_page(&self, index: u64) -> Result<u64, u64> {
+    pub fn retain_page(&self, index: u64) -> Result<u64, NativeError> {
         self.prepare_page(index).map(|(frame, _)| frame)
     }
 
     /// The retained frame and generation come from one serialized population.
-    pub(crate) fn prepare_page(&self, index: u64) -> Result<(u64, u64), u64> {
+    pub(crate) fn prepare_page(&self, index: u64) -> Result<(u64, u64), NativeError> {
         let (page, generation) = self.page(index)?;
-        super::paging::retain_shared_user_frame(page.0).map_err(|_| crate::syscall::ENOMEM)?;
+        super::paging::retain_shared_user_frame(page.0)
+            .map_err(|_| NativeError::ResourceUnavailable)?;
         Ok((page.0, generation))
     }
 
@@ -103,10 +107,10 @@ impl SharedMemory {
         generation: u64,
         install: impl FnOnce() -> Result<T, u64>,
     ) -> Result<T, u64> {
-        // Migration adapter: callback failures keep their original domain.
-        // The generation gate itself has no userspace error-number policy.
+        // Encoded-status callers retain callback failures unchanged. The
+        // generation gate itself always uses the native error domain.
         self.with_generation_native(generation, || Ok(install()))
-            .map_err(|_| crate::syscall::EAGAIN)?
+            .map_err(NativeError::into_raw)?
     }
 
     pub(crate) fn with_generation_native<T>(
@@ -187,11 +191,11 @@ impl SharedMemory {
         Ok(())
     }
 
-    pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
+    pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, NativeError> {
         let mut pages = self.pages.lock();
         let backing_length = pages.length();
         if offset > backing_length {
-            return Err(crate::syscall::EINVAL);
+            return Err(NativeError::InvalidArgument);
         }
         let length = output.len().min((backing_length - offset) as usize);
         Self::copy(&mut pages, offset, length, |pointer, done, count| {
@@ -204,10 +208,10 @@ impl SharedMemory {
         Ok(length)
     }
 
-    pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
+    pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, NativeError> {
         let mut pages = self.pages.lock();
         if !pages.contains_range(offset, input.len() as u64) {
-            return Err(crate::syscall::EINVAL);
+            return Err(NativeError::InvalidArgument);
         }
         Self::copy(&mut pages, offset, input.len(), |pointer, done, count| {
             for index in 0..count {
@@ -224,8 +228,9 @@ impl SharedMemory {
         offset: u64,
         length: usize,
         mut copy: impl FnMut(*mut u8, usize, usize),
-    ) -> Result<(), u64> {
-        let physical_offset = super::paging::physical_memory_offset().ok_or(crate::syscall::EIO)?;
+    ) -> Result<(), NativeError> {
+        let physical_offset =
+            super::paging::physical_memory_offset().ok_or(NativeError::BackingFailure)?;
         let mut done = 0;
         while done < length {
             let current = offset + done as u64;
@@ -235,7 +240,7 @@ impl SharedMemory {
             let address = physical_offset
                 .checked_add(page.0)
                 .and_then(|address| address.checked_add(within as u64))
-                .ok_or(crate::syscall::EIO)?;
+                .ok_or(NativeError::BackingFailure)?;
             copy(address as *mut u8, done, count);
             done += count;
         }

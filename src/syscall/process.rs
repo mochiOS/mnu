@@ -351,22 +351,34 @@ impl MemoryFault {
     /// A backing reservation or superseded page snapshot is not a user access
     /// violation. Retry outside all VM/cache locks rather than deliver an upcall.
     pub(crate) fn is_retryable(self) -> bool {
-        matches!(
-            self,
-            Self::Operation(EAGAIN)
-                | Self::Backing(crate::mem::vm_object::VmPageError::Operation(EAGAIN))
-        )
+        use crate::mem::vm_object::VmPageError;
+        use mnu_abi::status::Error;
+        match self {
+            Self::Operation(error) | Self::Backing(VmPageError::Operation(error)) => {
+                error == EAGAIN || Error::from_raw(error) == Some(Error::NotReady)
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn cause(self) -> mnu_abi::MemoryFaultCause {
         use crate::mem::vm_object::VmPageError;
-        use mnu_abi::MemoryFaultCause;
+        use mnu_abi::{MemoryFaultCause, status::Error};
         match self {
             Self::Unmapped => MemoryFaultCause::Unmapped,
             Self::AccessDenied => MemoryFaultCause::AccessDenied,
             Self::Backing(VmPageError::OutsideBacking) => MemoryFaultCause::OutsideBacking,
-            Self::Operation(ENOMEM) | Self::Backing(VmPageError::Operation(ENOMEM)) => {
+            Self::Operation(error) | Self::Backing(VmPageError::Operation(error))
+                if error == ENOMEM || Error::from_raw(error) == Some(Error::ResourceUnavailable) => {
                 MemoryFaultCause::ResourceUnavailable
+            }
+            Self::Operation(error) | Self::Backing(VmPageError::Operation(error))
+                if Error::from_raw(error) == Some(Error::BackingFailure) => {
+                MemoryFaultCause::BackingFailure
+            }
+            Self::Operation(error) | Self::Backing(VmPageError::Operation(error))
+                if Error::from_raw(error) == Some(Error::AccessDenied) => {
+                MemoryFaultCause::AccessDenied
             }
             Self::Backing(VmPageError::Operation(_)) => MemoryFaultCause::BackingFailure,
             Self::Operation(_) => MemoryFaultCause::Unresolved,

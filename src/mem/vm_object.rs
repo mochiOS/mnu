@@ -277,10 +277,15 @@ impl VmObject {
     }
 
     fn page_error(&self, error: u64) -> VmPageError {
-        // RAM population uses EINVAL only for an index outside its extent.
+        // RAM population uses invalid-argument only for an index outside its extent.
         // A provider's error with the same value must not be guessed as EOF.
         match (&self.source, error) {
-            (VmObjectSource::Memory(_), crate::syscall::EINVAL) => VmPageError::OutsideBacking,
+            (VmObjectSource::Memory(_), error)
+                if error == crate::syscall::EINVAL
+                    || mnu_abi::status::Error::from_raw(error)
+                        == Some(mnu_abi::status::Error::InvalidArgument) => {
+                VmPageError::OutsideBacking
+            }
             _ => VmPageError::Operation(error),
         }
     }
@@ -310,7 +315,9 @@ impl VmObject {
                 return Err(crate::syscall::EINVAL);
             }
             let mut bytes = [0u8; PAGE_BYTES];
-            let length = memory.read_at(offset, &mut bytes)?;
+            let length = memory
+                .read_at(offset, &mut bytes)
+                .map_err(mnu_abi::status::Error::into_raw)?;
             return Ok((Arc::new(bytes), length));
         }
         let offset = page_index
@@ -346,7 +353,9 @@ impl VmObject {
 
     pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
         if let VmObjectSource::Memory(memory) = &self.source {
-            return memory.read_at(offset, output);
+            return memory
+                .read_at(offset, output)
+                .map_err(mnu_abi::status::Error::into_raw);
         }
         let mut copied = 0usize;
 
@@ -410,7 +419,7 @@ impl VmObject {
         if let VmObjectSource::Memory(memory) = &self.source {
             let (frame_phys, generation) = memory
                 .prepare_page(page_index)
-                .map_err(|error| self.page_error(error))?;
+                .map_err(|error| self.page_error(error.into_raw()))?;
             return Ok(PreparedSharedPage {
                 frame_phys,
                 generation: PreparedGeneration::Memory(memory.clone(), generation),
@@ -507,7 +516,9 @@ impl VmObject {
     /// Stages a write in the shared page cache without writing it to storage.
     pub fn stage_write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
         if let VmObjectSource::Memory(memory) = &self.source {
-            return memory.write_at(offset, input);
+            return memory
+                .write_at(offset, input)
+                .map_err(mnu_abi::status::Error::into_raw);
         }
         let input_len = u64::try_from(input.len()).map_err(|_| crate::syscall::EINVAL)?;
 
@@ -981,6 +992,7 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
         let read = match source {
             VmObjectSource::Memory(memory) => {
                 memory.read_at(current, &mut output[bytes_read..bytes_read + request_len])
+                    .map_err(mnu_abi::status::Error::into_raw)
             }
             VmObjectSource::Provider { object, .. } => crate::syscall::handle::provider_read_at(
                 object,
@@ -1035,7 +1047,8 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
 
 fn write_lower(source: &VmObjectSource, offset: u64, input: &[u8]) -> Result<usize, u64> {
     match source {
-        VmObjectSource::Memory(memory) => memory.write_at(offset, input),
+        VmObjectSource::Memory(memory) => memory.write_at(offset, input)
+            .map_err(mnu_abi::status::Error::into_raw),
         VmObjectSource::Provider { object, .. } => {
             crate::syscall::handle::provider_write_at(object, offset, input)
         }
