@@ -219,11 +219,14 @@ impl VmObject {
             endpoint_generation: object.endpoint_generation,
             identity,
         };
-        let io_lock = PROVIDER_IO.lock().try_get(
-            key,
-            crate::mem::object_io_native::new_lock,
-            crate::syscall::ENOMEM,
-        )?;
+        let io_lock = PROVIDER_IO
+            .lock()
+            .try_get(
+                key,
+                crate::mem::object_io_native::new_lock,
+                mnu_abi::status::Error::ResourceUnavailable,
+            )
+            .map_err(mnu_abi::status::Error::into_raw)?;
         Ok(Self {
             source: VmObjectSource::Provider {
                 object,
@@ -380,7 +383,7 @@ impl VmObject {
             .ok_or(crate::syscall::EINVAL)?;
 
         let _io_guard = if matches!(&self.source, VmObjectSource::Provider { .. }) {
-            Some(lock_provider_key(self.object_key())?)
+            Some(lock_provider_key(self.object_key()).map_err(mnu_abi::status::Error::into_raw)?)
         } else {
             None
         };
@@ -605,7 +608,7 @@ impl VmObject {
         // Retain ordering through the lower write and cache update. The
         // registry lock is released before waiting or calling provider IPC.
         let _io_guard = if matches!(self.source, VmObjectSource::Provider { .. }) {
-            Some(lock_provider_key(self.object_key())?)
+            Some(lock_provider_key(self.object_key()).map_err(mnu_abi::status::Error::into_raw)?)
         } else {
             None
         };
@@ -682,6 +685,13 @@ impl VmObject {
         };
         match result {
             Err(crate::syscall::EIO) if unavailable => Ok(()),
+            Err(error)
+                if unavailable
+                    && mnu_abi::status::Error::from_raw(error)
+                        == Some(mnu_abi::status::Error::BackingFailure) =>
+            {
+                Ok(())
+            }
             result => result,
         }
     }
@@ -776,7 +786,7 @@ pub(crate) fn update_provider_range(guard: &ProviderIoGuard, offset: u64, input:
 pub(crate) fn lock_provider_io(
     object: &ProviderObject,
     identity: u64,
-) -> Result<ProviderIoGuard, u64> {
+) -> Result<ProviderIoGuard, mnu_abi::status::Error> {
     lock_provider_key(ObjectKey::Provider {
         endpoint_thread_id: object.endpoint_thread_id,
         endpoint_slot: object.endpoint_slot,
@@ -823,17 +833,18 @@ pub(crate) fn overlay_provider_range(
     Ok(())
 }
 
-fn lock_provider_key(key: ObjectKey) -> Result<ProviderIoGuard, u64> {
+fn lock_provider_key(key: ObjectKey) -> Result<ProviderIoGuard, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
     let gate = PROVIDER_IO.lock().try_get(
         key,
         crate::mem::object_io_native::new_lock,
-        crate::syscall::ENOMEM,
+        Error::ResourceUnavailable,
     )?;
     let guard = gate
         .lock(|| {
             let _ = crate::task::yield_now();
         })
-        .map_err(|_| crate::syscall::EIO)?;
+        .map_err(|_| Error::BackingFailure)?;
     Ok(ProviderIoGuard { key, _guard: guard })
 }
 

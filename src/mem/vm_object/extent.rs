@@ -75,11 +75,14 @@ impl PreparedExtent {
         if !matches!(key, ObjectKey::Provider { identity, .. } if identity != 0) {
             return Err(crate::syscall::EINVAL);
         }
-        let gate = PROVIDER_IO.lock().try_get(
-            key,
-            crate::mem::object_io_native::new_lock,
-            crate::syscall::ENOMEM,
-        )?;
+        let gate = PROVIDER_IO
+            .lock()
+            .try_get(
+                key,
+                crate::mem::object_io_native::new_lock,
+                mnu_abi::status::Error::ResourceUnavailable,
+            )
+            .map_err(mnu_abi::status::Error::into_raw)?;
         Self::prepare(key, gate, None, old_length, length, allocate, None)
     }
 
