@@ -57,6 +57,8 @@ pub const MEMORY_OBJECT_RESIZABLE: u64 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyscallNumber {
     // Native mnu file syscalls
+    /// Sends one message to an opaque endpoint. Failures use status::Error:
+    /// NotReady for queue pressure, ResourceUnavailable for allocation failure.
     IpcSend = 514,
     IpcRecv = 515,
     Sleep = 517,
@@ -128,6 +130,8 @@ pub enum SyscallNumber {
     /// Creates a caller-local endpoint reference. SEND/RECEIVE/WAIT are
     /// bounded by existing IPC capabilities. Failures use status::Error.
     IpcCreateHandle = 629,
+    /// Sends a message with attenuated object references. Admission, transfer
+    /// validation and message delivery failures all use status::Error.
     IpcSendObjectHandles = 630,
     IpcRecvObjectHandles = 631,
     IpcCallObjectHandles = 632,

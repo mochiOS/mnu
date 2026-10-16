@@ -2124,25 +2124,28 @@ fn send_to_thread_id_with_attachments(
 /// arg1: buf_ptr
 /// arg2: len
 pub fn send(dest_endpoint_handle: u64, buf_ptr: u64, len: u64) -> u64 {
+    use mnu_abi::status::Error;
+
     let dest_record = match endpoint_record_from_handle(dest_endpoint_handle) {
         Some(record) => record,
-        None => return EINVAL,
+        None => return Error::NotFound.into_raw(),
     };
     if !dest_record.rights.contains(EndpointRights::RECV) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let dest_thread_id = dest_record.thread_id;
     let sender = match crate::task::current_thread_id() {
-        Some(id) => ensure_endpoint_for_thread(id.as_u64()).unwrap_or(EINVAL),
-        None => return EINVAL,
+        Some(id) => match ensure_endpoint_for_thread(id.as_u64()) {
+            Some(handle) => handle,
+            None => return Error::ResourceUnavailable.into_raw(),
+        },
+        None => return Error::NotReady.into_raw(),
     };
-    if sender == EINVAL {
-        return EINVAL;
-    }
-    if let Some(sender_record) = endpoint_record_from_handle(sender) {
-        if !sender_record.rights.contains(EndpointRights::SEND) {
-            return EACCES;
-        }
+    let Some(sender_record) = endpoint_record_from_handle(sender) else {
+        return Error::NotReady.into_raw();
+    };
+    if !sender_record.rights.contains(EndpointRights::SEND) {
+        return Error::AccessDenied.into_raw();
     }
 
     // capability 強制:
@@ -2152,7 +2155,7 @@ pub fn send(dest_endpoint_handle: u64, buf_ptr: u64, len: u64) -> u64 {
         crate::capability::Capability::IpcClient,
         crate::capability::Capability::IpcServer,
     ]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     send_to_thread_id(dest_thread_id, sender, buf_ptr, len)
 }
@@ -2164,11 +2167,13 @@ pub fn send_object_handles(
     len: u64,
     handles_ptr: u64,
 ) -> u64 {
+    use mnu_abi::status::Error;
+
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::IpcClient,
         crate::capability::Capability::IpcServer,
     ]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let (dest_thread_id, _, delivery_flags) = match resolve_call_destination(dest_endpoint_handle) {
         Ok(destination) => destination,
@@ -2177,9 +2182,9 @@ pub fn send_object_handles(
     let sender = match crate::task::current_thread_id() {
         Some(id) => match ensure_endpoint_for_thread(id.as_u64()) {
             Some(handle) => handle,
-            None => return EINVAL,
+            None => return Error::ResourceUnavailable.into_raw(),
         },
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
     let mut object_handles = match decode_outgoing_object_handles(handles_ptr) {
         Ok(handles) => handles,
