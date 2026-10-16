@@ -322,13 +322,19 @@ pub(crate) fn register_endpoint_waiter(
     endpoint: IpcEndpoint,
     waiter: crate::task::ThreadId,
 ) -> Result<(), u64> {
-    if !endpoint_is_valid(endpoint) || endpoint.thread_id != waiter.as_u64() {
-        return Err(EACCES);
+    use mnu_abi::status::Error;
+    if !endpoint_is_valid(endpoint) {
+        return Err(Error::NotFound.into_raw());
+    }
+    if endpoint.thread_id != waiter.as_u64() {
+        return Err(Error::AccessDenied.into_raw());
     }
     let mut mailboxes = lock_mailboxes();
-    let mailbox = mailboxes.get_mut(endpoint.slot as usize).ok_or(EINVAL)?;
+    let mailbox = mailboxes
+        .get_mut(endpoint.slot as usize)
+        .ok_or_else(|| Error::InvalidArgument.into_raw())?;
     if mailbox.waiter != 0 && mailbox.waiter != waiter.as_u64() {
-        return Err(EAGAIN);
+        return Err(Error::ResourceUnavailable.into_raw());
     }
     mailbox.waiter = waiter.as_u64();
     Ok(())
