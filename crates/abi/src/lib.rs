@@ -243,6 +243,9 @@ pub enum SyscallNumber {
     /// local identity is InvalidArgument; absent execution context is NotReady.
     ProviderObjectSignal = 667,
     HandleControl = 668,
+    /// Suspends the caller's process until resumed. Absent execution context
+    /// or no eligible thread returns native NotReady; success requires observing
+    /// that the calling thread is no longer suspended.
     ProcessSuspendCurrent = 669,
     /// Suspends execution through a SIGNAL Process Handle. Failures use
     /// status::Error; no eligible thread is NotReady, a retired target NotFound.

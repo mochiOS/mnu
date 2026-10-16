@@ -290,22 +290,25 @@ pub fn clone_address_space() -> u64 {
 /// handle resumes it. This is a native lifecycle primitive; the kernel does
 /// not assign any POSIX signal or job-control meaning to the suspension.
 pub fn suspend_current_process() -> u64 {
+    use mnu_abi::status::Error;
     let Some(process_id) = crate::syscall::security::current_process_id() else {
-        return EINVAL;
+        return Error::NotReady.into_raw();
     };
     let Some(thread_id) = crate::task::current_thread_id() else {
-        return ESRCH;
+        return Error::NotReady.into_raw();
     };
     if crate::task::suspend_process_threads(process_id) == 0 {
-        return ESRCH;
+        return Error::NotReady.into_raw();
     }
-    while crate::task::with_thread(thread_id, |thread| thread.is_scheduling_suspended())
-        .unwrap_or(false)
-    {
+    loop {
+        match crate::task::with_thread(thread_id, |thread| thread.is_scheduling_suspended()) {
+            Some(false) => return SUCCESS,
+            Some(true) => {}
+            None => return Error::NotReady.into_raw(),
+        }
         crate::task::yield_now();
         core::hint::spin_loop();
     }
-    SUCCESS
 }
 
 /// Sleepシステムコール
