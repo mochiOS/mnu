@@ -10,7 +10,7 @@ pub(crate) mod lifetime;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
-use super::{EACCES, EAGAIN, EFAULT, EINVAL, EMSGSIZE};
+use super::{EACCES, EAGAIN, EFAULT, EINVAL};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
@@ -1299,6 +1299,8 @@ impl Mailbox {
         max_copy: usize,
         accept_object_handles: bool,
     ) -> Result<Option<UserReceive>, u64> {
+        use mnu_abi::status::Error;
+
         while self.count > 0 {
             let slot_idx = self.queue[self.head] as usize;
             let Some(msg) = self
@@ -1320,12 +1322,13 @@ impl Mailbox {
                 continue;
             }
             if !accept_object_handles && !msg.object_handles.is_empty() {
-                return Err(EMSGSIZE);
+                return Err(Error::LimitExceeded.into_raw());
             }
 
             let copy_len = core::cmp::min(msg.len, max_copy);
-            if copy_len > 0 && buf_ptr != 0 {
-                crate::syscall::copy_to_user(buf_ptr, &msg.data[..copy_len])?;
+            if copy_len > 0 {
+                crate::syscall::copy_to_user_native(buf_ptr, &msg.data[..copy_len])
+                    .map_err(Error::into_raw)?;
                 record_ipc_copy(copy_len);
             }
 
@@ -1409,6 +1412,8 @@ impl Mailbox {
         max_copy: usize,
         accept_object_handles: bool,
     ) -> Result<Option<UserReceive>, u64> {
+        use mnu_abi::status::Error;
+
         if self.count == 0 {
             return Ok(None);
         }
@@ -1437,19 +1442,20 @@ impl Mailbox {
             }
 
             if !accept_object_handles && !msg.object_handles.is_empty() {
-                if !self.free_slot(slot_idx) {
-                    return Ok(None);
+                if self.enqueue_slot(slot_idx).is_err() {
+                    let _ = self.free_slot(slot_idx);
+                    return Err(Error::BackingFailure.into_raw());
                 }
-                return Err(EMSGSIZE);
+                return Err(Error::LimitExceeded.into_raw());
             }
 
             let copy_len = core::cmp::min(msg.len, max_copy);
-            if copy_len > 0 && buf_ptr != 0 {
-                if let Err(error) = crate::syscall::copy_to_user(buf_ptr, &msg.data[..copy_len]) {
+            if copy_len > 0 {
+                if let Err(error) = crate::syscall::copy_to_user_native(buf_ptr, &msg.data[..copy_len]) {
                     if self.enqueue_slot(slot_idx).is_err() {
                         let _ = self.free_slot(slot_idx);
                     }
-                    return Err(error);
+                    return Err(error.into_raw());
                 }
                 record_ipc_copy(copy_len);
             }
@@ -2218,7 +2224,7 @@ fn finish_user_receive(
     if let Some(output) = object_handles_output {
         install_received_object_handles(receiver_thread_id, receive.object_handles, output)?;
     } else if !receive.object_handles.is_empty() {
-        return Err(EMSGSIZE);
+        return Err(mnu_abi::status::Error::LimitExceeded.into_raw());
     }
     Ok((receive.from, receive.copy_len, receive.expects_reply))
 }
@@ -2701,7 +2707,7 @@ mod tests {
     }
 
     #[test]
-    fn byte_only_call_rejects_and_discards_reply_object_handles() {
+    fn byte_only_call_rejects_and_retains_reply_object_handles() {
         let mut mailbox = Mailbox::new();
         let mut message = Box::new(Message::empty());
         message.from = 10;
@@ -2717,8 +2723,8 @@ mod tests {
 
         assert!(matches!(
             mailbox.pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false),
-            Err(error) if error == mnu_abi::EMSGSIZE
+            Err(error) if error == mnu_abi::status::Error::LimitExceeded.into_raw()
         ));
-        assert_eq!(mailbox.count, 0);
+        assert_eq!(mailbox.count, 1);
     }
 }
