@@ -7,7 +7,6 @@
 extern crate alloc;
 pub mod path;
 
-use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -426,7 +425,9 @@ pub fn capability_implies(parent: Capability, child: Capability) -> bool {
 /// capability の集合
 #[derive(Clone, Debug, Default)]
 pub struct CapabilitySet {
-    caps: BTreeSet<Capability>,
+    // Sorted and unique, preserving the previous set's iteration order while
+    // allowing native callers to reserve storage before changing authority.
+    caps: Vec<Capability>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -444,18 +445,37 @@ impl CapabilitySet {
     /// 空集合
     pub fn empty() -> Self {
         Self {
-            caps: BTreeSet::new(),
+            caps: Vec::new(),
         }
     }
 
     /// capability を追加
     pub fn insert(&mut self, cap: Capability) {
-        self.caps.insert(cap);
+        if let Err(index) = self.caps.binary_search(&cap) {
+            self.caps.insert(index, cap);
+        }
+    }
+
+    /// Add a capability without changing the set if storage cannot be reserved.
+    pub fn try_insert(&mut self, cap: Capability) -> Result<(), mnu_abi::status::Error> {
+        if let Err(index) = self.caps.binary_search(&cap) {
+            self.caps
+                .try_reserve(1)
+                .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)?;
+            self.caps.insert(index, cap);
+        }
+        Ok(())
     }
 
     /// capability を削除
     pub fn remove(&mut self, cap: Capability) -> bool {
-        self.caps.remove(&cap)
+        match self.caps.binary_search(&cap) {
+            Ok(index) => {
+                self.caps.remove(index);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// capability の個数を返す
@@ -475,7 +495,7 @@ impl CapabilitySet {
 
     /// 完全一致で含まれるか
     pub fn contains_exact(&self, cap: Capability) -> bool {
-        self.caps.contains(&cap)
+        self.caps.binary_search(&cap).is_ok()
     }
 
     /// 含意（階層継承）を考慮して含まれるか

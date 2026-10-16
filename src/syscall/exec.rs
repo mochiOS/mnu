@@ -330,7 +330,7 @@ fn parse_requested_exec_grants(
         if matches!(cap, Capability::MemoryPhysMap) {
             return Err(Error::InvalidArgument);
         }
-        caps.insert(cap);
+        caps.try_insert(cap)?;
     }
     Ok((caps, authorities))
 }
