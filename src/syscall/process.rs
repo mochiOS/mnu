@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{EAGAIN, EFAULT, EINVAL, ENOMEM, ENOSYS, EPERM, ESRCH, SUCCESS};
+use super::types::{EAGAIN, EFAULT, EINVAL, ENOMEM, EPERM, ESRCH, SUCCESS};
 use crate::task::ThreadId;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -1099,19 +1099,24 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
 ///
 /// 共有マッピングの内容を backing に同期する。
 pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
-    if options != 0 || addr == 0 || length == 0 || addr & 4095 != 0 {
-        return EINVAL;
+    use mnu_abi::status::Error;
+
+    if options != 0 || length == 0 || addr & 4095 != 0 {
+        return Error::InvalidArgument.into_raw();
+    }
+    if addr == 0 {
+        return Error::InvalidAddress.into_raw();
     }
     let sync_len = match page_align_up(length) {
         Some(v) if v > 0 => v,
-        _ => return EINVAL,
+        _ => return Error::InvalidAddress.into_raw(),
     };
     if !is_user_range(addr, sync_len) {
-        return EINVAL;
+        return Error::InvalidAddress.into_raw();
     }
     let pid = match crate::syscall::security::current_process_id() {
         Some(p) => p,
-        None => return ENOSYS,
+        None => return Error::NotReady.into_raw(),
     };
     // Snapshot owned backing references while validating the entire range.
     // Provider IPC must not execute under the process-table lock. A concurrent
@@ -1138,8 +1143,9 @@ pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
             Some((end, backing))
         })
     }) {
-        Some(Some(work)) => work,
-        _ => return ENOMEM,
+        Some(Ok(work)) => work,
+        Some(Err(error)) => return error.into_raw(),
+        None => return Error::NotReady.into_raw(),
     };
     for ((object, offset), length) in work {
         if let Err(errno) = object.flush_range(offset, length) {
