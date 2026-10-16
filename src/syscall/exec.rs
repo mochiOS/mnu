@@ -764,11 +764,13 @@ fn exec_with_data(
     launch: ImageLaunch<'_>,
     measurement: &mut ExecMeasurement,
 ) -> u64 {
+    use mnu_abi::status::Error;
+
     let is_boot_init = launch.is_bootstrap();
     let native_startup = launch.startup();
     let owned_identity = match storage::text(exec_path) {
         Ok(identity) => identity,
-        Err(errno) => return errno,
+        Err(error) => return error.into_raw(),
     };
     crate::debug!("exec: name={}", process_name);
     let aslr_seed = next_aslr_seed(process_name);
@@ -974,14 +976,14 @@ fn exec_with_data(
         if is_boot_init && !claim_init_pid(pid.as_u64()) {
             crate::kernel::early_serial("exec: init claim failed\n");
             crate::warn!("init is already running, rejecting duplicate launch");
-            return crate::syscall::types::EINVAL;
+            return Error::AlreadyExists.into_raw();
         }
         if crate::task::add_process(proc).is_none() {
             crate::kernel::early_serial("exec: add process failed\n");
             if is_boot_init {
                 let _ = release_init_pid(pid.as_u64());
             }
-            return crate::syscall::types::EINVAL;
+            return Error::ResourceUnavailable.into_raw();
         }
         // allocate kernel stack for the new thread
         let kstack_size = crate::config::kernel().exec.kernel_thread_stack_size;
@@ -995,7 +997,7 @@ fn exec_with_data(
                         let _ = release_init_pid(pid.as_u64());
                     }
                     // The page-table guard still owns this table on this path.
-                    return crate::syscall::types::ENOMEM;
+                    return Error::ResourceUnavailable.into_raw();
                 }
             };
         new_pt_guard.disarm();
@@ -1033,7 +1035,7 @@ fn exec_with_data(
                 let _ = release_init_pid(pid.as_u64());
             }
             let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
-            return crate::syscall::types::EINVAL;
+            return Error::ResourceUnavailable.into_raw();
         }
 
         crate::info!(
@@ -1123,13 +1125,13 @@ fn replace_current_process_image(
     byte_ceiling: u64,
     mut measurement: ExecMeasurement,
 ) -> Result<(u64, u64, u64), u64> {
-    use crate::syscall::types::EINVAL;
+    use mnu_abi::status::Error;
 
     let Some(process_id) = crate::syscall::security::current_process_id() else {
-        return Err(EINVAL);
+        return Err(Error::NotReady.into_raw());
     };
     let Some(transition) = crate::task::image_transition::begin_image_transition(process_id) else {
-        return Err(crate::syscall::types::EAGAIN);
+        return Err(Error::NotReady.into_raw());
     };
 
     let aslr_seed = next_aslr_seed(identity);
@@ -1211,19 +1213,19 @@ fn replace_current_process_image(
         .map_err(mnu_abi::status::Error::into_raw)?;
     let current_tid = match crate::task::current_thread_id() {
         Some(thread) => thread,
-        None => return Err(EINVAL),
+        None => return Err(Error::NotReady.into_raw()),
     };
     let pid = match crate::task::with_thread(current_tid, |thread| thread.process_id()) {
         Some(process) => process,
-        None => return Err(EINVAL),
+        None => return Err(Error::NotReady.into_raw()),
     };
     let kernel_stack =
         match crate::task::with_thread(current_tid, |thread| thread.kernel_stack_base()) {
             Some(base) => base,
-            None => return Err(EINVAL),
+            None => return Err(Error::NotReady.into_raw()),
         };
     let stack_mapping = crate::task::prepare_kernel_stack_user_table(kernel_stack, new_pt_phys)
-        .ok_or(crate::syscall::types::ENOMEM)?;
+        .ok_or(Error::ResourceUnavailable.into_raw())?;
     // Quiescence is reversible. In particular, a failed borrowed-PTE/TLB
     // transaction must resume siblings and keep the old stack alias/owner.
     let quiescence = crate::task::scheduler::quiesce_image_siblings(pid, current_tid);
