@@ -242,35 +242,68 @@ impl MemoryRegion {
             return None;
         }
         let delta = start.checked_sub(self.start)?;
-        let mut slice = self.clone();
-        slice.start = start;
-        slice.len = end - start;
-        match &mut slice.backing {
-            MemoryBacking::File { offset, .. } => {
-                *offset = offset.checked_add(delta)?;
+        let len = end - start;
+        // This is a preflight operation for VM edits. Never invoke infallible
+        // Vec cloning here: memory pressure must leave the original mapping live.
+        let backing = match &self.backing {
+            MemoryBacking::File {
+                object, offset, writable, shared,
+            } => MemoryBacking::File {
+                object: Arc::clone(object),
+                offset: offset.checked_add(delta)?,
+                writable: *writable,
+                shared: *shared,
+            },
+            MemoryBacking::Anonymous { data, writable, shared } => {
+                let source = if data.is_empty() {
+                    &[][..]
+                } else {
+                    let first = usize::try_from(delta).ok()?;
+                    let last = usize::try_from(delta.checked_add(len)?).ok()?;
+                    data.get(first..last)?
+                };
+                let mut copy = Vec::new();
+                copy.try_reserve_exact(source.len()).ok()?;
+                copy.extend_from_slice(source);
+                MemoryBacking::Anonymous {
+                    data: copy,
+                    writable: *writable,
+                    shared: *shared,
+                }
             }
-            MemoryBacking::Anonymous { data, .. } if !data.is_empty() => {
-                let first = usize::try_from(delta).ok()?;
-                let last = usize::try_from(delta.checked_add(slice.len)?).ok()?;
-                *data = data.get(first..last)?.to_vec();
+        };
+        let mut access_ranges = Vec::new();
+        for range in &self.access_ranges {
+            let low = range.start.max(start);
+            let high = range.end.min(end);
+            if low < high {
+                access_ranges.try_reserve(1).ok()?;
+                access_ranges.push(MemoryAccessRange {
+                    start: low,
+                    end: high,
+                    access: range.access,
+                });
             }
-            _ => {}
         }
-        slice.access_ranges.retain_mut(|range| {
-            range.start = range.start.max(start);
-            range.end = range.end.min(end);
-            range.start < range.end
-        });
         let first_page = delta / 4096;
-        let last_page = first_page.checked_add(slice.len / 4096)?;
-        slice.dirty_pages.retain_mut(|page| {
-            if *page < first_page || *page >= last_page {
-                return false;
+        let last_page = first_page.checked_add(len / 4096)?;
+        let mut dirty_pages = Vec::new();
+        for &page in &self.dirty_pages {
+            if first_page <= page && page < last_page {
+                dirty_pages.try_reserve(1).ok()?;
+                dirty_pages.push(page - first_page);
             }
-            *page -= first_page;
-            true
-        });
-        Some(slice)
+        }
+        Some(Self {
+            start,
+            len,
+            access: self.access,
+            max_access: self.max_access,
+            access_ranges,
+            options: self.options,
+            backing,
+            dirty_pages,
+        })
     }
 
     pub fn set_writable(&mut self, writable: bool) {
