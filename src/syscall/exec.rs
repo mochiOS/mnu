@@ -235,14 +235,13 @@ fn read_nul_identity_fields(
     fields_ptr: u64,
     max_total_bytes: usize,
     max_fields: usize,
-) -> Result<Vec<String>, u64> {
-    use crate::syscall::types::EINVAL;
+) -> Result<Vec<String>, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
 
     if fields_ptr == 0 {
         return Ok(Vec::new());
     }
-    let mut storage = alloc::vec![0u8; max_total_bytes];
-    crate::syscall::copy_from_user(fields_ptr, &mut storage)?;
+    let mut storage = storage::from_user_native(fields_ptr, max_total_bytes)?;
     if let Some(end) = storage.windows(2).position(|w| w == [0, 0]) {
         storage.truncate(end + 2);
     }
@@ -252,8 +251,10 @@ fn read_nul_identity_fields(
         if s.is_empty() {
             continue;
         }
-        let text = core::str::from_utf8(s).map_err(|_| EINVAL)?;
-        out.push(String::from(text));
+        let text = core::str::from_utf8(s).map_err(|_| Error::InvalidArgument)?;
+        let text = storage::text(text)?;
+        out.try_reserve(1).map_err(|_| Error::ResourceUnavailable)?;
+        out.push(text);
         if out.len() >= max_fields {
             break;
         }
@@ -261,24 +262,26 @@ fn read_nul_identity_fields(
     Ok(out)
 }
 
-fn read_nul_caps_from_user(caps_ptr: u64, caps_total_len: u64) -> Result<Vec<String>, u64> {
-    use crate::syscall::types::EINVAL;
+fn read_nul_caps_from_user(
+    caps_ptr: u64,
+    caps_total_len: u64,
+) -> Result<Vec<String>, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
 
     if caps_total_len == 0 {
         return Ok(Vec::new());
     }
     if caps_ptr == 0 {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
     let Ok(len) = usize::try_from(caps_total_len) else {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     };
     if len > 1024 {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument);
     }
 
-    let mut storage = alloc::vec![0u8; len];
-    crate::syscall::copy_from_user(caps_ptr, &mut storage)?;
+    let storage = storage::from_user_native(caps_ptr, len)?;
 
     // cap 名は NUL 区切りで渡す。末尾の NUL は任意だが、無くても split が動くようにする。
     let mut out = Vec::new();
@@ -286,8 +289,10 @@ fn read_nul_caps_from_user(caps_ptr: u64, caps_total_len: u64) -> Result<Vec<Str
         if s.is_empty() {
             continue;
         }
-        let text = core::str::from_utf8(s).map_err(|_| EINVAL)?;
-        out.push(text.to_string());
+        let text = core::str::from_utf8(s).map_err(|_| Error::InvalidArgument)?;
+        let text = storage::text(text)?;
+        out.try_reserve(1).map_err(|_| Error::ResourceUnavailable)?;
+        out.push(text);
         if out.len() >= 128 {
             break;
         }
@@ -477,7 +482,7 @@ pub fn authorize_exec_syscall(
     };
     let identity_items = match read_nul_identity_fields(identity_ptr, 1024, 7) {
         Ok(items) => items,
-        Err(errno) => return errno,
+        Err(error) => return error.into_raw(),
     };
     let mut package = None;
     let mut developer = None;
@@ -556,7 +561,7 @@ pub fn authorize_exec_syscall(
     }
     let caps_list = match read_nul_caps_from_user(caps_ptr, caps_total_len) {
         Ok(caps) => caps,
-        Err(errno) => return errno,
+        Err(error) => return error.into_raw(),
     };
     let (capabilities, kernel_authorities) = match parse_requested_exec_grants(&caps_list, false) {
         Ok(grants) => grants,
