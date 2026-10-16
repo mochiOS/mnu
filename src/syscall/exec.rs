@@ -1522,20 +1522,20 @@ fn consume_address_space_for_create(
     image: &crate::mem::address_space::AddressSpaceObject,
     authorization: &crate::task::process::PendingExecSecurity,
     context: &mnu_abi::ThreadCreateContext,
-) -> Result<crate::mem::address_space::AddressSpaceImage, u64> {
+) -> Result<crate::mem::address_space::AddressSpaceImage, mnu_abi::status::Error> {
     use crate::mem::address_space::ConsumeError;
-    use crate::syscall::types::{EACCES, EAGAIN, EFAULT};
-    let pid = crate::syscall::security::current_process_id().ok_or(EACCES)?;
+    use mnu_abi::status::Error;
+    let pid = crate::syscall::security::current_process_id().ok_or(Error::NotReady)?;
     // Detached roots are pinned by the image, but resize may still revoke
     // their PTEs. Follow PROC -> image lock order through context validation
     // and one-shot ownership transfer, then prepare the new container outside.
     crate::task::with_process(pid, |_| image.consume(authorization, context))
-        .ok_or(EACCES)?
+        .ok_or(Error::NotReady)?
         .map_err(|error| match error {
-            ConsumeError::Consumed => EAGAIN,
-            ConsumeError::Backing(error) => error.into_raw(),
-            ConsumeError::Authorization => EACCES,
-            ConsumeError::Context => EFAULT,
+            ConsumeError::Consumed => Error::NotReady,
+            ConsumeError::Backing(error) => error,
+            ConsumeError::Authorization => Error::AccessDenied,
+            ConsumeError::Context => Error::InvalidAddress,
         })
 }
 
@@ -1569,7 +1569,7 @@ fn create_from_address_space(
     }
     let image = match consume_address_space_for_create(&image, &authorization, &context) {
         Ok(image) => image,
-        Err(errno) => return errno,
+        Err(error) => return error.into_raw(),
     };
     process.set_capabilities_for_exec(authorization.capabilities);
     process.set_kernel_authorities_for_exec(authorization.kernel_authorities);
