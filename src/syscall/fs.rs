@@ -131,6 +131,9 @@ pub(crate) fn register_stream_waiter(
         return Err(EBADF);
     };
     if !stream.waiters.contains(&waiter) {
+        if stream.waiters.try_reserve(1).is_err() {
+            return Err(mnu_abi::status::Error::ResourceUnavailable.into_raw());
+        }
         stream.waiters.push(waiter);
     }
     Ok(stream_id)
@@ -206,6 +209,9 @@ fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
                 return EAGAIN;
             }
             if !pipe.waiters.contains(&current) {
+                if pipe.waiters.try_reserve(1).is_err() {
+                    return mnu_abi::status::Error::ResourceUnavailable.into_raw();
+                }
                 pipe.waiters.push(current);
             }
             drop(table);
@@ -326,7 +332,12 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
     if len_usize == 0 {
         return 0;
     }
-    let mut tmp = alloc::vec![0u8; len_usize.min(PIPE_BUFFER_CAP)];
+    let mut tmp = Vec::new();
+    let temporary_length = len_usize.min(PIPE_BUFFER_CAP);
+    if tmp.try_reserve_exact(temporary_length).is_err() {
+        return mnu_abi::status::Error::ResourceUnavailable.into_raw();
+    }
+    tmp.resize(temporary_length, 0);
     crate::performance::record_vfs_temporary_buffer(tmp.len());
     if let Err(errno) = crate::syscall::copy_from_user(buf_ptr, &mut tmp) {
         return errno;
@@ -349,6 +360,9 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
             available.min(tmp.len())
         };
         if count != 0 {
+            if pipe.data.try_reserve(count).is_err() {
+                return mnu_abi::status::Error::ResourceUnavailable.into_raw();
+            }
             pipe.data.extend_from_slice(&tmp[..count]);
             pipe.waiters.retain(|waiter| *waiter != current);
             let waiters = core::mem::take(&mut pipe.waiters);
@@ -360,6 +374,9 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
             return EAGAIN;
         }
         if !pipe.waiters.contains(&current) {
+            if pipe.waiters.try_reserve(1).is_err() {
+                return mnu_abi::status::Error::ResourceUnavailable.into_raw();
+            }
             pipe.waiters.push(current);
         }
         drop(table);
