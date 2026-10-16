@@ -1203,8 +1203,11 @@ const PROCESS_ADMIN_HANDLE_RIGHTS: HandleRights = PROCESS_HANDLE_RIGHTS.union(Ha
 
 /// Retain an object created by this caller before its first thread is published.
 /// This is not a lookup API: only the authorized creation path calls it.
-pub(super) fn retain_created_process(target: &crate::task::Process) -> Result<u64, u64> {
-    let owner = current_process()?;
+pub(super) fn retain_created_process(
+    target: &crate::task::Process,
+) -> Result<u64, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+    let owner = crate::syscall::security::current_process_id().ok_or(Error::NotReady)?;
     let object = target.process_object();
     crate::task::with_process_mut(owner, |process| {
         process
@@ -1214,9 +1217,9 @@ pub(super) fn retain_created_process(target: &crate::task::Process) -> Result<u6
                 PROCESS_ADMIN_HANDLE_RIGHTS,
             ))
             .map(|handle| handle.raw() as u64)
-            .ok_or(ENOSPC)
+            .ok_or(Error::ResourceUnavailable)
     })
-    .ok_or(EINVAL)?
+    .ok_or(Error::NotReady)?
 }
 
 fn insert_process_handle(target: crate::task::ProcessId, rights: HandleRights) -> u64 {

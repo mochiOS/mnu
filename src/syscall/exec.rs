@@ -953,7 +953,7 @@ fn exec_with_data(
         let mut created_handle = CreatedProcessHandle(if native_startup.is_some() {
             match crate::syscall::handle::retain_created_process(&proc) {
                 Ok(handle) => Some(handle),
-                Err(errno) => return errno,
+                Err(error) => return error.into_raw(),
             }
         } else {
             None
@@ -1556,12 +1556,12 @@ fn create_from_address_space(
     grants: &[InheritedHandleGrant],
     values: &[InheritedValueSpec],
 ) -> u64 {
-    use crate::syscall::types::{EACCES, EINVAL, ENOMEM};
+    use mnu_abi::status::Error;
     let image =
-        match crate::syscall::handle::object(image_handle, crate::task::HandleRights::CONTROL) {
+        match crate::syscall::handle::object_native(image_handle, crate::task::HandleRights::CONTROL) {
             Ok(crate::task::KernelObject::AddressSpace(image)) => image,
-            Ok(_) => return EINVAL,
-            Err(errno) => return errno,
+            Ok(_) => return Error::InvalidArgument.into_raw(),
+            Err(error) => return error.into_raw(),
         };
     let privilege = match authorization.execution_class {
         ExecutionClass::Privileged => crate::task::PrivilegeLevel::Service,
@@ -1586,25 +1586,25 @@ fn create_from_address_space(
     process.set_image_digest(authorization.executable_digest);
     process.set_exe_path(authorization.path);
     if image.install(&mut process).is_err() {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let Some(table) = process.page_table() else {
-        return EINVAL;
+        return Error::NotReady.into_raw();
     };
     // From installation until publication the guard owns the table. It also
     // reclaims it on any creator-handle, kernel-stack, or thread failure.
     let Some(root) = process.pending_image_root().cloned() else {
-        return EINVAL;
+        return Error::NotReady.into_raw();
     };
     let mut table_guard = UserPageTableGuard::for_image(root);
     let mut handle = match crate::syscall::handle::retain_created_process(&process) {
         Ok(handle) => CreatedProcessHandle(Some(handle)),
-        Err(errno) => return errno,
+        Err(error) => return error.into_raw(),
     };
     let stack_size = crate::config::kernel().exec.kernel_thread_stack_size;
     let stack = match crate::task::allocate_kernel_stack_in_table(stack_size, table) {
         Some(stack) => stack,
-        None => return ENOMEM,
+        None => return Error::ResourceUnavailable.into_raw(),
     };
     let r = context.registers;
     let state = crate::task::thread::SyscallUserContext {
@@ -1638,13 +1638,13 @@ fn create_from_address_space(
     thread.suspend();
     if crate::task::add_process(process).is_none() {
         crate::task::free_kernel_stack(stack);
-        return ENOMEM;
+        return Error::ResourceUnavailable.into_raw();
     }
     if crate::task::add_thread(thread).is_none() {
         let _ = crate::task::remove_process(pid);
         crate::task::free_kernel_stack(stack);
-        return ENOMEM;
+        return Error::ResourceUnavailable.into_raw();
     }
     table_guard.disarm();
-    handle.0.take().unwrap_or(EINVAL)
+    handle.0.take().unwrap_or_else(|| Error::NotReady.into_raw())
 }
