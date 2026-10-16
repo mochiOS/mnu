@@ -5,10 +5,6 @@ use alloc::vec::Vec;
 
 /// Allocate initialized storage without invoking the allocation-error handler.
 /// Callers validate their own extent and policy bounds before requesting it.
-pub fn zeroed(length: usize) -> Result<Vec<u8>, u64> {
-    zeroed_native(length).map_err(|_| mnu_abi::ENOMEM)
-}
-
 pub fn zeroed_native(length: usize) -> Result<Vec<u8>, mnu_abi::status::Error> {
     let mut bytes = Vec::new();
     bytes

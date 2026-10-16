@@ -664,7 +664,9 @@ pub(crate) fn launch_bootstrap_image(
     measurement.finish(result)
 }
 
-pub(crate) fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u64> {
+pub(crate) fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+
     let exec = crate::config::kernel().exec;
     let tls_base = exec
         .tls_base_min
@@ -672,8 +674,8 @@ pub(crate) fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u6
     let length = usize::try_from(exec.initial_tls_size)
         .ok()
         .filter(|&length| length >= core::mem::size_of::<u64>())
-        .ok_or(crate::syscall::types::EINVAL)?;
-    let mut tls_data = crate::util::object_snapshot::zeroed(length)?;
+        .ok_or(Error::InvalidArgument)?;
+    let mut tls_data = crate::util::object_snapshot::zeroed_native(length)?;
     tls_data[..8].copy_from_slice(&tls_base.to_ne_bytes());
     match crate::mem::paging::map_and_copy_segment_to(
         table_phys,
@@ -691,7 +693,7 @@ pub(crate) fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u6
                 tls_base,
                 e
             );
-            Err(mapping_error_errno(e))
+            Err(mapping_error_native(e))
         }
     }
 }
@@ -703,31 +705,40 @@ fn build_relocatable_user_stack(
     phentsize: u64,
     phnum: u64,
     entry: u64,
-) -> Result<InitialUserStack, u64> {
+) -> Result<InitialUserStack, mnu_abi::status::Error> {
     use mnu_abi::process_image::RelocationKind;
+    use mnu_abi::status::Error;
 
     let exec = crate::config::kernel().exec;
     let stack_end_vaddr = exec.stack_top_base.saturating_sub(
         aslr_offset_pages(aslr_seed ^ 0x53a9_1e2d, exec.stack_aslr_max_pages) * 4096,
     );
-    let stack_base_vaddr = stack_end_vaddr - (exec.user_stack_size_pages as u64 * 4096);
+    let stack_size = u64::try_from(exec.user_stack_size_pages)
+        .ok()
+        .and_then(|pages| pages.checked_mul(4096))
+        .ok_or(Error::InvalidArgument)?;
+    let stack_base_vaddr = stack_end_vaddr
+        .checked_sub(stack_size)
+        .ok_or(Error::InvalidArgument)?;
     let image_offset = 4096usize
         .checked_sub(startup.stack().len())
-        .ok_or(crate::syscall::types::EINVAL)?;
-    let image_base = stack_end_vaddr - startup.stack().len() as u64;
-    let mut page_data = crate::util::object_snapshot::zeroed(4096)?;
+        .ok_or(Error::InvalidArgument)?;
+    let image_base = stack_end_vaddr
+        .checked_sub(startup.stack().len() as u64)
+        .ok_or(Error::InvalidArgument)?;
+    let mut page_data = crate::util::object_snapshot::zeroed_native(4096)?;
     page_data[image_offset..].copy_from_slice(startup.stack());
     for relocation in startup.relocations() {
         let offset = image_offset + relocation.offset as usize;
         let stored = u64::from_le_bytes(
             page_data[offset..offset + 8]
                 .try_into()
-                .map_err(|_| crate::syscall::types::EINVAL)?,
+                .map_err(|_| Error::InvalidArgument)?,
         );
         let value = match relocation.kind {
             RelocationKind::StackAddress => image_base
                 .checked_add(stored)
-                .ok_or(crate::syscall::types::EINVAL)?,
+                .ok_or(Error::InvalidArgument)?,
             RelocationKind::ElfProgramHeaders => phdr_vaddr,
             RelocationKind::ElfProgramHeaderSize => phentsize,
             RelocationKind::ElfProgramHeaderCount => phnum,
@@ -738,7 +749,7 @@ fn build_relocatable_user_stack(
     }
     let initial_rsp = image_base
         .checked_add(u64::from(startup.initial_stack_pointer()))
-        .ok_or(crate::syscall::types::EINVAL)?;
+        .ok_or(Error::InvalidArgument)?;
     Ok(InitialUserStack {
         stack_base_vaddr,
         stack_end_vaddr,
@@ -830,9 +841,9 @@ fn exec_with_data(
             page_data,
         } = match stack {
             Ok(stack) => stack,
-            Err(errno) => {
+            Err(error) => {
                 crate::kernel::early_serial("exec: build stack failed\n");
-                return errno;
+                return error.into_raw();
             }
         };
         let exec = crate::config::kernel().exec;
@@ -952,9 +963,9 @@ fn exec_with_data(
         }
         let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
             Ok(base) => base,
-            Err(errno) => {
+            Err(error) => {
                 crate::kernel::early_serial("exec: map TLS failed\n");
-                return errno;
+                return error.into_raw();
             }
         };
         let pid = proc.id();
@@ -1148,7 +1159,7 @@ fn replace_current_process_image(
         page_data,
     } = match stack {
         Ok(stack) => stack,
-        Err(errno) => return Err(errno),
+        Err(error) => return Err(error.into_raw()),
     };
     if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
         new_pt_phys,
@@ -1191,7 +1202,7 @@ fn replace_current_process_image(
     }
     let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
         Ok(base) => base,
-        Err(errno) => return Err(errno),
+        Err(error) => return Err(error.into_raw()),
     };
     initial_mappings::prepare(new_pt_phys, startup, &mut deferred_zero_regions)?;
     // Admission precedes every destructive old-image operation, including
