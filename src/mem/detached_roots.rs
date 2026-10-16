@@ -49,7 +49,7 @@ impl Root {
                 });
             }
         }
-        let root = Arc::new(root);
+        let root = Arc::try_new(root).map_err(|_| ())?;
         let mut roots = ROOTS.lock();
         roots.retain(|root| root.strong_count() != 0);
         if roots.len() >= MAX_ROOTS {
