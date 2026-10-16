@@ -181,13 +181,6 @@ impl Drop for UserPageTableGuard {
     }
 }
 
-fn mapping_error_errno(error: crate::Kernel) -> u64 {
-    match error {
-        crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => crate::syscall::types::ENOMEM,
-        _ => crate::syscall::types::EINVAL,
-    }
-}
-
 fn mapping_error_native(error: crate::Kernel) -> mnu_abi::status::Error {
     match error {
         crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => {
@@ -797,7 +790,7 @@ fn exec_with_data(
                     process_name,
                     e
                 );
-                return mapping_error_errno(e);
+                return mapping_error_native(e).into_raw();
             }
         };
         let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
@@ -868,7 +861,7 @@ fn exec_with_data(
         ) {
             crate::kernel::early_serial("exec: map stack lower failed\n");
             crate::warn!("Failed to allocate user stack lower: {:?}", e);
-            return mapping_error_errno(e);
+            return mapping_error_native(e).into_raw();
         }
         // Map the top page with args (writable, non-executable stack)
         let top_page_vaddr = stack_end_vaddr - 4096;
@@ -883,7 +876,7 @@ fn exec_with_data(
         ) {
             crate::kernel::early_serial("exec: map stack top failed\n");
             crate::warn!("Failed to allocate user stack top: {:?}", e);
-            return mapping_error_errno(e);
+            return mapping_error_native(e).into_raw();
         }
 
         crate::debug!("User stack allocated successfully");
@@ -1097,7 +1090,9 @@ fn check_image_byte_ceiling(
     table: u64,
     reservations: &[crate::task::MemoryRegion],
     byte_ceiling: u64,
-) -> Result<(), u64> {
+) -> Result<(), mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+
     if byte_ceiling == u64::MAX {
         return Ok(());
     }
@@ -1110,9 +1105,12 @@ fn check_image_byte_ceiling(
             .map(|region| (region.start(), region.end().unwrap_or(u64::MAX))),
         |start, end| unsafe { crate::mem::paging::next_user_page_entry(table, start, end) },
     )
-    .map_err(|_| crate::syscall::types::EFAULT)?;
+    .map_err(|error| match error {
+        mapping_usage::Error::InvalidRange => Error::InvalidAddress,
+        mapping_usage::Error::Backend(_) => Error::BackingFailure,
+    })?;
     if !mapping_usage::permits(used, 0, byte_ceiling) {
-        return Err(crate::syscall::types::ENOMEM);
+        return Err(Error::ResourceUnavailable);
     }
     Ok(())
 }
@@ -1137,7 +1135,7 @@ fn replace_current_process_image(
     let aslr_seed = next_aslr_seed(identity);
     let new_pt_phys = match crate::mem::paging::create_user_page_table() {
         Ok(page_table) => page_table,
-        Err(error) => return Err(mapping_error_errno(error)),
+        Err(error) => return Err(mapping_error_native(error).into_raw()),
     };
     let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
     let ElfImageLayout {
@@ -1170,7 +1168,7 @@ fn replace_current_process_image(
         true,
         false,
     ) {
-        return Err(mapping_error_errno(error));
+        return Err(mapping_error_native(error).into_raw());
     }
     let top_page_vaddr = stack_end_vaddr - 4096;
     if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
@@ -1182,7 +1180,7 @@ fn replace_current_process_image(
         true,
         false,
     ) {
-        return Err(mapping_error_errno(error));
+        return Err(mapping_error_native(error).into_raw());
     }
     let exec_cfg = crate::config::kernel().exec;
     let heap_base = exec_cfg.memory_map_base_min.saturating_add(
@@ -1198,7 +1196,7 @@ fn replace_current_process_image(
         true,
         false,
     ) {
-        return Err(mapping_error_errno(error));
+        return Err(mapping_error_native(error).into_raw());
     }
     let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
         Ok(base) => base,
@@ -1208,7 +1206,8 @@ fn replace_current_process_image(
     // Admission precedes every destructive old-image operation, including
     // sibling retirement, borrowed mapping revocation, TLS/context edits and
     // launch-Handle retention. Failed preparation drops only the new root.
-    check_image_byte_ceiling(new_pt_phys, &deferred_zero_regions, byte_ceiling)?;
+    check_image_byte_ceiling(new_pt_phys, &deferred_zero_regions, byte_ceiling)
+        .map_err(mnu_abi::status::Error::into_raw)?;
     let current_tid = match crate::task::current_thread_id() {
         Some(thread) => thread,
         None => return Err(EINVAL),
