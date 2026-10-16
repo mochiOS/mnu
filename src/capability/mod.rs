@@ -253,10 +253,18 @@ impl Capability {
     }
 
     pub fn intern(s: &str) -> Option<Self> {
+        Self::try_intern(s).ok()
+    }
+
+    /// Register a name without publishing an ID until storage is prepared.
+    pub fn try_intern(s: &str) -> Result<Self, mnu_abi::status::Error> {
         if !valid_capability_name(s) {
-            return None;
+            return Err(mnu_abi::status::Error::InvalidArgument);
         }
-        builtin_capability(s).or_else(|| intern_dynamic_capability(s))
+        match builtin_capability(s) {
+            Some(capability) => Ok(capability),
+            None => intern_dynamic_capability(s),
+        }
     }
 
     pub fn is_delegable(&self) -> bool {
@@ -362,7 +370,9 @@ fn lookup_dynamic_capability(name: &str) -> Option<Capability> {
     })
 }
 
-fn intern_dynamic_capability(name: &str) -> Option<Capability> {
+fn intern_dynamic_capability(name: &str) -> Result<Capability, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+
     const MAX_DYNAMIC_CAPABILITIES: usize = 4096;
 
     with_dynamic_registry(|registry| {
@@ -371,14 +381,23 @@ fn intern_dynamic_capability(name: &str) -> Option<Capability> {
             .iter()
             .position(|registered| registered == name)
         {
-            return Some(Capability::Dynamic(id as u32));
+            return Ok(Capability::Dynamic(id as u32));
         }
         if registry.names.len() >= MAX_DYNAMIC_CAPABILITIES {
-            return None;
+            return Err(Error::LimitExceeded);
         }
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(name.len())
+            .map_err(|_| Error::ResourceUnavailable)?;
+        owned.push_str(name);
+        registry
+            .names
+            .try_reserve(1)
+            .map_err(|_| Error::ResourceUnavailable)?;
         let id = registry.names.len() as u32;
-        registry.names.push(name.to_string());
-        Some(Capability::Dynamic(id))
+        registry.names.push(owned);
+        Ok(Capability::Dynamic(id))
     })
 }
 
@@ -503,6 +522,17 @@ impl KernelAuthoritySet {
         if !self.authorities.contains(&authority) {
             self.authorities.push(authority);
         }
+    }
+
+    /// Add an exact authority, leaving the set unchanged on allocation failure.
+    pub fn try_insert(&mut self, authority: KernelAuthority) -> Result<(), mnu_abi::status::Error> {
+        if !self.authorities.contains(&authority) {
+            self.authorities
+                .try_reserve(1)
+                .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)?;
+            self.authorities.push(authority);
+        }
+        Ok(())
     }
 
     pub fn remove_exact(&mut self, authority: &KernelAuthority) -> bool {

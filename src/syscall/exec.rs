@@ -312,7 +312,7 @@ fn parse_requested_exec_grants(
     let mut authorities = KernelAuthoritySet::empty();
     for spec in caps_list {
         if let Some(authority) = parse_kernel_authority_spec(spec.as_str()) {
-            authorities.insert(authority);
+            authorities.try_insert(authority)?;
             continue;
         }
         // Canonical capabilities are safe to intern even while consuming an
@@ -320,7 +320,7 @@ fn parse_requested_exec_grants(
         // policy classification, and the ABI registry prevents arbitrary
         // names from creating kernel capability IDs here.
         let cap = if mnu_abi::capability::metadata(spec.as_str()).is_some() {
-            Capability::intern(spec.as_str())
+            Some(Capability::try_intern(spec.as_str())?)
         } else {
             Capability::from_str(spec.as_str())
         };
