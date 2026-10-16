@@ -869,19 +869,24 @@ fn export_object_handle(
     handle: ObjectHandle,
     requested: HandleRights,
 ) -> Result<ObjectHandleEntry, u64> {
+    use mnu_abi::status::Error;
+
     crate::task::with_process(process_id, |process| {
-        let source = process.object_handles().get(handle).ok_or(EBADF)?;
+        let source = process
+            .object_handles()
+            .get(handle)
+            .ok_or_else(|| Error::InvalidArgument.into_raw())?;
         if !source.rights().contains(HandleRights::TRANSFER)
             || !source.rights().contains(requested)
         {
-            return Err(EACCES);
+            return Err(Error::AccessDenied.into_raw());
         }
         process
             .object_handles()
             .export_restricted(handle, requested)
-            .ok_or(EACCES)
+            .ok_or_else(|| Error::AccessDenied.into_raw())
     })
-    .ok_or(EBADF)?
+    .ok_or_else(|| Error::NotReady.into_raw())?
 }
 
 fn install_received_object_handles(
@@ -1740,10 +1745,13 @@ pub(crate) fn call_provider_from_kernel(
     request: &[u8],
     reply: &mut [u8],
 ) -> Result<usize, u64> {
+    use mnu_abi::status::Error;
+
     if !endpoint_is_valid(endpoint) {
-        return Err(super::ESRCH);
+        return Err(Error::NotFound.into_raw());
     }
-    let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id).ok_or(EINVAL)?;
+    let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id)
+        .ok_or_else(|| Error::NotReady.into_raw())?;
     let mut attachments = ObjectHandleAttachments::empty();
     attachments.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
     call_endpoint_with_attachments_from_kernel(endpoint, expected_sender, request, reply, attachments)
@@ -1773,15 +1781,19 @@ pub(crate) fn call_provider_with_handle_from_kernel(
     handle: ObjectHandle,
     requested: HandleRights,
 ) -> Result<usize, u64> {
+    use mnu_abi::status::Error;
+
     if !endpoint_is_valid(endpoint) {
-        return Err(super::ESRCH);
+        return Err(Error::NotFound.into_raw());
     }
-    let process_id = crate::syscall::security::current_process_id().ok_or(EINVAL)?;
+    let process_id = crate::syscall::security::current_process_id()
+        .ok_or_else(|| Error::NotReady.into_raw())?;
     let mut attachments = ObjectHandleAttachments::empty();
     attachments.handles[0] = Some(export_object_handle(process_id, handle, requested)?);
     attachments.count = 1;
     attachments.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
-    let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id).ok_or(EINVAL)?;
+    let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id)
+        .ok_or_else(|| Error::NotReady.into_raw())?;
     call_endpoint_with_attachments_from_kernel(
         endpoint, expected_sender, request, reply, attachments,
     )
