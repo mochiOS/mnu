@@ -481,20 +481,34 @@ fn provider_call(
     request_data: &[u8],
     response_storage: &mut [u8],
 ) -> Result<(mnu_abi::provider::ResponseHeader, usize), u64> {
-    let mut request = vec![0u8; mnu_abi::provider::REQUEST_HEADER_LEN + request_data.len()];
+    use mnu_abi::status::Error;
+
+    if request_data.len() > mnu_abi::provider::MAX_DATA_LEN {
+        return Err(Error::LimitExceeded.into_raw());
+    }
+    let request_capacity = mnu_abi::provider::REQUEST_HEADER_LEN
+        .checked_add(request_data.len())
+        .ok_or_else(|| Error::LimitExceeded.into_raw())?;
+    let mut request = alloc::vec::Vec::new();
+    request
+        .try_reserve_exact(request_capacity)
+        .map_err(|_| Error::ResourceUnavailable.into_raw())?;
+    request.resize(request_capacity, 0);
     let request_len = request_header
         .encode(request_data, &mut request)
-        .map_err(|_| EINVAL)?;
+        .map_err(|_| Error::InvalidArgument.into_raw())?;
     let response_len = crate::syscall::ipc::call_provider_from_kernel(
         provider_endpoint(provider),
         &request[..request_len],
         response_storage,
     )?;
-    let (response, data) =
-        mnu_abi::provider::ResponseHeader::decode(response_storage.get(..response_len).ok_or(EIO)?)
-            .map_err(|_| EIO)?;
+    let (response, data) = mnu_abi::provider::ResponseHeader::decode(
+        response_storage.get(..response_len)
+            .ok_or_else(|| Error::BackingFailure.into_raw())?,
+    )
+    .map_err(|_| Error::BackingFailure.into_raw())?;
     if response.opcode != request_header.opcode || response.object_id != provider.object_id {
-        return Err(EIO);
+        return Err(Error::BackingFailure.into_raw());
     }
     if response.status != 0 {
         return Err(response.status as u64);
@@ -509,8 +523,10 @@ pub(crate) fn provider_read_at(
     offset: u64,
     output: &mut [u8],
 ) -> Result<usize, u64> {
+    use mnu_abi::status::Error;
+
     if output.len() > mnu_abi::provider::MAX_DATA_LEN {
-        return Err(EINVAL);
+        return Err(Error::LimitExceeded.into_raw());
     }
     let request = mnu_abi::provider::RequestHeader {
         opcode: mnu_abi::provider::OP_READ_AT,
@@ -520,10 +536,15 @@ pub(crate) fn provider_read_at(
         length: output.len() as u32,
         data_length: 0,
     };
-    let mut response_storage = vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + output.len()];
+    let capacity = mnu_abi::provider::RESPONSE_HEADER_LEN + output.len();
+    let mut response_storage = alloc::vec::Vec::new();
+    response_storage
+        .try_reserve_exact(capacity)
+        .map_err(|_| Error::ResourceUnavailable.into_raw())?;
+    response_storage.resize(capacity, 0);
     let (response, data_len) = provider_call(provider, request, &[], &mut response_storage)?;
     if response.value as usize != data_len || data_len > output.len() {
-        return Err(EIO);
+        return Err(Error::BackingFailure.into_raw());
     }
     output[..data_len].copy_from_slice(
         &response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN
@@ -538,8 +559,10 @@ pub(crate) fn provider_write_at(
     offset: u64,
     input: &[u8],
 ) -> Result<usize, u64> {
+    use mnu_abi::status::Error;
+
     if input.len() > mnu_abi::provider::MAX_DATA_LEN {
-        return Err(EINVAL);
+        return Err(Error::LimitExceeded.into_raw());
     }
     let request = mnu_abi::provider::RequestHeader {
         opcode: mnu_abi::provider::OP_WRITE_AT,
@@ -551,14 +574,17 @@ pub(crate) fn provider_write_at(
     };
     let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
     let (response, data_len) = provider_call(provider, request, input, &mut response_storage)?;
-    let written = usize::try_from(response.value).map_err(|_| EIO)?;
+    let written = usize::try_from(response.value)
+        .map_err(|_| Error::BackingFailure.into_raw())?;
     if data_len != 0 || written > input.len() {
-        return Err(EIO);
+        return Err(Error::BackingFailure.into_raw());
     }
     Ok(written)
 }
 
 pub(crate) fn provider_sync(provider: &ProviderObject) -> Result<(), u64> {
+    use mnu_abi::status::Error;
+
     let request = mnu_abi::provider::RequestHeader {
         opcode: mnu_abi::provider::OP_SYNC,
         object_id: provider.object_id,
@@ -570,7 +596,7 @@ pub(crate) fn provider_sync(provider: &ProviderObject) -> Result<(), u64> {
     let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
     let (response, data_len) = provider_call(provider, request, &[], &mut response_storage)?;
     if response.value != 0 || data_len != 0 {
-        return Err(EIO);
+        return Err(Error::BackingFailure.into_raw());
     }
     Ok(())
 }
