@@ -1,6 +1,7 @@
 //! Generic virtual-memory system calls.
 
-use super::types::{EACCES, EFAULT, EINVAL, ENOMEM, ESRCH, SUCCESS};
+use super::types::SUCCESS;
+use mnu_abi::status::Error;
 
 #[inline]
 fn current_pid() -> Option<crate::task::ids::ProcessId> {
@@ -9,15 +10,16 @@ fn current_pid() -> Option<crate::task::ids::ProcessId> {
 }
 
 #[inline(never)]
-fn memory_protection_error(error: crate::Kernel) -> u64 {
+fn memory_protection_error(error: crate::Kernel) -> Error {
     match error {
-        crate::Kernel::Memory(crate::result::Memory::NotMapped) => EFAULT,
-        crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => ENOMEM,
-        crate::Kernel::Memory(crate::result::Memory::PermissionDenied)
-        | crate::Kernel::Memory(crate::result::Memory::InvalidAddress)
-        | crate::Kernel::Memory(crate::result::Memory::AlignmentError)
-        | crate::Kernel::InvalidParam => EINVAL,
-        _ => EFAULT,
+        crate::Kernel::Memory(crate::result::Memory::NotMapped)
+        | crate::Kernel::Memory(crate::result::Memory::InvalidAddress) => Error::InvalidAddress,
+        crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => Error::ResourceUnavailable,
+        crate::Kernel::Memory(crate::result::Memory::Busy) => Error::NotReady,
+        crate::Kernel::Memory(crate::result::Memory::PermissionDenied) => Error::AccessDenied,
+        crate::Kernel::Memory(crate::result::Memory::AlignmentError)
+        | crate::Kernel::InvalidParam => Error::InvalidArgument,
+        _ => Error::BackingFailure,
     }
 }
 
@@ -31,7 +33,11 @@ fn memory_range_is_mapped(
     crate::task::memory_range::covers_pages(
         start,
         end,
-        |page| process.find_memory_region(page).and_then(|region| region.end()),
+        |page| {
+            process
+                .find_memory_region(page)
+                .and_then(|region| region.end())
+        },
         |page| crate::mem::paging::has_user_page_entry_in_table(table_phys, page),
     )
 }
@@ -45,14 +51,12 @@ fn protect_memory_pages(
     present: bool,
     writable: bool,
     executable: bool,
-) -> Result<(), u64> {
+) -> Result<(), Error> {
     let mut page = start;
     while page < end {
         // The caller holds PROC, retaining this root and excluding native VM
         // writers. Include allocated non-present leaves, skip absent subtrees.
-        let resident = unsafe {
-            crate::mem::paging::next_user_page_entry(table_phys, page, end)
-        };
+        let resident = unsafe { crate::mem::paging::next_user_page_entry(table_phys, page, end) };
         let Some(resident) = resident.map_err(memory_protection_error)? else {
             break;
         };
@@ -110,15 +114,15 @@ pub fn protect(addr: u64, len: u64, access: u64) -> u64 {
         return SUCCESS;
     }
     if (access & !mnu_abi::MEMORY_ACCESS_ALL) != 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if addr == 0 || addr > USER_SPACE_END {
-        return EINVAL;
+        return Error::InvalidAddress.into_raw();
     }
 
     let end_inclusive = match addr.checked_add(len.saturating_sub(1)) {
         Some(v) if v <= USER_SPACE_END => v,
-        _ => return EINVAL,
+        _ => return Error::InvalidAddress.into_raw(),
     };
     let start = addr & !0xfffu64;
     let length = match (end_inclusive & !0xfffu64)
@@ -126,51 +130,51 @@ pub fn protect(addr: u64, len: u64, access: u64) -> u64 {
         .and_then(|end| end.checked_sub(start))
     {
         Some(v) if v != 0 => v,
-        _ => return EINVAL,
+        _ => return Error::InvalidArgument.into_raw(),
     };
 
     let present = access != 0;
     let writable = (access & mnu_abi::MEMORY_ACCESS_WRITE) != 0;
     let executable = (access & mnu_abi::MEMORY_ACCESS_EXECUTE) != 0;
     if present && writable && executable {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
 
     let pid = match current_pid() {
         Some(p) => p,
-        None => return ESRCH,
+        None => return Error::NotReady.into_raw(),
     };
     let end = start + length;
     let result = crate::task::with_process_mut(pid, |process| {
-        let table_phys = process.page_table().ok_or(EINVAL)?;
+        let table_phys = process.page_table().ok_or(Error::NotReady)?;
         if !memory_range_is_mapped(process, table_phys, start, end) {
-            return Err(EFAULT);
+            return Err(Error::InvalidAddress);
         }
         // Validate the entire range before changing any page permissions.
         // A mapping retains the authority of its original backing handle even
         // after that handle is closed or transferred with fewer rights.
         for region in process.memory_regions() {
-            let region_end = region.end().ok_or(EFAULT)?;
+            let region_end = region.end().ok_or(Error::BackingFailure)?;
             if start < region_end && end > region.start() && !region.permits_access(access) {
-                return Err(EACCES);
+                return Err(Error::AccessDenied);
             }
         }
-        crate::mem::mapping_admission::check(process.memory_regions(), start, end)?;
+        crate::mem::mapping_admission::check_native(process.memory_regions(), start, end)?;
         let changed = protect_memory_pages(
             process, table_phys, start, end, present, writable, executable,
         );
         // Partial failure may have changed permissions too. Complete remote
         // invalidation before reporting success or returning an editing error.
-        crate::mem::tlb_shootdown::invalidate_all().map_err(|_| EFAULT)?;
+        crate::mem::tlb_shootdown::invalidate_all().map_err(|_| Error::BackingFailure)?;
         changed?;
         if !record_mapping_access(process, start, end, access) {
-            return Err(EFAULT);
+            return Err(Error::BackingFailure);
         }
         Ok(())
     });
     match result {
         Some(Ok(())) => SUCCESS,
-        Some(Err(errno)) => errno,
-        None => ESRCH,
+        Some(Err(error)) => error.into_raw(),
+        None => Error::NotReady.into_raw(),
     }
 }

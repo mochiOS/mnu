@@ -79,6 +79,8 @@ pub enum SyscallNumber {
     ThreadYield = 579,
     MemoryMap = 582,
     MemoryUnmap = 583,
+    /// Changes access within the caller's existing mappings. Failures use
+    /// status::Error; compatibility layers select operation-specific errno.
     MemoryProtect = 584,
     MemorySync = 586,
     IpcCreate = 587,

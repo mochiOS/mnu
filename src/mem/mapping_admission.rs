@@ -9,6 +9,26 @@ pub(crate) fn check(
     check_range(regions, start, end, false)
 }
 
+/// Native failure boundary for VM editors. The backing generation interface
+/// still has legacy status payloads during migration; isolate them here, not
+/// in a native syscall's public result or its permission-editing logic.
+pub(crate) fn check_native(
+    regions: &[crate::task::MemoryRegion],
+    start: u64,
+    end: u64,
+) -> Result<(), mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+    check(regions, start, end).map_err(|status| {
+        Error::from_raw(status).unwrap_or_else(|| {
+            if status == crate::syscall::EAGAIN {
+                Error::NotReady
+            } else {
+                Error::BackingFailure
+            }
+        })
+    })
+}
+
 /// Unmapping can discard unavailable data, but not an extent owner's PTEs.
 /// This admission must never be used for protection changes or data access.
 pub(crate) fn check_unmap(
