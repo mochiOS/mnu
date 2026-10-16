@@ -103,19 +103,19 @@ impl PreparedSharedPage {
         virt_addr: u64,
         writable: bool,
         executable: bool,
-    ) -> Result<(), u64> {
+    ) -> Result<(), mnu_abi::status::Error> {
         let install = || {
             crate::mem::paging::map_shared_frame_to_user(
                 table_phys, virt_addr, self.frame_phys, writable, executable,
             )
-            .map_err(|_| crate::syscall::ENOMEM)
+            .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)
         };
         match &self.generation {
             PreparedGeneration::Memory(memory, generation) => {
-                memory.with_generation(*generation, install)
+                memory.with_generation_native(*generation, install)
             }
             PreparedGeneration::Provider(gate, generation) => {
-                with_cache_generation(gate, *generation, install)
+                with_cache_generation_native(gate, *generation, install)
             }
         }
     }
@@ -172,24 +172,6 @@ impl VmObject {
         match &self.source {
             VmObjectSource::Memory(memory) => Some(memory.generation()),
             VmObjectSource::Provider { _io_lock, .. } => Some(_io_lock.generation()),
-        }
-    }
-
-    /// Validate a snapshot taken before loading private page bytes, and keep
-    /// backing generation stable throughout the final PTE installation.
-    pub(crate) fn with_memory_generation<T>(
-        &self,
-        generation: Option<u64>,
-        install: impl FnOnce() -> Result<T, u64>,
-    ) -> Result<T, u64> {
-        match (&self.source, generation) {
-            (VmObjectSource::Memory(memory), Some(generation)) => {
-                memory.with_generation(generation, install)
-            }
-            (VmObjectSource::Provider { _io_lock, .. }, Some(generation)) => {
-                with_cache_generation(_io_lock, generation, install)
-            }
-            _ => Err(crate::syscall::EINVAL),
         }
     }
 
@@ -1149,19 +1131,6 @@ fn ensure_unreserved(object: ObjectKey) -> Result<(), u64> {
         }
     }
     Ok(())
-}
-
-fn with_cache_generation<T>(
-    gate: &super::object_io::IoLock,
-    generation: u64,
-    install: impl FnOnce() -> Result<T, u64>,
-) -> Result<T, u64> {
-    // Keep old callback statuses untouched until their callers are migrated.
-    with_cache_generation_native(gate, generation, || Ok(install()))
-        .map_err(|error| match error {
-            mnu_abi::status::Error::NotReady => crate::syscall::EAGAIN,
-            _ => crate::syscall::EIO,
-        })?
 }
 
 fn with_cache_generation_native<T>(

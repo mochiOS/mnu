@@ -44,7 +44,7 @@ impl AddressSpaceObject {
         for region in &image.regions {
             if let Some(object) = region.backing().file_object() {
                 object
-                    .with_memory_generation(object.memory_generation(), || Ok(()))
+                    .with_memory_generation_native(object.memory_generation(), || Ok(()))
                     .map_err(|_| ConsumeError::BackingBusy)?;
             }
         }
@@ -98,7 +98,7 @@ impl CloneSource {
         for region in process.memory_regions() {
             if let Some(object) = region.backing().file_object() {
                 object
-                    .with_memory_generation(object.memory_generation(), || Ok(()))
+                    .with_memory_generation_native(object.memory_generation(), || Ok(()))
                     .map_err(|_| CloneError::BackingBusy)?;
             }
         }

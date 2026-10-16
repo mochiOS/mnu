@@ -102,17 +102,6 @@ impl SharedMemory {
 
     /// Keep size/epoch stable through the final PTE installation. This prevents
     /// an old prepared page from being installed after shrink and regrowth.
-    pub(crate) fn with_generation<T>(
-        &self,
-        generation: u64,
-        install: impl FnOnce() -> Result<T, u64>,
-    ) -> Result<T, u64> {
-        // Encoded-status callers retain callback failures unchanged. The
-        // generation gate itself always uses the native error domain.
-        self.with_generation_native(generation, || Ok(install()))
-            .map_err(NativeError::into_raw)?
-    }
-
     pub(crate) fn with_generation_native<T>(
         &self,
         generation: u64,

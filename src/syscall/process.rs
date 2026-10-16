@@ -347,6 +347,12 @@ impl From<u64> for MemoryFault {
     }
 }
 
+impl From<mnu_abi::status::Error> for MemoryFault {
+    fn from(error: mnu_abi::status::Error) -> Self {
+        Self::Operation(error.into_raw())
+    }
+}
+
 impl MemoryFault {
     /// A backing reservation or superseded page snapshot is not a user access
     /// violation. Retry outside all VM/cache locks rather than deliver an upcall.
@@ -600,10 +606,10 @@ pub(crate) fn handle_user_memory_fault(
                     is_write && region.allows_write_at(fault_addr),
                     executable,
                 )
-                .map_err(|_| ENOMEM)
+                .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)
             };
             match pager.as_ref() {
-                Some((object, _)) => object.with_memory_generation(generation, install)?,
+                Some((object, _)) => object.with_memory_generation_native(generation, install)?,
                 None => install()?,
             }
         }
@@ -902,7 +908,8 @@ fn memory_map_impl(
             };
             // Reservations and new mapping admission share PROCESS_TABLE.
             // Do not publish metadata for a backing being changed by its owner.
-            object.with_memory_generation(object.memory_generation(), || Ok(()))?;
+            object.with_memory_generation_native(object.memory_generation(), || Ok(()))
+                .map_err(mnu_abi::status::Error::into_raw)?;
             crate::task::MemoryRegion::file_backed(
                 map_start,
                 size,
