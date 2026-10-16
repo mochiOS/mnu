@@ -450,11 +450,13 @@ pub fn call(
     reply_ptr: u64,
     reply_len: u64,
 ) -> u64 {
+    use mnu_abi::status::Error;
+
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::IpcClient,
         crate::capability::Capability::IpcServer,
     ]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let (dest_thread_id, expected_sender, delivery_flags) =
         match resolve_call_destination(dest_endpoint_handle) {
@@ -463,15 +465,15 @@ pub fn call(
         };
     let caller = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
     let sender = match ensure_endpoint_for_thread(caller) {
         Some(handle) => handle,
-        None => return EINVAL,
+        None => return Error::ResourceUnavailable.into_raw(),
     };
     let destination = match endpoint_for_thread(dest_thread_id) {
         Some(endpoint) => endpoint,
-        None => return super::ESRCH,
+        None => return Error::NotFound.into_raw(),
     };
     let _lifetime = match lifetime::observe(destination, crate::task::ThreadId::from_u64(caller)) {
         Ok(observation) => observation,
@@ -482,7 +484,7 @@ pub fn call(
     let round_trip_start = crate::performance::timestamp();
     let sent = loop {
         if !endpoint_is_valid(destination) {
-            return super::ESRCH;
+            return Error::NotFound.into_raw();
         }
         let status = send_call_to_thread_id(
             dest_thread_id, sender, call_id, req_ptr, req_len, delivery_flags,
@@ -529,14 +531,16 @@ pub fn call_object_handles(
     reply_len: u64,
     handles_ptr: u64,
 ) -> u64 {
+    use mnu_abi::status::Error;
+
     if handles_ptr == 0 {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::IpcClient,
         crate::capability::Capability::IpcServer,
     ]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let (dest_thread_id, expected_sender, delivery_flags) =
         match resolve_call_destination(dest_endpoint_handle) {
@@ -545,15 +549,15 @@ pub fn call_object_handles(
         };
     let caller = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
     let sender = match ensure_endpoint_for_thread(caller) {
         Some(handle) => handle,
-        None => return EINVAL,
+        None => return Error::ResourceUnavailable.into_raw(),
     };
     let destination = match endpoint_for_thread(dest_thread_id) {
         Some(endpoint) => endpoint,
-        None => return super::ESRCH,
+        None => return Error::NotFound.into_raw(),
     };
     let _lifetime = match lifetime::observe(destination, crate::task::ThreadId::from_u64(caller)) {
         Ok(observation) => observation,
@@ -562,7 +566,7 @@ pub fn call_object_handles(
     let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let sent = loop {
         if !endpoint_is_valid(destination) {
-            return super::ESRCH;
+            return Error::NotFound.into_raw();
         }
         let mut attachments = match decode_outgoing_object_handles(handles_ptr) {
             Ok(handles) => handles,
@@ -629,34 +633,36 @@ fn reply_with_attachments(
     len: u64,
     object_handles: ObjectHandleAttachments,
 ) -> u64 {
+    use mnu_abi::status::Error;
+
     let current = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
     let caller_handle = match ensure_endpoint_for_thread(current) {
         Some(handle) => handle,
-        None => return EINVAL,
+        None => return Error::ResourceUnavailable.into_raw(),
     };
     let target = {
         let boxes = lock_mailboxes();
         let (idx, generation) = match crate::task::thread_slot_index_and_generation_by_u64(current) {
             Some(v) => v,
-            None => return EINVAL,
+            None => return Error::NotReady.into_raw(),
         };
         if idx >= MAX_THREADS {
-            return EINVAL;
+            return Error::BackingFailure.into_raw();
         }
         match boxes[idx].reply_target(dest_thread_id, (current, generation)) {
             Some(target) => target,
-            None => return EACCES,
+            None => return Error::AccessDenied.into_raw(),
         }
     };
     if target.endpoint == 0 {
-        return EINVAL;
+        return Error::BackingFailure.into_raw();
     }
     let target_thread = match resolve_endpoint_handle(target.endpoint) {
         Some(thread_id) => thread_id,
-        None => return EINVAL,
+        None => return Error::NotFound.into_raw(),
     };
     let status = send_to_thread_id_with_attachments(
         target_thread,
