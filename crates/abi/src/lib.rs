@@ -151,6 +151,10 @@ pub enum SyscallNumber {
     /// Observes a retained WAIT Process Handle, including after its process
     /// table record is reclaimed. Failures use status::Error.
     ProcessHandleStatus = 642,
+    /// Waits on the retained target of a WAIT Process Handle. Poll/deadline
+    /// expiry or a deliverable upcall returns native NotReady. Storage or
+    /// deadline admission failure is ResourceUnavailable. Other failures also
+    /// use status::Error; no child relationship or POSIX wait status is used.
     ProcessHandleWait = 643,
     ProcessHandleResume = 645,
     ProcessHandleTerminate = 646,

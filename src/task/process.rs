@@ -1564,6 +1564,9 @@ pub fn register_process_exit_waiter(thread: super::ThreadId, process: ProcessId)
         .find(|waiter| waiter.thread == thread)
     {
         if !waiter.processes.contains(&process) {
+            if waiter.processes.try_reserve(1).is_err() {
+                return false;
+            }
             waiter.processes.push(process);
         }
         return true;
@@ -1571,9 +1574,14 @@ pub fn register_process_exit_waiter(thread: super::ThreadId, process: ProcessId)
     let Some(slot) = waiters.iter_mut().find(|slot| slot.is_none()) else {
         return false;
     };
+    let mut processes = Vec::new();
+    if processes.try_reserve_exact(1).is_err() {
+        return false;
+    }
+    processes.push(process);
     *slot = Some(ProcessExitWaiter {
         thread,
-        processes: alloc::vec![process],
+        processes,
     });
     true
 }

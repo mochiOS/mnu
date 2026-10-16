@@ -1322,8 +1322,12 @@ fn process_status_for(raw: u64) -> Result<mnu_abi::ProcessStatus, u64> {
     let KernelObject::Process(process) = object else {
         return Err(Error::InvalidArgument.into_raw());
     };
+    Ok(process_status_of(&process))
+}
+
+fn process_status_of(process: &crate::task::process::ProcessObject) -> mnu_abi::ProcessStatus {
     let exited = process.is_exited();
-    Ok(mnu_abi::ProcessStatus {
+    mnu_abi::ProcessStatus {
         process_id: process.id().as_u64(),
         state: if exited {
             mnu_abi::PROCESS_STATE_EXITED
@@ -1332,7 +1336,7 @@ fn process_status_for(raw: u64) -> Result<mnu_abi::ProcessStatus, u64> {
         },
         reserved: 0,
         exit_code: process.exit_code(),
-    })
+    }
 }
 
 fn write_process_status(output: u64, status: mnu_abi::ProcessStatus) -> u64 {
@@ -1409,15 +1413,29 @@ pub fn process_execution_read(raw: u64, output: u64, length: u64) -> u64 {
 /// Waits until the process exits. `deadline_nanoseconds` is an absolute
 /// monotonic-clock value; zero polls and `u64::MAX` waits indefinitely.
 pub fn process_wait(raw: u64, deadline_nanoseconds: u64, output: u64) -> u64 {
-    let process_id = match object(raw, HandleRights::WAIT) {
-        Ok(KernelObject::Process(process)) => process.id(),
-        Ok(_) => return EBADF,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    // Retain the target once: concurrent close/reuse of the caller's selector
+    // must not redirect a pending wait to a different lifecycle object.
+    let process = match object_native(raw, HandleRights::WAIT) {
+        Ok(KernelObject::Process(process)) => process,
+        Ok(_) => return Error::InvalidArgument.into_raw(),
+        Err(error) => return error.into_raw(),
     };
+    let process_id = process.id();
     let current = match crate::task::current_thread_id() {
         Some(thread) => thread,
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
+    struct Registration {
+        thread: crate::task::ThreadId,
+        process: crate::task::ProcessId,
+    }
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            crate::task::remove_process_exit_waiter(self.thread, self.process);
+            crate::syscall::time::disarm_thread_deadline(self.thread);
+        }
+    }
     let deadline_tick = if matches!(
         deadline_nanoseconds,
         mnu_abi::PROCESS_WAIT_POLL | mnu_abi::PROCESS_WAIT_INFINITE
@@ -1428,52 +1446,43 @@ pub fn process_wait(raw: u64, deadline_nanoseconds: u64, output: u64) -> u64 {
     };
     loop {
         crate::syscall::time::disarm_thread_deadline(current);
-        let status = match process_status_for(raw) {
-            Ok(status) => status,
-            Err(error) => return error,
+        let registration = Registration {
+            thread: current,
+            process: process_id,
         };
+        let status = process_status_of(&process);
         if status.state == mnu_abi::PROCESS_STATE_EXITED {
-            crate::task::remove_process_exit_waiter(current, process_id);
-            crate::syscall::time::disarm_thread_deadline(current);
+            drop(registration);
             return write_process_status(output, status);
         }
         if deadline_nanoseconds == mnu_abi::PROCESS_WAIT_POLL
             || (deadline_nanoseconds != mnu_abi::PROCESS_WAIT_INFINITE
                 && crate::syscall::time::monotonic_nanoseconds() >= deadline_nanoseconds)
         {
-            crate::task::remove_process_exit_waiter(current, process_id);
-            crate::syscall::time::disarm_thread_deadline(current);
-            return EAGAIN;
+            return Error::NotReady.into_raw();
+        }
+        if super::upcall::current_has_deliverable_upcall() {
+            return Error::NotReady.into_raw();
         }
         if !crate::task::register_process_exit_waiter(current, process_id) {
-            return EAGAIN;
+            return Error::ResourceUnavailable.into_raw();
         }
 
         // Recheck after registration so an exit racing with registration
         // cannot be missed.
-        let status = match process_status_for(raw) {
-            Ok(status) => status,
-            Err(error) => {
-                crate::task::remove_process_exit_waiter(current, process_id);
-                crate::syscall::time::disarm_thread_deadline(current);
-                return error;
-            }
-        };
+        let status = process_status_of(&process);
         if status.state == mnu_abi::PROCESS_STATE_EXITED {
-            crate::task::remove_process_exit_waiter(current, process_id);
-            crate::syscall::time::disarm_thread_deadline(current);
+            drop(registration);
             return write_process_status(output, status);
         }
 
         if deadline_nanoseconds != mnu_abi::PROCESS_WAIT_INFINITE
             && !crate::syscall::time::arm_thread_deadline(current, deadline_tick)
         {
-            crate::task::remove_process_exit_waiter(current, process_id);
-            return EAGAIN;
+            return Error::ResourceUnavailable.into_raw();
         }
         let _ = crate::task::sleep_thread_unless_woken(current);
         crate::task::yield_now();
-        crate::task::remove_process_exit_waiter(current, process_id);
     }
 }
 
