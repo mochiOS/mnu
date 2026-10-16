@@ -61,6 +61,26 @@ pub struct FileHandle {
 }
 
 impl FileHandle {
+    pub(crate) fn try_stream_pair(
+        pipe_id: usize,
+    ) -> Result<(Self, Self), mnu_abi::status::Error> {
+        // Both endpoint owners exist before either allocation can fail. Their
+        // Drops balance the stream table's initial reader/writer references.
+        let read = OpenFile::new_pipe(pipe_id, false);
+        let write = OpenFile::new_pipe(pipe_id, true);
+        let read = Self {
+            open: Arc::try_new(SpinLock::new(read))
+                .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)?,
+            cap: FileHandleCap::READ,
+        };
+        let write = Self {
+            open: Arc::try_new(SpinLock::new(write))
+                .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)?,
+            cap: FileHandleCap::WRITE,
+        };
+        Ok((read, write))
+    }
+
     pub fn new(open: OpenFile, cap: FileHandleCap) -> Self {
         Self {
             open: Arc::new(SpinLock::new(open)),

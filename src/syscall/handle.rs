@@ -2054,18 +2054,30 @@ pub fn rights_get(raw: u64) -> u64 {
 /// Descriptor numbering and POSIX descriptor flags are intentionally left to
 /// user space.
 pub fn stream_pair_create(output: u64) -> u64 {
+    use mnu_abi::status::Error;
+
     if output == 0 {
-        return EFAULT;
+        return Error::InvalidAddress.into_raw();
     }
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
     let Some(stream_id) = crate::syscall::fs::alloc_stream_state() else {
-        return ENOSPC;
+        return Error::ResourceUnavailable.into_raw();
     };
-    let read = KernelObject::File(Arc::new(crate::task::FileHandle::new_pipe_read(stream_id)));
-    let write = KernelObject::File(Arc::new(crate::task::FileHandle::new_pipe_write(stream_id)));
+    let (read, write) = match crate::task::FileHandle::try_stream_pair(stream_id) {
+        Ok(pair) => pair,
+        Err(error) => return error.into_raw(),
+    };
+    let read = match Arc::try_new(read) {
+        Ok(read) => KernelObject::File(read),
+        Err(_) => return Error::ResourceUnavailable.into_raw(),
+    };
+    let write = match Arc::try_new(write) {
+        Ok(write) => KernelObject::File(write),
+        Err(_) => return Error::ResourceUnavailable.into_raw(),
+    };
     let handles = crate::task::with_process_mut(process_id, |process| {
         let read = process.object_handles_mut().insert(ObjectHandleEntry::new(
             read,
@@ -2091,10 +2103,11 @@ pub fn stream_pair_create(output: u64) -> u64 {
             return None;
         };
         Some((read, write))
-    })
-    .flatten();
-    let Some((read, write)) = handles else {
-        return ENOSPC;
+    });
+    let (read, write) = match handles {
+        Some(Some(handles)) => handles,
+        Some(None) => return Error::ResourceUnavailable.into_raw(),
+        None => return Error::NotReady.into_raw(),
     };
     let pair = mnu_abi::StreamPair {
         read: read.raw(),
@@ -2106,12 +2119,12 @@ pub fn stream_pair_create(output: u64) -> u64 {
             core::mem::size_of::<mnu_abi::StreamPair>(),
         )
     };
-    if let Err(error) = crate::syscall::copy_to_user(output, bytes) {
+    if let Err(error) = crate::syscall::copy_to_user_native(output, bytes) {
         let _ = crate::task::with_process_mut(process_id, |process| {
             process.object_handles_mut().close(read);
             process.object_handles_mut().close(write);
         });
-        return error;
+        return error.into_raw();
     }
     SUCCESS
 }
