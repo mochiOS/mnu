@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
+use mnu_abi::status::Error as NativeError;
 
 use super::shared_pages::{PageError, ResizeError, SharedPages, SizeError};
 use crate::interrupt::spinlock::SpinLock;
@@ -126,8 +127,8 @@ impl SharedMemory {
     pub(crate) fn resize_with(
         &self,
         length: u64,
-        revoke: impl FnOnce(u64, u64) -> Result<(), u64>,
-    ) -> Result<(), u64> {
+        revoke: impl FnOnce(u64, u64) -> Result<(), NativeError>,
+    ) -> Result<(), NativeError> {
         self.resize_transaction(length, |start, end, commit| {
             revoke(start, end)?;
             Ok(commit.commit())
@@ -142,8 +143,8 @@ impl SharedMemory {
             u64,
             super::shared_pages::ResizeCommit<'a>,
         )
-            -> Result<super::shared_pages::ResizeCommitted<'a>, u64>,
-    ) -> Result<(), u64> {
+            -> Result<super::shared_pages::ResizeCommitted<'a>, NativeError>,
+    ) -> Result<(), NativeError> {
         let mut pages = self.pages.lock();
         if pages.length() == length {
             return Ok(());
@@ -152,16 +153,19 @@ impl SharedMemory {
             .generation
             .load(Ordering::Relaxed)
             .checked_add(1)
-            .ok_or(crate::syscall::ENOMEM)?;
+            .ok_or(NativeError::ResourceUnavailable)?;
         pages
             .resize_bytes_transaction(
                 length,
                 |page, range| {
                     let base = super::paging::physical_memory_offset()
                         .and_then(|offset| offset.checked_add(page.0))
-                        .ok_or(crate::syscall::EIO)?;
-                    let start = base.checked_add(range.start).ok_or(crate::syscall::EIO)?;
-                    base.checked_add(range.end).ok_or(crate::syscall::EIO)?;
+                        .ok_or(NativeError::BackingFailure)?;
+                    let start = base
+                        .checked_add(range.start)
+                        .ok_or(NativeError::BackingFailure)?;
+                    base.checked_add(range.end)
+                        .ok_or(NativeError::BackingFailure)?;
                     Ok((start, range.end - range.start))
                 },
                 coordinate,
@@ -174,8 +178,8 @@ impl SharedMemory {
                 },
             )
             .map_err(|error| match error {
-                ResizeError::Size(SizeError::Invalid) => crate::syscall::EINVAL,
-                ResizeError::Size(SizeError::LimitExceeded) => crate::syscall::ENOMEM,
+                ResizeError::Size(SizeError::Invalid) => NativeError::InvalidArgument,
+                ResizeError::Size(SizeError::LimitExceeded) => NativeError::ResourceUnavailable,
                 ResizeError::Revocation(error) => error,
                 ResizeError::Preparation(error) => error,
             })?;

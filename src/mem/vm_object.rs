@@ -152,12 +152,12 @@ impl VmObject {
         }
     }
 
-    pub(crate) fn resize_memory(&self, length: u64) -> Result<(), u64> {
+    pub(crate) fn resize_memory(&self, length: u64) -> Result<(), mnu_abi::status::Error> {
         match &self.source {
             VmObjectSource::Memory(memory) => {
                 crate::task::process::resize_shared_memory(memory, length)
             }
-            _ => Err(crate::syscall::EINVAL),
+            _ => Err(mnu_abi::status::Error::InvalidArgument),
         }
     }
 

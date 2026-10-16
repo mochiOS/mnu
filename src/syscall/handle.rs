@@ -110,7 +110,11 @@ pub fn memory_object_resize(raw: u64, length: u64) -> u64 {
     // Resolve and retain the resource before acquiring the mapping lock. Never
     // use a foreign PID/FD or hold a caller-table guard across global resize.
     match object(raw, HandleRights::CONTROL) {
-        Ok(KernelObject::VmObject(object)) => object.resize_memory(length).err().unwrap_or(SUCCESS),
+        Ok(KernelObject::VmObject(object)) => object
+            .resize_memory(length)
+            .err()
+            .map(mnu_abi::status::Error::into_raw)
+            .unwrap_or(SUCCESS),
         Ok(_) => EINVAL,
         Err(error) => error,
     }

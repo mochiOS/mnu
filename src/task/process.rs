@@ -1625,7 +1625,8 @@ where
 pub(crate) fn resize_shared_memory(
     memory: &crate::mem::shared_memory::SharedMemory,
     length: u64,
-) -> core::result::Result<(), u64> {
+) -> core::result::Result<(), mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
     use crate::mem::{
         mapping_preservation_native::Preserving,
         mapping_targets::Targets,
@@ -1640,18 +1641,16 @@ pub(crate) fn resize_shared_memory(
             start,
             end,
             boundary,
-        )
-        .map_err(mnu_abi::status::Error::into_raw)?;
+        )?;
         // SAFETY: user mapping exclusion plus the retained table guard
         // keeps every selected PTE and page-table hierarchy stable.
         let native = unsafe { Native::for_targets(&table, &targets) };
-        let mut backend = Preserving::new(native, targets.preserved())
-            .map_err(mnu_abi::status::Error::into_raw)?;
+        let mut backend = Preserving::new(native, targets.preserved())?;
         transaction::revoke_with(targets.ranges(), &mut backend, || Ok(commit.commit()))
             .map_err(|error| match error {
-                transaction::Error::InvalidRange => crate::syscall::EINVAL,
-                transaction::Error::Allocation => crate::syscall::ENOMEM,
-                transaction::Error::Backend(error) => error.into_raw(),
+                transaction::Error::InvalidRange => Error::InvalidArgument,
+                transaction::Error::Allocation => Error::ResourceUnavailable,
+                transaction::Error::Backend(error) => error,
             })
     })
 }
