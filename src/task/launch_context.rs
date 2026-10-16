@@ -78,13 +78,17 @@ impl LaunchContext {
         self.inherited_handles.get(&key).copied()
     }
 
-    pub fn install(&mut self, key: u64, handle: ObjectHandle) -> bool {
-        if self.inherited_handles.len() >= PROCESS_MAX_INHERITED_HANDLES
-            || self.inherited_handles.contains_key(&key)
-        {
-            return false;
+    pub fn install(&mut self, key: u64, handle: ObjectHandle) -> Result<(), Error> {
+        if self.inherited_handles.contains_key(&key) {
+            return Err(Error::AlreadyExists);
         }
-        self.inherited_handles.insert(key, handle)
+        if self.inherited_handles.len() >= PROCESS_MAX_INHERITED_HANDLES {
+            return Err(Error::ResourceUnavailable);
+        }
+        self.inherited_handles
+            .insert(key, handle)
+            .then_some(())
+            .ok_or(Error::ResourceUnavailable)
     }
 
     pub fn set(&mut self, key: u64, handle: ObjectHandle) -> bool {
@@ -115,13 +119,17 @@ impl LaunchContext {
         self.inherited_values.get(&key).copied()
     }
 
-    pub fn install_value(&mut self, key: u64, value: u64) -> bool {
-        if self.inherited_values.len() >= PROCESS_MAX_INHERITED_VALUES
-            || self.inherited_values.contains_key(&key)
-        {
-            return false;
+    pub fn install_value(&mut self, key: u64, value: u64) -> Result<(), Error> {
+        if self.inherited_values.contains_key(&key) {
+            return Err(Error::AlreadyExists);
         }
-        self.inherited_values.insert(key, value)
+        if self.inherited_values.len() >= PROCESS_MAX_INHERITED_VALUES {
+            return Err(Error::ResourceUnavailable);
+        }
+        self.inherited_values
+            .insert(key, value)
+            .then_some(())
+            .ok_or(Error::ResourceUnavailable)
     }
 
     pub fn set_value(&mut self, key: u64, value: u64) -> bool {
@@ -227,8 +235,11 @@ mod tests {
         let mut context = LaunchContext::new_boxed();
         let first = ObjectHandle::from_raw(1).unwrap();
         let second = ObjectHandle::from_raw(2).unwrap();
-        assert!(context.install(0x706f_7369_782d_6970, first));
-        assert!(!context.install(0x706f_7369_782d_6970, second));
+        assert!(context.install(0x706f_7369_782d_6970, first).is_ok());
+        assert_eq!(
+            context.install(0x706f_7369_782d_6970, second),
+            Err(Error::AlreadyExists)
+        );
         assert_eq!(context.get(0x706f_7369_782d_6970), Some(first));
     }
 
@@ -237,8 +248,8 @@ mod tests {
         let mut context = LaunchContext::new_boxed();
         let first = ObjectHandle::from_raw(1).unwrap();
         let second = ObjectHandle::from_raw(2).unwrap();
-        assert!(context.install(1, first));
-        assert!(context.install(2, second));
+        assert!(context.install(1, first).is_ok());
+        assert!(context.install(2, second).is_ok());
         assert_eq!(context.take(1), Some(first));
         assert_eq!(context.get(1), None);
         context.remove_handle(second);
@@ -249,10 +260,10 @@ mod tests {
     fn opaque_values_are_independent_from_handle_keys() {
         let mut context = LaunchContext::new_boxed();
         let handle = ObjectHandle::from_raw(1).unwrap();
-        assert!(context.install(7, handle));
-        assert!(context.install_value(7, u64::MAX));
+        assert!(context.install(7, handle).is_ok());
+        assert!(context.install_value(7, u64::MAX).is_ok());
         assert_eq!(context.value(7), Some(u64::MAX));
-        assert!(!context.install_value(7, 1));
+        assert_eq!(context.install_value(7, 1), Err(Error::AlreadyExists));
     }
 
     #[test]

@@ -375,8 +375,8 @@ fn export_inherited_handles(
 fn install_inherited_handles(
     process: &mut crate::task::Process,
     grants: &[InheritedHandleGrant],
-) -> Result<(), u64> {
-    use crate::syscall::types::{EINVAL, ENOSPC};
+) -> Result<(), mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
 
     // Reserve explicit slots before allocating automatic ones. Wire record
     // order must not make an automatic allocation collide with a later slot.
@@ -385,24 +385,32 @@ fn install_inherited_handles(
         .filter(|grant| grant.target != 0)
         .chain(grants.iter().filter(|grant| grant.target == 0))
     {
+        if process.launch_context().get(grant.key).is_some() {
+            return Err(Error::AlreadyExists);
+        }
         let handle = if grant.target == 0 {
             process
                 .object_handles_mut()
                 .insert(grant.entry.clone())
-                .ok_or(ENOSPC)?
+                .ok_or(Error::ResourceUnavailable)?
         } else {
-            let handle = crate::task::ObjectHandle::from_raw(grant.target).ok_or(EINVAL)?;
+            if grant.target > crate::task::handle_table::PROCESS_MAX_OBJECT_HANDLES as u32 {
+                return Err(Error::InvalidArgument);
+            }
+            let handle =
+                crate::task::ObjectHandle::from_raw(grant.target).ok_or(Error::InvalidArgument)?;
+            if process.object_handles().get(handle).is_some() {
+                return Err(Error::AlreadyExists);
+            }
             if !process
                 .object_handles_mut()
                 .insert_at(handle, grant.entry.clone())
             {
-                return Err(EINVAL);
+                return Err(Error::ResourceUnavailable);
             }
             handle
         };
-        if !process.launch_context_mut().install(grant.key, handle) {
-            return Err(EINVAL);
-        }
+        process.launch_context_mut().install(grant.key, handle)?;
     }
     Ok(())
 }
@@ -410,13 +418,11 @@ fn install_inherited_handles(
 fn install_inherited_values(
     process: &mut crate::task::Process,
     values: &[InheritedValueSpec],
-) -> Result<(), u64> {
-    use crate::syscall::types::EINVAL;
-
+) -> Result<(), mnu_abi::status::Error> {
     for value in values {
-        if !process.launch_context_mut().install_value(value.key, value.value) {
-            return Err(EINVAL);
-        }
+        process
+            .launch_context_mut()
+            .install_value(value.key, value.value)?;
     }
     Ok(())
 }
@@ -913,11 +919,11 @@ fn exec_with_data(
         if let Some(authorities) = initial_kernel_authorities {
             proc.set_kernel_authorities_for_exec(authorities);
         }
-        if let Err(errno) = install_inherited_handles(&mut proc, inherited_handles) {
-            return errno;
+        if let Err(error) = install_inherited_handles(&mut proc, inherited_handles) {
+            return error.into_raw();
         }
-        if let Err(errno) = install_inherited_values(&mut proc, inherited_values) {
-            return errno;
+        if let Err(error) = install_inherited_values(&mut proc, inherited_values) {
+            return error.into_raw();
         }
         proc.set_page_table(new_pt_phys);
         proc.set_memory_regions(deferred_zero_regions);
@@ -1564,11 +1570,11 @@ fn create_from_address_space(
     let mut process = crate::task::Process::new(request.label, privilege, 8);
     // Only the explicit grants are installed. No creator table, relationship,
     // resource policy, or execution identity is implicitly inherited.
-    if let Err(errno) = install_inherited_handles(&mut process, grants) {
-        return errno;
+    if let Err(error) = install_inherited_handles(&mut process, grants) {
+        return error.into_raw();
     }
-    if let Err(errno) = install_inherited_values(&mut process, values) {
-        return errno;
+    if let Err(error) = install_inherited_values(&mut process, values) {
+        return error.into_raw();
     }
     let image = match consume_address_space_for_create(&image, &authorization, &context) {
         Ok(image) => image,
