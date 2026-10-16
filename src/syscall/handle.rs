@@ -428,9 +428,10 @@ pub fn control(
 }
 
 pub fn options_get(raw: u64) -> u64 {
-    let object = match object(raw, HandleRights::CONTROL) {
+    use mnu_abi::status::Error;
+    let object = match object_native(raw, HandleRights::CONTROL) {
         Ok(object) => object,
-        Err(error) => return error,
+        Err(error) => return error.into_raw(),
     };
     match object {
         KernelObject::File(file) => match crate::syscall::fs::file_handle_options(&file) {
@@ -438,17 +439,18 @@ pub fn options_get(raw: u64) -> u64 {
             Err(error) => error,
         },
         KernelObject::Provider(provider) => provider.io_options(),
-        _ => ENOTSUP,
+        _ => Error::InvalidArgument.into_raw(),
     }
 }
 
 pub fn options_set(raw: u64, options: u64) -> u64 {
+    use mnu_abi::status::Error;
     if options & !mnu_abi::HANDLE_OPTIONS_ALL != 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
-    let object = match object(raw, HandleRights::CONTROL) {
+    let object = match object_native(raw, HandleRights::CONTROL) {
         Ok(object) => object,
-        Err(error) => return error,
+        Err(error) => return error.into_raw(),
     };
     match object {
         KernelObject::File(file) => {
@@ -461,7 +463,7 @@ pub fn options_set(raw: u64, options: u64) -> u64 {
             provider.set_io_options(options);
             SUCCESS
         }
-        _ => ENOTSUP,
+        _ => Error::InvalidArgument.into_raw(),
     }
 }
 

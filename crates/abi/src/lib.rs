@@ -159,7 +159,13 @@ pub enum SyscallNumber {
     /// and NotReady (execution context).
     ContextHandleSet = 648,
     StreamPairCreate = 649,
+    /// Reads shared native I/O behavior through a caller-owned CONTROL Handle.
+    /// Failures use status::Error: InvalidArgument for selector/object kind,
+    /// AccessDenied for missing CONTROL, NotReady for absent caller context.
     HandleOptionsGet = 650,
+    /// Replaces shared I/O behavior, not descriptor-local flags. Unknown
+    /// HANDLE_OPTIONS_ALL bits fail with native InvalidArgument before lookup;
+    /// selector, authority and context failures match HandleOptionsGet.
     HandleOptionsSet = 651,
     WaitOnAddress = 652,
     WakeAddress = 653,
