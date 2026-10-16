@@ -1140,34 +1140,35 @@ pub fn close(raw: u64) -> u64 {
 }
 
 pub fn duplicate(raw: u64, requested_rights: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
-    let handle = match decode_handle(raw) {
-        Ok(handle) => handle,
-        Err(error) => return error,
+    let handle = match u32::try_from(raw).ok().and_then(ObjectHandle::from_raw) {
+        Some(handle) => handle,
+        None => return Error::InvalidArgument.into_raw(),
     };
     let rights = match HandleRights::from_bits(requested_rights) {
         Some(rights) => rights,
-        None => return EINVAL,
+        None => return Error::InvalidArgument.into_raw(),
     };
     crate::task::with_process_mut(process_id, |process| {
         let Some(source) = process.object_handles().get(handle) else {
-            return EBADF;
+            return Error::InvalidArgument.into_raw();
         };
         if !source.rights().contains(HandleRights::DUPLICATE) || !source.rights().contains(rights) {
-            return EACCES;
+            return Error::AccessDenied.into_raw();
         }
         match process
             .object_handles_mut()
             .duplicate_restricted(handle, rights)
         {
             Some(duplicate) => duplicate.raw() as u64,
-            None => ENOSPC,
+            None => Error::ResourceUnavailable.into_raw(),
         }
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 /// Compares two process-local handles without disclosing a globally reusable
@@ -2005,22 +2006,23 @@ pub fn context_value_remove(key: u64) -> u64 {
 }
 
 pub fn rights_get(raw: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
-    let handle = match decode_handle(raw) {
-        Ok(handle) => handle,
-        Err(error) => return error,
+    let handle = match u32::try_from(raw).ok().and_then(ObjectHandle::from_raw) {
+        Some(handle) => handle,
+        None => return Error::InvalidArgument.into_raw(),
     };
     crate::task::with_process(process_id, |process| {
         process
             .object_handles()
             .get(handle)
             .map(|entry| entry.rights().bits())
-            .unwrap_or(EBADF)
+            .unwrap_or(Error::InvalidArgument.into_raw())
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 /// Creates a native unidirectional byte stream as two object handles.

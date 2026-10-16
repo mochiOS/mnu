@@ -116,6 +116,10 @@ pub enum SyscallNumber {
     /// other references. Failures use status::Error: invalid/missing selector
     /// is InvalidArgument, absent execution context is NotReady.
     HandleClose = 626,
+    /// Adds a caller-local reference with a subset of the source rights.
+    /// Requires DUPLICATE; never grants missing rights. Native failures:
+    /// InvalidArgument for selectors/rights, AccessDenied for authority,
+    /// ResourceUnavailable for table capacity, NotReady for missing context.
     HandleDuplicate = 627,
     LaunchHandleGet = 628,
     IpcCreateHandle = 629,
@@ -159,6 +163,9 @@ pub enum SyscallNumber {
     ContextHandleRemove = 661,
     ContextValueSet = 662,
     ContextValueRemove = 663,
+    /// Reads the caller's reference rights, including an empty rights set.
+    /// Requires possession only. Native failures are InvalidArgument for an
+    /// invalid/missing selector and NotReady for absent execution context.
     HandleRightsGet = 664,
     ProcessImageReplace = 665,
     /// Compares two caller-held references without publishing a global ID.
