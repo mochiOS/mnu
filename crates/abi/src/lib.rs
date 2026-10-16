@@ -157,6 +157,11 @@ pub enum SyscallNumber {
     ContextValueRemove = 663,
     HandleRightsGet = 664,
     ProcessImageReplace = 665,
+    /// Compares two caller-held references without publishing a global ID.
+    /// Both selectors are validated under the caller's Handle-table lock;
+    /// no resource rights are required. Returns exactly zero or one.
+    /// Failures use status::Error: invalid/missing selectors are
+    /// InvalidArgument; absent execution context is NotReady.
     HandleSameObject = 666,
     /// Updates readiness bits in the calling endpoint's provider namespace.
     /// Failures use status::Error: unsupported/overlapping bits or unknown

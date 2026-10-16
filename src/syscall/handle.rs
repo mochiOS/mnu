@@ -1172,28 +1172,25 @@ pub fn duplicate(raw: u64, requested_rights: u64) -> u64 {
 /// Compares two process-local handles without disclosing a globally reusable
 /// object identifier. Possession of both valid handles is sufficient.
 pub fn same_object(left_raw: u64, right_raw: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
-    let left = match decode_handle(left_raw) {
-        Ok(handle) => handle,
-        Err(error) => return error,
-    };
-    let right = match decode_handle(right_raw) {
-        Ok(handle) => handle,
-        Err(error) => return error,
+    let decode = |raw| u32::try_from(raw).ok().and_then(ObjectHandle::from_raw);
+    let (Some(left), Some(right)) = (decode(left_raw), decode(right_raw)) else {
+        return Error::InvalidArgument.into_raw();
     };
     crate::task::with_process(process_id, |process| {
         let Some(left) = process.object_handles().get(left) else {
-            return EBADF;
+            return Error::InvalidArgument.into_raw();
         };
         let Some(right) = process.object_handles().get(right) else {
-            return EBADF;
+            return Error::InvalidArgument.into_raw();
         };
         u64::from(left.object().is_same_object(right.object()))
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 const PROCESS_HANDLE_RIGHTS: HandleRights = HandleRights::WAIT
