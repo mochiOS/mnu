@@ -162,6 +162,8 @@ pub enum SyscallNumber {
     /// Failures use status::Error, not compatibility-layer errno values.
     MemoryObjectCreate = 671,
     /// Returns the byte length of a process-local MemoryObject with MAP rights.
+    /// Failures use status::Error. Invalid Handle selectors or object kinds
+    /// are InvalidArgument; missing MAP authority is AccessDenied.
     MemoryObjectLength = 672,
     /// Reads bytes at an explicit object offset without moving its cursor.
     /// Arguments: Handle, destination, byte length, unsigned object offset.
@@ -216,6 +218,8 @@ pub enum SyscallNumber {
     /// Changes the byte extent of RAM backing selected by a caller-owned
     /// Handle granting CONTROL. Arguments: Handle, new length. Revokes live
     /// and detached aliases before reclaiming or zeroing backing storage.
+    /// Failures use status::Error. Invalid Handle selectors or object kinds
+    /// are InvalidArgument; missing CONTROL authority is AccessDenied.
     MemoryObjectResize = 686,
     /// Read a bounded diagnostic byte history. Requires diagnostics.read.
     /// Arguments: absolute cursor, byte buffer, byte capacity, diagnostic

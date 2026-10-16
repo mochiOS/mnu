@@ -99,25 +99,54 @@ fn decode_handle(raw: u64) -> Result<ObjectHandle, u64> {
 }
 
 pub fn memory_object_length(raw: u64) -> u64 {
-    match object(raw, HandleRights::MAP) {
-        Ok(KernelObject::VmObject(object)) => object.memory_length().unwrap_or(EINVAL),
-        Ok(_) => EINVAL,
-        Err(error) => error,
+    use mnu_abi::status::Error;
+    match object_native(raw, HandleRights::MAP) {
+        Ok(KernelObject::VmObject(object)) => object
+            .memory_length()
+            .unwrap_or_else(|| Error::InvalidArgument.into_raw()),
+        Ok(_) => Error::InvalidArgument.into_raw(),
+        Err(error) => error.into_raw(),
     }
 }
 
 pub fn memory_object_resize(raw: u64, length: u64) -> u64 {
+    use mnu_abi::status::Error;
     // Resolve and retain the resource before acquiring the mapping lock. Never
     // use a foreign PID/FD or hold a caller-table guard across global resize.
-    match object(raw, HandleRights::CONTROL) {
+    match object_native(raw, HandleRights::CONTROL) {
         Ok(KernelObject::VmObject(object)) => object
             .resize_memory(length)
             .err()
-            .map(mnu_abi::status::Error::into_raw)
+            .map(Error::into_raw)
             .unwrap_or(SUCCESS),
-        Ok(_) => EINVAL,
-        Err(error) => error,
+        Ok(_) => Error::InvalidArgument.into_raw(),
+        Err(error) => error.into_raw(),
     }
+}
+
+/// Retain only a caller-owned reference with the required authority. Invalid
+/// Handle selectors are native InvalidArgument, not compatibility FD errors.
+pub(crate) fn object_native(
+    raw: u64,
+    required_right: HandleRights,
+) -> Result<KernelObject, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+    let process_id = crate::syscall::security::current_process_id().ok_or(Error::NotReady)?;
+    let handle = u32::try_from(raw)
+        .ok()
+        .and_then(ObjectHandle::from_raw)
+        .ok_or(Error::InvalidArgument)?;
+    crate::task::with_process(process_id, |process| {
+        let entry = process
+            .object_handles()
+            .get(handle)
+            .ok_or(Error::InvalidArgument)?;
+        if !entry.rights().contains(required_right) {
+            return Err(Error::AccessDenied);
+        }
+        Ok(entry.object().clone())
+    })
+    .unwrap_or(Err(Error::NotReady))
 }
 
 pub(crate) fn object(raw: u64, required_right: HandleRights) -> Result<KernelObject, u64> {
