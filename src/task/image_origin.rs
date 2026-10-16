@@ -15,14 +15,22 @@ pub struct ImageOrigin {
 }
 
 impl ImageOrigin {
-    pub fn capture(process: &Process) -> Option<Self> {
-        Some(Self {
-            identity: process.application_identity()?.clone(),
-            digest: process.image_digest()?,
-            capabilities: process.capabilities().clone(),
-            kernel_authorities: process.kernel_authorities().clone(),
+    /// Missing measurement/identity is distinct from a failed owned copy.
+    /// Callers must not turn allocation failure into an unmeasured image.
+    pub fn capture(process: &Process) -> Result<Option<Self>, mnu_abi::status::Error> {
+        let Some(identity) = process.application_identity() else {
+            return Ok(None);
+        };
+        let Some(digest) = process.image_digest() else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            identity: identity.try_clone()?,
+            digest,
+            capabilities: process.capabilities().try_clone()?,
+            kernel_authorities: process.kernel_authorities().try_clone()?,
             privilege: process.privilege(),
-        })
+        }))
     }
 
     /// A mutable runtime image must never gain authority by being presented as

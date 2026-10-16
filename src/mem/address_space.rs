@@ -118,7 +118,8 @@ impl CloneSource {
             ipc_mapping_end: process.ipc_mapping_end(),
             stack_bottom: process.stack_bottom(),
             stack_top: process.stack_top(),
-            origin: crate::task::image_origin::ImageOrigin::capture(process),
+            origin: crate::task::image_origin::ImageOrigin::capture(process)
+                .map_err(CloneError::Backing)?,
         })
     }
 

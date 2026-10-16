@@ -442,6 +442,15 @@ pub enum CapabilityParseError {
 }
 
 impl CapabilitySet {
+    pub fn try_clone(&self) -> Result<Self, mnu_abi::status::Error> {
+        let mut caps = Vec::new();
+        caps
+            .try_reserve_exact(self.caps.len())
+            .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)?;
+        caps.extend_from_slice(&self.caps);
+        Ok(Self { caps })
+    }
+
     /// 空集合
     pub fn empty() -> Self {
         Self {
@@ -532,6 +541,15 @@ impl CapabilitySet {
 }
 
 impl KernelAuthoritySet {
+    pub fn try_clone(&self) -> Result<Self, mnu_abi::status::Error> {
+        let mut authorities = Vec::new();
+        authorities
+            .try_reserve_exact(self.authorities.len())
+            .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)?;
+        authorities.extend_from_slice(&self.authorities);
+        Ok(Self { authorities })
+    }
+
     pub fn empty() -> Self {
         Self {
             authorities: Vec::new(),

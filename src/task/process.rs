@@ -595,6 +595,23 @@ pub enum PendingExecKind {
 }
 
 impl ApplicationIdentity {
+    pub fn try_clone(&self) -> core::result::Result<Self, mnu_abi::status::Error> {
+        fn owned(value: &str) -> core::result::Result<String, mnu_abi::status::Error> {
+            let mut result = String::new();
+            result
+                .try_reserve_exact(value.len())
+                .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)?;
+            result.push_str(value);
+            Ok(result)
+        }
+        Ok(Self {
+            package_id: owned(&self.package_id)?,
+            developer_id: owned(&self.developer_id)?,
+            subject_key_id: self.subject_key_id,
+            provenance: self.provenance,
+        })
+    }
+
     pub fn new(
         package_id: String,
         developer_id: String,
