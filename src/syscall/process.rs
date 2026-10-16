@@ -1105,12 +1105,16 @@ pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
 }
 
 fn fill_random_buffer(buf_ptr: u64, len: u64) -> u64 {
+    use mnu_abi::status::Error;
     const CHUNK_LEN: usize = 256;
     if len == 0 {
         return 0;
     }
-    if buf_ptr == 0 || len > isize::MAX as u64 || !super::validate_user_ptr(buf_ptr, len) {
-        return EFAULT;
+    if len > isize::MAX as u64 {
+        return Error::LimitExceeded.into_raw();
+    }
+    if buf_ptr == 0 || !super::validate_user_ptr(buf_ptr, len) {
+        return Error::InvalidAddress.into_raw();
     }
     let mut buffer = [0u8; CHUNK_LEN];
     let mut offset = 0u64;
@@ -1118,11 +1122,14 @@ fn fill_random_buffer(buf_ptr: u64, len: u64) -> u64 {
         let chunk_len = core::cmp::min(CHUNK_LEN as u64, len - offset) as usize;
         if crate::random::fill(&mut buffer[..chunk_len]).is_err() {
             buffer.fill(0);
-            return EAGAIN;
+            return Error::NotReady.into_raw();
         }
-        if let Err(error) = crate::syscall::copy_to_user(buf_ptr + offset, &buffer[..chunk_len]) {
+        if let Err(error) = crate::syscall::copy_to_user_native(
+            buf_ptr + offset,
+            &buffer[..chunk_len],
+        ) {
             buffer.fill(0);
-            return error;
+            return error.into_raw();
         }
         offset += chunk_len as u64;
     }
@@ -1134,7 +1141,7 @@ pub fn random_fill(buf_ptr: u64, len: u64) -> u64 {
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::SystemRandomRead,
     ]) {
-        return super::types::EACCES;
+        return mnu_abi::status::Error::AccessDenied.into_raw();
     }
     fill_random_buffer(buf_ptr, len)
 }
