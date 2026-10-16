@@ -592,6 +592,8 @@ impl VmObject {
 
     /// Writes dirty cache pages intersecting the range back to their object.
     pub fn flush_range(&self, offset: u64, length: u64) -> Result<(), u64> {
+        use mnu_abi::status::Error;
+
         if let VmObjectSource::Memory(_) = &self.source {
             // RAM stores are already visible to aliases; there is no lower
             // writeback target. Reservations can exceed the live extent, and
@@ -599,12 +601,15 @@ impl VmObject {
             return if length == u64::MAX && offset == 0 || offset.checked_add(length).is_some() {
                 Ok(())
             } else {
-                Err(crate::syscall::EINVAL)
+                Err(Error::InvalidArgument.into_raw())
             };
         }
         if length == 0 {
             return Ok(());
         }
+        let range_end = offset
+            .checked_add(length)
+            .ok_or_else(|| Error::InvalidArgument.into_raw())?;
         // Retain ordering through the lower write and cache update. The
         // registry lock is released before waiting or calling provider IPC.
         let _io_guard = if matches!(self.source, VmObjectSource::Provider { .. }) {
@@ -612,7 +617,6 @@ impl VmObject {
         } else {
             None
         };
-        let range_end = offset.saturating_add(length);
         let snapshots = {
             let mut cache = PAGE_CACHE.lock();
             let mut snapshots = Vec::new();
@@ -621,14 +625,26 @@ impl VmObject {
                 .iter_mut()
                 .filter(|entry| entry.key.object == object_key)
             {
-                let page_start = entry.key.page_index.saturating_mul(PAGE_BYTES as u64);
-                let page_end = page_start.saturating_add(PAGE_BYTES as u64);
+                let page_start = entry
+                    .key
+                    .page_index
+                    .checked_mul(PAGE_BYTES as u64)
+                    .ok_or_else(|| Error::BackingFailure.into_raw())?;
+                let page_end = page_start
+                    .checked_add(PAGE_BYTES as u64)
+                    .ok_or_else(|| Error::BackingFailure.into_raw())?;
                 if page_start >= range_end || page_end <= offset {
                     continue;
                 }
                 let Some((dirty_start, dirty_end)) = entry.dirty_range else {
                     continue;
                 };
+                if dirty_start > dirty_end || dirty_end > PAGE_BYTES {
+                    return Err(Error::BackingFailure.into_raw());
+                }
+                snapshots
+                    .try_reserve(1)
+                    .map_err(|_| Error::ResourceUnavailable.into_raw())?;
                 entry.last_used = next_cache_access();
                 snapshots.push((
                     entry.key,
@@ -641,20 +657,28 @@ impl VmObject {
             snapshots
         };
 
-        for (key, bytes, dirty_start, dirty_end, version) in snapshots {
+        for (key, bytes, dirty_start, dirty_end, _) in &snapshots {
             let page_start = key
                 .page_index
                 .checked_mul(PAGE_BYTES as u64)
-                .ok_or(crate::syscall::EINVAL)?;
+                .ok_or_else(|| Error::BackingFailure.into_raw())?;
             let write_offset = page_start
-                .checked_add(dirty_start as u64)
-                .ok_or(crate::syscall::EINVAL)?;
-            let written = write_lower(&self.source, write_offset, &bytes[dirty_start..dirty_end])?;
+                .checked_add(*dirty_start as u64)
+                .ok_or_else(|| Error::BackingFailure.into_raw())?;
+            let written = write_lower(&self.source, write_offset, &bytes[*dirty_start..*dirty_end])?;
             if written != dirty_end - dirty_start {
-                return Err(crate::syscall::EIO);
+                return Err(Error::BackingFailure.into_raw());
             }
+        }
+        if let VmObjectSource::Provider { object, .. } = &self.source {
+            crate::syscall::handle::provider_sync(object)?;
+        }
 
-            let mut cache = PAGE_CACHE.lock();
+        // Publish clean state only after all writes and provider sync succeed.
+        // Otherwise retain every dirty snapshot for retry, including pages
+        // whose individual write completed before a later failure.
+        let mut cache = PAGE_CACHE.lock();
+        for (key, _, _, _, version) in snapshots {
             if let Some(entry) = cache
                 .iter_mut()
                 .find(|entry| entry.key == key && entry.version == version)
@@ -667,9 +691,6 @@ impl VmObject {
                 }
                 entry.last_used = next_cache_access();
             }
-        }
-        if let VmObjectSource::Provider { object, .. } = &self.source {
-            crate::syscall::handle::provider_sync(object)?;
         }
         Ok(())
     }
@@ -724,8 +745,8 @@ fn snapshot_page(entry: &CachedPage) -> Result<Arc<[u8; PAGE_BYTES]>, u64> {
     let Some(frame_phys) = entry.frame_phys else {
         return Ok(entry.bytes.clone());
     };
-    let physical_offset =
-        crate::mem::paging::physical_memory_offset().ok_or(crate::syscall::EIO)?;
+    let physical_offset = crate::mem::paging::physical_memory_offset()
+        .ok_or_else(|| mnu_abi::status::Error::BackingFailure.into_raw())?;
     let mut bytes = [0u8; PAGE_BYTES];
     unsafe {
         core::ptr::copy_nonoverlapping(
@@ -734,7 +755,7 @@ fn snapshot_page(entry: &CachedPage) -> Result<Arc<[u8; PAGE_BYTES]>, u64> {
             PAGE_BYTES,
         );
     }
-    Ok(Arc::new(bytes))
+    Arc::try_new(bytes).map_err(|_| mnu_abi::status::Error::ResourceUnavailable.into_raw())
 }
 
 fn copy_to_frame(frame_phys: u64, offset: usize, input: &[u8]) -> Result<(), u64> {
