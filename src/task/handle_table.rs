@@ -98,14 +98,14 @@ impl ProviderObject {
         endpoint_slot: u16,
         endpoint_generation: u64,
         object_id: u64,
-    ) -> Result<Self, u64> {
+    ) -> Result<Self, mnu_abi::status::Error> {
         let release_ticket = deferred::Ticket::new(ProviderRelease {
             endpoint_thread_id,
             endpoint_slot,
             endpoint_generation,
             object_id,
         })
-        .map_err(|_| mnu_abi::ENOMEM)?
+        .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)?
         .defer_on_drop(&PENDING_PROVIDER_RELEASES);
         Ok(Self {
             endpoint_thread_id,

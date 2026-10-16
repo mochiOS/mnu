@@ -122,6 +122,9 @@ pub enum SyscallNumber {
     HandleRead = 634,
     HandleWrite = 635,
     HandleSeek = 636,
+    /// Creates an opaque provider reference under a caller-owned RECEIVE
+    /// endpoint. Failures use status::Error; duplicate identities within that
+    /// endpoint namespace are AlreadyExists, not compatibility errno values.
     ProviderObjectCreate = 637,
     ProviderObjectIdentify = 638,
     LaunchValueGet = 639,

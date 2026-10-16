@@ -24,6 +24,8 @@ pub enum Error {
     AccessDenied = 6,
     /// The source or execution context is not currently ready.
     NotReady = 7,
+    /// A resource with the requested identity is already registered.
+    AlreadyExists = 8,
 }
 
 impl Error {
@@ -43,6 +45,7 @@ impl Error {
             5 => Some(Self::InvalidArgument),
             6 => Some(Self::AccessDenied),
             7 => Some(Self::NotReady),
+            8 => Some(Self::AlreadyExists),
             _ => None,
         }
     }

@@ -14,7 +14,7 @@ pub use memory_update::create_admission as provider_memory_admission_create;
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
 use super::{
-    EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO, ENOSPC, ENOSYS, ENOTSUP, ESRCH,
+    EACCES, EAGAIN, EBADF, EFAULT, EFBIG, EINVAL, EIO, ENOSPC, ENOSYS, ENOTSUP, ESRCH,
     SUCCESS,
 };
 
@@ -1016,18 +1016,19 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
 }
 
 pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u64) -> u64 {
+    use mnu_abi::status::Error;
     // Object IDs are returned directly by ProviderObjectIdentify, so keep the
     // syscall's negative range unambiguous.
     if object_id > i64::MAX as u64 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
     let rights = match HandleRights::from_bits(requested_rights) {
         Some(rights) => rights,
-        None => return EINVAL,
+        None => return Error::InvalidArgument.into_raw(),
     };
     let (endpoint_thread_id, endpoint_slot, endpoint_generation) =
         match crate::syscall::ipc::resolve_provider_endpoint_native(endpoint) {
@@ -1042,12 +1043,12 @@ pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u
     ) {
         Ok(provider) => match Arc::try_new(provider) {
             Ok(provider) => provider,
-            Err(_) => return super::ENOMEM,
+            Err(_) => return Error::ResourceUnavailable.into_raw(),
         },
-        Err(error) => return error,
+        Err(error) => return error.into_raw(),
     };
     if !crate::task::handle_table::register_provider_object(&provider) {
-        return EEXIST;
+        return Error::AlreadyExists.into_raw();
     }
     let object = KernelObject::Provider(provider);
     crate::task::with_process_mut(process_id, |process| {
@@ -1055,9 +1056,9 @@ pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u
             .object_handles_mut()
             .insert(ObjectHandleEntry::new(object, rights))
             .map(|handle| handle.raw() as u64)
-            .unwrap_or(ENOSPC)
+            .unwrap_or(Error::ResourceUnavailable.into_raw())
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 /// Returns the opaque identifier of a provider object only to the exact
