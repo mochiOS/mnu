@@ -214,15 +214,15 @@ impl VmObject {
     /// Removing an existing mapping needs no usable backing bytes. The caller
     /// holds mapping exclusion through removal; an extent owner still excludes
     /// edits until it has resolved its suspended PTEs and released reservation.
-    pub(crate) fn check_mapping_removal(&self) -> Result<(), u64> {
+    pub(crate) fn check_mapping_removal(&self) -> Result<(), mnu_abi::status::Error> {
         match &self.source {
             VmObjectSource::Memory(memory) => {
-                memory.with_generation(memory.generation(), || Ok(()))
+                memory.with_generation_native(memory.generation(), || Ok(()))
             }
             VmObjectSource::Provider { _io_lock, .. } => {
                 let _cache = PAGE_CACHE.lock();
                 if _io_lock.is_reserved() {
-                    Err(crate::syscall::EAGAIN)
+                    Err(mnu_abi::status::Error::NotReady)
                 } else {
                     Ok(())
                 }

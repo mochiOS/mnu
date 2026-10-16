@@ -29,12 +29,13 @@ pub(crate) fn check_unmap(
     regions: &[crate::task::MemoryRegion],
     start: u64,
     end: u64,
-) -> Result<(), u64> {
+) -> Result<(), mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
     if start >= end {
-        return Err(crate::syscall::EINVAL);
+        return Err(Error::InvalidArgument);
     }
     for region in regions {
-        let region_end = region.end().ok_or(crate::syscall::EINVAL)?;
+        let region_end = region.end().ok_or(Error::BackingFailure)?;
         if start < region_end && region.start() < end {
             if let Some(object) = region.backing().file_object() {
                 object.check_mapping_removal()?;

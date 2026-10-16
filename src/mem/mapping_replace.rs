@@ -23,7 +23,8 @@ pub(crate) fn replace(
     {
         return Err(EPERM);
     }
-    mapping_admission::check_unmap(process.memory_regions(), start, end)?;
+    mapping_admission::check_unmap(process.memory_regions(), start, end)
+        .map_err(mnu_abi::status::Error::into_raw)?;
     let (mut retained, removed) =
         process
             .prepare_remove_memory_range(start, length)

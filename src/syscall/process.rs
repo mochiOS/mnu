@@ -996,7 +996,8 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
             process.memory_regions(),
             unmap_start,
             unmap_end,
-        )?;
+        )
+        .map_err(mnu_abi::status::Error::into_raw)?;
         let metadata = if owns_frames {
             Some(
                 process
