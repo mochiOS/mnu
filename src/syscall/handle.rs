@@ -1641,7 +1641,7 @@ fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) ->
     let bytes = unsafe {
         core::slice::from_raw_parts(items.as_ptr().cast::<u8>(), core::mem::size_of_val(items))
     };
-    crate::syscall::copy_to_user(items_ptr, bytes)
+    crate::syscall::copy_to_user_native(items_ptr, bytes).map_err(mnu_abi::status::Error::into_raw)
 }
 
 /// Waits until one of the supplied process-local object handles observes an
@@ -1650,21 +1650,19 @@ fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) ->
 /// `u64::MAX` waits indefinitely.
 /// Wait-local storage is reserved before subscription; allocation failure is
 /// native ResourceUnavailable. All return paths remove subscriptions/deadlines.
+/// Array-size validation and usercopy preserve native status::Error categories;
+/// the optional guard descriptor is copied once, before checking its predicate.
 pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_ptr: u64) -> u64 {
+    use mnu_abi::status::Error;
     let guard = if guard_ptr == 0 {
         None
     } else {
-        let Some(expected_ptr) = guard_ptr.checked_add(8) else {
-            return EFAULT;
-        };
-        let address = match super::read_user_u64(guard_ptr) {
-            Ok(address) => address,
-            Err(error) => return error,
-        };
-        let expected = match super::read_user_u64(expected_ptr) {
-            Ok(expected) => expected,
-            Err(error) => return error,
-        };
+        let mut bytes = [0u8; 16];
+        if let Err(error) = crate::syscall::copy_from_user_native(guard_ptr, &mut bytes) {
+            return error.into_raw();
+        }
+        let address = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+        let expected = u64::from_ne_bytes(bytes[8..].try_into().unwrap());
         if let Err(error) = super::address_wait::read_guard_value(address) {
             return error;
         }
@@ -1672,15 +1670,12 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
     };
     let count = match usize::try_from(count) {
         Ok(count) if count <= mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS => count,
-        _ => return EINVAL,
+        _ => return Error::InvalidArgument.into_raw(),
     };
     let byte_len = match count.checked_mul(core::mem::size_of::<mnu_abi::HandleWaitItem>()) {
         Some(length) => length,
-        None => return EINVAL,
+        None => return Error::InvalidArgument.into_raw(),
     };
-    if byte_len != 0 && !crate::syscall::validate_user_ptr(items_ptr, byte_len as u64) {
-        return EFAULT;
-    }
     let mut items = alloc::vec::Vec::new();
     if items.try_reserve_exact(count).is_err() {
         return mnu_abi::status::Error::ResourceUnavailable.into_raw();
@@ -1689,13 +1684,13 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
     if byte_len != 0 {
         let bytes =
             unsafe { core::slice::from_raw_parts_mut(items.as_mut_ptr().cast::<u8>(), byte_len) };
-        if let Err(error) = crate::syscall::copy_from_user(items_ptr, bytes) {
-            return error;
+        if let Err(error) = crate::syscall::copy_from_user_native(items_ptr, bytes) {
+            return error.into_raw();
         }
     }
     let current = match crate::task::current_thread_id() {
         Some(thread) => thread,
-        None => return EINVAL,
+        None => return Error::NotReady.into_raw(),
     };
     let mut registrations = ObjectWaitRegistrations {
         thread: current,
