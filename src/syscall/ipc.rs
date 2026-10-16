@@ -833,30 +833,46 @@ fn record_ipc_copy(bytes: usize) {
 }
 
 fn decode_outgoing_object_handles(pointer: u64) -> Result<ObjectHandleAttachments, u64> {
+    use mnu_abi::status::Error;
+
     if pointer == 0 {
-        return Err(EFAULT);
+        return Err(Error::InvalidAddress.into_raw());
     }
     let mut bytes = [0u8; core::mem::size_of::<mnu_abi::IpcObjectHandles>()];
-    crate::syscall::copy_from_user(pointer, &mut bytes)?;
-    let count = u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| EINVAL)?) as usize;
-    let delivery_flags = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| EINVAL)?);
+    crate::syscall::copy_from_user_native(pointer, &mut bytes).map_err(Error::into_raw)?;
+    let count = u32::from_le_bytes(
+        bytes[0..4].try_into().map_err(|_| Error::InvalidArgument.into_raw())?,
+    ) as usize;
+    let delivery_flags = u32::from_le_bytes(
+        bytes[4..8].try_into().map_err(|_| Error::InvalidArgument.into_raw())?,
+    );
     if count > MAX_OBJECT_HANDLES || delivery_flags != 0 {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument.into_raw());
     }
-    let process_id = crate::syscall::security::current_process_id().ok_or(EINVAL)?;
+    let process_id = crate::syscall::security::current_process_id()
+        .ok_or_else(|| Error::NotReady.into_raw())?;
     let mut attachments = ObjectHandleAttachments::empty();
     for index in 0..count {
         let offset = 8 + index * 16;
-        let raw = u32::from_le_bytes(bytes[offset..offset + 4].try_into().map_err(|_| EINVAL)?);
-        let item_reserved =
-            u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().map_err(|_| EINVAL)?);
-        let requested_bits =
-            u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into().map_err(|_| EINVAL)?);
+        let raw = u32::from_le_bytes(
+            bytes[offset..offset + 4].try_into()
+                .map_err(|_| Error::InvalidArgument.into_raw())?,
+        );
+        let item_reserved = u32::from_le_bytes(
+            bytes[offset + 4..offset + 8].try_into()
+                .map_err(|_| Error::InvalidArgument.into_raw())?,
+        );
+        let requested_bits = u64::from_le_bytes(
+            bytes[offset + 8..offset + 16].try_into()
+                .map_err(|_| Error::InvalidArgument.into_raw())?,
+        );
         if item_reserved != 0 {
-            return Err(EINVAL);
+            return Err(Error::InvalidArgument.into_raw());
         }
-        let handle = ObjectHandle::from_raw(raw).ok_or(EBADF)?;
-        let requested = HandleRights::from_bits(requested_bits).ok_or(EINVAL)?;
+        let handle = ObjectHandle::from_raw(raw)
+            .ok_or_else(|| Error::InvalidArgument.into_raw())?;
+        let requested = HandleRights::from_bits(requested_bits)
+            .ok_or_else(|| Error::InvalidArgument.into_raw())?;
         let exported = export_object_handle(process_id, handle, requested)?;
         attachments.handles[index] = Some(exported);
         attachments.count += 1;
