@@ -111,6 +111,10 @@ pub enum SyscallNumber {
     BootSystemSlot = 618,
     BlockFlush = 619,
     BootEspGuid = 620,
+    /// Discards one reference from the caller's table and removes inherited
+    /// aliases to that selector. Requires no resource right; does not revoke
+    /// other references. Failures use status::Error: invalid/missing selector
+    /// is InvalidArgument, absent execution context is NotReady.
     HandleClose = 626,
     HandleDuplicate = 627,
     LaunchHandleGet = 628,

@@ -1120,22 +1120,23 @@ pub fn provider_object_signal(object_id: u64, set: u64, clear: u64) -> u64 {
 }
 
 pub fn close(raw: u64) -> u64 {
-    let process_id = match current_process() {
-        Ok(process_id) => process_id,
-        Err(error) => return error,
+    use mnu_abi::status::Error;
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(process_id) => process_id,
+        None => return Error::NotReady.into_raw(),
     };
-    let handle = match decode_handle(raw) {
-        Ok(handle) => handle,
-        Err(error) => return error,
+    let handle = match u32::try_from(raw).ok().and_then(ObjectHandle::from_raw) {
+        Some(handle) => handle,
+        None => return Error::InvalidArgument.into_raw(),
     };
     crate::task::with_process_mut(process_id, |process| {
         if !process.object_handles_mut().close(handle) {
-            return EBADF;
+            return Error::InvalidArgument.into_raw();
         }
         process.launch_context_mut().remove_handle(handle);
         SUCCESS
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 pub fn duplicate(raw: u64, requested_rights: u64) -> u64 {
