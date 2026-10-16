@@ -962,10 +962,6 @@ pub const EACCES: u64 = (-13i64) as u64;
 pub const EFAULT: u64 = (-14i64) as u64;
 /// ファイルが既に存在する
 pub const EEXIST: u64 = (-17i64) as u64;
-/// ディレクトリではない
-pub const ENOTDIR: u64 = (-20i64) as u64;
-/// ディレクトリを開こうとしたがファイルだった
-pub const EISDIR: u64 = (-21i64) as u64;
 /// 無効な引数
 pub const EINVAL: u64 = (-22i64) as u64;
 /// ファイルディスクリプタが多すぎる
