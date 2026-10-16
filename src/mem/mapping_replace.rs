@@ -24,9 +24,13 @@ pub(crate) fn replace(
         return Err(EPERM);
     }
     mapping_admission::check_unmap(process.memory_regions(), start, end)?;
-    let (mut retained, removed) = process
-        .prepare_remove_memory_range(start, length)
-        .ok_or(ENOMEM)?;
+    let (mut retained, removed) =
+        process
+            .prepare_remove_memory_range(start, length)
+            .map_err(|error| match error {
+                crate::task::process::MemoryRangeError::InvalidRange => EINVAL,
+                crate::task::process::MemoryRangeError::Allocation => ENOMEM,
+            })?;
     retained.try_reserve(1).map_err(|_| ENOMEM)?;
     retained.push(region);
     if let Some(ceiling) = byte_ceiling.filter(|&value| value != u64::MAX) {

@@ -1001,7 +1001,10 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
             Some(
                 process
                     .prepare_remove_memory_range(unmap_start, unmap_len)
-                    .ok_or(EINVAL)?,
+                    .map_err(|error| match error {
+                        crate::task::process::MemoryRangeError::InvalidRange => EINVAL,
+                        crate::task::process::MemoryRangeError::Allocation => ENOMEM,
+                    })?,
             )
         } else {
             None

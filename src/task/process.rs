@@ -72,6 +72,13 @@ struct MemoryAccessRange {
     access: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Generic VM metadata planning failures; syscall status conversion is separate.
+pub enum MemoryRangeError {
+    InvalidRange,
+    Allocation,
+}
+
 #[derive(Clone, Debug)]
 pub struct DmaBuffer {
     handle: u64,
@@ -237,11 +244,12 @@ impl MemoryRegion {
 
     /// Retains an aligned subrange without losing its backing authority,
     /// object offset, dirty-page indices, or access overrides.
-    fn slice(&self, start: u64, end: u64) -> Option<Self> {
-        if start < self.start || end > self.end()? || start >= end {
-            return None;
+    fn slice(&self, start: u64, end: u64) -> core::result::Result<Self, MemoryRangeError> {
+        use MemoryRangeError::{Allocation, InvalidRange};
+        if start < self.start || end > self.end().ok_or(InvalidRange)? || start >= end {
+            return Err(InvalidRange);
         }
-        let delta = start.checked_sub(self.start)?;
+        let delta = start.checked_sub(self.start).ok_or(InvalidRange)?;
         let len = end - start;
         // This is a preflight operation for VM edits. Never invoke infallible
         // Vec cloning here: memory pressure must leave the original mapping live.
@@ -250,7 +258,7 @@ impl MemoryRegion {
                 object, offset, writable, shared,
             } => MemoryBacking::File {
                 object: Arc::clone(object),
-                offset: offset.checked_add(delta)?,
+                offset: offset.checked_add(delta).ok_or(InvalidRange)?,
                 writable: *writable,
                 shared: *shared,
             },
@@ -258,12 +266,13 @@ impl MemoryRegion {
                 let source = if data.is_empty() {
                     &[][..]
                 } else {
-                    let first = usize::try_from(delta).ok()?;
-                    let last = usize::try_from(delta.checked_add(len)?).ok()?;
-                    data.get(first..last)?
+                    let first = usize::try_from(delta).map_err(|_| InvalidRange)?;
+                    let last = usize::try_from(delta.checked_add(len).ok_or(InvalidRange)?)
+                        .map_err(|_| InvalidRange)?;
+                    data.get(first..last).ok_or(InvalidRange)?
                 };
                 let mut copy = Vec::new();
-                copy.try_reserve_exact(source.len()).ok()?;
+                copy.try_reserve_exact(source.len()).map_err(|_| Allocation)?;
                 copy.extend_from_slice(source);
                 MemoryBacking::Anonymous {
                     data: copy,
@@ -277,7 +286,7 @@ impl MemoryRegion {
             let low = range.start.max(start);
             let high = range.end.min(end);
             if low < high {
-                access_ranges.try_reserve(1).ok()?;
+                access_ranges.try_reserve(1).map_err(|_| Allocation)?;
                 access_ranges.push(MemoryAccessRange {
                     start: low,
                     end: high,
@@ -286,15 +295,15 @@ impl MemoryRegion {
             }
         }
         let first_page = delta / 4096;
-        let last_page = first_page.checked_add(len / 4096)?;
+        let last_page = first_page.checked_add(len / 4096).ok_or(InvalidRange)?;
         let mut dirty_pages = Vec::new();
         for &page in &self.dirty_pages {
             if first_page <= page && page < last_page {
-                dirty_pages.try_reserve(1).ok()?;
+                dirty_pages.try_reserve(1).map_err(|_| Allocation)?;
                 dirty_pages.push(page - first_page);
             }
         }
-        Some(Self {
+        Ok(Self {
             start,
             len,
             access: self.access,
@@ -1063,10 +1072,14 @@ impl Process {
 
     /// Removes every intersection and keeps the surviving pieces. Build the
     /// replacement before changing state so an invalid slice changes nothing.
-    pub fn remove_memory_range(&mut self, start: u64, len: u64) -> Option<Vec<MemoryRegion>> {
+    pub fn remove_memory_range(
+        &mut self,
+        start: u64,
+        len: u64,
+    ) -> core::result::Result<Vec<MemoryRegion>, MemoryRangeError> {
         let (retained, removed) = self.prepare_remove_memory_range(start, len)?;
         self.memory_regions = retained;
-        Some(removed)
+        Ok(removed)
     }
 
     /// Prepare both surviving metadata and writeback references before editing
@@ -1075,21 +1088,29 @@ impl Process {
         &self,
         start: u64,
         len: u64,
-    ) -> Option<(Vec<MemoryRegion>, Vec<MemoryRegion>)> {
-        let end = start.checked_add(len)?;
+    ) -> core::result::Result<(Vec<MemoryRegion>, Vec<MemoryRegion>), MemoryRangeError> {
+        use MemoryRangeError::{Allocation, InvalidRange};
+        let end = start
+            .checked_add(len)
+            .filter(|&end| end > start)
+            .ok_or(InvalidRange)?;
         let mut retained = Vec::new();
         let mut removed = Vec::new();
-        retained.try_reserve(self.memory_regions.len().checked_mul(2)?).ok()?;
-        removed.try_reserve(self.memory_regions.len()).ok()?;
+        let capacity = self.memory_regions.len().checked_mul(2).ok_or(Allocation)?;
+        retained.try_reserve(capacity).map_err(|_| Allocation)?;
+        removed
+            .try_reserve(self.memory_regions.len())
+            .map_err(|_| Allocation)?;
         for region in &self.memory_regions {
             use super::memory_range::{Range, cut};
             let pieces = cut(
                 Range {
                     start: region.start,
-                    end: region.end()?,
+                    end: region.end().ok_or(InvalidRange)?,
                 },
                 Range { start, end },
-            )?;
+            )
+            .ok_or(InvalidRange)?;
             if let Some(range) = pieces.removed {
                 removed.push(region.slice(range.start, range.end)?);
             }
@@ -1097,7 +1118,7 @@ impl Process {
                 retained.push(region.slice(range.start, range.end)?);
             }
         }
-        Some((retained, removed))
+        Ok((retained, removed))
     }
 
     pub fn has_kernel_authority(&self, authority: &KernelAuthority) -> bool {
