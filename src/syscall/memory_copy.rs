@@ -17,11 +17,11 @@ pub fn copy(destination: u64, source: u64, length: u64) -> u64 {
     // and leaf permissions under the process lock for each resident copy.
     let mut snapshot = [0u8; mnu_abi::memory_copy::MAX_BYTES];
     let snapshot = &mut snapshot[..length];
-    if let Err(error) = super::copy_from_user(source, snapshot) {
-        return error;
+    if let Err(error) = super::copy_from_user_native(source, snapshot) {
+        return error.into_raw();
     }
-    if let Err(error) = super::copy_to_user(destination, snapshot) {
-        return error;
+    if let Err(error) = super::copy_to_user_native(destination, snapshot) {
+        return error.into_raw();
     }
     length as u64
 }

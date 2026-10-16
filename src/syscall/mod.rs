@@ -21,6 +21,7 @@ pub mod syscall_entry;
 pub mod task;
 pub mod time;
 pub mod upcall;
+mod usercopy_error;
 pub(crate) use upcall::prepare_user_exception;
 
 mod types;
@@ -482,19 +483,31 @@ fn retry_usercopy<T>(
 
 /// ユーザー空間からバイト列をコピーする（コピー先はカーネル空間）。
 pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
+    // Legacy callers retain their old ABI until individually migrated.
+    copy_from_user_native(src_ptr, dst).map_err(|_| EFAULT)
+}
+
+pub fn copy_from_user_native(
+    src_ptr: u64,
+    dst: &mut [u8],
+) -> Result<(), mnu_abi::status::Error> {
     if dst.is_empty() {
         return Ok(());
     }
     let user_pt = match current_user_page_table() {
         Some(pt) => pt,
-        None => return Err(EFAULT),
+        None => return Err(mnu_abi::status::Error::InvalidAddress),
     };
     if src_ptr == 0 {
-        return Err(EFAULT);
+        return Err(mnu_abi::status::Error::InvalidAddress);
     }
-    let mut result = retry_usercopy(|| copy_out_of_current_root(user_pt, src_ptr, dst));
-    if result.is_err() && fault_in_user_range(user_pt, src_ptr, dst.len() as u64, false) {
-        result = retry_usercopy(|| copy_out_of_current_root(user_pt, src_ptr, dst));
+    let mut result = retry_usercopy(|| copy_out_of_current_root(user_pt, src_ptr, dst))
+        .map_err(usercopy_error::resident);
+    if result.is_err() {
+        result = fault_in_user_range(user_pt, src_ptr, dst.len() as u64, false).and_then(|()| {
+            retry_usercopy(|| copy_out_of_current_root(user_pt, src_ptr, dst))
+                .map_err(usercopy_error::resident)
+        });
     }
     result.map_err(|err| {
         let (syscall_num, syscall_args) = last_syscall_snapshot();
@@ -518,26 +531,26 @@ pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
                 syscall_args[4]
             ),
         );
-        match err {
-            crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => EFAULT,
-            crate::Kernel::Memory(crate::result::Memory::PermissionDenied) => EFAULT,
-            crate::Kernel::Memory(crate::result::Memory::InvalidAddress) => EFAULT,
-            _ => EFAULT,
-        }
+        err
     })
 }
 
 #[inline(never)]
-fn fault_in_user_range(table_phys: u64, address: u64, len: u64, write: bool) -> bool {
+fn fault_in_user_range(
+    table_phys: u64,
+    address: u64,
+    len: u64,
+    write: bool,
+) -> Result<(), mnu_abi::status::Error> {
     if !is_canonical_user_range(address, len) {
-        return false;
+        return Err(mnu_abi::status::Error::InvalidAddress);
     }
 
     let end = address + len - 1;
     let mut page = address & !0xfff;
     let end_page = end & !0xfff;
     let Some(pid) = security::current_process_id() else {
-        return false;
+        return Err(mnu_abi::status::Error::InvalidAddress);
     };
     loop {
         let resident = crate::task::with_process(pid, |process| {
@@ -552,7 +565,7 @@ fn fault_in_user_range(table_phys: u64, address: u64, len: u64, write: bool) -> 
         })
         .flatten();
         let Some(resident) = resident else {
-            return false;
+            return Err(mnu_abi::status::Error::InvalidAddress);
         };
         // Provider fault preparation can do IPC. Drop PROC before it; the
         // final resident copy revalidates and locks the original root again.
@@ -563,11 +576,11 @@ fn fault_in_user_range(table_phys: u64, address: u64, len: u64, write: bool) -> 
                     crate::task::yield_now();
                     continue;
                 }
-                Err(_) => return false,
+                Err(error) => return Err(usercopy_error::fault(error.cause())),
             }
         }
         if page == end_page {
-            return true;
+            return Ok(());
         }
         page += 4096;
     }
@@ -615,19 +628,31 @@ fn copy_into_current_root(table: u64, address: u64, bytes: &[u8]) -> crate::resu
 
 /// バイト列をユーザー空間へコピーする（コピー元はカーネル空間）。
 pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
+    // Legacy callers retain their old ABI until individually migrated.
+    copy_to_user_native(dst_ptr, src).map_err(|_| EFAULT)
+}
+
+pub fn copy_to_user_native(
+    dst_ptr: u64,
+    src: &[u8],
+) -> Result<(), mnu_abi::status::Error> {
     if src.is_empty() {
         return Ok(());
     }
     let user_pt = match current_user_page_table() {
         Some(pt) => pt,
-        None => return Err(EFAULT),
+        None => return Err(mnu_abi::status::Error::InvalidAddress),
     };
     if dst_ptr == 0 {
-        return Err(EFAULT);
+        return Err(mnu_abi::status::Error::InvalidAddress);
     }
-    let mut result = retry_usercopy(|| copy_into_current_root(user_pt, dst_ptr, src));
-    if result.is_err() && fault_in_user_range(user_pt, dst_ptr, src.len() as u64, true) {
-        result = retry_usercopy(|| copy_into_current_root(user_pt, dst_ptr, src));
+    let mut result = retry_usercopy(|| copy_into_current_root(user_pt, dst_ptr, src))
+        .map_err(usercopy_error::resident);
+    if result.is_err() {
+        result = fault_in_user_range(user_pt, dst_ptr, src.len() as u64, true).and_then(|()| {
+            retry_usercopy(|| copy_into_current_root(user_pt, dst_ptr, src))
+                .map_err(usercopy_error::resident)
+        });
     }
     result.map_err(|err| {
         let (syscall_num, syscall_args) = last_syscall_snapshot();
@@ -651,12 +676,7 @@ pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
                 syscall_args[4]
             ),
         );
-        match err {
-            crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => EFAULT,
-            crate::Kernel::Memory(crate::result::Memory::PermissionDenied) => EFAULT,
-            crate::Kernel::Memory(crate::result::Memory::InvalidAddress) => EFAULT,
-            _ => EFAULT,
-        }
+        err
     })
 }
 

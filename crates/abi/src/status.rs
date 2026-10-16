@@ -12,6 +12,12 @@ const MASK: u64 = 0xffff_ffff_ffff_0000;
 pub enum Error {
     /// The requested work exceeds a mechanism's explicitly published bound.
     LimitExceeded = 1,
+    /// The caller's address range is absent or lacks the requested access.
+    InvalidAddress = 2,
+    /// Storage needed to complete the mechanism could not be allocated.
+    ResourceUnavailable = 3,
+    /// A backing object failed while resolving the requested operation.
+    BackingFailure = 4,
 }
 
 impl Error {
@@ -25,6 +31,9 @@ impl Error {
         }
         match raw & !MASK {
             1 => Some(Self::LimitExceeded),
+            2 => Some(Self::InvalidAddress),
+            3 => Some(Self::ResourceUnavailable),
+            4 => Some(Self::BackingFailure),
             _ => None,
         }
     }
