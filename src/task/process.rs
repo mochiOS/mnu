@@ -1206,9 +1206,13 @@ impl Process {
         !self.mmio_mappings.is_empty()
     }
 
-    pub fn add_mmio_mapping(&mut self, mapping: MmioMapping) -> bool {
+    pub fn add_mmio_mapping(
+        &mut self,
+        mapping: MmioMapping,
+    ) -> core::result::Result<(), mnu_abi::status::Error> {
+        use mnu_abi::status::Error;
         let Some(mapping_end) = mapping.end() else {
-            return false;
+            return Err(Error::InvalidAddress);
         };
         let mmio_overlap = self.mmio_mappings.iter().any(|existing| {
             let Some(existing_end) = existing.end() else {
@@ -1217,7 +1221,7 @@ impl Process {
             mapping.virt_start() < existing_end && existing.virt_start() < mapping_end
         });
         if mmio_overlap {
-            return false;
+            return Err(Error::AlreadyExists);
         }
         let memory_overlap = self.memory_regions.iter().any(|region| {
             let Some(region_end) = region.end() else {
@@ -1226,7 +1230,7 @@ impl Process {
             mapping.virt_start() < region_end && region.start() < mapping_end
         });
         if memory_overlap {
-            return false;
+            return Err(Error::AlreadyExists);
         }
         let dma_overlap = self.dma_buffers.iter().any(|existing| {
             let Some(existing_end) = existing.end() else {
@@ -1235,24 +1239,27 @@ impl Process {
             mapping.virt_start() < existing_end && existing.virt_start() < mapping_end
         });
         if dma_overlap {
-            return false;
+            return Err(Error::AlreadyExists);
         }
         if self.heap_start != 0
             && self.heap_end != 0
             && mapping.virt_start() < self.heap_end
             && self.heap_start < mapping_end
         {
-            return false;
+            return Err(Error::AlreadyExists);
         }
         if self.stack_bottom != 0
             && self.stack_top != 0
             && mapping.virt_start() < self.stack_top
             && self.stack_bottom < mapping_end
         {
-            return false;
+            return Err(Error::AlreadyExists);
         }
+        self.mmio_mappings
+            .try_reserve(1)
+            .map_err(|_| Error::ResourceUnavailable)?;
         self.mmio_mappings.push(mapping);
-        true
+        Ok(())
     }
 
     pub fn remove_mmio_mapping(&mut self, start: u64, len: u64) -> Option<MmioMapping> {

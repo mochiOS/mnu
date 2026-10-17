@@ -10,7 +10,7 @@ fn current_pid() -> Option<crate::task::ids::ProcessId> {
 }
 
 #[inline(never)]
-fn memory_protection_error(error: crate::Kernel) -> Error {
+pub(super) fn memory_protection_error(error: crate::Kernel) -> Error {
     match error {
         crate::Kernel::Memory(crate::result::Memory::NotMapped)
         | crate::Kernel::Memory(crate::result::Memory::InvalidAddress) => Error::InvalidAddress,

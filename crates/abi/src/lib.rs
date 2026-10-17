@@ -83,9 +83,14 @@ pub enum SyscallNumber {
     /// Writes the low width bytes under the same native port contract.
     PortOut = 521,
     GetFramebufferInfo = 528,
+    /// Maps borrowed display storage under display authority. Validation,
+    /// allocation, capacity and VM failures use status::Error.
     MapFramebuffer = 529,
     /// Blocking receive; native failures never report an empty wakeup.
     IpcRecvWait = 533,
+    /// Maps authorized borrowed MMIO, never allocator-owned RAM. Native
+    /// failures distinguish AccessDenied, AlreadyExists, LimitExceeded,
+    /// ResourceUnavailable and NotReady; no POSIX errno is returned.
     MapPhysicalRange = 536,
     /// Validates an opaque endpoint's live generation. Missing or stale
     /// endpoints return status::Error::NotFound.

@@ -146,29 +146,29 @@ pub fn read_user_cstring(ptr: u64, max_len: usize) -> Result<String, mnu_abi::st
 }
 
 pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
-    use crate::syscall::types::{EACCES, EINVAL, ENOMEM, EPERM, SUCCESS};
+    use mnu_abi::status::Error;
     if virt_addr == 0
         || size == 0
         || (virt_addr & 0xfff) != 0
         || (phys_addr & 0xfff) != 0
         || (size & 0xfff) != 0
     {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if !is_canonical_user_range(virt_addr, size) {
-        return EINVAL;
+        return Error::InvalidAddress.into_raw();
     }
     if !crate::mem::frame::is_allowed_mmio_range(phys_addr, size) {
         crate::audit::log(
             crate::audit::AuditEventKind::Policy,
             "MapPhysicalRange rejected non-MMIO or allocator-owned physical range",
         );
-        return EPERM;
+        return Error::AccessDenied.into_raw();
     }
 
     let pid = match crate::syscall::security::current_process_id() {
         Some(pid) => pid,
-        None => return ENOMEM,
+        None => return Error::NotReady.into_raw(),
     };
     let requested_authority = KernelAuthority::new(
         KernelCapability::PhysMap,
@@ -183,7 +183,7 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
         crate::capability::Capability::SerialAccess,
     ]);
     if !has_mmio_device && !crate::task::process_has_kernel_authority(pid, &requested_authority) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     map_borrowed_range_for_process(
         pid, virt_addr, phys_addr, size, crate::mem::paging::MappingCache::Uncached,
@@ -197,53 +197,51 @@ fn map_borrowed_range_for_process(
     size: u64,
     cache: crate::mem::paging::MappingCache,
 ) -> u64 {
-    use crate::syscall::types::{EINVAL, ENOMEM, SUCCESS};
+    use mnu_abi::status::Error;
     if !is_canonical_user_range(virt_addr, size) {
-        return EINVAL;
+        return Error::InvalidAddress.into_raw();
     }
     let writable = true;
     let mapping = crate::task::MmioMapping::new(virt_addr, size, phys_addr, writable);
     let outcome = crate::task::with_process_mut(pid, |proc| {
         use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
-        let pt_phys = proc.page_table().ok_or(ENOMEM)?;
+        let pt_phys = proc.page_table().ok_or(Error::NotReady.into_raw())?;
         if proc.mmio_mapping_count() >= proc.resource_limits().max_mmio_ranges {
-            return Err(ENOMEM);
+            return Err(Error::LimitExceeded.into_raw());
         }
         if crate::mem::paging::is_user_range_occupied_in_table(pt_phys, virt_addr, size) {
-            return Err(EINVAL);
+            return Err(Error::AlreadyExists.into_raw());
         }
-        if !proc.add_mmio_mapping(mapping.clone()) {
-            return Err(EINVAL);
-        }
-        if crate::mem::paging::map_physical_range_to_user(
+        proc.add_mmio_mapping(mapping.clone()).map_err(Error::into_raw)?;
+        if let Err(error) = crate::mem::paging::map_physical_range_to_user(
             pt_phys,
             virt_addr,
             phys_addr,
             size,
             cache,
         )
-        .is_err()
         {
+            let failure = memory::memory_protection_error(error).into_raw();
             // Keep the root alive and exclude faults/clone/resize throughout
             // rollback. MMIO frames are borrowed: detach only after TLB ack.
             let mut backend = unsafe { Native::for_process(proc, false) };
             transaction::revoke([(pt_phys, virt_addr, virt_addr + size)], &mut backend)
                 .map_err(|error| match error {
-                    transaction::Error::InvalidRange => EINVAL,
-                    transaction::Error::Allocation => ENOMEM,
+                    transaction::Error::InvalidRange => Error::InvalidArgument.into_raw(),
+                    transaction::Error::Allocation => Error::ResourceUnavailable.into_raw(),
                     transaction::Error::Backend(error) => error.into_raw(),
                 })?;
             // If revocation fails, retain metadata for the restored partial
             // mapping. Never leave live PTEs without an ownership record.
             proc.remove_mmio_mapping(virt_addr, size);
-            return Err(ENOMEM);
+            return Err(failure);
         }
         Ok(())
     });
     match outcome {
         Some(Ok(())) => SUCCESS,
-        Some(Err(errno)) => errno,
-        None => ENOMEM,
+        Some(Err(error)) => error,
+        None => Error::NotReady.into_raw(),
     }
 }
 
@@ -421,13 +419,13 @@ pub fn commit_framebuffer(position: u64, size: u64) -> u64 {
 
 pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     use crate::capability::Capability;
-    use crate::syscall::types::{EACCES, EINVAL, ENOMEM, ENXIO, SUCCESS};
+    use mnu_abi::status::Error;
 
     if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     if virt_addr == 0 || size == 0 || (virt_addr & 0xfff) != 0 || (size & 0xfff) != 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let shared_surface = crate::platform::display_info()
         .ok()
@@ -447,22 +445,22 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
             true,
         )
     } else {
-        return ENXIO;
+        return Error::NotReady.into_raw();
     };
     let required = match framebuffer_size.checked_add(fb_offset)
         .and_then(|bytes| bytes.checked_add(0xfff))
     {
         Some(v) => v & !0xfff,
-        None => return EINVAL,
+        None => return Error::BackingFailure.into_raw(),
     };
     if size < required {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if mmio && !crate::mem::frame::is_allowed_mmio_range(fb_base, required) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let Some(pid) = crate::syscall::security::current_process_id() else {
-        return ENOMEM;
+        return Error::NotReady.into_raw();
     };
     let cache = if mmio {
         crate::mem::paging::MappingCache::Uncached
