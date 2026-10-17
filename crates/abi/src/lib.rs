@@ -83,6 +83,8 @@ pub enum SyscallNumber {
     /// the first complete record use status::Error; later faults return the
     /// completed prefix. No task-table lock is retained across usercopy.
     ListProcesses = 552,
+    /// Returns 1/0 for authority of an IPC-resolved sender. Input, allocation
+    /// and usercopy failures use status::Error; an absent sender returns 0.
     CheckThreadCapability = 553,
     BlockRead = 555,
     BlockWrite = 556,
@@ -116,6 +118,8 @@ pub enum SyscallNumber {
     CapClone = 591,
     CapDrop = 592,
     CapTransfer = 593,
+    /// Returns 1/0 for caller authority. Input and usercopy failures use
+    /// status::Error; a missing caller context is NotReady.
     CapQuery = 594,
     CapRestrict = 595,
     TimeNow = 600,

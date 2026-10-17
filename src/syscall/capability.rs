@@ -7,16 +7,16 @@
 
 extern crate alloc;
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
+use alloc::string::String;
+use mnu_abi::status::Error;
 
 use crate::capability::path::{self, PathRights, PATH_CREATE, PATH_LIST, PATH_READ, PATH_WRITE};
 use crate::capability::{
     kernel_authority_implies, parse_kernel_authority_spec, Capability, KernelAuthority,
     KernelCapability,
 };
-use crate::syscall::copy_from_user;
-use crate::syscall::types::{EACCES, EFAULT, EINVAL, ENOSYS, SUCCESS};
+use crate::syscall::copy_from_user_native;
+use crate::syscall::types::{EACCES, EINVAL, ENOSYS, SUCCESS};
 
 #[derive(Clone, Copy)]
 enum CapabilityToken {
@@ -32,30 +32,18 @@ enum CapabilityToken {
 /// 戻り値:
 /// - `1` = 許可
 /// - `0` = 不許可
-/// - `EINVAL/EFAULT` = 不正な引数
+/// - `status::Error` = 入力、メモリ、または確保の失敗
 pub fn check_thread_capability(thread_id: u64, cap_ptr: u64, cap_len: u64) -> u64 {
     // 過剰なコピーを避けるため、ここでは短い上限を設ける。
     // capability 名は固定の識別子であり、長大な文字列である必要がない。
     let max_cap_name_len = crate::config::kernel().capability.max_name_len;
 
-    if thread_id == 0 || cap_ptr == 0 || cap_len == 0 {
-        return EINVAL;
+    if thread_id == 0 {
+        return Error::InvalidArgument.into_raw();
     }
-    let Ok(cap_len_usize) = usize::try_from(cap_len) else {
-        return EINVAL;
-    };
-    if cap_len_usize > max_cap_name_len {
-        return EINVAL;
-    }
-
-    let mut buf = Vec::with_capacity(cap_len_usize);
-    buf.resize(cap_len_usize, 0u8);
-    if copy_from_user(cap_ptr, &mut buf).is_err() {
-        return EFAULT;
-    }
-
-    let Ok(name) = core::str::from_utf8(&buf) else {
-        return EINVAL;
+    let name = match read_capability_name(cap_ptr, cap_len, max_cap_name_len) {
+        Ok(name) => name,
+        Err(error) => return error,
     };
     let Some(resolved_thread) = crate::syscall::ipc::resolve_sender_thread_id(thread_id) else {
         return 0;
@@ -63,7 +51,7 @@ pub fn check_thread_capability(thread_id: u64, cap_ptr: u64, cap_len: u64) -> u6
     let Some(pid) = crate::task::thread_to_process_id(resolved_thread) else {
         return 0;
     };
-    match parse_capability_token(name) {
+    match parse_capability_token(&name) {
         Some(CapabilityToken::Plain(cap)) => {
             if crate::task::process::process_has_capability(pid, cap) {
                 1
@@ -78,7 +66,7 @@ pub fn check_thread_capability(thread_id: u64, cap_ptr: u64, cap_len: u64) -> u6
                 0
             }
         }
-        None => EINVAL,
+        None => Error::InvalidArgument.into_raw(),
     }
 }
 
@@ -87,29 +75,14 @@ pub fn check_thread_capability(thread_id: u64, cap_ptr: u64, cap_len: u64) -> u6
 /// いまは文字列で指定された capability を caller が持つかだけを返す。
 pub fn query(cap_ptr: u64, cap_len: u64) -> u64 {
     let max_cap_name_len = crate::config::kernel().capability.max_name_len;
-    if cap_ptr == 0 || cap_len == 0 {
-        return EINVAL;
-    }
-    let Ok(cap_len_usize) = usize::try_from(cap_len) else {
-        return EINVAL;
-    };
-    if cap_len_usize > max_cap_name_len {
-        return EINVAL;
-    }
-
-    let mut buf = Vec::with_capacity(cap_len_usize);
-    buf.resize(cap_len_usize, 0u8);
-    if copy_from_user(cap_ptr, &mut buf).is_err() {
-        return EFAULT;
-    }
-
-    let Ok(name) = core::str::from_utf8(&buf) else {
-        return EINVAL;
+    let name = match read_capability_name(cap_ptr, cap_len, max_cap_name_len) {
+        Ok(name) => name,
+        Err(error) => return error,
     };
     let Some(pid) = current_process() else {
-        return ENOSYS;
+        return Error::NotReady.into_raw();
     };
-    match parse_capability_token(name) {
+    match parse_capability_token(&name) {
         Some(CapabilityToken::Plain(cap)) => {
             if crate::task::process::process_has_capability(pid, cap)
                 || (matches!(cap, Capability::MemoryPhysMap)
@@ -130,7 +103,7 @@ pub fn query(cap_ptr: u64, cap_len: u64) -> u64 {
                 0
             }
         }
-        None => EINVAL,
+        None => Error::InvalidArgument.into_raw(),
     }
 }
 
@@ -381,20 +354,25 @@ fn read_capability_spec_from_user(cap_ptr: u64, cap_len: u64) -> Result<String, 
         .capability
         .max_name_len
         .max(MAX_TRANSFER_SPEC_LEN);
-    if cap_ptr == 0 || cap_len == 0 {
-        return Err(EINVAL);
+    read_capability_name(cap_ptr, cap_len, max_cap_name_len)
+}
+
+/// Copy once, before interpreting authority or mutating any grant. Converting
+/// the owned byte buffer into UTF-8 reuses its allocation.
+fn read_capability_name(cap_ptr: u64, cap_len: u64, maximum: usize) -> Result<String, u64> {
+    if cap_len == 0 {
+        return Err(Error::InvalidArgument.into_raw());
     }
-    let cap_len_usize = usize::try_from(cap_len).map_err(|_| EINVAL)?;
-    if cap_len_usize > max_cap_name_len {
-        return Err(EINVAL);
+    let length = usize::try_from(cap_len)
+        .ok()
+        .filter(|length| *length <= maximum && *length <= isize::MAX as usize)
+        .ok_or(Error::LimitExceeded.into_raw())?;
+    if cap_ptr == 0 || cap_ptr.checked_add(cap_len - 1).is_none() {
+        return Err(Error::InvalidAddress.into_raw());
     }
-    let mut buf = Vec::with_capacity(cap_len_usize);
-    buf.resize(cap_len_usize, 0u8);
-    if copy_from_user(cap_ptr, &mut buf).is_err() {
-        return Err(EFAULT);
-    }
-    let name = core::str::from_utf8(&buf).map_err(|_| EINVAL)?;
-    Ok(name.to_string())
+    let mut bytes = crate::util::object_snapshot::zeroed_native(length).map_err(Error::into_raw)?;
+    copy_from_user_native(cap_ptr, &mut bytes).map_err(Error::into_raw)?;
+    String::from_utf8(bytes).map_err(|_| Error::InvalidArgument.into_raw())
 }
 
 fn parse_scoped_path_grant(spec: &str) -> Option<(&str, PathRights)> {
