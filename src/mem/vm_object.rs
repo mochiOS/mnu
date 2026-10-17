@@ -337,6 +337,9 @@ impl VmObject {
     }
 
     pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<usize, u64> {
+        offset
+            .checked_add(output.len() as u64)
+            .ok_or(mnu_abi::status::Error::LimitExceeded.into_raw())?;
         if let VmObjectSource::Memory(memory) = &self.source {
             return memory
                 .read_at(offset, output)
@@ -347,7 +350,7 @@ impl VmObject {
         while copied < output.len() {
             let current = offset
                 .checked_add(copied as u64)
-                .ok_or(crate::syscall::EINVAL)?;
+                .ok_or(mnu_abi::status::Error::LimitExceeded.into_raw())?;
 
             let page_index = current / PAGE_BYTES as u64;
             let page_offset = (current % PAGE_BYTES as u64) as usize;
@@ -376,11 +379,16 @@ impl VmObject {
     }
 
     pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize, u64> {
-        let input_len = u64::try_from(input.len()).map_err(|_| crate::syscall::EINVAL)?;
+        let input_len = u64::try_from(input.len())
+            .map_err(|_| mnu_abi::status::Error::LimitExceeded.into_raw())?;
 
         offset
             .checked_add(input_len)
-            .ok_or(crate::syscall::EINVAL)?;
+            .ok_or(mnu_abi::status::Error::LimitExceeded.into_raw())?;
+
+        if input.is_empty() {
+            return Ok(0);
+        }
 
         let _io_guard = if matches!(&self.source, VmObjectSource::Provider { .. }) {
             Some(lock_provider_key(self.object_key()).map_err(mnu_abi::status::Error::into_raw)?)
@@ -390,7 +398,7 @@ impl VmObject {
         let written = write_lower(&self.source, offset, input)?;
 
         if written > input.len() {
-            return Err(crate::syscall::EIO);
+            return Err(mnu_abi::status::Error::BackingFailure.into_raw());
         }
 
         if let Some(guard) = &_io_guard {
@@ -825,7 +833,7 @@ pub(crate) fn overlay_provider_range(
 ) -> Result<(), u64> {
     let end = offset
         .checked_add(output.len() as u64)
-        .ok_or(crate::syscall::EIO)?;
+        .ok_or(mnu_abi::status::Error::LimitExceeded.into_raw())?;
     let key = ObjectKey::Provider {
         endpoint_thread_id: object.endpoint_thread_id,
         endpoint_slot: object.endpoint_slot,
@@ -839,16 +847,16 @@ pub(crate) fn overlay_provider_range(
             .key
             .page_index
             .checked_mul(PAGE_BYTES as u64)
-            .ok_or(crate::syscall::EIO)?;
+            .ok_or(mnu_abi::status::Error::BackingFailure.into_raw())?;
         let page_end = page_start
             .checked_add(entry.valid_len as u64)
-            .ok_or(crate::syscall::EIO)?;
+            .ok_or(mnu_abi::status::Error::BackingFailure.into_raw())?;
         if page_start >= end || page_end <= offset {
             continue;
         }
         let bytes = snapshot_page(entry)?;
         super::cache_range::copy_overlap(offset, output, page_start, &bytes[..entry.valid_len])
-            .map_err(|_| crate::syscall::EIO)?;
+            .map_err(|_| mnu_abi::status::Error::BackingFailure.into_raw())?;
         entry.last_used = next_cache_access();
     }
     Ok(())
@@ -985,7 +993,7 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
                 return LowerReadOutcome {
                     bytes_read,
                     eof: false,
-                    error: Some(crate::syscall::EINVAL),
+                    error: Some(mnu_abi::status::Error::LimitExceeded.into_raw()),
                 };
             }
         };
@@ -996,7 +1004,7 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
                 return LowerReadOutcome {
                     bytes_read,
                     eof: false,
-                    error: Some(crate::syscall::EINVAL),
+                    error: Some(mnu_abi::status::Error::LimitExceeded.into_raw()),
                 };
             }
         };
@@ -1038,7 +1046,7 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
                 return LowerReadOutcome {
                     bytes_read,
                     eof: false,
-                    error: Some(crate::syscall::EIO),
+                    error: Some(mnu_abi::status::Error::BackingFailure.into_raw()),
                 };
             }
 
