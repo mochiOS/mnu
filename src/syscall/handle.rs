@@ -12,10 +12,7 @@ pub use memory_update::create_admission as provider_memory_admission_create;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
-use super::{
-    EACCES, EBADF, EINVAL, ENOSYS, ENOTSUP,
-    SUCCESS,
-};
+use super::{EACCES, EBADF, EINVAL, SUCCESS};
 
 pub(crate) fn flush_provider_releases() {
     let mut releases = crate::task::handle_table::take_provider_releases();
@@ -718,35 +715,37 @@ impl Drop for TemporaryMemoryHandle {
     }
 }
 
+/// None permits inline retry only before any bytes have been read. Some
+/// carries a completed count or opaque failure; neither permits replay.
 fn provider_read_shared(
     provider: &ProviderObject,
     identity: u64,
     buffer: u64,
     length: usize,
-) -> u64 {
+) -> Option<u64> {
     use mnu_abi::{provider as wire, status::Error};
     let capacity = length.min(wire::MAX_SHARED_READ_LEN);
     let backing_length = (capacity as u64 + 4095) & !4095;
     let raw = memory_object_create(backing_length, 0);
     if (raw as i64) < 0 {
-        return raw;
+        return Some(raw);
     }
     let _handle = TemporaryMemoryHandle(raw);
     let object = match object_native(raw, HandleRights::MAP) {
         Ok(KernelObject::VmObject(object)) => object,
-        Ok(_) => return Error::BackingFailure.into_raw(),
-        Err(error) => return error.into_raw(),
+        Ok(_) => return Some(Error::BackingFailure.into_raw()),
+        Err(error) => return Some(error.into_raw()),
     };
     let handle = match u32::try_from(raw).ok().and_then(ObjectHandle::from_raw) {
         Some(handle) => handle,
-        None => return Error::BackingFailure.into_raw(),
+        None => return Some(Error::BackingFailure.into_raw()),
     };
     let requested = HandleRights::READ
         .union(HandleRights::WRITE)
         .union(HandleRights::MAP);
     let mut data = match crate::util::object_snapshot::zeroed_native(capacity) {
         Ok(data) => data,
-        Err(error) => return error.into_raw(),
+        Err(error) => return Some(error.into_raw()),
     };
     let mut total = 0usize;
     while total < length {
@@ -761,14 +760,14 @@ fn provider_read_shared(
         };
         let mut encoded = [0u8; wire::REQUEST_HEADER_LEN];
         if request.encode(&[], &mut encoded).is_err() {
-            return if total == 0 {
+            return Some(if total == 0 {
                 Error::InvalidArgument.into_raw()
             } else {
                 total as u64
-            };
+            });
         }
         let mut response = [0u8; wire::RESPONSE_HEADER_LEN + wire::READ_POSITION_LEN];
-        let result = (|| -> Result<usize, u64> {
+        let result = (|| -> Result<Option<usize>, u64> {
             let _io_guard = crate::mem::vm_object::lock_provider_io(provider, identity)
                 .map_err(mnu_abi::status::Error::into_raw)?;
             let reply_length = crate::syscall::ipc::call_provider_with_handle_from_kernel(
@@ -790,6 +789,11 @@ fn provider_read_shared(
             if reply.status != 0 {
                 return Err(reply.status as u64);
             }
+            if position.is_empty() {
+                // Only the validated, empty successful reply authorizes a
+                // transport change. No error value is feature detection.
+                return Ok(None);
+            }
             let count =
                 usize::try_from(reply.value).map_err(|_| Error::BackingFailure.into_raw())?;
             if count > chunk || position.len() != wire::READ_POSITION_LEN {
@@ -809,37 +813,38 @@ fn provider_read_shared(
                 start,
                 &mut data[..count],
             )?;
-            Ok(count)
+            Ok(Some(count))
         })();
         let count = match result {
-            Ok(count) => count,
-            Err(error) => return if total == 0 { error } else { total as u64 },
+            Ok(Some(count)) => count,
+            Ok(None) => return (total != 0).then_some(total as u64),
+            Err(error) => return Some(if total == 0 { error } else { total as u64 }),
         };
         // User-buffer faults can read the same object: never retain its I/O
         // serialization guard across this copy.
         let address = match buffer.checked_add(total as u64) {
             Some(address) => address,
             None => {
-                return if total == 0 {
+                return Some(if total == 0 {
                     Error::InvalidAddress.into_raw()
                 } else {
                     total as u64
-                };
+                });
             }
         };
         if let Err(error) = crate::syscall::copy_to_user_native(address, &data[..count]) {
-            return if total == 0 {
+            return Some(if total == 0 {
                 error.into_raw()
             } else {
                 total as u64
-            };
+            });
         }
         total += count;
         if count < chunk {
             break;
         }
     }
-    total as u64
+    Some(total as u64)
 }
 
 fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
@@ -856,11 +861,9 @@ fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
     };
     if let Some(identity) = identity {
         if length > mnu_abi::provider::MAX_POSITIONED_READ_LEN {
-            let result = provider_read_shared(provider, identity, buffer, length);
-            // Providers can explicitly decline this optional transport without
-            // losing support for ordinary object reads. No POSIX syscall path
-            // is used, and other errors or partial reads are never retried.
-            if result != ENOSYS && result != ENOTSUP {
+            // Only a side-effect-free, empty success declines this transport.
+            // Errors and completed prefixes must never replay a stream read.
+            if let Some(result) = provider_read_shared(provider, identity, buffer, length) {
                 return result;
             }
         }

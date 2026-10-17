@@ -26,6 +26,10 @@ pub const OP_READ_WITH_POSITION: u16 = 10;
 /// offset within the object, not a pointer or handle number. The receiver must
 /// require READ | WRITE | MAP, validate the mapping bounds, and close the attachment.
 /// Success returns the byte count in `value` and an inline u64 starting position.
+/// Alternatively, an empty successful reply with value zero declines this
+/// transport without reading bytes, advancing the cursor or modifying the
+/// attachment. The caller may then issue an inline read. EOF instead includes
+/// its starting position. Errors never authorize retry by another transport.
 pub const OP_READ_SHARED: u16 = 11;
 /// Sequential write with a per-operation exclusive byte end in `basis`.
 /// The provider selects position and limits the written prefix atomically.
@@ -291,8 +295,9 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
                 && header.value == (header.data_length as usize - READ_POSITION_LEN) as u64
         }
         OP_READ_SHARED => {
-            header.data_length as usize == READ_POSITION_LEN
-                && header.value <= MAX_SHARED_READ_LEN as u64
+            (header.data_length == 0 && header.value == 0)
+                || (header.data_length as usize == READ_POSITION_LEN
+                    && header.value <= MAX_SHARED_READ_LEN as u64)
         }
         // Positioned providers may return the starting byte offset alongside
         // a sequential write result, captured by the same operation.
