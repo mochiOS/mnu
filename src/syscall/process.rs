@@ -1193,15 +1193,18 @@ pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
         crate::mem::range_plan::collect(addr, sync_len, |cursor| {
             let region = process.find_memory_region(cursor)?;
             let end = region.end()?;
-            if refresh
-                && region.is_shared()
+            if region.is_shared()
                 && region.backing().file_object().is_some()
                 && !region.permits_access(mnu_abi::MEMORY_ACCESS_READ)
+                && (refresh || !region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE))
             {
                 denied = true;
             }
-            let backing = if region.is_shared() && (refresh || region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE))
-            {
+            // Synchronization does not grant write access: dirty cache pages
+            // retain their original writer. A read-only alias must not silently
+            // skip pending writeback or its errors. Refresh additionally needs
+            // READ authority to replace resident contents from the backing.
+            let backing = if region.is_shared() {
                 match region.backing().file_object() {
                     Some(object) => {
                         let offset = region
