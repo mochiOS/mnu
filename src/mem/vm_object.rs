@@ -67,6 +67,9 @@ struct CachedPage {
     frame_phys: Option<u64>,
     valid_len: usize,
     dirty_range: Option<(usize, usize)>,
+    // Retain the source which accepted these dirty bytes. A read-only alias
+    // can request synchronization without becoming a write authority itself.
+    writer: Option<Arc<ProviderObject>>,
     version: u64,
     last_used: u64,
 }
@@ -452,6 +455,7 @@ impl VmObject {
                     frame_phys: None,
                     valid_len: loaded_len,
                     dirty_range: None,
+                    writer: None,
                     version: 0,
                     last_used: next_cache_access(),
                 });
@@ -493,6 +497,9 @@ impl VmObject {
                 Err(Error::InvalidArgument.into_raw())
             };
         }
+        let VmObjectSource::Provider { object: writer, .. } = &self.source else {
+            return Err(Error::InvalidArgument.into_raw());
+        };
         let key = self.page_key(page_index);
 
         let mut cache = PAGE_CACHE.lock();
@@ -503,14 +510,17 @@ impl VmObject {
             .find(|entry| entry.key == key && entry.frame_phys.is_some())
             .ok_or(Error::BackingFailure.into_raw())?;
 
-        if entry.valid_len != 0 {
+        let retired = if entry.valid_len != 0 {
             entry.dirty_range = Some((0, entry.valid_len));
-        }
+            entry.writer.replace(writer.clone())
+        } else { None };
 
         entry.version = entry.version.wrapping_add(1);
         entry.last_used = next_cache_access();
 
         bump_cache_mutation_epoch(key.object);
+        drop(cache);
+        drop(retired);
 
         Ok(())
     }
@@ -522,6 +532,9 @@ impl VmObject {
                 .write_at(offset, input)
                 .map_err(mnu_abi::status::Error::into_raw);
         }
+        let VmObjectSource::Provider { object: writer, .. } = &self.source else {
+            return Err(Error::InvalidArgument.into_raw());
+        };
         let input_len = u64::try_from(input.len()).map_err(|_| Error::LimitExceeded.into_raw())?;
 
         offset
@@ -563,6 +576,7 @@ impl VmObject {
                     frame_phys: None,
                     valid_len: loaded_len,
                     dirty_range: None,
+                    writer: None,
                     version: 0,
                     last_used: next_cache_access(),
                 });
@@ -595,6 +609,7 @@ impl VmObject {
                 ),
                 None => (page_offset, write_end),
             });
+            let retired = entry.writer.replace(writer.clone());
 
             entry.version = entry.version.wrapping_add(1);
             entry.last_used = next_cache_access();
@@ -602,6 +617,8 @@ impl VmObject {
             bump_cache_mutation_epoch(key.object);
 
             staged += count;
+            drop(cache);
+            drop(retired);
         }
 
         Ok(staged)
@@ -665,6 +682,7 @@ impl VmObject {
                 if dirty_start > dirty_end || dirty_end > PAGE_BYTES {
                     return Err(Error::BackingFailure.into_raw());
                 }
+                let writer = entry.writer.as_ref().ok_or(Error::BackingFailure.into_raw())?;
                 snapshots
                     .try_reserve(1)
                     .map_err(|_| Error::ResourceUnavailable.into_raw())?;
@@ -675,12 +693,13 @@ impl VmObject {
                     dirty_start,
                     dirty_end,
                     entry.version,
+                    writer.clone(),
                 ));
             }
             snapshots
         };
 
-        for (key, bytes, dirty_start, dirty_end, _) in &snapshots {
+        for (key, bytes, dirty_start, dirty_end, _, writer) in &snapshots {
             let page_start = key
                 .page_index
                 .checked_mul(PAGE_BYTES as u64)
@@ -688,33 +707,47 @@ impl VmObject {
             let write_offset = page_start
                 .checked_add(*dirty_start as u64)
                 .ok_or_else(|| Error::BackingFailure.into_raw())?;
-            let written = write_lower(&self.source, write_offset, &bytes[*dirty_start..*dirty_end])?;
+            let written = crate::syscall::handle::provider_write_at(
+                writer, write_offset, &bytes[*dirty_start..*dirty_end],
+            )?;
             if written != dirty_end - dirty_start {
                 return Err(Error::BackingFailure.into_raw());
             }
         }
-        if let VmObjectSource::Provider { object, .. } = &self.source {
-            crate::syscall::handle::provider_sync(object)?;
+        if snapshots.is_empty() {
+            if let VmObjectSource::Provider { object, .. } = &self.source {
+                crate::syscall::handle::provider_sync(object)?;
+            }
+        } else {
+            for (index, (_, _, _, _, _, writer)) in snapshots.iter().enumerate() {
+                if !snapshots[..index].iter().any(|(_, _, _, _, _, prior)| Arc::ptr_eq(prior, writer)) {
+                    crate::syscall::handle::provider_sync(writer)?;
+                }
+            }
         }
 
         // Publish clean state only after all writes and provider sync succeed.
         // Otherwise retain every dirty snapshot for retry, including pages
         // whose individual write completed before a later failure.
         let mut cache = PAGE_CACHE.lock();
-        for (key, _, _, _, version) in snapshots {
+        for (key, _, _, _, version, _) in &snapshots {
             if let Some(entry) = cache
                 .iter_mut()
-                .find(|entry| entry.key == key && entry.version == version)
+                .find(|entry| entry.key == *key && entry.version == *version)
             {
                 if !entry
                     .frame_phys
                     .is_some_and(crate::mem::paging::user_frame_has_multiple_owners)
                 {
                     entry.dirty_range = None;
+                    entry.writer = None;
                 }
                 entry.last_used = next_cache_access();
             }
         }
+        // Snapshot owners keep retired writer references alive until cache
+        // exclusion is released, including the last provider reference.
+        drop(cache);
         Ok(())
     }
 
@@ -1149,6 +1182,7 @@ fn cache_or_snapshot_page(
         frame_phys: None,
         valid_len,
         dirty_range: None,
+        writer: None,
         version: 0,
         last_used: next_cache_access(),
     });
