@@ -1175,8 +1175,6 @@ pub const EFAULT: u64 = (-14i64) as u64;
 pub const EEXIST: u64 = (-17i64) as u64;
 /// 無効な引数
 pub const EINVAL: u64 = (-22i64) as u64;
-/// ファイルディスクリプタが多すぎる
-pub const EMFILE: u64 = (-24i64) as u64;
 /// ディスク/ストレージに空きがない
 pub const ENOSPC: u64 = (-28i64) as u64;
 /// パイプが壊れている
