@@ -239,20 +239,21 @@ pub fn stream_write(raw: u64, buffer: u64, length: u64, options: u64) -> u64 {
 }
 
 pub fn seek(raw: u64, offset: u64, basis: u64) -> u64 {
-    let object = match object(raw, HandleRights::SEEK) {
+    use mnu_abi::status::Error;
+
+    let object = match object_native(raw, HandleRights::SEEK) {
         Ok(object) => object,
-        Err(error) => return error,
+        Err(error) => return error.into_raw(),
     };
     let basis = match basis {
         mnu_abi::HANDLE_SEEK_START => crate::syscall::fs::SeekBasis::Start,
         mnu_abi::HANDLE_SEEK_CURRENT => crate::syscall::fs::SeekBasis::Current,
         mnu_abi::HANDLE_SEEK_END => crate::syscall::fs::SeekBasis::End,
-        _ => return EINVAL,
+        _ => return Error::InvalidArgument.into_raw(),
     };
     match object {
-        KernelObject::File(_) => ENOTSUP,
         KernelObject::Provider(provider) => provider_seek(&provider, offset as i64, basis),
-        _ => EBADF,
+        _ => Error::InvalidArgument.into_raw(),
     }
 }
 
@@ -1012,8 +1013,9 @@ fn provider_seek_result(
     };
     let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
     match provider_call(provider, request, &[], &mut response_storage) {
-        Ok((response, 0)) => Ok(response.value),
-        Ok(_) => Err(EIO),
+        Ok((response, 0)) if response.value <= i64::MAX as u64 => Ok(response.value),
+        Ok((_, 0)) => Err(mnu_abi::status::Error::LimitExceeded.into_raw()),
+        Ok(_) => Err(mnu_abi::status::Error::BackingFailure.into_raw()),
         Err(error) => Err(error),
     }
 }

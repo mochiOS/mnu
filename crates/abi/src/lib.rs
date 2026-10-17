@@ -149,6 +149,9 @@ pub enum SyscallNumber {
     IpcReplyObjectHandles = 633,
     HandleRead = 634,
     HandleWrite = 635,
+    /// Moves a provider cursor using native HANDLE_SEEK_* bases and a signed
+    /// displacement. Successful positions are at most i64::MAX. Mechanism
+    /// failures use status::Error; provider status is passed through.
     HandleSeek = 636,
     /// Creates an opaque provider reference under a caller-owned RECEIVE
     /// endpoint. Failures use status::Error; duplicate identities within that
