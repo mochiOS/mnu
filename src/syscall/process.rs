@@ -1314,7 +1314,7 @@ pub fn find_process_by_name(name_ptr: u64, len: u64) -> u64 {
     }
 
     let mut name_buf = [0u8; 64];
-    if crate::syscall::copy_from_user(name_ptr, &mut name_buf[..len as usize]).is_err() {
+    if crate::syscall::copy_from_user_native(name_ptr, &mut name_buf[..len as usize]).is_err() {
         return 0;
     }
     let name = match str::from_utf8(&name_buf[..len as usize]) {

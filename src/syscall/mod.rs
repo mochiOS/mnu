@@ -488,11 +488,6 @@ fn retry_usercopy<T>(
 }
 
 /// ユーザー空間からバイト列をコピーする（コピー先はカーネル空間）。
-pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
-    // Legacy callers retain their old ABI until individually migrated.
-    copy_from_user_native(src_ptr, dst).map_err(|_| EFAULT)
-}
-
 pub fn copy_from_user_native(
     src_ptr: u64,
     dst: &mut [u8],
@@ -633,11 +628,6 @@ fn copy_into_current_root(table: u64, address: u64, bytes: &[u8]) -> crate::resu
 }
 
 /// バイト列をユーザー空間へコピーする（コピー元はカーネル空間）。
-pub fn copy_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
-    // Legacy callers retain their old ABI until individually migrated.
-    copy_to_user_native(dst_ptr, src).map_err(|_| EFAULT)
-}
-
 pub fn copy_to_user_native(
     dst_ptr: u64,
     src: &[u8],
@@ -684,52 +674,6 @@ pub fn copy_to_user_native(
         );
         err
     })
-}
-
-pub fn read_user_u64(ptr: u64) -> Result<u64, u64> {
-    let mut buf = [0u8; 8];
-    copy_from_user(ptr, &mut buf)?;
-    Ok(u64::from_ne_bytes(buf))
-}
-
-pub fn read_user_u32(ptr: u64) -> Result<u32, u64> {
-    let mut buf = [0u8; 4];
-    copy_from_user(ptr, &mut buf)?;
-    Ok(u32::from_ne_bytes(buf))
-}
-
-pub fn read_user_i64(ptr: u64) -> Result<i64, u64> {
-    let mut buf = [0u8; 8];
-    copy_from_user(ptr, &mut buf)?;
-    Ok(i64::from_ne_bytes(buf))
-}
-
-pub fn read_user_i32(ptr: u64) -> Result<i32, u64> {
-    let mut buf = [0u8; 4];
-    copy_from_user(ptr, &mut buf)?;
-    Ok(i32::from_ne_bytes(buf))
-}
-
-pub fn read_user_u16(ptr: u64) -> Result<u16, u64> {
-    let mut buf = [0u8; 2];
-    copy_from_user(ptr, &mut buf)?;
-    Ok(u16::from_ne_bytes(buf))
-}
-
-pub fn write_user_u64(ptr: u64, value: u64) -> Result<(), u64> {
-    copy_to_user(ptr, &value.to_ne_bytes())
-}
-
-pub fn write_user_u32(ptr: u64, value: u32) -> Result<(), u64> {
-    copy_to_user(ptr, &value.to_ne_bytes())
-}
-
-pub fn write_user_i32(ptr: u64, value: i32) -> Result<(), u64> {
-    copy_to_user(ptr, &value.to_ne_bytes())
-}
-
-pub fn write_user_u16(ptr: u64, value: u16) -> Result<(), u64> {
-    copy_to_user(ptr, &value.to_ne_bytes())
 }
 
 pub use types::*;

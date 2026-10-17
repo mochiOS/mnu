@@ -446,7 +446,7 @@ pub(crate) fn prepare_user_exception(
     // No thread-table lock is held across faultable usercopy. If this stack
     // became inaccessible, the caller retains its native fatal-fault path;
     // never enter the callback with missing or stale exception metadata.
-    if super::copy_to_user(delivery.stack_top + 8, &(cause as u64).to_ne_bytes()).is_err() {
+    if super::copy_to_user_native(delivery.stack_top + 8, &(cause as u64).to_ne_bytes()).is_err() {
         return false;
     }
     context.user_rip = delivery.entry;
