@@ -632,8 +632,10 @@ pub(crate) fn provider_sync(provider: &ProviderObject) -> Result<(), u64> {
 }
 
 pub(crate) fn provider_memory_object(provider: &ProviderObject) -> Result<u64, u64> {
+    use mnu_abi::status::Error;
+
     if provider.memory_identity_unavailable() {
-        return Err(ENOTSUP);
+        return Ok(0);
     }
     if let Some(cached) = provider.memory_identity() {
         return Ok(cached);
@@ -647,28 +649,20 @@ pub(crate) fn provider_memory_object(provider: &ProviderObject) -> Result<u64, u
         data_length: 0,
     };
     let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
-    let (response, data_len) = match provider_call(provider, request, &[], &mut response_storage) {
-        Ok(response) => response,
-        Err(error) => {
-            if error == ENOTSUP || error == ENOSYS {
-                provider.set_memory_identity_unavailable();
-            }
-            return Err(error);
-        }
-    };
-    if response.value == 0 || data_len != 0 {
-        return Err(EIO);
+    let (response, data_len) = provider_call(provider, request, &[], &mut response_storage)?;
+    if data_len != 0 {
+        return Err(Error::BackingFailure.into_raw());
     }
-    provider.set_memory_identity(response.value);
+    if response.value == 0 {
+        provider.set_memory_identity_unavailable();
+    } else {
+        provider.set_memory_identity(response.value);
+    }
     Ok(response.value)
 }
 
 fn provider_cache_identity(provider: &ProviderObject) -> Result<Option<u64>, u64> {
-    match provider_memory_object(provider) {
-        Ok(identity) => Ok(Some(identity)),
-        Err(error) if error == ENOTSUP || error == ENOSYS => Ok(None),
-        Err(error) => Err(error),
-    }
+    provider_memory_object(provider).map(|identity| (identity != 0).then_some(identity))
 }
 
 /// The caller retains its backing I/O guard through reading and cache overlay.

@@ -14,6 +14,10 @@ pub const OP_CONTROL: u16 = 5;
 pub const OP_READ_AT: u16 = 6;
 pub const OP_WRITE_AT: u16 = 7;
 pub const OP_SYNC: u16 = 8;
+/// Queries stable byte-addressed backing without changing the stream cursor.
+/// A successful empty response returns its nonzero identity in `value`, or
+/// zero if this object provides no memory backing. Provider errors are not
+/// interpreted as feature detection. The answer is stable for its lifetime.
 pub const OP_MEMORY_OBJECT: u16 = 9;
 /// Sequential read with an atomically captured starting byte position.
 /// Successful payloads contain a little-endian u64 position, then `value` bytes.
@@ -295,7 +299,7 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
         OP_WRITE => header.data_length == 0 || header.data_length == 8,
         OP_WRITE_BOUNDED => header.data_length == 8 && header.value <= MAX_DATA_LEN as u64,
         OP_WRITE_AT | OP_SEEK | OP_RELEASE | OP_SYNC => header.data_length == 0,
-        OP_MEMORY_OBJECT => header.value != 0 && header.data_length == 0,
+        OP_MEMORY_OBJECT => header.data_length == 0,
         _ => false,
     }
 }

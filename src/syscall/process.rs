@@ -766,6 +766,7 @@ fn memory_map_impl(
         let object = match object {
             crate::task::KernelObject::Provider(provider) => {
                 let identity = match crate::syscall::handle::provider_memory_object(&provider) {
+                    Ok(0) => return mnu_abi::status::Error::InvalidArgument.into_raw(),
                     Ok(identity) => identity,
                     Err(error) => return error,
                 };
