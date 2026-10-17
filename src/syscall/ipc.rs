@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 pub(crate) mod lifetime;
+mod receive;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
@@ -68,6 +69,7 @@ const ENDPOINT_HANDLE_BASE: u64 = 0x4000_0000;
 const ENDPOINT_HANDLE_LIMIT: u64 = 0x7fff_ffff;
 static NEXT_ENDPOINT_HANDLE: AtomicU64 = AtomicU64::new(ENDPOINT_HANDLE_BASE);
 static NEXT_CALL_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
 static ENDPOINTS: Mutex<Option<BTreeMap<u64, EndpointRecord>>> = Mutex::new(None);
 static THREAD_DEFAULT_ENDPOINTS: Mutex<Option<BTreeMap<u64, u64>>> = Mutex::new(None);
 
@@ -991,6 +993,7 @@ impl ObjectHandleAttachments {
 
 #[derive(Debug)]
 pub struct Message {
+    message_id: u64,
     from: u64,
     to: u64,
     to_slot: u16,
@@ -1006,6 +1009,7 @@ pub struct Message {
 impl Message {
     const fn empty() -> Self {
         Self {
+            message_id: 0,
             from: 0,
             to: 0,
             to_slot: 0,
@@ -1188,6 +1192,18 @@ impl Mailbox {
     fn enqueue_slot(&mut self, slot_idx: usize) -> Result<(), ()> {
         if self.count >= MAILBOX_CAP {
             return Err(());
+        }
+        let message = self
+            .slots
+            .get_mut(slot_idx)
+            .and_then(Option::as_deref_mut)
+            .ok_or(())?;
+        if message.message_id == 0 {
+            // Rotating an existing queue entry keeps its identity. Never wrap
+            // and let a delayed receive commit consume a reused allocation.
+            message.message_id = NEXT_MESSAGE_ID
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .map_err(|_| ())?;
         }
         self.queue[self.tail] = slot_idx as u8;
         self.tail = (self.tail + 1) % MAILBOX_CAP;
@@ -2247,31 +2263,20 @@ fn recv_from_thread_nonblocking(
     }
 
     let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
-    let receive = {
-        let mut boxes = lock_mailboxes();
-        match boxes[idx].pop_valid_for_receiver_to_user(
-            receiver_thread_id,
-            idx as u16,
-            receiver_generation,
-            buf_ptr,
-            max_copy,
-            object_handles_output.is_some(),
-        ) {
-            Ok(Some(receive)) => {
-                if let Some((caller_idx, caller_generation)) =
-                    crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
-                {
-                    if caller_idx < MAX_THREADS && receive.expects_reply {
-                        boxes[caller_idx].add_reply_target(
-                            receive.from, receive.call_id, (caller_thread_id, caller_generation),
-                        );
-                    }
-                }
-                receive
-            }
-            Ok(None) => return EAGAIN,
-            Err(error) => return error,
-        }
+    let receive = match receive::copy_message(
+        IpcEndpoint {
+            thread_id: receiver_thread_id,
+            slot: idx as u16,
+            generation: receiver_generation,
+        },
+        caller_thread_id,
+        buf_ptr,
+        max_copy,
+        object_handles_output.is_some(),
+    ) {
+        Ok(Some(receive)) => receive,
+        Ok(None) => return EAGAIN,
+        Err(error) => return error,
     };
     let (from, copy_len, _) =
         match finish_user_receive(receiver_thread_id, receive, object_handles_output) {
