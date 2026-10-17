@@ -1187,11 +1187,7 @@ pub const EPIPE: u64 = (-32i64) as u64;
 pub const ERANGE: u64 = (-34i64) as u64;
 /// 未実装
 pub const ENOSYS: u64 = (-38i64) as u64;
-/// データがない / ノンブロッキングで読み出しできない
-pub const ENODATA: u64 = (-61i64) as u64;
 /// 値が表現可能な範囲を超える
 pub const EOVERFLOW: u64 = (-75i64) as u64;
-/// Message cannot be received by the selected IPC receive operation.
-pub const EMSGSIZE: u64 = (-90i64) as u64;
 /// 操作がサポートされていない
 pub const ENOTSUP: u64 = (-95i64) as u64;
