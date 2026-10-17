@@ -1167,8 +1167,6 @@ pub const ENOMEM: u64 = (-12i64) as u64;
 pub const EACCES: u64 = (-13i64) as u64;
 /// 無効な引数
 pub const EINVAL: u64 = (-22i64) as u64;
-/// ディスク/ストレージに空きがない
-pub const ENOSPC: u64 = (-28i64) as u64;
 /// 引数が範囲外
 pub const ERANGE: u64 = (-34i64) as u64;
 /// 未実装
