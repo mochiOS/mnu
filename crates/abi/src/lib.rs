@@ -119,7 +119,11 @@ pub enum SyscallNumber {
     CapQuery = 594,
     CapRestrict = 595,
     TimeNow = 600,
+    /// Allocates caller-owned DMA bytes. Local input, backing, allocation and
+    /// usercopy failures use status::Error, without compatibility errno.
     DmaAlloc = 604,
+    /// Revokes caller-owned DMA mappings before recycling frames. A failed
+    /// revocation retains the ownership record and returns a native failure.
     DmaFree = 605,
     RandomFill = 607,
     PresentFramebuffer = 610,

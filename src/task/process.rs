@@ -1809,33 +1809,43 @@ pub fn flush_deferred_process_reclaims() {
 /// leaves every record and frame owned, allowing exec to fail or exit reclaim
 /// to retry without recycling storage still accessible through remote TLBs.
 pub fn release_process_borrowed_mappings(pid: ProcessId) -> core::result::Result<(), u64> {
+    use mnu_abi::status::Error;
     let dma_buffers = with_process_mut(pid, |proc| {
         use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
         if proc.mmio_mappings().is_empty() && proc.dma_buffers().is_empty() {
             proc.reset_dma_arena();
             return Ok(Vec::new());
         }
-        let page_table = proc.page_table().ok_or(crate::syscall::EINVAL)?;
-        let count = proc.mmio_mappings().len()
+        let page_table = proc.page_table().ok_or(Error::InvalidArgument.into_raw())?;
+        let count = proc
+            .mmio_mappings()
+            .len()
             .checked_add(proc.dma_buffers().len())
-            .ok_or(crate::syscall::ENOMEM)?;
+            .ok_or(Error::ResourceUnavailable.into_raw())?;
         let mut ranges = Vec::new();
-        ranges.try_reserve_exact(count)
-            .map_err(|_| crate::syscall::ENOMEM)?;
+        ranges
+            .try_reserve_exact(count)
+            .map_err(|_| Error::ResourceUnavailable.into_raw())?;
         for mmio in proc.mmio_mappings() {
-            ranges.push((page_table, mmio.virt_start(),
-                mmio.end().ok_or(crate::syscall::EINVAL)?));
+            ranges.push((
+                page_table,
+                mmio.virt_start(),
+                mmio.end().ok_or(Error::InvalidArgument.into_raw())?,
+            ));
         }
         for dma in proc.dma_buffers() {
-            ranges.push((page_table, dma.virt_start(),
-                dma.end().ok_or(crate::syscall::EINVAL)?));
+            ranges.push((
+                page_table,
+                dma.virt_start(),
+                dma.end().ok_or(Error::InvalidArgument.into_raw())?,
+            ));
         }
         // SAFETY: PROCESS_TABLE excludes hierarchy edits and pins this root.
         // Borrowed PTEs must be detached, not returned to the RAM frame ledger.
         let mut backend = unsafe { Native::for_process(proc, false) };
         transaction::revoke(ranges, &mut backend).map_err(|error| match error {
-            transaction::Error::InvalidRange => crate::syscall::EINVAL,
-            transaction::Error::Allocation => crate::syscall::ENOMEM,
+            transaction::Error::InvalidRange => Error::InvalidArgument.into_raw(),
+            transaction::Error::Allocation => Error::ResourceUnavailable.into_raw(),
             transaction::Error::Backend(error) => error.into_raw(),
         })?;
         proc.take_mmio_mappings();
@@ -1843,7 +1853,7 @@ pub fn release_process_borrowed_mappings(pid: ProcessId) -> core::result::Result
         proc.reset_dma_arena();
         Ok(dma_buffers)
     })
-    .unwrap_or(Err(crate::syscall::ESRCH))?;
+    .unwrap_or(Err(Error::NotFound.into_raw()))?;
 
     for dma in dma_buffers {
         for page_index in 0..dma.page_count() {

@@ -1,10 +1,11 @@
 use crate::capability::Capability;
-use crate::syscall::types::{EACCES, EFAULT, EINVAL, ENOMEM, SUCCESS};
+use crate::syscall::types::SUCCESS;
 use crate::task::{DmaBuffer, ProcessId};
 use core::sync::atomic::{AtomicU64, Ordering};
 use mnu_abi::DmaAllocation;
-use x86_64::structures::paging::PhysFrame;
+use mnu_abi::status::Error;
 use x86_64::PhysAddr;
+use x86_64::structures::paging::PhysFrame;
 
 static NEXT_DMA_HANDLE: AtomicU64 = AtomicU64::new(1);
 const DMA_VA_BASE_MIN: u64 = 0x0000_7000_0000_0000;
@@ -61,10 +62,12 @@ fn allocate_dma_virtual_range(
         process.set_dma_end(base);
     }
     let old_dma_end = process.dma_end();
-    let map_start = page_align_up(old_dma_end).ok_or(EINVAL)?;
-    let new_heap_end = map_start.checked_add(size).ok_or(EINVAL)?;
+    let map_start = page_align_up(old_dma_end).ok_or(Error::LimitExceeded.into_raw())?;
+    let new_heap_end = map_start
+        .checked_add(size)
+        .ok_or(Error::LimitExceeded.into_raw())?;
     if !crate::syscall::is_canonical_user_range(map_start, size) {
-        return Err(EINVAL);
+        return Err(Error::InvalidArgument.into_raw());
     }
     process.set_dma_end(new_heap_end);
     Ok((map_start, old_dma_end))
@@ -88,7 +91,7 @@ fn install_dma_buffer(
 ) -> Result<u64, InstallError> {
     use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
     if process.page_table() != Some(pt_phys) {
-        return Err(InstallError::Unpublished(EINVAL));
+        return Err(InstallError::Unpublished(Error::NotReady.into_raw()));
     }
     let (virt_start, old_dma_end) =
         allocate_dma_virtual_range(process, pid, size).map_err(InstallError::Unpublished)?;
@@ -100,7 +103,7 @@ fn install_dma_buffer(
         || !process.add_dma_buffer(buffer)
     {
         process.set_dma_end(old_dma_end);
-        return Err(InstallError::Unpublished(EINVAL));
+        return Err(InstallError::Unpublished(Error::InvalidArgument.into_raw()));
     }
     for idx in 0..page_count {
         let virt = virt_start + idx as u64 * 4096;
@@ -112,15 +115,17 @@ fn install_dma_buffer(
             transaction::revoke([(pt_phys, virt_start, virt_start + size)], &mut backend).map_err(
                 |error| {
                     InstallError::Retained(match error {
-                        transaction::Error::InvalidRange => EINVAL,
-                        transaction::Error::Allocation => ENOMEM,
+                        transaction::Error::InvalidRange => Error::InvalidArgument.into_raw(),
+                        transaction::Error::Allocation => Error::ResourceUnavailable.into_raw(),
                         transaction::Error::Backend(error) => error.into_raw(),
                     })
                 },
             )?;
             process.remove_dma_buffer(handle);
             process.set_dma_end(old_dma_end);
-            return Err(InstallError::Unpublished(ENOMEM));
+            return Err(InstallError::Unpublished(
+                Error::ResourceUnavailable.into_raw(),
+            ));
         }
     }
     Ok(virt_start)
@@ -128,37 +133,43 @@ fn install_dma_buffer(
 
 pub fn alloc(length: u64, out_ptr: u64) -> u64 {
     if !caller_has_dma_capability() {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
-    if length == 0 || out_ptr == 0 {
-        return EINVAL;
+    if length == 0 {
+        return Error::InvalidArgument.into_raw();
     }
-    if !crate::syscall::validate_user_ptr(out_ptr, core::mem::size_of::<DmaAllocation>() as u64) {
-        return EFAULT;
+    if out_ptr == 0
+        || !crate::syscall::validate_user_ptr(out_ptr, core::mem::size_of::<DmaAllocation>() as u64)
+    {
+        return Error::InvalidAddress.into_raw();
     }
 
     let size = match page_align_up(length) {
-        Some(v) if v > 0 => v,
-        _ => return EINVAL,
+        Some(v) if v > 0 && v <= isize::MAX as u64 => v,
+        _ => return Error::LimitExceeded.into_raw(),
     };
     let page_count = (size / 4096) as usize;
     let (pid, pt_phys) = match current_process() {
         Some(v) => v,
-        None => return ENOMEM,
+        None => return Error::NotReady.into_raw(),
     };
     let first_frame = match crate::mem::frame::allocate_contiguous_frames(page_count) {
         Ok(frame) => frame,
-        Err(_) => return ENOMEM,
+        Err(_) => return Error::ResourceUnavailable.into_raw(),
     };
     let phys_start = first_frame.start_address().as_u64();
     let Some(phys_offset) = crate::mem::paging::physical_memory_offset() else {
         release_dma_frames(phys_start, page_count);
-        return ENOMEM;
+        return Error::BackingFailure.into_raw();
     };
     let Some(clear_address) = phys_start.checked_add(phys_offset) else {
         release_dma_frames(phys_start, page_count);
-        return ENOMEM;
+        return Error::BackingFailure.into_raw();
     };
+    if clear_address.checked_add(size - 1).is_none() {
+        release_dma_frames(phys_start, page_count);
+        return Error::BackingFailure.into_raw();
+    }
     let zero_started = crate::performance::frame_zero_start();
     unsafe {
         core::ptr::write_bytes(clear_address as *mut u8, 0, size as usize);
@@ -178,7 +189,7 @@ pub fn alloc(length: u64, out_ptr: u64) -> u64 {
         }
         None => {
             release_dma_frames(phys_start, page_count);
-            return ENOMEM;
+            return Error::NotReady.into_raw();
         }
     };
 
@@ -194,9 +205,9 @@ pub fn alloc(length: u64, out_ptr: u64) -> u64 {
             core::mem::size_of::<DmaAllocation>(),
         )
     };
-    if crate::syscall::copy_to_user(out_ptr, info_bytes).is_err() {
+    if let Err(error) = crate::syscall::copy_to_user_native(out_ptr, info_bytes) {
         let _ = free(handle);
-        return EFAULT;
+        return error.into_raw();
     }
 
     SUCCESS
@@ -204,44 +215,46 @@ pub fn alloc(length: u64, out_ptr: u64) -> u64 {
 
 pub fn free(handle: u64) -> u64 {
     if !caller_has_dma_capability() {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     if handle == 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let (pid, pt_phys) = match current_process() {
         Some(v) => v,
-        None => return ENOMEM,
+        None => return Error::NotReady.into_raw(),
     };
     let outcome = crate::task::with_process_mut(pid, |process| {
         use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
         if process.page_table() != Some(pt_phys) {
-            return Err(EINVAL);
+            return Err(Error::NotReady.into_raw());
         }
         let buffer = process
             .dma_buffers()
             .iter()
             .find(|buffer| buffer.handle() == handle)
             .cloned()
-            .ok_or(EINVAL)?;
-        let end = buffer.end().ok_or(EINVAL)?;
+            .ok_or(Error::InvalidArgument.into_raw())?;
+        let end = buffer.end().ok_or(Error::InvalidArgument.into_raw())?;
         // SAFETY: PROCESS_TABLE holds the root and PTE hierarchy stable.
         // DMA storage is owned by the buffer, not by the PTE frame ledger.
         let mut backend = unsafe { Native::for_process(process, false) };
         transaction::revoke([(pt_phys, buffer.virt_start(), end)], &mut backend).map_err(
             |error| match error {
-                transaction::Error::InvalidRange => EINVAL,
-                transaction::Error::Allocation => ENOMEM,
+                transaction::Error::InvalidRange => Error::InvalidArgument.into_raw(),
+                transaction::Error::Allocation => Error::ResourceUnavailable.into_raw(),
                 transaction::Error::Backend(error) => error.into_raw(),
             },
         )?;
         // Failure above restores mappings and retains their ownership record.
-        process.remove_dma_buffer(handle).ok_or(EINVAL)
+        process
+            .remove_dma_buffer(handle)
+            .ok_or(Error::InvalidArgument.into_raw())
     });
     let buffer = match outcome {
         Some(Ok(buffer)) => buffer,
         Some(Err(error)) => return error,
-        None => return ENOMEM,
+        None => return Error::NotReady.into_raw(),
     };
     // Recycle physical storage only after every CPU acknowledged revocation.
     release_dma_frames(buffer.phys_start(), buffer.page_count());
