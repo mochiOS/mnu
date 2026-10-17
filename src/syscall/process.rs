@@ -1163,7 +1163,7 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
 pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
     use mnu_abi::status::Error;
 
-    if options != 0 || length == 0 || addr & 4095 != 0 {
+    if options & !mnu_abi::MEMORY_SYNC_DEFERRED != 0 || length == 0 || addr & 4095 != 0 {
         return Error::InvalidArgument.into_raw();
     }
     if addr == 0 {
@@ -1210,6 +1210,9 @@ pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
         None => return Error::NotReady.into_raw(),
     };
     let work = crate::mem::writeback::Batch::new(work);
+    if options & mnu_abi::MEMORY_SYNC_DEFERRED != 0 {
+        return crate::mem::writeback_worker::submit(pid, work);
+    }
     if let Err(error) = work.execute(|object, offset, length| object.flush_range(offset, length)) {
         return error;
     }

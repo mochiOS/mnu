@@ -10,6 +10,7 @@ struct Value<T>(Option<T>);
 pub(crate) struct Prepared<T>(Arc<Value<T>>);
 
 impl<T> Prepared<T> {
+    pub(crate) fn value(&self) -> &T { self.0.0.as_ref().unwrap() }
     pub(crate) fn new(value: T) -> Result<Self, (Error, T)> {
         let mut storage = match Arc::try_new(Value(None)) {
             Ok(storage) => storage,

@@ -52,6 +52,10 @@ pub const MEMORY_MAP_OPTIONS_ALL: u64 = MEMORY_MAP_EXACT | MEMORY_MAP_SHARED | M
 /// Byte-sized RAM backing whose creator receives CONTROL for extent changes.
 /// Zero options retain fixed, nonempty, page-aligned creation.
 pub const MEMORY_OBJECT_RESIZABLE: u64 = 1;
+/// Queue captured VM backing ranges and return a read-only completion Handle.
+/// With zero options, MemorySync remains blocking and returns zero on success.
+/// The completion supports READ, WAIT, DUPLICATE and TRANSFER, not mutation.
+pub const MEMORY_SYNC_DEFERRED: u64 = 1;
 
 /// mnu native syscall numbers.
 /// An unregistered number returns status::Error::Unsupported; compatibility
@@ -114,6 +118,8 @@ pub enum SyscallNumber {
     /// Changes access within the caller's existing mappings. Failures use
     /// status::Error; compatibility layers select operation-specific errno.
     MemoryProtect = 584,
+    /// Synchronizes owned shared backing ranges. Zero options block; native
+    /// MEMORY_SYNC_DEFERRED returns a completion Handle after queue admission.
     MemorySync = 586,
     /// Creates or obtains the caller thread's opaque endpoint identifier.
     /// Failures use status::Error, not compatibility errno values.

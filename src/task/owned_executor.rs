@@ -119,6 +119,18 @@ struct Job<T> {
     receipt: Receipt,
 }
 
+/// Own all submission storage before entering a publication transaction.
+pub(crate) struct Submission<T>(Prepared<Job<T>>);
+
+impl<T> Submission<T> {
+    pub(crate) fn receipt(&self) -> Receipt {
+        self.0.value().receipt.clone()
+    }
+    pub(crate) fn into_value(self) -> T {
+        self.0.into_value().value
+    }
+}
+
 pub(crate) struct Executor<T, const N: usize> {
     worker: AtomicU64,
     pending: SpinLock<Queue<Job<T>, N>>,
@@ -147,10 +159,21 @@ impl<T, const N: usize> Executor<T, N> {
     /// The wake callback runs after publication and outside queue exclusion.
     /// All rejected submissions return the original value to its owner.
     pub(crate) fn submit(&self, value: T, wake: impl FnOnce(u64)) -> Result<Receipt, (Error, T)> {
-        let worker = self.worker.load(Ordering::Acquire);
-        if worker == 0 {
+        if self.worker.load(Ordering::Acquire) == 0 {
             return Err((Error::NotReady, value));
         }
+        let submission = Self::prepare(value)?;
+        let receipt = submission.receipt();
+        match self.admit(submission) {
+            Ok(worker) => {
+                wake(worker);
+                Ok(receipt)
+            }
+            Err((error, submission)) => Err((error, submission.into_value())),
+        }
+    }
+
+    pub(crate) fn prepare(value: T) -> Result<Submission<T>, (Error, T)> {
         let receipt = match Arc::try_new(ResultState {
             phase: AtomicU8::new(0),
             error: AtomicU64::new(0),
@@ -166,14 +189,21 @@ impl<T, const N: usize> Executor<T, N> {
             Ok(prepared) => prepared,
             Err((error, job)) => return Err((error, job.value)),
         };
-        let admission = self.pending.lock().submit(prepared);
-        if let Err((error, prepared)) = admission {
-            // No queue reference was published, so the original job can be
-            // recovered without cloning its resource or dropping under lock.
-            return Err((error, prepared.into_value().value));
+        Ok(Submission(prepared))
+    }
+
+    /// Publication only: no allocation, destruction or wake callback. The
+    /// caller wakes the returned worker after its outer transaction unlocks.
+    pub(crate) fn admit(&self, submission: Submission<T>) -> Result<u64, (Error, Submission<T>)> {
+        let worker = self.worker.load(Ordering::Acquire);
+        if worker == 0 {
+            return Err((Error::NotReady, submission));
         }
-        wake(worker);
-        Ok(receipt)
+        let admission = self.pending.lock().submit(submission.0);
+        match admission {
+            Ok(()) => Ok(worker),
+            Err((error, prepared)) => Err((error, Submission(prepared))),
+        }
     }
 
     /// Called by the installed execution context, not by a syscall caller.

@@ -82,6 +82,13 @@ fn kernel_main() -> ! {
     } else {
     }
     crate::smp::start_secondary_cpus();
+    if let Some(process) = task::current_thread_id()
+        .and_then(|thread| task::with_thread(thread, |thread| thread.process_id()))
+    {
+        if let Err(error) = crate::mem::writeback_worker::start(process) {
+            crate::warn!("VM writeback executor unavailable: {:?}", error);
+        }
+    }
     let mut caps = crate::capability::CapabilitySet::empty();
     for cap in crate::capability::Capability::bootstrap_capabilities() {
         if matches!(
