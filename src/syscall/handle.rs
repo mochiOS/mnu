@@ -1,5 +1,4 @@
 use alloc::sync::{Arc, Weak};
-use alloc::vec;
 
 mod snapshot;
 pub use snapshot::table_read;
@@ -14,7 +13,7 @@ pub use memory_update::create_admission as provider_memory_admission_create;
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
 use super::{
-    EACCES, EBADF, EINVAL, EIO, ENOSYS, ENOTSUP,
+    EACCES, EBADF, EINVAL, ENOSYS, ENOTSUP,
     SUCCESS,
 };
 
@@ -729,7 +728,7 @@ fn provider_read_shared(
     buffer: u64,
     length: usize,
 ) -> u64 {
-    use mnu_abi::provider as wire;
+    use mnu_abi::{provider as wire, status::Error};
     let capacity = length.min(wire::MAX_SHARED_READ_LEN);
     let backing_length = (capacity as u64 + 4095) & !4095;
     let raw = memory_object_create(backing_length, 0);
@@ -737,17 +736,22 @@ fn provider_read_shared(
         return raw;
     }
     let _handle = TemporaryMemoryHandle(raw);
-    let object = match object(raw, HandleRights::MAP) {
+    let object = match object_native(raw, HandleRights::MAP) {
         Ok(KernelObject::VmObject(object)) => object,
-        Ok(_) => return EIO,
-        Err(error) => return error,
+        Ok(_) => return Error::BackingFailure.into_raw(),
+        Err(error) => return error.into_raw(),
     };
-    let handle = match decode_handle(raw) {
-        Ok(handle) => handle,
-        Err(error) => return error,
+    let handle = match u32::try_from(raw).ok().and_then(ObjectHandle::from_raw) {
+        Some(handle) => handle,
+        None => return Error::BackingFailure.into_raw(),
     };
-    let requested = HandleRights::READ.union(HandleRights::WRITE).union(HandleRights::MAP);
-    let mut data = vec![0u8; capacity];
+    let requested = HandleRights::READ
+        .union(HandleRights::WRITE)
+        .union(HandleRights::MAP);
+    let mut data = match crate::util::object_snapshot::zeroed_native(capacity) {
+        Ok(data) => data,
+        Err(error) => return error.into_raw(),
+    };
     let mut total = 0usize;
     while total < length {
         let chunk = (length - total).min(capacity);
@@ -761,7 +765,11 @@ fn provider_read_shared(
         };
         let mut encoded = [0u8; wire::REQUEST_HEADER_LEN];
         if request.encode(&[], &mut encoded).is_err() {
-            return EINVAL;
+            return if total == 0 {
+                Error::InvalidArgument.into_raw()
+            } else {
+                total as u64
+            };
         }
         let mut response = [0u8; wire::RESPONSE_HEADER_LEN + wire::READ_POSITION_LEN];
         let result = (|| -> Result<usize, u64> {
@@ -775,25 +783,35 @@ fn provider_read_shared(
                 requested,
             )?;
             let (reply, position) = wire::ResponseHeader::decode(
-                response.get(..reply_length).ok_or(EIO)?,
+                response
+                    .get(..reply_length)
+                    .ok_or(Error::BackingFailure.into_raw())?,
             )
-            .map_err(|_| EIO)?;
+            .map_err(|_| Error::BackingFailure.into_raw())?;
             if reply.object_id != provider.object_id || reply.opcode != request.opcode {
-                return Err(EIO);
+                return Err(Error::BackingFailure.into_raw());
             }
             if reply.status != 0 {
                 return Err(reply.status as u64);
             }
-            let count = usize::try_from(reply.value).map_err(|_| EIO)?;
+            let count =
+                usize::try_from(reply.value).map_err(|_| Error::BackingFailure.into_raw())?;
             if count > chunk || position.len() != wire::READ_POSITION_LEN {
-                return Err(EIO);
+                return Err(Error::BackingFailure.into_raw());
             }
-            let start = u64::from_le_bytes(position.try_into().map_err(|_| EIO)?);
+            let start = u64::from_le_bytes(
+                position
+                    .try_into()
+                    .map_err(|_| Error::BackingFailure.into_raw())?,
+            );
             if object.read_at(0, &mut data[..count])? != count {
-                return Err(EIO);
+                return Err(Error::BackingFailure.into_raw());
             }
             crate::mem::vm_object::overlay_provider_range(
-                provider, identity, start, &mut data[..count],
+                provider,
+                identity,
+                start,
+                &mut data[..count],
             )?;
             Ok(count)
         })();
@@ -805,10 +823,20 @@ fn provider_read_shared(
         // serialization guard across this copy.
         let address = match buffer.checked_add(total as u64) {
             Some(address) => address,
-            None => return if total == 0 { EINVAL } else { total as u64 },
+            None => {
+                return if total == 0 {
+                    Error::InvalidAddress.into_raw()
+                } else {
+                    total as u64
+                };
+            }
         };
-        if let Err(error) = crate::syscall::copy_to_user(address, &data[..count]) {
-            return if total == 0 { error } else { total as u64 };
+        if let Err(error) = crate::syscall::copy_to_user_native(address, &data[..count]) {
+            return if total == 0 {
+                error.into_raw()
+            } else {
+                total as u64
+            };
         }
         total += count;
         if count < chunk {
