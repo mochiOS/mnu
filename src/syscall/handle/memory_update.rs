@@ -5,7 +5,7 @@ use crate::mem::{
     extent_transaction::ExtentTransaction,
     vm_object::{ObjectKey, ProviderAdmission},
 };
-use crate::syscall::{EAGAIN, EINVAL, ENOSYS, SUCCESS};
+use crate::syscall::SUCCESS;
 use crate::task::{HandleRights, KernelObject, ObjectHandleEntry};
 use alloc::sync::{Arc, Weak};
 use mnu_abi::status::Error;
@@ -147,24 +147,24 @@ pub(super) fn control(
 ) -> u64 {
     use mnu_abi::memory_update as operation;
     if input != 0 || input_length != 0 || output != 0 || output_length != 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if !matches!(
         code,
         operation::BEGIN | operation::UNCHANGED | operation::PUBLISH
     ) {
-        return ENOSYS;
+        return Error::InvalidArgument.into_raw();
     }
     // A concurrent caller must not spin with interrupts disabled while an
     // earlier operation is acquiring VM exclusion. No IPC occurs under either.
     let Some(mut update) = update.try_lock() else {
-        return EAGAIN;
+        return Error::NotReady.into_raw();
     };
     match code {
         operation::BEGIN => update.begin_external(),
         operation::UNCHANGED => update.confirm_unchanged(),
         operation::PUBLISH => update.request_external_publication(),
-        _ => Err(ENOSYS),
+        _ => Err(Error::InvalidArgument.into_raw()),
     }
     .err()
     .unwrap_or(SUCCESS)

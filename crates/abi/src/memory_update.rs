@@ -1,5 +1,7 @@
 //! HandleControl operations for a private provider-memory update owner.
 //! Codes are scoped to this object type; no filesystem or POSIX policy.
+//! Unknown codes or nonempty arguments return native InvalidArgument; a busy
+//! control owner returns native NotReady without changing transaction state.
 
 /// Record uncertainty before issuing external mutation. Losing this owner
 /// afterward quarantines backing data rather than restoring old mappings.

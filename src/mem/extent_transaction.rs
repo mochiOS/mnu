@@ -13,6 +13,7 @@ use crate::task::{
     process,
 };
 use alloc::{sync::Arc, vec::Vec};
+use mnu_abi::status::Error;
 
 struct Page {
     record: paging::RecordedUserPage,
@@ -74,7 +75,7 @@ impl ExtentTransaction {
     ) -> Result<Self, u64> {
         Self::prepare_extent(object.object_key(), external, || {
             object.prepare_extent(old_length, length, |bytes| {
-                Arc::try_new(bytes).map_err(|_| crate::syscall::ENOMEM)
+                Arc::try_new(bytes).map_err(|_| Error::ResourceUnavailable.into_raw())
             })
         })
     }
@@ -88,7 +89,7 @@ impl ExtentTransaction {
     ) -> Result<Self, u64> {
         Self::prepare_extent(key, true, || {
             PreparedExtent::prepare_provider(key, old_length, length, |bytes| {
-                Arc::try_new(bytes).map_err(|_| crate::syscall::ENOMEM)
+                Arc::try_new(bytes).map_err(|_| Error::ResourceUnavailable.into_raw())
             })
         })
     }
@@ -100,7 +101,7 @@ impl ExtentTransaction {
     ) -> Result<Self, u64> {
         Self::prepare_extent(guard.key(), true, || {
             PreparedExtent::prepare_admitted(guard, old_length, length, |bytes| {
-                Arc::try_new(bytes).map_err(|_| crate::syscall::ENOMEM)
+                Arc::try_new(bytes).map_err(|_| Error::ResourceUnavailable.into_raw())
             })
         })
     }
@@ -111,7 +112,7 @@ impl ExtentTransaction {
         prepare: impl FnOnce() -> Result<PreparedExtent, u64>,
     ) -> Result<Self, u64> {
         // Reserve cancellation storage BEFORE edits, including failed prepare.
-        let ticket = Ticket::new(None).map_err(|_| crate::syscall::ENOMEM)?;
+        let ticket = Ticket::new(None).map_err(|_| Error::ResourceUnavailable.into_raw())?;
         let mut owner = ticket.defer_on_drop(&PENDING);
         process::with_mapping_table(|table| {
             let extent = prepare()?;
@@ -135,16 +136,16 @@ impl ExtentTransaction {
                     // backing reservation exclude all selected PTE writers.
                     let Some(address) =
                         (unsafe { paging::next_user_page_entry(root, cursor, end) })
-                            .map_err(|_| crate::syscall::EFAULT)?
+                            .map_err(|_| Error::BackingFailure.into_raw())?
                     else {
                         break;
                     };
                     if address < cursor || address >= end || address & 4095 != 0 {
-                        return Err(crate::syscall::EFAULT);
+                        return Err(Error::BackingFailure.into_raw());
                     }
                     locations
                         .try_reserve(1)
-                        .map_err(|_| crate::syscall::ENOMEM)?;
+                        .map_err(|_| Error::ResourceUnavailable.into_raw())?;
                     let changed = affected
                         .as_ref()
                         .is_none_or(|targets| targets.contains(root, address, address + 4096));
@@ -155,7 +156,7 @@ impl ExtentTransaction {
             let mut pages = Vec::new();
             pages
                 .try_reserve_exact(locations.len())
-                .map_err(|_| crate::syscall::ENOMEM)?;
+                .map_err(|_| Error::ResourceUnavailable.into_raw())?;
             *owner.value_mut() = Some(Work {
                 pages,
                 targets,
@@ -163,11 +164,11 @@ impl ExtentTransaction {
                 publication: Publication::Prepared,
                 external,
             });
-            let work = owner.value_mut().as_mut().ok_or(crate::syscall::EINVAL)?;
+            let work = owner.value_mut().as_mut().ok_or(Error::InvalidArgument.into_raw())?;
             for (root, address, affected) in locations {
                 // SAFETY: same retained roots, reservation and VM exclusion.
                 if let Some(page) = unsafe { paging::suspend_user_page(root, address) }
-                    .map_err(|_| crate::syscall::EFAULT)?
+                    .map_err(|_| Error::BackingFailure.into_raw())?
                 {
                     work.pages.push(Page {
                         record: page.into_record(),
@@ -176,20 +177,20 @@ impl ExtentTransaction {
                     });
                     // Publish the record into the cancellation owner BEFORE
                     // any later check can fail. Push cannot allocate here.
-                    let page = work.pages.last_mut().ok_or(crate::syscall::EINVAL)?;
+                    let page = work.pages.last_mut().ok_or(Error::InvalidArgument.into_raw())?;
                     if let Some(boundary) = work.targets.preserved().iter().find(|boundary| {
                         affected && boundary.table == root && boundary.address == address
                     }) {
                         page.zero = Some(
                             page.record
                                 .suffix_address(boundary.zero_from)
-                                .map_err(|_| crate::syscall::EFAULT)?,
+                                .map_err(|_| Error::BackingFailure.into_raw())?,
                         );
                     }
                 }
             }
             if !work.pages.is_empty() {
-                tlb_shootdown::invalidate_all().map_err(|_| crate::syscall::EIO)?;
+                tlb_shootdown::invalidate_all().map_err(|_| Error::BackingFailure.into_raw())?;
             }
             // Surface cache-address/buffer errors before handing back an
             // unlocked owner. No external-storage permission is implied.
@@ -203,14 +204,14 @@ impl ExtentTransaction {
     /// VM lock is held over that mutation. Once begun, owner loss cannot mean
     /// cancellation: cleanup must discard all suspended mappings instead.
     pub(crate) fn begin_external(&mut self) -> Result<(), u64> {
-        let owner = self.owner.as_mut().ok_or(crate::syscall::EINVAL)?;
+        let owner = self.owner.as_mut().ok_or(Error::InvalidArgument.into_raw())?;
         process::with_mapping_table(|_| {
-            let work = owner.value_mut().as_mut().ok_or(crate::syscall::EINVAL)?;
+            let work = owner.value_mut().as_mut().ok_or(Error::InvalidArgument.into_raw())?;
             if !work.external || work.publication != Publication::Prepared {
-                return Err(crate::syscall::EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             if !work.pages.iter().all(|page| work.current(page)) {
-                return Err(crate::syscall::EFAULT);
+                return Err(Error::BackingFailure.into_raw());
             }
             work.extent.preflight()?;
             work.publication = Publication::InFlight;
@@ -221,14 +222,14 @@ impl ExtentTransaction {
     /// The resource owner confirms storage is unchanged, not merely that an
     /// I/O request returned an error. Keep that decision across cleanup retry.
     pub(crate) fn confirm_unchanged(&mut self) -> Result<(), u64> {
-        let owner = self.owner.as_mut().ok_or(crate::syscall::EINVAL)?;
+        let owner = self.owner.as_mut().ok_or(Error::InvalidArgument.into_raw())?;
         process::with_mapping_table(|_| {
-            let work = owner.value_mut().as_mut().ok_or(crate::syscall::EINVAL)?;
+            let work = owner.value_mut().as_mut().ok_or(Error::InvalidArgument.into_raw())?;
             if !matches!(
                 work.publication,
                 Publication::InFlight | Publication::Unchanged
             ) {
-                return Err(crate::syscall::EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             work.publication = Publication::Unchanged;
             work.resolve()
@@ -257,31 +258,31 @@ impl ExtentTransaction {
     /// Provider-owned update Handles must cross the uncertainty boundary
     /// explicitly; the local-only publication API cannot substitute for BEGIN.
     pub(crate) fn request_external_publication(&mut self) -> Result<(), u64> {
-        let owner = self.owner.as_mut().ok_or(crate::syscall::EINVAL)?;
-        let work = owner.value_mut().as_ref().ok_or(crate::syscall::EINVAL)?;
+        let owner = self.owner.as_mut().ok_or(Error::InvalidArgument.into_raw())?;
+        let work = owner.value_mut().as_ref().ok_or(Error::InvalidArgument.into_raw())?;
         if !work.external
             || !matches!(
                 work.publication,
                 Publication::InFlight | Publication::Requested | Publication::Published
             )
         {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument.into_raw());
         }
         self.finish(true)
     }
 
     fn finish(&mut self, request_publication: bool) -> Result<(), u64> {
-        let owner = self.owner.as_mut().ok_or(crate::syscall::EINVAL)?;
+        let owner = self.owner.as_mut().ok_or(Error::InvalidArgument.into_raw())?;
         process::with_mapping_table(|_| {
-            let work = owner.value_mut().as_mut().ok_or(crate::syscall::EINVAL)?;
+            let work = owner.value_mut().as_mut().ok_or(Error::InvalidArgument.into_raw())?;
             if work.publication == Publication::Unchanged {
-                return Err(crate::syscall::EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             if work.publication == Publication::InFlight && !request_publication {
-                return Err(crate::syscall::EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             if work.publication == Publication::Unavailable {
-                return Err(crate::syscall::EIO);
+                return Err(Error::BackingFailure.into_raw());
             }
             if request_publication
                 && matches!(
@@ -312,7 +313,7 @@ impl Work {
         if self.publication != Publication::Published {
             // All PTE checks precede cache mutation, under the same lock.
             if !self.pages.iter().all(|page| self.current(page)) {
-                return Err(crate::syscall::EFAULT);
+                return Err(Error::BackingFailure.into_raw());
             }
             self.extent.publish()?;
             self.publication = Publication::Published;
@@ -353,12 +354,12 @@ impl Work {
             Publication::Published => true,
             // Neither an uncertain outcome nor an irrevocable request may
             // fall through to cancellation.
-            Publication::InFlight | Publication::Requested => return Err(crate::syscall::EAGAIN),
+            Publication::InFlight | Publication::Requested => return Err(Error::NotReady.into_raw()),
         };
         while let Some(page) = self.pages.pop() {
             if !self.current(&page) {
                 self.pages.push(page);
-                return Err(crate::syscall::EFAULT);
+                return Err(Error::BackingFailure.into_raw());
             }
             // Zero only after cache publication, never during cancellation.
             // Physical access was validated before TLB synchronization.
@@ -393,7 +394,7 @@ impl Work {
                     zero,
                     affected,
                 });
-                return Err(crate::syscall::EFAULT);
+                return Err(Error::BackingFailure.into_raw());
             }
         }
         Ok(())
