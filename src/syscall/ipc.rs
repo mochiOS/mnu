@@ -11,7 +11,7 @@ mod receive;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
-use super::{EACCES, EAGAIN, EFAULT, EINVAL};
+use super::{EACCES, EAGAIN, EINVAL};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
@@ -728,12 +728,26 @@ fn recv_blocking_reply_for_thread(
     }
 }
 
+fn current_receiver(require_receive: bool) -> Result<u64, u64> {
+    use mnu_abi::status::Error;
+
+    let current = crate::task::current_thread_id()
+        .ok_or_else(|| Error::NotReady.into_raw())?
+        .as_u64();
+    let endpoint =
+        ensure_endpoint_for_thread(current).ok_or_else(|| Error::ResourceUnavailable.into_raw())?;
+    let record = endpoint_record_from_handle(endpoint).ok_or_else(|| Error::NotReady.into_raw())?;
+    if require_receive && !record.rights.contains(EndpointRights::RECV) {
+        return Err(Error::AccessDenied.into_raw());
+    }
+    Ok(current)
+}
+
 pub fn wait(buf_ptr: u64, max_len: u64, blocking: u64) -> u64 {
-    let current = match crate::task::current_thread_id() {
-        Some(id) => id.as_u64(),
-        None => return EINVAL,
+    let current = match current_receiver(false) {
+        Ok(current) => current,
+        Err(error) => return error,
     };
-    let _ = ensure_endpoint_for_thread(current);
     if blocking == 0 {
         return recv_from_thread_nonblocking(current, current, buf_ptr, max_len, None);
     }
@@ -2086,14 +2100,16 @@ fn recv_from_thread_nonblocking(
     max_len: u64,
     object_handles_output: Option<u64>,
 ) -> u64 {
+    use mnu_abi::status::Error;
+
     let (idx, receiver_generation) =
         match crate::task::thread_slot_index_and_generation_by_u64(receiver_thread_id) {
             Some(v) => v,
-            None => return EINVAL,
+            None => return Error::NotReady.into_raw(),
         };
 
     if idx >= MAX_THREADS || idx > (u16::MAX as usize) {
-        return EINVAL;
+        return Error::BackingFailure.into_raw();
     }
 
     let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
@@ -2170,18 +2186,10 @@ fn recv_blocking_for_thread(
 /// arg1: len
 /// 戻り値: (sender_id << 32) | received_len
 pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
-    let receiver = match crate::task::current_thread_id() {
-        Some(id) => id.as_u64(),
-        None => return EINVAL,
+    let receiver = match current_receiver(true) {
+        Ok(receiver) => receiver,
+        Err(error) => return error,
     };
-    let _ = ensure_endpoint_for_thread(receiver);
-    if let Some(receiver_handle) = endpoint_handle_for_thread(receiver) {
-        if let Some(record) = endpoint_record_from_handle(receiver_handle) {
-            if !record.rights.contains(EndpointRights::RECV) {
-                return EACCES;
-            }
-        }
-    }
     recv_from_thread_nonblocking(receiver, receiver, buf_ptr, max_len, None)
 }
 
@@ -2190,18 +2198,10 @@ pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
 /// arg0: buf_ptr
 /// arg1: len
 pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
-    let receiver = match crate::task::current_thread_id() {
-        Some(id) => id.as_u64(),
-        None => return EINVAL,
+    let receiver = match current_receiver(true) {
+        Ok(receiver) => receiver,
+        Err(error) => return error,
     };
-    let _ = ensure_endpoint_for_thread(receiver);
-    if let Some(receiver_handle) = endpoint_handle_for_thread(receiver) {
-        if let Some(record) = endpoint_record_from_handle(receiver_handle) {
-            if !record.rights.contains(EndpointRights::RECV) {
-                return EACCES;
-            }
-        }
-    }
     recv_blocking_for_thread(receiver, receiver, buf_ptr, max_len, None)
 }
 
@@ -2213,13 +2213,12 @@ pub fn recv_object_handles(
     blocking: u64,
 ) -> u64 {
     if handles_ptr == 0 {
-        return EFAULT;
+        return mnu_abi::status::Error::InvalidAddress.into_raw();
     }
-    let current = match crate::task::current_thread_id() {
-        Some(id) => id.as_u64(),
-        None => return EINVAL,
+    let current = match current_receiver(false) {
+        Ok(current) => current,
+        Err(error) => return error,
     };
-    let _ = ensure_endpoint_for_thread(current);
     if blocking == 0 {
         return recv_from_thread_nonblocking(current, current, buf_ptr, max_len, Some(handles_ptr));
     }
