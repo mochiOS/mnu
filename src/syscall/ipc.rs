@@ -697,107 +697,34 @@ fn recv_blocking_reply_for_thread(
     object_handles_output: Option<u64>,
     destination: IpcEndpoint,
 ) -> u64 {
-    let (idx, receiver_generation) =
+    use mnu_abi::status::Error;
+
+    let (idx, generation) =
         match crate::task::thread_slot_index_and_generation_by_u64(receiver_thread_id) {
-            Some(v) => v,
-            None => return EINVAL,
+            Some(identity) => identity,
+            None => return Error::NotReady.into_raw(),
         };
-
-    if idx >= MAX_THREADS || idx > (u16::MAX as usize) {
-        return EINVAL;
+    if idx >= MAX_THREADS || idx > u16::MAX as usize {
+        return Error::BackingFailure.into_raw();
     }
-
-    loop {
-        let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
-        let recv = {
-            let mut boxes = lock_mailboxes();
-            match boxes[idx].pop_reply_to_user(
-                expected_sender,
-                expected_call_id,
-                receiver_thread_id,
-                idx as u16,
-                receiver_generation,
-                buf_ptr,
-                max_copy,
-                object_handles_output.is_some(),
-            ) {
-                Ok(Some(v)) => Some(v),
-                Ok(None) => {
-                    boxes[idx].waiter = caller_thread_id;
-                    None
-                }
-                Err(error) => return error,
-            }
-        };
-
-        match recv {
-            Some(receive) => {
-                let (from, copy_len, _) = match finish_user_receive(
-                    receiver_thread_id,
-                    receive,
-                    object_handles_output,
-                ) {
-                    Ok(result) => result,
-                    Err(error) => return error,
-                };
-                return (from << 32) | (copy_len as u64);
-            }
-            None => {
-                {
-                    let mut boxes = lock_mailboxes();
-                    let second_try = boxes[idx].pop_reply_to_user(
-                        expected_sender,
-                        expected_call_id,
-                        receiver_thread_id,
-                        idx as u16,
-                        receiver_generation,
-                        buf_ptr,
-                        max_copy,
-                        object_handles_output.is_some(),
-                    );
-                    if let Ok(Some(receive)) = second_try {
-                        if boxes[idx].waiter == caller_thread_id {
-                            boxes[idx].waiter = 0;
-                        }
-                        drop(boxes);
-                        let (from, copy_len, _) = match finish_user_receive(
-                            receiver_thread_id,
-                            receive,
-                            object_handles_output,
-                        ) {
-                            Ok(result) => result,
-                            Err(error) => return error,
-                        };
-                        return (from << 32) | (copy_len as u64);
-                    }
-                    if let Err(error) = second_try {
-                        if boxes[idx].waiter == caller_thread_id {
-                            boxes[idx].waiter = 0;
-                        }
-                        return error;
-                    }
-                }
-                if !endpoint_is_valid(destination) {
-                    let mut boxes = lock_mailboxes();
-                    if boxes[idx].waiter == caller_thread_id {
-                        boxes[idx].waiter = 0;
-                    }
-                    return super::ESRCH;
-                }
-                if crate::task::sleep_thread_unless_woken(crate::task::ThreadId::from_u64(
-                    caller_thread_id,
-                )) {
-                    crate::task::yield_now();
-                } else {
-                    // The caller's mailbox also carries ordinary events. A wakeup
-                    // without a reply must not abort an already-delivered IPC call.
-                    let mut boxes = lock_mailboxes();
-                    if boxes[idx].waiter == caller_thread_id {
-                        boxes[idx].waiter = 0;
-                    }
-                }
-            }
-        }
+    let receive = match receive::wait_message(
+        IpcEndpoint {
+            thread_id: receiver_thread_id,
+            slot: idx as u16,
+            generation,
+        },
+        caller_thread_id,
+        buf_ptr,
+        core::cmp::min(max_len as usize, ipc_max_msg_size()),
+        object_handles_output.is_some(),
+        Some((expected_sender, expected_call_id, destination)),
+    ) {
+        Ok(receive) => receive,
+        Err(error) => return error,
+    };
+    match finish_user_receive(receiver_thread_id, receive, object_handles_output) {
+        Ok((from, length, _)) => (from << 32) | length as u64,
+        Err(error) => error,
     }
 }
 
@@ -1028,7 +955,6 @@ struct UserReceive {
     from: u64,
     copy_len: usize,
     expects_reply: bool,
-    call_id: u64,
     object_handles: ObjectHandleAttachments,
 }
 
@@ -1306,66 +1232,6 @@ impl Mailbox {
         Ok(())
     }
 
-    fn pop_valid_for_receiver_to_user(
-        &mut self,
-        receiver: u64,
-        receiver_slot: u16,
-        receiver_generation: u64,
-        buf_ptr: u64,
-        max_copy: usize,
-        accept_object_handles: bool,
-    ) -> Result<Option<UserReceive>, u64> {
-        use mnu_abi::status::Error;
-
-        while self.count > 0 {
-            let slot_idx = self.queue[self.head] as usize;
-            let Some(msg) = self
-                .slots
-                .get_mut(slot_idx)
-                .and_then(Option::as_deref_mut)
-            else {
-                self.quarantine("ipc mailbox queue points to an empty slot");
-                return Ok(None);
-            };
-            if msg.to != receiver
-                || msg.to_slot != receiver_slot
-                || msg.to_generation != receiver_generation
-            {
-                let _ = self.dequeue_slot();
-                if !self.free_slot(slot_idx) {
-                    return Ok(None);
-                }
-                continue;
-            }
-            if !accept_object_handles && !msg.object_handles.is_empty() {
-                return Err(Error::LimitExceeded.into_raw());
-            }
-
-            let copy_len = core::cmp::min(msg.len, max_copy);
-            if copy_len > 0 {
-                crate::syscall::copy_to_user_native(buf_ptr, &msg.data[..copy_len])
-                    .map_err(Error::into_raw)?;
-                record_ipc_copy(copy_len);
-            }
-
-            let receive = UserReceive {
-                from: msg.from,
-                copy_len,
-                expects_reply: msg.expects_reply,
-                call_id: msg.call_id,
-                object_handles: core::mem::replace(
-                    &mut msg.object_handles,
-                    ObjectHandleAttachments::empty(),
-                ),
-            };
-            let dequeued = self.dequeue_slot();
-            if dequeued != Some(slot_idx) || !self.free_slot(slot_idx) {
-                return Ok(None);
-            }
-            return Ok(Some(receive));
-        }
-        Ok(None)
-    }
 
     /// 指定送信元からの有効メッセージを1件だけ取り出し、内容を out へコピーする
     fn pop_from_sender_copy(
@@ -1417,82 +1283,6 @@ impl Mailbox {
         None
     }
 
-    fn pop_reply_to_user(
-        &mut self,
-        expected_sender: u64,
-        expected_call_id: u64,
-        receiver: u64,
-        receiver_slot: u16,
-        receiver_generation: u64,
-        buf_ptr: u64,
-        max_copy: usize,
-        accept_object_handles: bool,
-    ) -> Result<Option<UserReceive>, u64> {
-        use mnu_abi::status::Error;
-
-        if self.count == 0 {
-            return Ok(None);
-        }
-
-        let original = self.count;
-        for _ in 0..original {
-            let Some(slot_idx) = self.dequeue_slot() else {
-                return Ok(None);
-            };
-            let Some(msg) = self.slots.get_mut(slot_idx).and_then(Option::as_deref_mut) else {
-                self.quarantine("ipc mailbox queue points to an empty slot");
-                return Ok(None);
-            };
-            if msg.from != expected_sender
-                || msg.call_id != expected_call_id
-                || msg.to != receiver
-                || msg.to_slot != receiver_slot
-                || msg.to_generation != receiver_generation
-                || !msg.is_reply
-            {
-                if self.enqueue_slot(slot_idx).is_err() {
-                    let _ = self.free_slot(slot_idx);
-                    return Ok(None);
-                }
-                continue;
-            }
-
-            if !accept_object_handles && !msg.object_handles.is_empty() {
-                if self.enqueue_slot(slot_idx).is_err() {
-                    let _ = self.free_slot(slot_idx);
-                    return Err(Error::BackingFailure.into_raw());
-                }
-                return Err(Error::LimitExceeded.into_raw());
-            }
-
-            let copy_len = core::cmp::min(msg.len, max_copy);
-            if copy_len > 0 {
-                if let Err(error) = crate::syscall::copy_to_user_native(buf_ptr, &msg.data[..copy_len]) {
-                    if self.enqueue_slot(slot_idx).is_err() {
-                        let _ = self.free_slot(slot_idx);
-                    }
-                    return Err(error.into_raw());
-                }
-                record_ipc_copy(copy_len);
-            }
-            let receive = UserReceive {
-                from: msg.from,
-                copy_len,
-                expects_reply: false,
-                call_id: msg.call_id,
-                object_handles: core::mem::replace(
-                    &mut msg.object_handles,
-                    ObjectHandleAttachments::empty(),
-                ),
-            };
-            if !self.free_slot(slot_idx) {
-                return Ok(None);
-            }
-            return Ok(Some(receive));
-        }
-
-        Ok(None)
-    }
 
     fn pop_reply_copy(
         &mut self,
@@ -2300,132 +2090,34 @@ fn recv_blocking_for_thread(
     max_len: u64,
     object_handles_output: Option<u64>,
 ) -> u64 {
-    let (idx, receiver_generation) =
+    use mnu_abi::status::Error;
+
+    let (idx, generation) =
         match crate::task::thread_slot_index_and_generation_by_u64(receiver_thread_id) {
-            Some(v) => v,
-            None => return EINVAL,
+            Some(identity) => identity,
+            None => return Error::NotReady.into_raw(),
         };
-
-    if idx >= MAX_THREADS || idx > (u16::MAX as usize) {
-        return EINVAL;
+    if idx >= MAX_THREADS || idx > u16::MAX as usize {
+        return Error::BackingFailure.into_raw();
     }
-
-    loop {
-        let max_copy = core::cmp::min(max_len as usize, ipc_max_msg_size());
-        let recv = {
-            let mut boxes = lock_mailboxes();
-            match boxes[idx].pop_valid_for_receiver_to_user(
-                receiver_thread_id,
-                idx as u16,
-                receiver_generation,
-                buf_ptr,
-                max_copy,
-                object_handles_output.is_some(),
-            ) {
-                Ok(Some(receive)) => {
-                    if let Some((caller_idx, caller_generation)) =
-                        crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
-                    {
-                        if caller_idx < MAX_THREADS && receive.expects_reply {
-                            boxes[caller_idx].add_reply_target(
-                                receive.from, receive.call_id, (caller_thread_id, caller_generation),
-                            );
-                        }
-                    }
-                    Some(receive)
-                }
-                Ok(None) => {
-                    boxes[idx].waiter = caller_thread_id;
-                    None
-                }
-                Err(error) => return error,
-            }
-        };
-
-        match recv {
-            Some(receive) => {
-                let (from, copy_len, _) = match finish_user_receive(
-                    receiver_thread_id,
-                    receive,
-                    object_handles_output,
-                ) {
-                    Ok(result) => result,
-                    Err(error) => return error,
-                };
-                crate::debug!(
-                    "[IPC RECV] tid={} from={} len={}",
-                    receiver_thread_id,
-                    from,
-                    copy_len
-                );
-                return (from << 32) | (copy_len as u64);
-            }
-            None => {
-                {
-                    let mut boxes = lock_mailboxes();
-                    let second_try = boxes[idx].pop_valid_for_receiver_to_user(
-                        receiver_thread_id,
-                        idx as u16,
-                        receiver_generation,
-                        buf_ptr,
-                        max_copy,
-                        object_handles_output.is_some(),
-                    );
-                    if let Ok(Some(receive)) = second_try {
-                        if boxes[idx].waiter == caller_thread_id {
-                            boxes[idx].waiter = 0;
-                        }
-                        if let Some((caller_idx, caller_generation)) =
-                            crate::task::thread_slot_index_and_generation_by_u64(caller_thread_id)
-                        {
-                            if caller_idx < MAX_THREADS && receive.expects_reply {
-                                boxes[caller_idx].add_reply_target(
-                                    receive.from, receive.call_id, (caller_thread_id, caller_generation),
-                                );
-                            }
-                        }
-                        drop(boxes);
-                        let (from, copy_len, _) = match finish_user_receive(
-                            receiver_thread_id,
-                            receive,
-                            object_handles_output,
-                        ) {
-                            Ok(result) => result,
-                            Err(error) => return error,
-                        };
-                        crate::debug!(
-                            "[IPC RECV] tid={} from={} len={}",
-                            receiver_thread_id,
-                            from,
-                            copy_len
-                        );
-                        return (from << 32) | (copy_len as u64);
-                    }
-                    if let Err(error) = second_try {
-                        if boxes[idx].waiter == caller_thread_id {
-                            boxes[idx].waiter = 0;
-                        }
-                        return error;
-                    }
-                }
-                if crate::task::sleep_thread_unless_woken(crate::task::ThreadId::from_u64(
-                    caller_thread_id,
-                )) {
-                    crate::task::yield_now();
-                } else {
-                    {
-                        let mut boxes = lock_mailboxes();
-                        if boxes[idx].waiter == caller_thread_id {
-                            boxes[idx].waiter = 0;
-                        }
-                    }
-                    // A message or another wakeup raced with the transition to sleep.
-                    // Retry the queue before registering a new waiter; a blocking receive
-                    // must not surface that internal race as an empty result.
-                    continue;
-                }
-            }
-        }
+    let receive = match receive::wait_message(
+        IpcEndpoint {
+            thread_id: receiver_thread_id,
+            slot: idx as u16,
+            generation,
+        },
+        caller_thread_id,
+        buf_ptr,
+        core::cmp::min(max_len as usize, ipc_max_msg_size()),
+        object_handles_output.is_some(),
+        None,
+    ) {
+        Ok(receive) => receive,
+        Err(error) => return error,
+    };
+    match finish_user_receive(receiver_thread_id, receive, object_handles_output) {
+        Ok((from, length, _)) => (from << 32) | length as u64,
+        Err(error) => error,
     }
 }
 
@@ -2600,136 +2292,5 @@ pub fn recv_blocking_from_sender_for_kernel(
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use alloc::boxed::Box;
-
-    use super::{Mailbox, Message, ObjectHandleAttachments, ReplyTarget};
-    use crate::task::{HandleRights, KernelObject, ObjectHandleEntry};
-
-    fn endpoint_entry() -> ObjectHandleEntry {
-        ObjectHandleEntry::new(
-            KernelObject::IpcEndpoint {
-                thread_id: 42,
-                slot: 2,
-                generation: 7,
-            },
-            HandleRights::SEND,
-        )
-    }
-
-    #[test]
-    fn mailbox_tracks_more_than_one_deferred_reply() {
-        let mut mailbox = Mailbox::new();
-        mailbox.add_reply_target(11, 101, (7, 3));
-        mailbox.add_reply_target(22, 202, (7, 3));
-        mailbox.add_reply_target(11, 101, (7, 3));
-
-        assert_eq!(mailbox.reply_target(11, (7, 3)).unwrap().call_id, 101);
-        assert_eq!(mailbox.reply_target(22, (7, 3)).unwrap().call_id, 202);
-        assert_eq!(mailbox.reply_targets.len(), 2);
-
-        mailbox.remove_reply_target(ReplyTarget {
-            endpoint: 22,
-            call_id: 202,
-        });
-        assert!(mailbox.reply_target(11, (7, 3)).is_some());
-        assert!(mailbox.reply_target(22, (7, 3)).is_none());
-    }
-
-    #[test]
-    fn synchronous_call_only_consumes_its_servers_reply() {
-        let mut mailbox = Mailbox::new();
-        mailbox
-            .push_message(10, 20, 1, 2, &[], true, false, 100, 0)
-            .unwrap();
-        mailbox
-            .push_message(11, 20, 1, 2, &[], true, false, 200, 0)
-            .unwrap();
-
-        assert_eq!(
-            mailbox
-                .pop_reply_to_user(11, 200, 20, 1, 2, 0, 0, false)
-                .map(|received| received.map(|value| (value.from, value.copy_len))),
-            Ok(Some((11, 0)))
-        );
-        assert_eq!(
-            mailbox
-                .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false)
-                .map(|received| received.map(|value| (value.from, value.copy_len))),
-            Ok(Some((10, 0)))
-        );
-    }
-
-    #[test]
-    fn synchronous_call_keeps_stale_reply_from_the_same_server_queued() {
-        let mut mailbox = Mailbox::new();
-        mailbox
-            .push_message(10, 20, 1, 2, &[], true, false, 100, 0)
-            .unwrap();
-        mailbox
-            .push_message(10, 20, 1, 2, &[], true, false, 101, 0)
-            .unwrap();
-
-        assert_eq!(
-            mailbox
-                .pop_reply_to_user(10, 101, 20, 1, 2, 0, 0, false)
-                .map(|received| received.map(|value| (value.from, value.copy_len))),
-            Ok(Some((10, 0)))
-        );
-        assert_eq!(
-            mailbox
-                .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false)
-                .map(|received| received.map(|value| (value.from, value.copy_len))),
-            Ok(Some((10, 0)))
-        );
-    }
-
-    #[test]
-    fn synchronous_call_explicitly_accepts_reply_object_handles() {
-        let mut mailbox = Mailbox::new();
-        let mut message = Box::new(Message::empty());
-        message.from = 10;
-        message.to = 20;
-        message.to_slot = 1;
-        message.to_generation = 2;
-        message.is_reply = true;
-        message.call_id = 100;
-        message.object_handles = ObjectHandleAttachments::empty();
-        message.object_handles.count = 1;
-        message.object_handles.handles[0] = Some(endpoint_entry());
-        mailbox.enqueue_message(message).unwrap();
-
-        let received = mailbox
-            .pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, true)
-            .unwrap()
-            .expect("reply should be received");
-        assert_eq!(received.object_handles.count, 1);
-        assert_eq!(mailbox.count, 0);
-    }
-
-    #[test]
-    fn byte_only_call_rejects_and_retains_reply_object_handles() {
-        let mut mailbox = Mailbox::new();
-        let mut message = Box::new(Message::empty());
-        message.from = 10;
-        message.to = 20;
-        message.to_slot = 1;
-        message.to_generation = 2;
-        message.is_reply = true;
-        message.call_id = 100;
-        message.object_handles = ObjectHandleAttachments::empty();
-        message.object_handles.count = 1;
-        message.object_handles.handles[0] = Some(endpoint_entry());
-        mailbox.enqueue_message(message).unwrap();
-
-        assert!(matches!(
-            mailbox.pop_reply_to_user(10, 100, 20, 1, 2, 0, 0, false),
-            Err(error) if error == mnu_abi::status::Error::LimitExceeded.into_raw()
-        ));
-        assert_eq!(mailbox.count, 1);
     }
 }

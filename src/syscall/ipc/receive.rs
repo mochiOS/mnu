@@ -14,6 +14,7 @@ impl Mailbox {
         endpoint: IpcEndpoint,
         max_copy: usize,
         accept_handles: bool,
+        reply: Option<(u64, u64)>,
     ) -> Result<Option<(usize, Box<Message>)>, u64> {
         if self.count > MAILBOX_CAP {
             return Err(Error::BackingFailure.into_raw());
@@ -29,6 +30,11 @@ impl Mailbox {
                 || message.to_slot != endpoint.slot
                 || message.to_generation != endpoint.generation
             {
+                continue;
+            }
+            if reply.is_some_and(|(sender, call_id)| {
+                message.from != sender || message.call_id != call_id || !message.is_reply
+            }) {
                 continue;
             }
             if !accept_handles && !message.object_handles.is_empty() {
@@ -87,16 +93,45 @@ pub(super) fn copy_message(
     max_copy: usize,
     accept_handles: bool,
 ) -> Result<Option<UserReceive>, u64> {
+    copy_selected(
+        endpoint,
+        caller,
+        output,
+        max_copy,
+        accept_handles,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_selected(
+    endpoint: IpcEndpoint,
+    caller: u64,
+    output: u64,
+    max_copy: usize,
+    accept_handles: bool,
+    reply: Option<(u64, u64)>,
+    waiter: Option<u64>,
+) -> Result<Option<UserReceive>, u64> {
     let slot = endpoint.slot as usize;
     if slot >= MAX_THREADS {
         return Err(Error::BackingFailure.into_raw());
     }
     let prepared = {
-        let boxes = lock_mailboxes();
+        let mut boxes = lock_mailboxes();
         if !endpoint_is_valid(endpoint) {
             return Err(Error::NotFound.into_raw());
         }
-        boxes[slot].snapshot_receive(endpoint, max_copy, accept_handles)?
+        let snapshot = boxes[slot].snapshot_receive(endpoint, max_copy, accept_handles, reply)?;
+        if snapshot.is_none() {
+            if let Some(waiter) = waiter {
+                // Queue inspection and waiter registration are atomic with
+                // respect to senders. Usercopy below never holds this lock.
+                boxes[slot].waiter = waiter;
+            }
+        }
+        snapshot
     };
     let Some((message_slot, snapshot)) = prepared else {
         return Ok(None);
@@ -114,7 +149,7 @@ pub(super) fn copy_message(
             boxes[slot]
                 .commit_receive(message_slot, snapshot.message_id)
                 .map(|message| {
-                    if message.expects_reply {
+                    if reply.is_none() && message.expects_reply {
                         if let Some((caller_slot, generation)) =
                             crate::task::thread_slot_index_and_generation_by_u64(caller)
                         {
@@ -138,8 +173,7 @@ pub(super) fn copy_message(
     let received = UserReceive {
         from: message.from,
         copy_len,
-        expects_reply: message.expects_reply,
-        call_id: message.call_id,
+        expects_reply: reply.is_none() && message.expects_reply,
         object_handles: core::mem::replace(
             &mut message.object_handles,
             ObjectHandleAttachments::empty(),
@@ -147,4 +181,59 @@ pub(super) fn copy_message(
     };
     release_message(message);
     Ok(Some(received))
+}
+
+fn clear_waiter(endpoint: IpcEndpoint, caller: u64) {
+    let mut boxes = lock_mailboxes();
+    if endpoint_is_valid(endpoint) && boxes[endpoint.slot as usize].waiter == caller {
+        boxes[endpoint.slot as usize].waiter = 0;
+    }
+}
+
+/// Wait on the same queue used by nonblocking receive. A destination lifetime
+/// observation is owned by the caller of a synchronous RPC, not by this loop.
+pub(super) fn wait_message(
+    endpoint: IpcEndpoint,
+    caller: u64,
+    output: u64,
+    max_copy: usize,
+    accept_handles: bool,
+    reply: Option<(u64, u64, IpcEndpoint)>,
+) -> Result<UserReceive, u64> {
+    if endpoint.slot as usize >= MAX_THREADS {
+        return Err(Error::BackingFailure.into_raw());
+    }
+    loop {
+        // Recheck after publishing the waiter before parking. A later sender
+        // latches its wake through sleep_thread_unless_woken's native protocol.
+        for _ in 0..2 {
+            match copy_selected(
+                endpoint,
+                caller,
+                output,
+                max_copy,
+                accept_handles,
+                reply.map(|(sender, call_id, _)| (sender, call_id)),
+                Some(caller),
+            ) {
+                Ok(None) => {}
+                Ok(Some(receive)) => {
+                    clear_waiter(endpoint, caller);
+                    return Ok(receive);
+                }
+                Err(error) => {
+                    clear_waiter(endpoint, caller);
+                    return Err(error);
+                }
+            }
+        }
+        if reply.is_some_and(|(_, _, destination)| !endpoint_is_valid(destination)) {
+            clear_waiter(endpoint, caller);
+            return Err(Error::NotFound.into_raw());
+        }
+        if crate::task::sleep_thread_unless_woken(crate::task::ThreadId::from_u64(caller)) {
+            crate::task::yield_now();
+        }
+        clear_waiter(endpoint, caller);
+    }
 }
