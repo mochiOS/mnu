@@ -51,6 +51,13 @@ impl VmObject {
 }
 
 impl PreparedRefresh {
+    pub(crate) fn range(&self) -> (u64, u64) {
+        (self.start, self.end)
+    }
+    pub(crate) fn preflight(&self) -> Result<(), u64> {
+        self.check()
+    }
+
     fn check(&self) -> Result<(), u64> {
         if self.published {
             return Err(Error::InvalidArgument.into_raw());

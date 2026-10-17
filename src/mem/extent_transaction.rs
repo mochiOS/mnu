@@ -1,11 +1,12 @@
-//! Native, owned mapping/cache extent coordination. No VM lock is retained by
-//! the owner. External I/O requires full suspension before begin_external,
-//! followed by an explicit unchanged/publication outcome. Losing an in-flight
-//! owner quarantines the backing; this module does not perform storage I/O.
+//! Owned VM backing publication and mapping cleanup. VM exclusion is retained
+//! only during PTE/metadata work. Extent mutation requires full suspension and
+//! an explicit external-storage outcome; losing an in-flight owner quarantines
+//! its backing. Cache refresh performs admitted writeback outside VM exclusion
+//! and can roll back its dirty mappings if that writeback fails.
 use super::{
     mapping_targets::Targets,
     paging, tlb_shootdown,
-    vm_object::{ObjectKey, PreparedExtent, VmObject},
+    vm_object::{ObjectKey, PreparedExtent, PreparedRefresh, VmObject},
 };
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::{
@@ -26,9 +27,56 @@ struct Work {
     // Field order keeps root lifetime and backing admission until all records
     // have been resolved. Incomplete Work is never dropped by this module.
     targets: Targets,
-    extent: PreparedExtent,
+    extent: PreparedBacking,
     publication: Publication,
     external: bool,
+}
+
+// The journal owns both kinds through the same root/PTE cleanup path. Cache
+// refresh writes existing bytes only; unlike an extent mutation, a failed
+// writeback can safely restore its original dirty mappings.
+enum PreparedBacking {
+    Extent(PreparedExtent),
+    Refresh(PreparedRefresh),
+}
+
+impl PreparedBacking {
+    fn is_refresh(&self) -> bool {
+        matches!(self, Self::Refresh(_))
+    }
+    fn revocation(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::Extent(owner) => owner.revocation(),
+            Self::Refresh(owner) => Some(owner.range()),
+        }
+    }
+    fn boundary(&self) -> u64 {
+        match self {
+            Self::Extent(owner) => owner.boundary(),
+            Self::Refresh(_) => 0,
+        }
+    }
+    fn preflight(&mut self) -> Result<(), u64> {
+        match self {
+            Self::Extent(owner) => owner.preflight(),
+            Self::Refresh(owner) => owner.preflight(),
+        }
+    }
+    fn publish(&mut self) -> Result<(), u64> {
+        match self {
+            Self::Extent(owner) => owner.publish(),
+            Self::Refresh(owner) => owner.publish(),
+        }
+    }
+    fn mark_unavailable(&self) -> Result<(), u64> {
+        match self {
+            Self::Extent(owner) => {
+                owner.mark_unavailable();
+                Ok(())
+            }
+            Self::Refresh(_) => Err(Error::InvalidArgument.into_raw()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -49,6 +97,36 @@ pub(crate) struct ExtentTransaction {
 }
 
 impl ExtentTransaction {
+    /// Internal cache refresh only. Resource authority must already have been
+    /// checked by its VM caller. No user addresses survive this preparation.
+    pub(crate) fn prepare_refresh(object: &VmObject, start: u64, length: u64) -> Result<Self, u64> {
+        Self::prepare_backing(object.object_key(), false, || {
+            object.prepare_refresh(start, length).map(PreparedBacking::Refresh)
+        })
+    }
+
+    /// The journal has already suspended shared aliases and acknowledged every
+    /// CPU. Keep its root pins and backing reservation, but release VM exclusion
+    /// during lower I/O. Failure leaves dirty cache and rollback ownership.
+    pub(crate) fn writeback_refresh(&mut self) -> Result<(), u64> {
+        let owner = self.owner.as_mut().ok_or(Error::InvalidArgument.into_raw())?;
+        let work = owner.value_mut().as_mut().ok_or(Error::InvalidArgument.into_raw())?;
+        if work.external || work.publication != Publication::Prepared || !work.extent.is_refresh() {
+            return Err(Error::InvalidArgument.into_raw());
+        }
+        process::with_mapping_table(|_| {
+            if work.pages.iter().all(|page| work.current(page)) {
+                Ok(())
+            } else {
+                Err(Error::BackingFailure.into_raw())
+            }
+        })?;
+        match &mut work.extent {
+            PreparedBacking::Refresh(refresh) => refresh.writeback(),
+            PreparedBacking::Extent(_) => Err(Error::InvalidArgument.into_raw()),
+        }
+    }
+
     /// Internal coordinator only; no caller authority is inferred from a PID,
     /// file path, or provider identity. Outward-facing entries must validate
     /// resource-control authority before reaching a constructor.
@@ -111,6 +189,14 @@ impl ExtentTransaction {
         external: bool,
         prepare: impl FnOnce() -> Result<PreparedExtent, u64>,
     ) -> Result<Self, u64> {
+        Self::prepare_backing(key, external, || prepare().map(PreparedBacking::Extent))
+    }
+
+    fn prepare_backing(
+        key: ObjectKey,
+        external: bool,
+        prepare: impl FnOnce() -> Result<PreparedBacking, u64>,
+    ) -> Result<Self, u64> {
         // Reserve cancellation storage BEFORE edits, including failed prepare.
         let ticket = Ticket::new(None).map_err(|_| Error::ResourceUnavailable.into_raw())?;
         let mut owner = ticket.defer_on_drop(&PENDING);
@@ -126,8 +212,11 @@ impl ExtentTransaction {
             } else {
                 (start, end)
             };
-            let targets = Targets::capture(table, key, low, high, extent.boundary())
-                .map_err(mnu_abi::status::Error::into_raw)?;
+            let targets = if extent.is_refresh() {
+                Targets::capture_shared(table, key, low, high)
+            } else {
+                Targets::capture(table, key, low, high, extent.boundary())
+            }.map_err(mnu_abi::status::Error::into_raw)?;
             let mut locations = Vec::new();
             for (root, start, end) in targets.ranges() {
                 let mut cursor = start;
@@ -275,6 +364,9 @@ impl ExtentTransaction {
         let owner = self.owner.as_mut().ok_or(Error::InvalidArgument.into_raw())?;
         process::with_mapping_table(|_| {
             let work = owner.value_mut().as_mut().ok_or(Error::InvalidArgument.into_raw())?;
+            if request_publication && work.extent.is_refresh() {
+                return Err(Error::InvalidArgument.into_raw());
+            }
             if work.publication == Publication::Unchanged {
                 return Err(Error::InvalidArgument.into_raw());
             }
@@ -326,7 +418,7 @@ impl Work {
             Publication::InFlight => {
                 // Only external/full-suspension preparation can enter this
                 // phase, after successful all-CPU TLB acknowledgement.
-                self.extent.mark_unavailable();
+                self.extent.mark_unavailable()?;
                 self.publication = Publication::Unavailable;
                 self.resolve()
             }
