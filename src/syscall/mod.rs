@@ -21,6 +21,8 @@ pub mod task;
 pub mod time;
 pub mod upcall;
 mod usercopy_error;
+mod user_output;
+pub(crate) use user_output::with_user_output_native;
 pub(crate) use upcall::prepare_user_exception;
 
 mod types;

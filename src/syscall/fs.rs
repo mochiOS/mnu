@@ -222,15 +222,31 @@ fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
             continue;
         }
         let take = core::cmp::min(pipe.data.len(), target_len);
-        if let Err(error) = crate::syscall::copy_to_user_native(buf_ptr, &pipe.data[..take]) {
-            return error.into_raw();
-        }
-        pipe.data.drain(0..take);
-        pipe.waiters.retain(|waiter| *waiter != current);
-        let waiters = core::mem::take(&mut pipe.waiters);
         drop(table);
-        wake_stream_waiters(waiters);
-        return take as u64;
+        // Fault/COW preparation can invoke a provider that uses this stream.
+        // Prepare without PIPE, then acquire PROC -> PIPE for resident copying.
+        let result = super::with_user_output_native(buf_ptr, take, |copy| {
+            let mut table = PIPE_TABLE.lock();
+            let Some(Some(pipe)) = table.get_mut(pipe_id) else {
+                return Err(Error::InvalidArgument);
+            };
+            let count = core::cmp::min(take, pipe.data.len());
+            if count == 0 {
+                return Ok(None);
+            }
+            copy(&pipe.data[..count])?;
+            pipe.data.drain(0..count);
+            pipe.waiters.retain(|waiter| *waiter != current);
+            Ok(Some((count, core::mem::take(&mut pipe.waiters))))
+        });
+        match result {
+            Ok(Some((count, waiters))) => {
+                wake_stream_waiters(waiters);
+                return count as u64;
+            }
+            Ok(None) => continue,
+            Err(error) => return error.into_raw(),
+        }
     }
 }
 
