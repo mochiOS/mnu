@@ -86,7 +86,12 @@ pub enum SyscallNumber {
     /// Returns 1/0 for authority of an IPC-resolved sender. Input, allocation
     /// and usercopy failures use status::Error; an absent sender returns 0.
     CheckThreadCapability = 553,
+    /// Transfers aligned sectors under device authority. Local validation,
+    /// allocation and usercopy failures use status::Error. Driver status is
+    /// returned unchanged; an unavailable backend is NotReady.
     BlockRead = 555,
+    /// Copies all input before invoking the driver, with BlockRead's native
+    /// failure contract. Transfers are bounded to 256 KiB.
     BlockWrite = 556,
     /// Returns the endpoint's native process identity. Requires ProcessInspect;
     /// failures use status::Error, never POSIX process or errno semantics.
@@ -131,14 +136,19 @@ pub enum SyscallNumber {
     DmaFree = 605,
     RandomFill = 607,
     PresentFramebuffer = 610,
+    /// Native authority/transport/usercopy failures use status::Error. The
+    /// platform's response status remains opaque in StorageControlResponse.
     StorageControl = 611,
     PerformanceSnapshot = 612,
     FramebufferTransferLimit = 613,
     CommitFramebuffer = 614,
+    /// StorageControl's mechanism with an explicit, bounded authority name.
     DeviceControl = 615,
     AuthorizeExec = 616,
     GetThreadSecurityContext = 617,
     BootSystemSlot = 618,
+    /// Flushes under device authority. Local failures are native; driver
+    /// status is opaque, and an unavailable backend returns NotReady.
     BlockFlush = 619,
     BootEspGuid = 620,
     /// Discards one reference from the caller's table and removes inherited
