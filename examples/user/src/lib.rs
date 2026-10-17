@@ -694,6 +694,8 @@ pub fn path_registry_self_test() -> bool {
 }
 
 fn fileio_self_test() -> bool {
+    use mnu_abi::status::Error;
+
     const TICK_MS: u64 = 2;
 
     let path = INIT_FS_TEST_PATH;
@@ -711,7 +713,7 @@ fn fileio_self_test() -> bool {
     };
 
     let fd = file_open(path, 0o2 | 0o100 | 0o1000);
-    if fd == mnu_abi::EBADF as u64 || fd == mnu_abi::ENOENT as u64 {
+    if fd == 0 || fd > u32::MAX as u64 {
         write_line("fs-test: open failed");
         return false;
     }
@@ -733,22 +735,20 @@ fn fileio_self_test() -> bool {
     let closed_errno = file_read(fd, buffer);
 
     let ro_fd = file_open(path, 0o0);
-    let ro_write_errno = if ro_fd < (1u64 << 63) {
-        let rc = file_write(ro_fd, &payload[..16]);
-        let _ = file_close(ro_fd);
-        rc
-    } else {
-        ro_fd
-    };
+    if ro_fd == 0 || ro_fd > u32::MAX as u64 {
+        write_line("fs-test: read-only open failed");
+        return false;
+    }
+    let ro_write_errno = file_write(ro_fd, &payload[..16]);
+    let _ = file_close(ro_fd);
 
     let wo_fd = file_open(path, 0o1 | 0o100);
-    let wo_read_errno = if wo_fd < (1u64 << 63) {
-        let rc = file_read(wo_fd, &mut buffer[..16]);
-        let _ = file_close(wo_fd);
-        rc
-    } else {
-        wo_fd
-    };
+    if wo_fd == 0 || wo_fd > u32::MAX as u64 {
+        write_line("fs-test: write-only open failed");
+        return false;
+    }
+    let wo_read_errno = file_read(wo_fd, &mut buffer[..16]);
+    let _ = file_close(wo_fd);
 
     let same = read == payload.len() as u64 && bytes_eq(payload, buffer);
     let write_mib_s = if write_elapsed_ms == 0 {
@@ -777,9 +777,9 @@ fn fileio_self_test() -> bool {
     write_line(write_line_buf.as_str());
     write_line(read_line_buf.as_str());
 
-    same && closed_errno == mnu_abi::EBADF as u64
-        && ro_write_errno == mnu_abi::EACCES as u64
-        && wo_read_errno == mnu_abi::EACCES as u64
+    same && closed_errno == Error::InvalidArgument.into_raw()
+        && ro_write_errno == Error::AccessDenied.into_raw()
+        && wo_read_errno == Error::AccessDenied.into_raw()
 }
 
 fn plugkit_ipc_self_test() -> bool {
