@@ -60,6 +60,8 @@ pub struct RequestHeader {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResponseHeader {
     pub opcode: u16,
+    /// Zero is success. Native status::Error tags are mechanism failures;
+    /// existing bounded negative provider statuses remain opaque to mnu.
     pub status: i64,
     pub object_id: u64,
     pub value: u64,
@@ -281,7 +283,7 @@ const fn valid_request_fields(header: RequestHeader) -> bool {
 }
 
 const fn valid_status(status: i64) -> bool {
-    status == 0 || (status >= -4095 && status <= -1)
+    status == 0 || (status >= -4095 && status <= -1) || crate::status::is_error(status as u64)
 }
 
 const fn valid_response_fields(header: ResponseHeader) -> bool {

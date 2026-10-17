@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{EAGAIN, EINVAL, ENOMEM, EPERM, ESRCH, SUCCESS};
+use super::types::{EPERM, SUCCESS};
 use crate::task::ThreadId;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -377,7 +377,7 @@ impl MemoryFault {
         use mnu_abi::status::Error;
         match self {
             Self::Operation(error) | Self::Backing(VmPageError::Operation(error)) => {
-                error == EAGAIN || Error::from_raw(error) == Some(Error::NotReady)
+                Error::from_raw(error) == Some(Error::NotReady)
             }
             _ => false,
         }
@@ -391,15 +391,18 @@ impl MemoryFault {
             Self::AccessDenied => MemoryFaultCause::AccessDenied,
             Self::Backing(VmPageError::OutsideBacking) => MemoryFaultCause::OutsideBacking,
             Self::Operation(error) | Self::Backing(VmPageError::Operation(error))
-                if error == ENOMEM || Error::from_raw(error) == Some(Error::ResourceUnavailable) => {
+                if Error::from_raw(error) == Some(Error::ResourceUnavailable) =>
+            {
                 MemoryFaultCause::ResourceUnavailable
             }
             Self::Operation(error) | Self::Backing(VmPageError::Operation(error))
-                if Error::from_raw(error) == Some(Error::BackingFailure) => {
+                if Error::from_raw(error) == Some(Error::BackingFailure) =>
+            {
                 MemoryFaultCause::BackingFailure
             }
             Self::Operation(error) | Self::Backing(VmPageError::Operation(error))
-                if Error::from_raw(error) == Some(Error::AccessDenied) => {
+                if Error::from_raw(error) == Some(Error::AccessDenied) =>
+            {
                 MemoryFaultCause::AccessDenied
             }
             Self::Backing(VmPageError::Operation(_)) => MemoryFaultCause::BackingFailure,
@@ -415,13 +418,14 @@ pub(crate) fn handle_user_memory_fault(
     is_write: bool,
     is_execute: bool,
 ) -> Result<(), MemoryFault> {
+    use mnu_abi::status::Error;
     let tid = match current_thread_id() {
         Some(t) => t,
-        None => return Err(MemoryFault::Operation(ESRCH)),
+        None => return Err(MemoryFault::Operation(Error::NotFound.into_raw())),
     };
     let pid = match crate::task::with_thread(tid, |t| t.process_id()) {
         Some(p) => p,
-        None => return Err(MemoryFault::Operation(ESRCH)),
+        None => return Err(MemoryFault::Operation(Error::NotFound.into_raw())),
     };
 
     let page_addr = fault_addr & !4095;
@@ -434,7 +438,7 @@ pub(crate) fn handle_user_memory_fault(
     let resident = crate::task::with_process_mut(pid, |process| {
         let pt_phys = match process.page_table() {
             Some(p) => p,
-            None => return Err(MemoryFault::Operation(EINVAL)),
+            None => return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw())),
         };
         let region = match process.find_memory_region_mut(fault_addr) {
             Some(region) => region,
@@ -465,16 +469,18 @@ pub(crate) fn handle_user_memory_fault(
         if crate::mem::paging::is_user_range_mapped_in_table(pt_phys, page_addr, 1) {
             if !is_write {
                 crate::debug!("[MEMORY_FAULT] page already mapped {:#x}", page_addr);
-                return Err(MemoryFault::Operation(EINVAL));
+                return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw()));
             }
             if region.is_shared() {
                 if let Some(object) = region.backing().file_object() {
-                    let page_offset = page_addr.checked_sub(region.start()).ok_or(EINVAL)?;
+                    let page_offset = page_addr
+                        .checked_sub(region.start())
+                        .ok_or(Error::InvalidArgument.into_raw())?;
                     let file_offset = region
                         .backing()
                         .file_offset()
                         .checked_add(page_offset)
-                        .ok_or(EINVAL)?;
+                        .ok_or(Error::InvalidArgument.into_raw())?;
                     object.mark_page_dirty(file_offset / 4096)?;
                 }
             }
@@ -484,7 +490,9 @@ pub(crate) fn handle_user_memory_fault(
             .is_err()
             {
                 crate::debug!("[MEMORY_FAULT] remap writable failed for {:#x}", page_addr);
-                return Err(MemoryFault::Operation(ENOMEM));
+                return Err(MemoryFault::Operation(
+                    Error::ResourceUnavailable.into_raw(),
+                ));
             }
             region.mark_dirty_page((page_addr - region.start()) / 4096);
             crate::debug!("[MEMORY_FAULT] upgraded dirty page {:#x}", page_addr);
@@ -496,26 +504,32 @@ pub(crate) fn handle_user_memory_fault(
         Some(Ok(true)) => return Ok(()),
         Some(Ok(false)) => {}
         Some(Err(error)) => return Err(error),
-        None => return Err(MemoryFault::Operation(ESRCH)),
+        None => return Err(MemoryFault::Operation(Error::NotFound.into_raw())),
     }
 
     let plan = crate::task::with_process(pid, |process| {
-        let pt_phys = process.page_table().ok_or(EINVAL)?;
-        let region = process.find_memory_region(fault_addr).ok_or(MemoryFault::Unmapped)?;
+        let pt_phys = process
+            .page_table()
+            .ok_or(Error::InvalidArgument.into_raw())?;
+        let region = process
+            .find_memory_region(fault_addr)
+            .ok_or(MemoryFault::Unmapped)?;
         if !region.allows_read_at(fault_addr)
             || (is_write && !region.allows_write_at(fault_addr))
             || (is_execute && !region.allows_execute_at(fault_addr))
         {
             return Err(MemoryFault::AccessDenied);
         }
-        let page_offset = page_addr.checked_sub(region.start()).ok_or(EINVAL)?;
+        let page_offset = page_addr
+            .checked_sub(region.start())
+            .ok_or(Error::InvalidArgument.into_raw())?;
         let pager = match region.backing().file_object() {
             Some(object) => {
                 let file_offset = region
                     .backing()
                     .file_offset()
                     .checked_add(page_offset)
-                    .ok_or(EINVAL)?;
+                    .ok_or(Error::InvalidArgument.into_raw())?;
                 Some((object.clone(), file_offset / 4096))
             }
             None => None,
@@ -524,16 +538,10 @@ pub(crate) fn handle_user_memory_fault(
         let generation = pager
             .as_ref()
             .and_then(|(object, _)| object.memory_generation());
-        Ok((
-            pt_phys,
-            region.start(),
-            shared_file,
-            pager,
-            generation,
-        ))
+        Ok((pt_phys, region.start(), shared_file, pager, generation))
     });
     let (pt_phys, region_start, shared_file, pager, generation) =
-        plan.ok_or(MemoryFault::Operation(ESRCH))??;
+        plan.ok_or(MemoryFault::Operation(Error::NotFound.into_raw()))??;
 
     let page = match pager.as_ref() {
         Some((object, page_index)) if !shared_file => match object.page(*page_index) {
@@ -553,18 +561,22 @@ pub(crate) fn handle_user_memory_fault(
     // the process-table lock; the retained frame also prevents cache eviction
     // between preparation and installation into the revalidated mapping.
     let shared_page = match pager.as_ref() {
-        Some((object, page_index)) if shared_file => match object.prepare_shared_page(*page_index) {
-            Ok(page) => Some(page),
-            Err(error) => return Err(MemoryFault::Backing(error)),
-        },
+        Some((object, page_index)) if shared_file => {
+            match object.prepare_shared_page(*page_index) {
+                Ok(page) => Some(page),
+                Err(error) => return Err(MemoryFault::Backing(error)),
+            }
+        }
         _ => None,
     };
 
     let result = crate::task::with_process_mut(pid, |process| {
         if process.page_table() != Some(pt_phys) {
-            return Err(MemoryFault::Operation(EINVAL));
+            return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw()));
         }
-        let region = process.find_memory_region_mut(fault_addr).ok_or(MemoryFault::Unmapped)?;
+        let region = process
+            .find_memory_region_mut(fault_addr)
+            .ok_or(MemoryFault::Unmapped)?;
         if region.start() != region_start
             || !region.allows_read_at(fault_addr)
             || (is_write && !region.allows_write_at(fault_addr))
@@ -586,7 +598,7 @@ pub(crate) fn handle_user_memory_fault(
             _ => false,
         };
         if !same_backing {
-            return Err(MemoryFault::Operation(EINVAL));
+            return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw()));
         }
         let executable = region.allows_execute_at(fault_addr);
         if crate::mem::paging::is_user_range_mapped_in_table(pt_phys, page_addr, 1) {
@@ -594,11 +606,11 @@ pub(crate) fn handle_user_memory_fault(
         }
         if shared_file {
             let Some((object, page_index)) = pager.as_ref() else {
-                return Err(MemoryFault::Operation(EINVAL));
+                return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw()));
             };
             shared_page
                 .as_ref()
-                .ok_or(EINVAL)?
+                .ok_or(Error::InvalidArgument.into_raw())?
                 .map_to(pt_phys, page_addr, false, executable)?;
             if is_write {
                 object.mark_page_dirty(*page_index)?;
@@ -607,11 +619,13 @@ pub(crate) fn handle_user_memory_fault(
                 )
                 .is_err()
                 {
-                    return Err(MemoryFault::Operation(ENOMEM));
+                    return Err(MemoryFault::Operation(
+                        Error::ResourceUnavailable.into_raw(),
+                    ));
                 }
             }
         } else {
-            let page = page.as_ref().ok_or(EINVAL)?;
+            let page = page.as_ref().ok_or(Error::InvalidArgument.into_raw())?;
             let install = || {
                 crate::mem::paging::map_and_copy_segment_to(
                     pt_phys,
@@ -639,9 +653,9 @@ pub(crate) fn handle_user_memory_fault(
     // A backing resize invalidated the prepared page. Retry the instruction
     // and fault again to prepare current backing; never install the stale pin.
     match result {
-        Some(Ok(())) | Some(Err(MemoryFault::Operation(EAGAIN))) => Ok(()),
+        Some(Ok(())) => Ok(()),
         Some(Err(error)) => Err(error),
-        None => Err(MemoryFault::Operation(ESRCH)),
+        None => Err(MemoryFault::Operation(Error::NotFound.into_raw())),
     }
 }
 
