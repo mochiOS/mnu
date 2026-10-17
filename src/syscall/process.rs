@@ -1209,10 +1209,9 @@ pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
         Some(Err(error)) => return error.into_raw(),
         None => return Error::NotReady.into_raw(),
     };
-    for ((object, offset), length) in work {
-        if let Err(errno) = object.flush_range(offset, length) {
-            return errno;
-        }
+    let work = crate::mem::writeback::Batch::new(work);
+    if let Err(error) = work.execute(|object, offset, length| object.flush_range(offset, length)) {
+        return error;
     }
     // Do not clear virtual-region dirty state after I/O: the mapping may have
     // been replaced, and writable frames still require cache dirty tracking.
