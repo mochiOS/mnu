@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{EPERM, SUCCESS};
+use super::types::SUCCESS;
 use crate::task::ThreadId;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -141,25 +141,39 @@ pub fn exit(exit_code: u64) -> ! {
 
 /// List processes into a user-supplied buffer.
 /// arg0 = user buffer ptr, arg1 = buffer length in bytes.
+/// Returns complete records copied, or a native failure before any complete
+/// record. Snapshots carry no authority and usercopy runs outside task locks.
 pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
     use crate::task::ProcessState;
+    use mnu_abi::status::Error;
 
     if !caller_has_process_inspect_capability() {
-        return EPERM;
+        return Error::AccessDenied.into_raw();
     }
 
     const RECORD_SIZE: usize = mnu_abi::PROCESS_INFO_RECORD_SIZE;
-    if buf_ptr == 0 {
-        return 0;
-    }
-    let max_bytes = buf_len as usize;
+    let max_bytes = match usize::try_from(buf_len) {
+        Ok(bytes) if bytes <= isize::MAX as usize => bytes,
+        _ => return Error::LimitExceeded.into_raw(),
+    };
     let max_entries = max_bytes / RECORD_SIZE;
     if max_entries == 0 {
         return 0;
     }
+    if buf_ptr == 0
+        || buf_ptr
+            .checked_add((max_entries * RECORD_SIZE) as u64)
+            .is_none()
+    {
+        return Error::InvalidAddress.into_raw();
+    }
 
     let mut thread_metrics: Vec<(crate::task::ProcessId, u64)> = Vec::new();
+    let mut allocation_failed = false;
     crate::task::for_each_thread(|thread| {
+        if allocation_failed {
+            return;
+        }
         let process_id = thread.process_id();
         if let Some((_, count)) = thread_metrics
             .iter_mut()
@@ -167,13 +181,24 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         {
             *count = count.saturating_add(1);
         } else {
+            if thread_metrics.try_reserve(1).is_err() {
+                allocation_failed = true;
+                return;
+            }
             thread_metrics.push((process_id, 1));
         }
     });
+    if allocation_failed {
+        return Error::ResourceUnavailable.into_raw();
+    }
 
     let mut records: Vec<[u8; RECORD_SIZE]> = Vec::new();
     crate::task::for_each_process(|proc| {
-        if records.len() >= max_entries {
+        if allocation_failed || records.len() >= max_entries {
+            return;
+        }
+        if records.try_reserve(1).is_err() {
+            allocation_failed = true;
             return;
         }
 
@@ -212,12 +237,19 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         out_buf[48..48 + copy_len].copy_from_slice(&name_bytes[..copy_len]);
         records.push(out_buf);
     });
+    if allocation_failed {
+        return Error::ResourceUnavailable.into_raw();
+    }
 
     let mut written = 0usize;
     while written < records.len() {
         let dest_ptr = buf_ptr + (written * RECORD_SIZE) as u64;
-        if let Err(_) = super::copy_to_user(dest_ptr, &records[written]) {
-            break;
+        if let Err(error) = super::copy_to_user_native(dest_ptr, &records[written]) {
+            return if written == 0 {
+                error.into_raw()
+            } else {
+                written as u64
+            };
         }
         written += 1;
     }

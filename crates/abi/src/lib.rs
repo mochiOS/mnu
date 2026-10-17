@@ -75,6 +75,10 @@ pub enum SyscallNumber {
     /// Validates an opaque endpoint's live generation. Missing or stale
     /// endpoints return status::Error::NotFound.
     IpcEndpointAlive = 551,
+    /// Copies complete native process-inspection records under caller authority.
+    /// A zero record capacity returns zero without copying. Failures before
+    /// the first complete record use status::Error; later faults return the
+    /// completed prefix. No task-table lock is retained across usercopy.
     ListProcesses = 552,
     CheckThreadCapability = 553,
     BlockRead = 555,
