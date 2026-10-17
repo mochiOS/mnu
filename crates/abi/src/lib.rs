@@ -1167,8 +1167,6 @@ pub const EAGAIN: u64 = (-11i64) as u64;
 pub const ENOMEM: u64 = (-12i64) as u64;
 /// アクセス権がない
 pub const EACCES: u64 = (-13i64) as u64;
-/// 不正なアドレス
-pub const EFAULT: u64 = (-14i64) as u64;
 /// ファイルが既に存在する
 pub const EEXIST: u64 = (-17i64) as u64;
 /// 無効な引数
