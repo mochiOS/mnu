@@ -135,6 +135,29 @@ impl<T, const N: usize> Queue<T, N> {
         }))
     }
 
+    /// Retire a quiescent failure only when its owner explicitly acknowledges
+    /// the error. Return both references so backing cleanup stays outside the
+    /// queue lock. Running work cannot be cancelled through this operation.
+    pub(crate) fn acknowledge_failure(
+        &mut self,
+        claim: Claim<T>,
+    ) -> Result<(u64, Retired<T>), Claim<T>> {
+        let Some(entry) = self.entry_for(&claim) else {
+            return Err(claim);
+        };
+        let Phase::Failed(error) = entry.phase else {
+            return Err(claim);
+        };
+        let entry = self.entries[claim.slot].take().unwrap();
+        Ok((
+            error,
+            Retired {
+                _entry: entry,
+                _claim: claim,
+            },
+        ))
+    }
+
     /// Only the matching failed claim can request a retry. No fresh user
     /// address, process identity, or resource lookup participates in retry.
     pub(crate) fn retry(&mut self, claim: Claim<T>) -> Result<(), Claim<T>> {
