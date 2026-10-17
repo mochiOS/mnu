@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interrupt::spinlock::SpinLock;
 use crate::task::ProviderObject;
+use mnu_abi::status::Error;
 #[path = "vm_object/extent.rs"]
 mod extent;
 pub(crate) use extent::PreparedExtent;
@@ -266,9 +267,8 @@ impl VmObject {
         // A provider's error with the same value must not be guessed as EOF.
         match (&self.source, error) {
             (VmObjectSource::Memory(_), error)
-                if error == crate::syscall::EINVAL
-                    || mnu_abi::status::Error::from_raw(error)
-                        == Some(mnu_abi::status::Error::InvalidArgument) => {
+                if Error::from_raw(error) == Some(Error::InvalidArgument) =>
+            {
                 VmPageError::OutsideBacking
             }
             _ => VmPageError::Operation(error),
@@ -293,11 +293,11 @@ impl VmObject {
         if let VmObjectSource::Memory(memory) = &self.source {
             let offset = page_index
                 .checked_mul(PAGE_BYTES as u64)
-                .ok_or(crate::syscall::EINVAL)?;
+                .ok_or(Error::InvalidArgument.into_raw())?;
             // Ordinary read_at may return EOF, but a pager must not manufacture
             // an accessible zero-filled private page beyond its RAM extent.
             if offset >= memory.length() {
-                return Err(crate::syscall::EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             let mut bytes = [0u8; PAGE_BYTES];
             let length = memory
@@ -307,7 +307,7 @@ impl VmObject {
         }
         let offset = page_index
             .checked_mul(PAGE_BYTES as u64)
-            .ok_or(crate::syscall::EINVAL)?;
+            .ok_or(Error::InvalidArgument.into_raw())?;
         let key = self.page_key(page_index);
         loop {
             if let Some(page) = cached_page(key)? {
@@ -326,7 +326,7 @@ impl VmObject {
                 // Capacity pressure may bypass caching, but only after the
                 // snapshot was validated under the cache lock.
                 Ok(None) => return Ok((bytes, valid_len)),
-                Err(crate::syscall::EAGAIN) => continue,
+                Err(error) if error == Error::NotReady.into_raw() => continue,
                 Err(error) => return Err(error),
             }
         }
@@ -425,7 +425,7 @@ impl VmObject {
             });
         }
         let VmObjectSource::Provider { _io_lock, .. } = &self.source else {
-            return Err(VmPageError::Operation(crate::syscall::EINVAL));
+            return Err(VmPageError::Operation(Error::InvalidArgument.into_raw()));
         };
         loop {
             let epoch = _io_lock.generation();
@@ -456,7 +456,7 @@ impl VmObject {
             };
             if cache[entry_index].frame_phys.is_none() {
                 let frame = crate::mem::frame::allocate_zeroed_frame()
-                    .map_err(|_| crate::syscall::ENOMEM)?;
+                    .map_err(|_| Error::ResourceUnavailable.into_raw())?;
                 let frame_phys = frame.start_address().as_u64();
                 if let Err(errno) =
                     copy_to_frame(frame_phys, 0, cache[entry_index].bytes.as_slice())
@@ -468,9 +468,9 @@ impl VmObject {
             }
             let frame_phys = cache[entry_index]
                 .frame_phys
-                .ok_or(crate::syscall::ENOMEM)?;
+                .ok_or(Error::ResourceUnavailable.into_raw())?;
             crate::mem::paging::retain_shared_user_frame(frame_phys)
-                .map_err(|_| crate::syscall::ENOMEM)?;
+                .map_err(|_| Error::ResourceUnavailable.into_raw())?;
             cache[entry_index].last_used = next_cache_access();
             return Ok(PreparedSharedPage {
                 frame_phys,
@@ -487,7 +487,7 @@ impl VmObject {
             {
                 Ok(())
             } else {
-                Err(crate::syscall::EINVAL)
+                Err(Error::InvalidArgument.into_raw())
             };
         }
         let key = self.page_key(page_index);
@@ -498,7 +498,7 @@ impl VmObject {
         let entry = cache
             .iter_mut()
             .find(|entry| entry.key == key && entry.frame_phys.is_some())
-            .ok_or(crate::syscall::EIO)?;
+            .ok_or(Error::BackingFailure.into_raw())?;
 
         if entry.valid_len != 0 {
             entry.dirty_range = Some((0, entry.valid_len));
@@ -519,20 +519,20 @@ impl VmObject {
                 .write_at(offset, input)
                 .map_err(mnu_abi::status::Error::into_raw);
         }
-        let input_len = u64::try_from(input.len()).map_err(|_| crate::syscall::EINVAL)?;
+        let input_len = u64::try_from(input.len()).map_err(|_| Error::LimitExceeded.into_raw())?;
 
         offset
             .checked_add(input_len)
-            .ok_or(crate::syscall::EINVAL)?;
+            .ok_or(Error::LimitExceeded.into_raw())?;
 
         let mut staged = 0usize;
 
         while staged < input.len() {
-            let staged_u64 = u64::try_from(staged).map_err(|_| crate::syscall::EINVAL)?;
+            let staged_u64 = u64::try_from(staged).map_err(|_| Error::LimitExceeded.into_raw())?;
 
             let current = offset
                 .checked_add(staged_u64)
-                .ok_or(crate::syscall::EINVAL)?;
+                .ok_or(Error::LimitExceeded.into_raw())?;
 
             let page_index = current / PAGE_BYTES as u64;
             let page_offset = (current % PAGE_BYTES as u64) as usize;
@@ -573,7 +573,7 @@ impl VmObject {
 
             let write_end = page_offset
                 .checked_add(count)
-                .ok_or(crate::syscall::EINVAL)?;
+                .ok_or(Error::LimitExceeded.into_raw())?;
 
             bytes[page_offset..write_end].copy_from_slice(&input[staged..staged + count]);
 
@@ -719,7 +719,6 @@ impl VmObject {
             VmObjectSource::Memory(_) => false,
         };
         match result {
-            Err(crate::syscall::EIO) if unavailable => Ok(()),
             Err(error)
                 if unavailable
                     && mnu_abi::status::Error::from_raw(error)
@@ -776,9 +775,9 @@ fn copy_to_frame(frame_phys: u64, offset: usize, input: &[u8]) -> Result<(), u64
     let end = offset
         .checked_add(input.len())
         .filter(|end| *end <= PAGE_BYTES)
-        .ok_or(crate::syscall::EINVAL)?;
+        .ok_or(Error::InvalidArgument.into_raw())?;
     let physical_offset =
-        crate::mem::paging::physical_memory_offset().ok_or(crate::syscall::EIO)?;
+        crate::mem::paging::physical_memory_offset().ok_or(Error::BackingFailure.into_raw())?;
     unsafe {
         core::ptr::copy_nonoverlapping(
             input.as_ptr(),
@@ -886,7 +885,7 @@ fn lock_provider_key(key: ObjectKey) -> Result<ProviderIoGuard, mnu_abi::status:
 fn invalidate_object(object: ObjectKey) -> Result<(), u64> {
     let mut cache = PAGE_CACHE.lock();
     if backing_is_reserved(object) {
-        return Err(crate::syscall::EAGAIN);
+        return Err(Error::NotReady.into_raw());
     }
 
     cache.retain(|entry| {
@@ -1090,7 +1089,7 @@ fn cache_or_snapshot_page(
     expected_epoch: Option<u64>,
 ) -> Result<Option<(Arc<[u8; PAGE_BYTES]>, usize)>, u64> {
     if valid_len > PAGE_BYTES || source.len() < valid_len {
-        return Err(crate::syscall::EINVAL);
+        return Err(Error::InvalidArgument.into_raw());
     }
 
     let mut cache = PAGE_CACHE.lock();
@@ -1109,7 +1108,7 @@ fn cache_or_snapshot_page(
     if cache_mutation_epoch(key.object) != expected_epoch {
         // This is not a capacity bypass: the lower bytes may predate a write
         // or invalidation. The loader must retry, not return those bytes.
-        return Err(crate::syscall::EAGAIN);
+        return Err(Error::NotReady.into_raw());
     }
 
     if cache.len() >= MAX_CACHED_PAGES {
@@ -1173,10 +1172,10 @@ fn retain_cache_gate(object: ObjectKey) -> Result<super::object_io::IoLock, u64>
 fn ensure_unreserved(object: ObjectKey) -> Result<(), u64> {
     if let Some(gate) = PROVIDER_IO.lock().existing(&object) {
         if gate.is_unavailable() {
-            return Err(crate::syscall::EIO);
+            return Err(Error::BackingFailure.into_raw());
         }
         if gate.is_reserved() {
-            return Err(crate::syscall::EAGAIN);
+            return Err(Error::NotReady.into_raw());
         }
     }
     Ok(())
