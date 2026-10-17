@@ -5,7 +5,7 @@ use crate::mem::{
     extent_transaction::ExtentTransaction,
     vm_object::{ObjectKey, ProviderAdmission},
 };
-use crate::syscall::{EAGAIN, EINVAL, ENOMEM, ENOSPC, ENOSYS, SUCCESS};
+use crate::syscall::{EAGAIN, EINVAL, ENOSYS, SUCCESS};
 use crate::task::{HandleRights, KernelObject, ObjectHandleEntry};
 use alloc::sync::{Arc, Weak};
 use mnu_abi::status::Error;
@@ -47,9 +47,9 @@ pub fn create_admission(endpoint: u64, identity: u64) -> u64 {
 }
 
 pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64, admission: u64) -> u64 {
-    let process_id = match super::current_process() {
-        Ok(id) => id,
-        Err(error) => return error,
+    let process_id = match crate::syscall::security::current_process_id() {
+        Some(id) => id,
+        None => return Error::NotReady.into_raw(),
     };
     let key = match provider_key(endpoint, identity) {
         Ok(key) => key,
@@ -60,9 +60,9 @@ pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64, admiss
     } else {
         (|| {
             let KernelObject::MemoryAdmission(admission) =
-                super::object(admission, HandleRights::WAIT)?
+                super::object_native(admission, HandleRights::WAIT).map_err(Error::into_raw)?
             else {
-                return Err(EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             };
             // Consumption drops the intent lock BEFORE VM/process exclusion.
             // The acquired guard itself carries its authenticated backing key.
@@ -78,7 +78,7 @@ pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64, admiss
     };
     let update = match Arc::try_new(SpinLock::new(update)) {
         Ok(update) => update,
-        Err(_) => return ENOMEM,
+        Err(_) => return Error::ResourceUnavailable.into_raw(),
     };
     // Failed insertion drops a still-prepared owner into the reserved cleanup
     // queue; it never needs to reacquire VM exclusion from this table lock.
@@ -90,9 +90,9 @@ pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64, admiss
                 HandleRights::CONTROL,
             ))
             .map(|handle| handle.raw() as u64)
-            .unwrap_or(ENOSPC)
+            .unwrap_or(Error::ResourceUnavailable.into_raw())
     })
-    .unwrap_or(EINVAL)
+    .unwrap_or(Error::NotReady.into_raw())
 }
 
 pub(super) fn admission_endpoint(

@@ -412,6 +412,7 @@ pub enum SyscallNumber {
     /// HandleControl(memory_update::*) resolves the outcome with empty payloads.
     /// Close before BEGIN cancels; close after BEGIN without confirmation
     /// quarantines backing data. No external mutation may precede BEGIN.
+    /// Local authority, allocation and publication failures use status::Error.
     ProviderMemoryUpdateCreate = 697,
     /// Registers a cancellable FIFO position for a provider's memory identity.
     /// Args: caller-local endpoint RECEIVE Handle, nonzero memory identity.

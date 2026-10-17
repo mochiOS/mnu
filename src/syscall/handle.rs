@@ -157,10 +157,6 @@ pub(crate) fn object_with_rights_native(
     .unwrap_or(Err(Error::NotReady))
 }
 
-pub(crate) fn object(raw: u64, required_right: HandleRights) -> Result<KernelObject, u64> {
-    object_with_rights(raw, required_right).map(|(object, _)| object)
-}
-
 pub(crate) fn object_with_rights(
     raw: u64,
     required_right: HandleRights,
