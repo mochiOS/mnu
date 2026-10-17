@@ -65,7 +65,10 @@ pub enum SyscallNumber {
     IpcRecv = 515,
     Sleep = 517,
     FindProcessByName = 518,
+    /// Reads one 1/2/4-byte port value under the caller's device authority.
+    /// Ports must fit u16; selector and authority failures use status::Error.
     PortIn = 520,
+    /// Writes the low width bytes under the same native port contract.
     PortOut = 521,
     GetFramebufferInfo = 528,
     MapFramebuffer = 529,
@@ -244,6 +247,8 @@ pub enum SyscallNumber {
     /// ProcessHandleOpen. Missing targets are native NotFound; absent caller
     /// context is NotReady, and Handle storage failure is ResourceUnavailable.
     ProcessHandleOpenById = 659,
+    /// Early diagnostic bytes, never a POSIX stream. Empty writes need no
+    /// buffer; extent, allocation and usercopy failures use status::Error.
     DebugWrite = 660,
     /// Removes an opaque Handle association, not its owned reference.
     /// Missing keys succeed; absent execution context is native NotReady.

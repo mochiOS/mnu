@@ -1,9 +1,9 @@
 //! I/O関連のシステムコール
 
-use super::types::{EFAULT, EINVAL, EPERM, SUCCESS};
+use super::types::SUCCESS;
 use crate::capability::Capability;
 use crate::util::console;
-use crate::{debug, error, info, warn};
+use mnu_abi::status::Error;
 
 fn caller_has_port_io_access() -> bool {
     crate::syscall::security::caller_has_any_capability(&[
@@ -23,13 +23,20 @@ pub fn debug_write(buf_ptr: u64, len: u64) -> u64 {
     if len == 0 {
         return SUCCESS;
     }
-    if buf_ptr == 0 {
-        return EFAULT;
+    let length = match usize::try_from(len) {
+        Ok(length) if length <= isize::MAX as usize => length,
+        _ => return Error::LimitExceeded.into_raw(),
+    };
+    if buf_ptr == 0 || buf_ptr.checked_add(len).is_none() {
+        return Error::InvalidAddress.into_raw();
     }
 
-    let mut buf = alloc::vec![0u8; len as usize];
-    if let Err(err) = crate::syscall::copy_from_user(buf_ptr, &mut buf) {
-        return err;
+    let mut buf = match crate::util::object_snapshot::zeroed_native(length) {
+        Ok(buf) => buf,
+        Err(error) => return error.into_raw(),
+    };
+    if let Err(error) = crate::syscall::copy_from_user_native(buf_ptr, &mut buf) {
+        return error.into_raw();
     }
 
     // シリアルには常に出力する（デバッグ用）
@@ -45,41 +52,6 @@ pub fn debug_write(buf_ptr: u64, len: u64) -> u64 {
     }
 
     len
-}
-
-/// Logシステムコール
-///
-/// カーネルログにメッセージを書き込む
-/// # 引数
-/// msg: メッセージ
-/// len: メッセージの長さ
-/// level: ログレベル（0=ERROR、1=WARNING、2=INFO、3=DEBUG）
-///
-/// # 戻り値
-/// 成功時はSUCCESS、エラー時はエラーコード
-pub fn log(msg: u64, len: u64, level: u64) -> u64 {
-    if msg == 0 || len == 0 {
-        return super::types::EINVAL;
-    }
-
-    let mut copied = alloc::vec![0u8; len as usize];
-    if let Err(err) = crate::syscall::copy_from_user(msg, &mut copied) {
-        return err;
-    }
-
-    let msg = match core::str::from_utf8(&copied) {
-        Ok(s) => s,
-        Err(_) => return EINVAL,
-    };
-
-    match level {
-        0 => error!("{}", msg),
-        1 => warn!("{}", msg),
-        2 => info!("{}", msg),
-        3 => debug!("{}", msg),
-        _ => return EINVAL,
-    }
-    SUCCESS
 }
 
 fn read_port_u8(port: u16) -> u8 {
@@ -126,27 +98,33 @@ fn write_port_u32(port: u16, value: u32) {
 
 pub fn port_in(port: u64, width: u64) -> u64 {
     if !caller_has_port_io_access() {
-        return EPERM;
+        return Error::AccessDenied.into_raw();
     }
-    let port = port as u16;
+    let port = match u16::try_from(port) {
+        Ok(port) => port,
+        Err(_) => return Error::InvalidArgument.into_raw(),
+    };
     match width {
         1 => read_port_u8(port) as u64,
         2 => read_port_u16(port) as u64,
         4 => read_port_u32(port) as u64,
-        _ => EINVAL,
+        _ => Error::InvalidArgument.into_raw(),
     }
 }
 
 pub fn port_out(port: u64, value: u64, width: u64) -> u64 {
     if !caller_has_port_io_access() {
-        return EPERM;
+        return Error::AccessDenied.into_raw();
     }
-    let port = port as u16;
+    let port = match u16::try_from(port) {
+        Ok(port) => port,
+        Err(_) => return Error::InvalidArgument.into_raw(),
+    };
     match width {
         1 => write_port_u8(port, value as u8),
         2 => write_port_u16(port, value as u16),
         4 => write_port_u32(port, value as u32),
-        _ => return EINVAL,
+        _ => return Error::InvalidArgument.into_raw(),
     }
     SUCCESS
 }
