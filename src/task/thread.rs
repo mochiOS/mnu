@@ -1877,9 +1877,9 @@ pub fn remove_thread(id: ThreadId) -> Option<Thread> {
         let endpoint = queue.slot_index_and_generation(id);
         (queue.remove(id), endpoint)
     };
-    if removed.is_some() {
+    if let Some(thread) = removed.as_ref() {
         retire_thread_endpoint(id, endpoint);
-        clear_thread_wait_registrations(id);
+        clear_thread_wait_registrations(id, thread.process_id());
     }
     removed
 }
@@ -1887,11 +1887,25 @@ pub fn remove_thread(id: ThreadId) -> Option<Thread> {
 // A parked thread may be discarded without returning through its syscall.
 // Release native wait records after dropping the queue lock: their normal
 // registration/wake paths may acquire the thread queue in the other order.
-fn clear_thread_wait_registrations(id: ThreadId) {
+// Unpublished handle references are detached one at a time and dropped only
+// after the process lock is released; their destructors may enter IPC.
+fn clear_thread_wait_registrations(id: ThreadId, process: ProcessId) {
     crate::syscall::ipc::lifetime::remove_waiter(id);
     crate::syscall::address_wait::remove_waiter(id);
     crate::syscall::time::disarm_thread_deadline(id);
     super::process::remove_process_exit_waiters(id);
+    loop {
+        let entry = super::process::with_process_mut(process, |process| {
+            process
+                .object_handles_mut()
+                .take_reservation_for(id.as_u64())
+        })
+        .flatten();
+        match entry {
+            Some(entry) => drop(entry),
+            None => break,
+        }
+    }
 }
 
 fn retire_thread_endpoint(id: ThreadId, position: Option<(usize, u64)>) {
@@ -2077,8 +2091,8 @@ pub(super) fn remove_quiescent_terminated_thread(id: ThreadId) -> Option<Thread>
         }
         queue.remove(id)
     };
-    if removed.is_some() {
-        clear_thread_wait_registrations(id);
+    if let Some(thread) = removed.as_ref() {
+        clear_thread_wait_registrations(id, thread.process_id());
     }
     removed
 }

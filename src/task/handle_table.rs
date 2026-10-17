@@ -422,11 +422,38 @@ impl ObjectHandleEntry {
     }
 }
 
+/// Kernel-owned publication ticket; an unpublished selector grants no access.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HandleReservation {
+    handle: ObjectHandle,
+    identity: u64,
+    owner: u64,
+}
+
+impl HandleReservation {
+    pub(crate) const fn handle(self) -> ObjectHandle {
+        self.handle
+    }
+}
+
+#[derive(Debug)]
+struct HandleReservations(Vec<(HandleReservation, ObjectHandleEntry)>);
+
+// A copied table inherits published authority, never another thread's
+// in-progress operation or its unpublished references.
+impl Clone for HandleReservations {
+    fn clone(&self) -> Self {
+        Self(Vec::new())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ObjectHandleTable {
     // Sorted by selector; reserve storage before publishing a new reference.
     entries: Vec<(ObjectHandle, ObjectHandleEntry)>,
     next: u32,
+    pending: HandleReservations,
+    next_reservation: u64,
 }
 
 impl ObjectHandleTable {
@@ -434,6 +461,8 @@ impl ObjectHandleTable {
         Self {
             entries: Vec::new(),
             next: 1,
+            pending: HandleReservations(Vec::new()),
+            next_reservation: 1,
         }
     }
 
@@ -470,9 +499,20 @@ impl ObjectHandleTable {
     }
 
     pub fn insert(&mut self, entry: ObjectHandleEntry) -> Option<ObjectHandle> {
-        if self.entries.len() >= PROCESS_MAX_OBJECT_HANDLES || self.entries.try_reserve(1).is_err() {
+        if !self.reserve_publication_storage() {
             return None;
         }
+        let (handle, index) = self.free_selector()?;
+        self.entries.insert(index, (handle, entry));
+        Some(handle)
+    }
+
+    fn reserve_publication_storage(&mut self) -> bool {
+        self.entries.len() + self.pending.0.len() < PROCESS_MAX_OBJECT_HANDLES
+            && self.entries.try_reserve(self.pending.0.len() + 1).is_ok()
+    }
+
+    fn free_selector(&mut self) -> Option<(ObjectHandle, usize)> {
         for _ in 0..PROCESS_MAX_OBJECT_HANDLES {
             let raw = self.next.clamp(1, PROCESS_MAX_OBJECT_HANDLES as u32);
             self.next = if raw == PROCESS_MAX_OBJECT_HANDLES as u32 {
@@ -485,11 +525,104 @@ impl ObjectHandleTable {
                 .entries
                 .binary_search_by_key(&handle, |(handle, _)| *handle)
             {
-                self.entries.insert(index, (handle, entry));
-                return Some(handle);
+                if !self
+                    .pending
+                    .0
+                    .iter()
+                    .any(|(ticket, _)| ticket.handle == handle)
+                {
+                    return Some((handle, index));
+                }
             }
         }
         None
+    }
+
+    /// Reserve both namespace and final Vec storage, without publishing any
+    /// authority. Failure returns the caller's reference for unlocked cleanup.
+    pub(crate) fn reserve(
+        &mut self,
+        owner: u64,
+        entry: ObjectHandleEntry,
+    ) -> Result<HandleReservation, ObjectHandleEntry> {
+        let Some(next_identity) = self.next_reservation.checked_add(1) else {
+            return Err(entry);
+        };
+        if owner == 0
+            || !self.reserve_publication_storage()
+            || self.pending.0.try_reserve(1).is_err()
+        {
+            return Err(entry);
+        }
+        let Some((handle, _)) = self.free_selector() else {
+            return Err(entry);
+        };
+        let ticket = HandleReservation {
+            handle,
+            identity: self.next_reservation,
+            owner,
+        };
+        self.next_reservation = next_identity;
+        self.pending.0.push((ticket, entry));
+        Ok(ticket)
+    }
+
+    pub(crate) fn is_reserved(&self, ticket: HandleReservation) -> bool {
+        self.pending
+            .0
+            .iter()
+            .any(|(candidate, _)| *candidate == ticket)
+    }
+
+    /// Caller validates its whole batch under the same table lock first.
+    /// Publication cannot allocate: every insertion preserves reserved space.
+    pub(crate) fn publish_reserved(&mut self, ticket: HandleReservation) -> bool {
+        let Some(pending) = self
+            .pending
+            .0
+            .iter()
+            .position(|(candidate, _)| *candidate == ticket)
+        else {
+            return false;
+        };
+        let Err(index) = self
+            .entries
+            .binary_search_by_key(&ticket.handle, |(handle, _)| *handle)
+        else {
+            return false;
+        };
+        let (_, entry) = self.pending.0.swap_remove(pending);
+        self.entries.insert(index, (ticket.handle, entry));
+        true
+    }
+
+    pub(crate) fn cancel_reserved(
+        &mut self,
+        ticket: HandleReservation,
+    ) -> Option<ObjectHandleEntry> {
+        let index = self
+            .pending
+            .0
+            .iter()
+            .position(|(candidate, _)| *candidate == ticket)?;
+        Some(self.pending.0.swap_remove(index).1)
+    }
+
+    pub(crate) fn take_reservation_for(&mut self, owner: u64) -> Option<ObjectHandleEntry> {
+        let index = self
+            .pending
+            .0
+            .iter()
+            .position(|(candidate, _)| candidate.owner == owner)?;
+        Some(self.pending.0.swap_remove(index).1)
+    }
+
+    pub(crate) fn take_entry(&mut self, handle: ObjectHandle) -> Option<ObjectHandleEntry> {
+        let index = self
+            .entries
+            .binary_search_by_key(&handle, |(handle, _)| *handle)
+            .ok()?;
+        Some(self.entries.remove(index).1)
     }
 
     pub fn close(&mut self, handle: ObjectHandle) -> bool {
@@ -509,7 +642,11 @@ impl ObjectHandleTable {
     /// Only the receiving table is touched; this grants no capture authority.
     pub fn insert_at(&mut self, handle: ObjectHandle, entry: ObjectHandleEntry) -> bool {
         if handle.raw() > PROCESS_MAX_OBJECT_HANDLES as u32
-            || self.entries.len() >= PROCESS_MAX_OBJECT_HANDLES
+            || self
+                .pending
+                .0
+                .iter()
+                .any(|(ticket, _)| ticket.handle == handle)
         {
             return false;
         }
@@ -519,7 +656,7 @@ impl ObjectHandleTable {
         else {
             return false;
         };
-        if self.entries.try_reserve(1).is_err() {
+        if !self.reserve_publication_storage() {
             return false;
         }
         self.entries.insert(index, (handle, entry));

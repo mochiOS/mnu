@@ -854,47 +854,91 @@ fn install_received_object_handles(
     use mnu_abi::status::Error;
 
     let count = attachments.count;
-    // Reject incomplete attachment metadata before publishing any reference.
     if count > MAX_OBJECT_HANDLES || attachments.handles[..count].iter().any(Option::is_none) {
         return Err(Error::BackingFailure.into_raw());
     }
     let process_id = crate::task::thread_to_process_id(receiver_thread_id)
         .ok_or_else(|| Error::NotReady.into_raw())?;
-    let mut installed = [None; MAX_OBJECT_HANDLES];
+    let mut reserved = [None; MAX_OBJECT_HANDLES];
     let mut output = [0u8; core::mem::size_of::<mnu_abi::IpcObjectHandles>()];
     output[0..4].copy_from_slice(&(count as u32).to_le_bytes());
     output[4..8].copy_from_slice(&attachments.delivery_flags.to_le_bytes());
-    let result = crate::task::with_process_mut(process_id, |process| {
+    let admission = crate::task::with_process_mut(process_id, |process| {
         for index in 0..count {
-            let entry = attachments.handles[index]
-                .take()
-                .ok_or_else(|| Error::BackingFailure.into_raw())?;
-            let rights = entry.rights().bits();
-            let Some(handle) = process.object_handles_mut().insert(entry) else {
-                for installed_handle in installed[..index].iter().flatten().copied() {
-                    let _ = process.object_handles_mut().close(installed_handle);
-                }
-                return Err(Error::ResourceUnavailable.into_raw());
+            let Some(entry) = attachments.handles[index].take() else {
+                return Err(Error::BackingFailure.into_raw());
             };
-            installed[index] = Some(handle);
+            let rights = entry.rights().bits();
+            let ticket = match process
+                .object_handles_mut()
+                .reserve(receiver_thread_id, entry)
+            {
+                Ok(ticket) => ticket,
+                Err(entry) => {
+                    attachments.handles[index] = Some(entry);
+                    return Err(Error::ResourceUnavailable.into_raw());
+                }
+            };
+            reserved[index] = Some(ticket);
             let offset = 8 + index * 16;
-            output[offset..offset + 4].copy_from_slice(&handle.raw().to_le_bytes());
+            output[offset..offset + 4].copy_from_slice(&ticket.handle().raw().to_le_bytes());
             output[offset + 8..offset + 16].copy_from_slice(&rights.to_le_bytes());
         }
         Ok(())
     })
     .ok_or_else(|| Error::NotReady.into_raw())?;
-    result?;
+    if let Err(error) = admission {
+        cancel_received_reservations(process_id, &reserved);
+        return Err(error);
+    }
 
+    // No published selector exists during the potentially faulting usercopy.
     if let Err(error) = crate::syscall::copy_to_user_native(output_pointer, &output) {
-        let _ = crate::task::with_process_mut(process_id, |process| {
-            for handle in installed[..count].iter().flatten().copied() {
-                let _ = process.object_handles_mut().close(handle);
-            }
-        });
+        cancel_received_reservations(process_id, &reserved);
         return Err(error.into_raw());
     }
-    Ok(())
+    let publication = crate::task::with_process_mut(process_id, |process| {
+        let mut discarded = [const { None }; MAX_OBJECT_HANDLES];
+        if reserved[..count].iter().any(Option::is_none)
+            || !reserved[..count]
+                .iter()
+                .flatten()
+                .all(|ticket| process.object_handles().is_reserved(*ticket))
+        {
+            return (Err(Error::BackingFailure.into_raw()), discarded);
+        }
+        for (index, ticket) in reserved[..count].iter().flatten().copied().enumerate() {
+            if !process.object_handles_mut().publish_reserved(ticket) {
+                // The whole commit is under one table lock. These entries
+                // cannot have been closed or reused by another thread.
+                for (slot, published) in reserved[..index].iter().flatten().copied().enumerate() {
+                    discarded[slot] = process.object_handles_mut().take_entry(published.handle());
+                }
+                return (Err(Error::BackingFailure.into_raw()), discarded);
+            }
+        }
+        (Ok(()), discarded)
+    })
+    .ok_or_else(|| Error::NotReady.into_raw())?;
+    let (result, discarded) = publication;
+    drop(discarded);
+    if result.is_err() {
+        cancel_received_reservations(process_id, &reserved);
+    }
+    result
+}
+
+fn cancel_received_reservations(
+    process: crate::task::ProcessId,
+    tickets: &[Option<crate::task::handle_table::HandleReservation>; MAX_OBJECT_HANDLES],
+) {
+    let discarded = crate::task::with_process_mut(process, |process| {
+        core::array::from_fn::<_, MAX_OBJECT_HANDLES, _>(|index| {
+            tickets[index].and_then(|ticket| process.object_handles_mut().cancel_reserved(ticket))
+        })
+    });
+    // Object destructors may enter IPC or other registries.
+    drop(discarded);
 }
 
 #[derive(Debug)]
