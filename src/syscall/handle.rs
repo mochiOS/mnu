@@ -374,9 +374,11 @@ pub fn control(
     output: u64,
     output_length: u64,
 ) -> u64 {
-    let object = match object(raw, HandleRights::CONTROL) {
+    use mnu_abi::status::Error;
+
+    let object = match object_native(raw, HandleRights::CONTROL) {
         Ok(object) => object,
-        Err(error) => return error,
+        Err(error) => return error.into_raw(),
     };
     if let KernelObject::MemoryUpdate(update) = &object {
         return memory_update::control(
@@ -384,20 +386,23 @@ pub fn control(
         );
     }
     let KernelObject::Provider(provider) = object else {
-        return ENOTSUP;
+        return Error::InvalidArgument.into_raw();
     };
     let input_length = match usize::try_from(input_length) {
         Ok(length) if length <= mnu_abi::provider::MAX_DATA_LEN => length,
-        _ => return EINVAL,
+        _ => return Error::LimitExceeded.into_raw(),
     };
     let output_length = match usize::try_from(output_length) {
         Ok(length) if length <= mnu_abi::provider::MAX_DATA_LEN => length,
-        _ => return EINVAL,
+        _ => return Error::LimitExceeded.into_raw(),
     };
-    let mut input_bytes = vec![0u8; input_length];
+    let mut input_bytes = match crate::util::object_snapshot::zeroed_native(input_length) {
+        Ok(bytes) => bytes,
+        Err(error) => return error.into_raw(),
+    };
     if input_length != 0 {
-        if let Err(error) = crate::syscall::copy_from_user(input, &mut input_bytes) {
-            return error;
+        if let Err(error) = crate::syscall::copy_from_user_native(input, &mut input_bytes) {
+            return error.into_raw();
         }
     }
     let request = mnu_abi::provider::RequestHeader {
@@ -408,20 +413,25 @@ pub fn control(
         length: output_length as u32,
         data_length: input_length as u32,
     };
-    let mut response_storage = vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + output_length];
+    let mut response_storage = match crate::util::object_snapshot::zeroed_native(
+        mnu_abi::provider::RESPONSE_HEADER_LEN + output_length,
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) => return error.into_raw(),
+    };
     let (response, data_length) =
         match provider_call(&provider, request, &input_bytes, &mut response_storage) {
             Ok(response) => response,
             Err(error) => return error,
         };
-    if response.value as usize != data_length || data_length > output_length {
-        return EIO;
+    if response.value != data_length as u64 || data_length > output_length {
+        return Error::BackingFailure.into_raw();
     }
     if data_length != 0 {
         let data = &response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN
             ..mnu_abi::provider::RESPONSE_HEADER_LEN + data_length];
-        if let Err(error) = crate::syscall::copy_to_user(output, data) {
-            return error;
+        if let Err(error) = crate::syscall::copy_to_user_native(output, data) {
+            return error.into_raw();
         }
     }
     data_length as u64

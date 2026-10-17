@@ -257,6 +257,8 @@ pub enum SyscallNumber {
     /// Failures use status::Error: unsupported/overlapping bits or unknown
     /// local identity is InvalidArgument; absent execution context is NotReady.
     ProviderObjectSignal = 667,
+    /// Bounded opaque provider control, or native memory-update control.
+    /// Mechanism failures use status::Error; provider status is passed through.
     HandleControl = 668,
     /// Suspends the caller's process until resumed. Absent execution context
     /// or no eligible thread returns native NotReady; success requires observing
