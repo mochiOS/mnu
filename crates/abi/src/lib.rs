@@ -1159,8 +1159,6 @@ pub const EPERM: u64 = (-1i64) as u64;
 pub const ENOENT: u64 = (-2i64) as u64;
 /// I/Oエラー
 pub const EIO: u64 = (-5i64) as u64;
-/// 不正なファイルディスクリプタ
-pub const EBADF: u64 = (-9i64) as u64;
 /// 受信/送信できない（キュー空/満杯）
 pub const EAGAIN: u64 = (-11i64) as u64;
 /// メモリ不足
