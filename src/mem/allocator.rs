@@ -170,6 +170,15 @@ impl HardenedKernelHeap {
     }
 
     fn grow(&self, minimum_bytes: usize) -> bool {
+        // The scheduler checks stack mappings under ThreadQueue. A timer on
+        // this CPU must not wait for that queue while growth owns PAGE_TABLE:
+        // another CPU can already own the queue and be waiting for our mapper.
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            self.grow_uninterruptible(minimum_bytes)
+        })
+    }
+
+    fn grow_uninterruptible(&self, minimum_bytes: usize) -> bool {
         let _growth = self.growth.lock();
         let committed = self.committed_bytes.load(Ordering::Acquire);
         if committed >= HEAP_SIZE {
