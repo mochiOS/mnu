@@ -110,7 +110,7 @@ pub fn query(cap_ptr: u64, cap_len: u64) -> u64 {
 pub fn clone_capability(_cap_ptr: u64, _cap_len: u64) -> u64 {
     let current = match current_process() {
         Some(pid) => pid,
-        None => return ENOSYS,
+        None => return Error::NotReady.into_raw(),
     };
     let cap = match read_capability_token_from_user(_cap_ptr, _cap_len) {
         Ok(cap) => cap,
@@ -121,14 +121,14 @@ pub fn clone_capability(_cap_ptr: u64, _cap_len: u64) -> u64 {
             if crate::task::process::process_has_capability(current, cap) {
                 SUCCESS
             } else {
-                EACCES
+                Error::AccessDenied.into_raw()
             }
         }
         CapabilityToken::Authority(authority) => {
             if crate::task::process::process_has_kernel_authority(current, &authority) {
                 SUCCESS
             } else {
-                EACCES
+                Error::AccessDenied.into_raw()
             }
         }
     }
@@ -137,7 +137,7 @@ pub fn clone_capability(_cap_ptr: u64, _cap_len: u64) -> u64 {
 pub fn drop_capability(_cap_ptr: u64, _cap_len: u64) -> u64 {
     let current = match current_process() {
         Some(pid) => pid,
-        None => return ENOSYS,
+        None => return Error::NotReady.into_raw(),
     };
     let cap = match read_capability_token_from_user(_cap_ptr, _cap_len) {
         Ok(cap) => cap,
@@ -148,12 +148,12 @@ pub fn drop_capability(_cap_ptr: u64, _cap_len: u64) -> u64 {
         CapabilityToken::Authority(authority) => {
             proc.kernel_authorities_mut().remove_exact(&authority)
         }
-    })
-    .unwrap_or(false);
-    if !removed {
-        return EACCES;
+    });
+    match removed {
+        Some(true) => SUCCESS,
+        Some(false) => Error::AccessDenied.into_raw(),
+        None => Error::NotReady.into_raw(),
     }
-    SUCCESS
 }
 
 pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {

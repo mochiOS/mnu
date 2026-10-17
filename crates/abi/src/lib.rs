@@ -120,7 +120,11 @@ pub enum SyscallNumber {
     /// Receives from the caller's queue or a caller-owned endpoint. Native
     /// NotReady indicates an empty queue only for the nonblocking form.
     IpcWait = 590,
+    /// Validates caller authority, including implication, without adding a
+    /// grant. Input, authority and context failures use status::Error.
     CapClone = 591,
+    /// Removes only an exact caller grant. An absent grant is AccessDenied;
+    /// a missing execution context is NotReady. Failures use status::Error.
     CapDrop = 592,
     CapTransfer = 593,
     /// Returns 1/0 for caller authority. Input and usercopy failures use
