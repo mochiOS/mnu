@@ -5,6 +5,7 @@ pub mod boot;
 
 /// Canonical metadata for named capabilities shared by kernel and user space.
 pub mod capability;
+pub mod completion;
 pub mod diagnostic;
 pub mod handle_snapshot;
 pub mod memory_map;

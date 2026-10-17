@@ -321,6 +321,7 @@ pub enum KernelObject {
     MemoryAdmission(Arc<crate::mem::vm_object::ProviderAdmission>),
     AddressSpace(Arc<crate::mem::address_space::AddressSpaceObject>),
     HandleSnapshot(Arc<super::handle_snapshot::HandleSnapshot>),
+    Completion(super::owned_executor::Receipt),
     File(Arc<FileHandle>),
     Provider(Arc<ProviderObject>),
 }
@@ -354,6 +355,7 @@ impl KernelObject {
             (Self::MemoryAdmission(left), Self::MemoryAdmission(right)) => Arc::ptr_eq(left, right),
             (Self::AddressSpace(left), Self::AddressSpace(right)) => Arc::ptr_eq(left, right),
             (Self::HandleSnapshot(left), Self::HandleSnapshot(right)) => Arc::ptr_eq(left, right),
+            (Self::Completion(left), Self::Completion(right)) => left.is_same(right),
             (Self::File(left), Self::File(right)) => Arc::ptr_eq(left, right),
             (Self::Provider(left), Self::Provider(right)) => Arc::ptr_eq(left, right),
             _ => false,
@@ -381,6 +383,7 @@ impl core::fmt::Debug for KernelObject {
             Self::Thread(thread) => formatter.debug_tuple("Thread").field(thread).finish(),
             Self::VmObject(id) => formatter.debug_tuple("VmObject").field(id).finish(),
             Self::MemoryUpdate(_) => formatter.write_str("MemoryUpdate(..)"),
+            Self::Completion(_) => formatter.write_str("Completion(..)"),
             Self::MemoryAdmission(_) => formatter.write_str("MemoryAdmission(..)"),
             Self::AddressSpace(image) => formatter.debug_tuple("AddressSpace").field(image).finish(),
             Self::HandleSnapshot(snapshot) => formatter

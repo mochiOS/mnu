@@ -239,6 +239,7 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
     let object = match object_native(raw, required) {
         Ok(object @ (KernelObject::Provider(_) | KernelObject::VmObject(_))) => object,
         Ok(object @ KernelObject::HandleSnapshot(_)) if !write => object,
+        Ok(object @ KernelObject::Completion(_)) if !write => object,
         Ok(_) => return Error::InvalidArgument.into_raw(),
         Err(error) => return error.into_raw(),
     };
@@ -324,6 +325,7 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
             KernelObject::HandleSnapshot(snapshot) => {
                 Ok(snapshot.read_at(position, &mut data[..chunk]))
             }
+            KernelObject::Completion(receipt) => Ok(receipt.read_at(position, &mut data[..chunk])),
             _ => return Error::InvalidArgument.into_raw(),
         };
         let count = match result {
@@ -1596,6 +1598,7 @@ pub fn process_wait(raw: u64, deadline_nanoseconds: u64, output: u64) -> u64 {
 
 #[derive(Clone)]
 enum WaitTarget {
+    Completion(crate::task::owned_executor::Receipt),
     Process(crate::task::ProcessId),
     IpcEndpoint(crate::syscall::ipc::IpcEndpoint),
     Stream(Arc<crate::task::FileHandle>),
@@ -1665,6 +1668,14 @@ fn wait_item_signal(
                 0
             };
             Ok((WaitTarget::Process(process_id), exited))
+        }
+        KernelObject::Completion(receipt) => {
+            if item.interests & !mnu_abi::HANDLE_SIGNAL_READABLE != 0 {
+                return Err(Error::InvalidArgument.into_raw());
+            }
+            let ready = receipt.result().is_some();
+            item.observed = if ready { mnu_abi::HANDLE_SIGNAL_READABLE } else { 0 };
+            Ok((WaitTarget::Completion(receipt), ready))
         }
         KernelObject::IpcEndpoint {
             thread_id,
@@ -1836,6 +1847,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
     let registered_providers = &mut registrations.providers;
     let mut endpoint_lifetimes = alloc::vec::Vec::new();
     let mut admission_waiters = alloc::vec::Vec::<memory_update::AdmissionWaiter>::new();
+    let mut completion_waiters = alloc::vec::Vec::new();
     let mut sources = alloc::vec::Vec::new();
     let mut targets = alloc::vec::Vec::new();
     // Each item contributes at most one target/subscription of each kind.
@@ -1845,6 +1857,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         || registered_providers.try_reserve_exact(count).is_err()
         || endpoint_lifetimes.try_reserve_exact(count).is_err()
         || admission_waiters.try_reserve_exact(count).is_err()
+        || completion_waiters.try_reserve_exact(count).is_err()
         || sources.try_reserve_exact(count).is_err()
         || targets.try_reserve_exact(count).is_err()
     {
@@ -1876,6 +1889,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         registered_providers.clear();
         endpoint_lifetimes.clear();
         admission_waiters.clear();
+        completion_waiters.clear();
         crate::syscall::time::disarm_thread_deadline(current);
         targets.clear();
         let mut ready = None;
@@ -1950,6 +1964,13 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         }
         for target in targets.drain(..) {
             match target {
+                WaitTarget::Completion(receipt) => {
+                    match receipt.subscribe(current.as_u64()) {
+                        Ok(Some(subscription)) => completion_waiters.push(subscription),
+                        Ok(None) => {},
+                        Err(error) => return error.into_raw(),
+                    }
+                }
                 WaitTarget::MemoryAdmission(admission) => {
                     let registered = (|| {
                         let endpoint = memory_update::admission_endpoint(&admission);

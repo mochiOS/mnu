@@ -7,18 +7,89 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use mnu_abi::status::Error;
 
+const MAX_WAITERS: usize = crate::task::ThreadQueue::MAX_THREADS;
+
 struct ResultState {
     phase: AtomicU8,
     error: AtomicU64,
+    waiters: SpinLock<[Option<(u64, usize)>; MAX_WAITERS]>,
 }
 
 /// Pending and a terminal failure with value zero are distinct. The status is
 /// retained independently of the submitted payload and needs no allocation to
 /// publish or read. Cloning this receipt grants no resource or queue authority.
 #[derive(Clone)]
-pub(crate) struct Receipt(Arc<ResultState>);
+pub struct Receipt(Arc<ResultState>);
+
+/// A subscription owns only a result reference, never execution authority.
+/// Duplicate registrations by a thread are reference counted so removing one
+/// wait item cannot remove another item's wakeup registration.
+pub(crate) struct Subscription {
+    receipt: Receipt,
+    slot: usize,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        let mut waiters = self.receipt.0.waiters.lock();
+        if let Some((_, count)) = &mut waiters[self.slot] {
+            *count -= 1;
+            if *count == 0 {
+                waiters[self.slot] = None;
+            }
+        }
+    }
+}
 
 impl Receipt {
+    pub(crate) fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub(crate) fn read_at(&self, offset: u64, output: &mut [u8]) -> usize {
+        let bytes = mnu_abi::completion::encode(self.result());
+        let Ok(offset) = usize::try_from(offset) else {
+            return 0;
+        };
+        let Some(bytes) = bytes.get(offset..) else {
+            return 0;
+        };
+        let count = bytes.len().min(output.len());
+        output[..count].copy_from_slice(&bytes[..count]);
+        count
+    }
+
+    /// The caller must recheck readiness before sleeping and use the native
+    /// latched wake/sleep protocol. Registration and terminal publication share
+    /// exclusion; a racing completion either wakes this thread or is observed
+    /// here. No allocation is required after accepting the operation.
+    pub(crate) fn subscribe(&self, thread: u64) -> Result<Option<Subscription>, Error> {
+        if thread == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        let mut waiters = self.0.waiters.lock();
+        if self.result().is_some() {
+            return Ok(None);
+        }
+        let slot = match waiters
+            .iter()
+            .position(|entry| entry.is_some_and(|(id, _)| id == thread))
+        {
+            Some(slot) => slot,
+            None => waiters
+                .iter()
+                .position(Option::is_none)
+                .ok_or(Error::ResourceUnavailable)?,
+        };
+        let count = waiters[slot].map_or(0, |(_, count)| count);
+        let count = count.checked_add(1).ok_or(Error::LimitExceeded)?;
+        waiters[slot] = Some((thread, count));
+        Ok(Some(Subscription {
+            receipt: self.clone(),
+            slot,
+        }))
+    }
+
     pub(crate) fn result(&self) -> Option<Result<(), u64>> {
         match self.0.phase.load(Ordering::Acquire) {
             0 => None,
@@ -36,6 +107,10 @@ impl Receipt {
             }
         };
         self.0.phase.store(phase, Ordering::Release);
+        let waiters = core::mem::replace(&mut *self.0.waiters.lock(), [None; MAX_WAITERS]);
+        for (thread, _) in waiters.into_iter().flatten() {
+            crate::task::wake_registered_waiter(crate::task::ThreadId::from_u64(thread));
+        }
     }
 }
 
@@ -79,6 +154,7 @@ impl<T, const N: usize> Executor<T, N> {
         let receipt = match Arc::try_new(ResultState {
             phase: AtomicU8::new(0),
             error: AtomicU64::new(0),
+            waiters: SpinLock::new([None; MAX_WAITERS]),
         }) {
             Ok(state) => Receipt(state),
             Err(_) => return Err((Error::ResourceUnavailable, value)),
