@@ -1179,8 +1179,6 @@ pub const EEXIST: u64 = (-17i64) as u64;
 pub const EINVAL: u64 = (-22i64) as u64;
 /// ファイルディスクリプタが多すぎる
 pub const EMFILE: u64 = (-24i64) as u64;
-/// ファイルが実装上の最大サイズを超える
-pub const EFBIG: u64 = (-27i64) as u64;
 /// ディスク/ストレージに空きがない
 pub const ENOSPC: u64 = (-28i64) as u64;
 /// パイプが壊れている
