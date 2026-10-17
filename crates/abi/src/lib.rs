@@ -163,6 +163,8 @@ pub enum SyscallNumber {
     /// revocation retains the ownership record and returns a native failure.
     DmaFree = 605,
     RandomFill = 607,
+    /// Snapshots bounded user pixels before platform I/O. Authority, size,
+    /// allocation, usercopy and transport failures use status::Error.
     PresentFramebuffer = 610,
     /// Native authority/transport/usercopy failures use status::Error. The
     /// platform's response status remains opaque in StorageControlResponse.

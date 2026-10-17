@@ -22,6 +22,7 @@ pub mod time;
 pub mod upcall;
 mod usercopy_error;
 mod user_output;
+mod owned_buffer;
 pub(crate) use user_output::with_user_output_native;
 pub(crate) use upcall::prepare_user_exception;
 
@@ -37,8 +38,7 @@ const FIRMWARE_PRESENT_MAX: usize = mnu_abi::hypervisor::FIRMWARE_FRAMEBUFFER_MA
 static FIRMWARE_PRESENT_BUFFER: crate::interrupt::spinlock::SpinLock<[u8; FIRMWARE_PRESENT_MAX]> =
     crate::interrupt::spinlock::SpinLock::new([0; FIRMWARE_PRESENT_MAX]);
 const PLATFORM_PRESENT_MAX: usize = 1024 * 1024;
-static PLATFORM_PRESENT_BUFFER: crate::interrupt::spinlock::SpinLock<Vec<u8>> =
-    crate::interrupt::spinlock::SpinLock::new(Vec::new());
+static PRESENT_BUFFERS: owned_buffer::Pool = owned_buffer::Pool::new(PLATFORM_PRESENT_MAX);
 
 /// ユーザー空間ポインタの有効性を検証する
 ///
@@ -313,10 +313,10 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
 
 pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len: u64) -> u64 {
     use crate::capability::Capability;
-    use crate::syscall::types::{EACCES, EFAULT, EINVAL, EIO, SUCCESS};
+    use mnu_abi::status::Error;
 
     if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let x = position as u32;
     let y = (position >> 32) as u32;
@@ -331,19 +331,39 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
         })
         .and_then(|pixels| pixels.checked_mul(4))
     else {
-        return EINVAL;
+        return Error::LimitExceeded.into_raw();
     };
-    if pixels_ptr == 0 || pixels_len != expected as u64 || expected == 0 {
-        return EINVAL;
+    if pixels_ptr == 0 {
+        return Error::InvalidAddress.into_raw();
     }
-    if crate::hypervisor_guest::is_active() && crate::util::vga::get_info().is_some() {
-        if expected > FIRMWARE_PRESENT_MAX {
-            return EINVAL;
+    if pixels_len != expected as u64 || expected == 0 {
+        return Error::InvalidArgument.into_raw();
+    }
+    let firmware = crate::hypervisor_guest::is_active() && crate::util::vga::get_info().is_some();
+    let transfer_limit = if firmware {
+        FIRMWARE_PRESENT_MAX
+    } else {
+        match crate::platform::display_transfer_limit() {
+            Ok(limit) if limit != 0 && limit <= PLATFORM_PRESENT_MAX => limit,
+            Ok(_) => return Error::BackingFailure.into_raw(),
+            Err(error) => return error.native().into_raw(),
         }
+    };
+    if expected > transfer_limit {
+        return Error::LimitExceeded.into_raw();
+    }
+    let mut pixels = match PRESENT_BUFFERS.acquire(expected) {
+        Ok(pixels) => pixels,
+        Err(error) => return error.into_raw(),
+    };
+    // The snapshot is exclusively owned. Provider faults and the platform
+    // callback must never run while the cache or firmware buffer is locked.
+    if let Err(error) = copy_from_user_native(pixels_ptr, pixels.bytes_mut()) {
+        return error.into_raw();
+    }
+    if firmware {
         let mut buffer = FIRMWARE_PRESENT_BUFFER.lock();
-        if copy_from_user(pixels_ptr, &mut buffer[..expected]).is_err() {
-            return EFAULT;
-        }
+        buffer[..expected].copy_from_slice(pixels.bytes());
         let result = crate::hypervisor_guest::invoke(
             mnu_abi::hypervisor::HypercallNumber::FirmwareFramebufferPresent,
             position,
@@ -353,30 +373,12 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
         return if result == mnu_abi::hypervisor::HYPERCALL_SUCCESS {
             SUCCESS
         } else {
-            EIO
+            Error::BackingFailure.into_raw()
         };
     }
-    let transfer_limit = match crate::platform::display_transfer_limit() {
-        Ok(limit) if limit != 0 && limit <= PLATFORM_PRESENT_MAX => limit,
-        _ => return EIO,
-    };
-    if expected > transfer_limit {
-        return EINVAL;
-    }
-    let mut pixels = PLATFORM_PRESENT_BUFFER.lock();
-    if expected > pixels.len() {
-        let additional = expected - pixels.len();
-        if pixels.try_reserve_exact(additional).is_err() {
-            return crate::syscall::types::ENOMEM;
-        }
-        pixels.resize(expected, 0);
-    }
-    if copy_from_user(pixels_ptr, &mut pixels[..expected]).is_err() {
-        return EFAULT;
-    }
-    match crate::platform::present_display(x, y, width, height, &pixels[..expected]) {
+    match crate::platform::present_display(x, y, width, height, pixels.bytes()) {
         Ok(()) => SUCCESS,
-        Err(_) => EIO,
+        Err(error) => error.native().into_raw(),
     }
 }
 
