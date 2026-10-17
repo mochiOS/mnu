@@ -1163,7 +1163,12 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
 pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
     use mnu_abi::status::Error;
 
-    if options & !mnu_abi::MEMORY_SYNC_DEFERRED != 0 || length == 0 || addr & 4095 != 0 {
+    let refresh = options & mnu_abi::MEMORY_SYNC_REFRESH != 0;
+    if options & !(mnu_abi::MEMORY_SYNC_DEFERRED | mnu_abi::MEMORY_SYNC_REFRESH) != 0
+        || (refresh && options & mnu_abi::MEMORY_SYNC_DEFERRED == 0)
+        || length == 0
+        || addr & 4095 != 0
+    {
         return Error::InvalidArgument.into_raw();
     }
     if addr == 0 {
@@ -1183,10 +1188,18 @@ pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
     // Snapshot owned backing references while validating the entire range.
     // Provider IPC must not execute under the process-table lock. A concurrent
     // unmap/remap cannot redirect this operation to a different backing.
+    let mut denied = false;
     let work = match crate::task::with_process(pid, |process| {
         crate::mem::range_plan::collect(addr, sync_len, |cursor| {
             let region = process.find_memory_region(cursor)?;
             let end = region.end()?;
+            if refresh
+                && region.is_shared()
+                && region.backing().file_object().is_some()
+                && !region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE)
+            {
+                denied = true;
+            }
             let backing = if region.is_shared() && region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE)
             {
                 match region.backing().file_object() {
@@ -1209,9 +1222,12 @@ pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
         Some(Err(error)) => return error.into_raw(),
         None => return Error::NotReady.into_raw(),
     };
+    if denied {
+        return Error::AccessDenied.into_raw();
+    }
     let work = crate::mem::writeback::Batch::new(work);
     if options & mnu_abi::MEMORY_SYNC_DEFERRED != 0 {
-        return crate::mem::writeback_worker::submit(pid, work);
+        return crate::mem::writeback_worker::submit(pid, work, refresh);
     }
     if let Err(error) = work.execute(|object, offset, length| object.flush_range(offset, length)) {
         return error;

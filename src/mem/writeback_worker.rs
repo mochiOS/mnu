@@ -11,7 +11,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 use mnu_abi::status::Error;
 
-type Work = Batch<Arc<VmObject>>;
+type Work = (Batch<Arc<VmObject>>, bool);
 static EXECUTOR: Executor<Work, 32> = Executor::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
 const STACK_SIZE: usize = 32 * 1024;
@@ -40,7 +40,20 @@ pub(crate) fn start(process: task::ProcessId) -> Result<(), Error> {
 fn run() -> ! {
     loop {
         if EXECUTOR.run_one(
-            |work| work.execute(|object, offset, length| object.flush_range(offset, length)),
+            |(work, refresh)| {
+                work.execute(|object, offset, length| {
+                    if !refresh
+                        || matches!(object.object_key(), super::vm_object::ObjectKey::Memory(_))
+                    {
+                        return object.flush_range(offset, length);
+                    }
+                    let mut owner = super::extent_transaction::ExtentTransaction::prepare_refresh(
+                        object, offset, length,
+                    )?;
+                    owner.writeback_refresh()?;
+                    owner.publish_local()
+                })
+            },
             || {},
         ) {
             continue;
@@ -58,8 +71,8 @@ fn run() -> ! {
 /// Reserve the result Handle before making the job executable. Handle-table
 /// failure, queue pressure and missing context perform no backing I/O. The
 /// caller's table is never locked during cleanup, wakeup or provider IPC.
-pub(crate) fn submit(process: task::ProcessId, work: Work) -> u64 {
-    let submission = match Executor::<Work, 32>::prepare(work) {
+pub(crate) fn submit(process: task::ProcessId, work: Batch<Arc<VmObject>>, refresh: bool) -> u64 {
+    let submission = match Executor::<Work, 32>::prepare((work, refresh)) {
         Ok(submission) => submission,
         Err((error, _work)) => return error.into_raw(),
     };
