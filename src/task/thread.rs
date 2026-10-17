@@ -955,7 +955,7 @@ impl Thread {
                         crate::audit::AuditEventKind::Fault,
                         "usermode_entry_trampoline without current thread",
                     );
-                    crate::task::exit_current_task(crate::syscall::EINVAL);
+                    crate::task::exit_current_task(mnu_abi::status::Error::NotReady.into_raw());
                 }
             };
             let (entry, stack) =
@@ -967,7 +967,7 @@ impl Thread {
                             crate::audit::AuditEventKind::Fault,
                             "usermode_entry_trampoline missing thread metadata",
                         );
-                        crate::task::exit_current_task(crate::syscall::EINVAL);
+                        crate::task::exit_current_task(mnu_abi::status::Error::NotFound.into_raw());
                     }
                 };
 
@@ -1089,7 +1089,7 @@ impl Thread {
                         crate::audit::AuditEventKind::Fault,
                         "user_resume_trampoline without current thread",
                     );
-                    crate::task::exit_current_task(crate::syscall::EINVAL);
+                    crate::task::exit_current_task(mnu_abi::status::Error::NotReady.into_raw());
                 }
             };
             let (user_context, rax, fs_base) = match with_thread(tid, |thread| {
@@ -1106,7 +1106,7 @@ impl Thread {
                         crate::audit::AuditEventKind::Fault,
                         "user_resume_trampoline missing thread metadata",
                     );
-                    crate::task::exit_current_task(crate::syscall::EINVAL);
+                    crate::task::exit_current_task(mnu_abi::status::Error::NotFound.into_raw());
                 }
             };
             unsafe {

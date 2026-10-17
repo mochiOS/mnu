@@ -1,7 +1,3 @@
 //! システムコール ABI の共通定義
 
-pub use mnu_abi::{
-    SyscallNumber, EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EFBIG, EINVAL, EIO,
-    EMFILE, EMSGSIZE, ENODATA, ENOENT, ENOMEM, ENOSPC, ENOSYS, ENOTSUP, ENXIO,
-    EOVERFLOW, EPERM, EPIPE, ERANGE, ESRCH, SUCCESS,
-};
+pub use mnu_abi::{SyscallNumber, SUCCESS};

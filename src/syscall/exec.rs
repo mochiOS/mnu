@@ -641,8 +641,10 @@ pub(crate) fn launch_bootstrap_image(
     initial_kernel_authorities: KernelAuthoritySet,
     requested_privilege: crate::task::PrivilegeLevel,
 ) -> u64 {
+    use mnu_abi::status::Error;
+
     let Some(data) = crate::init::fs::read_initfs(path) else {
-        return crate::syscall::types::ENOENT;
+        return Error::NotFound.into_raw();
     };
     crate::performance::increment(
         crate::performance::CounterMetric::ExecutableBytesRead,
