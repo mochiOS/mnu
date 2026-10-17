@@ -13,6 +13,9 @@ pub(crate) use extent::PreparedExtent;
 #[path = "vm_object/admission.rs"]
 mod admission;
 pub(crate) use admission::ProviderAdmission;
+#[path = "vm_object/refresh.rs"]
+mod refresh;
+pub(crate) use refresh::PreparedRefresh;
 
 pub const PAGE_BYTES: usize = 4096;
 
@@ -631,6 +634,12 @@ impl VmObject {
         } else {
             None
         };
+        self.flush_provider_range(offset, range_end)
+    }
+
+    /// The caller owns the canonical I/O gate, either as ordinary I/O or as
+    /// a mapping/cache reservation. No VM exclusion may be held during IPC.
+    fn flush_provider_range(&self, offset: u64, range_end: u64) -> Result<(), u64> {
         let snapshots = {
             let mut cache = PAGE_CACHE.lock();
             let mut snapshots = Vec::new();
