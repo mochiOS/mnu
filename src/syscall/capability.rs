@@ -264,7 +264,7 @@ pub fn restrict_capability(
 ) -> u64 {
     let current = match current_process() {
         Some(pid) => pid,
-        None => return ENOSYS,
+        None => return Error::NotReady.into_raw(),
     };
     let cap = match read_capability_token_from_user(_cap_ptr, _cap_len) {
         Ok(cap) => cap,
@@ -274,58 +274,47 @@ pub fn restrict_capability(
         Ok(cap) => cap,
         Err(e) => return e,
     };
-    match (cap, restriction) {
+    let changed = match (cap, restriction) {
         (CapabilityToken::Plain(cap), CapabilityToken::Plain(restriction)) => {
-            if !crate::task::with_process(current, |proc| proc.capabilities().contains_exact(cap))
-                .unwrap_or(false)
-            {
-                return EACCES;
-            }
             if !crate::capability::capability_implies(cap, restriction) {
-                return EACCES;
+                return Error::AccessDenied.into_raw();
             }
-            if crate::task::with_process_mut(current, |proc| {
+            crate::task::with_process_mut(current, |proc| {
                 let caps = proc.capabilities_mut();
-                if !caps.remove(cap) {
-                    return false;
+                if !caps.contains_exact(cap) {
+                    return Err(Error::AccessDenied);
                 }
-                caps.insert(restriction);
-                true
+                if cap != restriction {
+                    // Removal leaves capacity for the replacement in this Vec.
+                    // Neither step allocates or escapes the process-table lock.
+                    caps.remove(cap);
+                    caps.insert(restriction);
+                }
+                Ok(())
             })
-            .unwrap_or(false)
-            {
-                SUCCESS
-            } else {
-                ENOSYS
-            }
         }
         (CapabilityToken::Authority(cap), CapabilityToken::Authority(restriction)) => {
-            if !crate::task::with_process(current, |proc| {
-                proc.kernel_authorities().contains_exact(&cap)
-            })
-            .unwrap_or(false)
-            {
-                return EACCES;
-            }
             if !kernel_authority_implies(&cap, &restriction) {
-                return EACCES;
+                return Error::AccessDenied.into_raw();
             }
-            if crate::task::with_process_mut(current, |proc| {
+            crate::task::with_process_mut(current, |proc| {
                 let authorities = proc.kernel_authorities_mut();
-                if !authorities.remove_exact(&cap) {
-                    return false;
+                if !authorities.contains_exact(&cap) {
+                    return Err(Error::AccessDenied);
                 }
-                authorities.insert(restriction);
-                true
+                if cap != restriction {
+                    authorities.remove_exact(&cap);
+                    authorities.insert(restriction);
+                }
+                Ok(())
             })
-            .unwrap_or(false)
-            {
-                SUCCESS
-            } else {
-                ENOSYS
-            }
         }
-        _ => EINVAL,
+        _ => return Error::InvalidArgument.into_raw(),
+    };
+    match changed {
+        Some(Ok(())) => SUCCESS,
+        Some(Err(error)) => error.into_raw(),
+        None => Error::NotReady.into_raw(),
     }
 }
 
@@ -405,7 +394,7 @@ fn intern_capability_token(spec: &str) -> Option<CapabilityToken> {
 
 fn read_capability_token_from_user(cap_ptr: u64, cap_len: u64) -> Result<CapabilityToken, u64> {
     let spec = read_capability_spec_from_user(cap_ptr, cap_len)?;
-    parse_capability_token(spec.as_str()).ok_or(EINVAL)
+    parse_capability_token(spec.as_str()).ok_or(Error::InvalidArgument.into_raw())
 }
 
 #[cfg(test)]

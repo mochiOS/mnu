@@ -126,6 +126,9 @@ pub enum SyscallNumber {
     /// Returns 1/0 for caller authority. Input and usercopy failures use
     /// status::Error; a missing caller context is NotReady.
     CapQuery = 594,
+    /// Replaces an exact caller authority with an implied narrower authority.
+    /// Input failures leave the original set unchanged; local failures use
+    /// status::Error. The locked replacement itself needs no allocation.
     CapRestrict = 595,
     TimeNow = 600,
     /// Allocates caller-owned DMA bytes. Local input, backing, allocation and
