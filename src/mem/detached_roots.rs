@@ -14,6 +14,7 @@ pub(crate) struct Mapping {
     pub start: u64,
     pub length: u64,
     pub offset: u64,
+    pub shared: bool,
 }
 
 pub(crate) struct Root {
@@ -46,6 +47,7 @@ impl Root {
                     start: region.start(),
                     length: region.len(),
                     offset: region.backing().file_offset(),
+                    shared: region.is_shared(),
                 });
             }
         }

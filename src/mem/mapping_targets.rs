@@ -25,6 +25,28 @@ impl Targets {
         end: u64,
         boundary: u64,
     ) -> Result<Self, Error> {
+        Self::capture_filtered(table, identity, start, end, boundary, false)
+    }
+
+    /// Cache refresh targets shared aliases only. Private/COW frames retain
+    /// their independent bytes, including in not-yet-published roots.
+    pub(crate) fn capture_shared(
+        table: &crate::task::process::ProcessTable,
+        identity: ObjectKey,
+        start: u64,
+        end: u64,
+    ) -> Result<Self, Error> {
+        Self::capture_filtered(table, identity, start, end, 0, true)
+    }
+
+    fn capture_filtered(
+        table: &crate::task::process::ProcessTable,
+        identity: ObjectKey,
+        start: u64,
+        end: u64,
+        boundary: u64,
+        shared_only: bool,
+    ) -> Result<Self, Error> {
         if start > end || start & 4095 != 0 || end & 4095 != 0 {
             return Err(Error::InvalidArgument);
         }
@@ -42,7 +64,7 @@ impl Targets {
             for mapping in root
                 .mappings()
                 .iter()
-                .filter(|mapping| mapping.identity == identity)
+                .filter(|mapping| mapping.identity == identity && (!shared_only || mapping.shared))
             {
                 targets.add(
                     root.table(),
@@ -60,6 +82,9 @@ impl Targets {
                 continue;
             };
             for region in process.memory_regions() {
+                if shared_only && !region.is_shared() {
+                    continue;
+                }
                 if region
                     .backing()
                     .file_object()
