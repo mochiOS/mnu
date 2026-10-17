@@ -14,7 +14,7 @@ pub use memory_update::create_admission as provider_memory_admission_create;
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
 use super::{
-    EACCES, EBADF, EFAULT, EINVAL, EIO, ENOSYS, ENOTSUP,
+    EACCES, EBADF, EINVAL, EIO, ENOSYS, ENOTSUP,
     SUCCESS,
 };
 
@@ -265,15 +265,17 @@ pub fn write_at(raw: u64, buffer: u64, length: u64, offset: u64) -> u64 {
 }
 
 fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -> u64 {
+    use mnu_abi::status::Error;
+
     let required = if write { HandleRights::WRITE } else { HandleRights::READ };
-    let object = match object(raw, required) {
+    let object = match object_native(raw, required) {
         Ok(object @ (KernelObject::Provider(_) | KernelObject::VmObject(_))) => object,
         Ok(object @ KernelObject::HandleSnapshot(_)) if !write => object,
-        Ok(_) => return ENOTSUP,
-        Err(error) => return error,
+        Ok(_) => return Error::InvalidArgument.into_raw(),
+        Err(error) => return error.into_raw(),
     };
     if length > isize::MAX as u64 || offset.checked_add(length).is_none() {
-        return EINVAL;
+        return Error::LimitExceeded.into_raw();
     }
     if length == 0 {
         return SUCCESS;
@@ -289,7 +291,7 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
     let capacity = (length as usize).min(mnu_abi::provider::MAX_DATA_LEN);
     let mut data = alloc::vec::Vec::new();
     if data.try_reserve_exact(capacity).is_err() {
-        return super::ENOMEM;
+        return Error::ResourceUnavailable.into_raw();
     }
     data.resize(capacity, 0);
     let mut done = 0usize;
@@ -297,13 +299,19 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
         let chunk = (length as usize - done).min(capacity);
         let address = match buffer.checked_add(done as u64) {
             Some(address) => address,
-            None => return if done == 0 { EFAULT } else { done as u64 },
+            None => {
+                return if done == 0 {
+                    Error::InvalidAddress.into_raw()
+                } else {
+                    done as u64
+                };
+            }
         };
         // A source/destination fault can load the same backing object. User
         // copies must never execute while its provider I/O guard is held.
         if write {
-            if let Err(error) = crate::syscall::copy_from_user(address, &mut data[..chunk]) {
-                return if done == 0 { error } else { done as u64 };
+            if let Err(error) = crate::syscall::copy_from_user_native(address, &mut data[..chunk]) {
+                return if done == 0 { error.into_raw() } else { done as u64 };
             }
         }
         let position = offset + done as u64;
@@ -318,16 +326,22 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
                     Err(error) => return if done == 0 { error } else { done as u64 },
                 };
                 if write {
-                    provider_write_at(provider, position, &data[..chunk]).map(|count| {
+                    provider_write_at(provider, position, &data[..chunk]).and_then(|count| {
+                        if count > chunk {
+                            return Err(Error::BackingFailure.into_raw());
+                        }
                         if let Some(guard) = &_guard {
                             crate::mem::vm_object::update_provider_range(
                                 guard, position, &data[..count],
                             );
                         }
-                        count
+                        Ok(count)
                     })
                 } else {
                     provider_read_at(provider, position, &mut data[..chunk]).and_then(|count| {
+                        if count > chunk {
+                            return Err(Error::BackingFailure.into_raw());
+                        }
                         if let Some(identity) = identity {
                             crate::mem::vm_object::overlay_provider_range(
                                 provider, identity, position, &mut data[..count],
@@ -342,16 +356,22 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
             KernelObject::HandleSnapshot(snapshot) => {
                 Ok(snapshot.read_at(position, &mut data[..chunk]))
             }
-            _ => return ENOTSUP,
+            _ => return Error::InvalidArgument.into_raw(),
         };
         let count = match result {
             Ok(count) if count <= chunk => count,
-            Ok(_) => return if done == 0 { EIO } else { done as u64 },
+            Ok(_) => {
+                return if done == 0 {
+                    Error::BackingFailure.into_raw()
+                } else {
+                    done as u64
+                };
+            }
             Err(error) => return if done == 0 { error } else { done as u64 },
         };
         if !write {
-            if let Err(error) = crate::syscall::copy_to_user(address, &data[..count]) {
-                return if done == 0 { error } else { done as u64 };
+            if let Err(error) = crate::syscall::copy_to_user_native(address, &data[..count]) {
+                return if done == 0 { error.into_raw() } else { done as u64 };
             }
         }
         done += count;

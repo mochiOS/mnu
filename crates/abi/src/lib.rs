@@ -279,9 +279,11 @@ pub enum SyscallNumber {
     MemoryObjectLength = 672,
     /// Reads bytes at an explicit object offset without moving its cursor.
     /// Arguments: Handle, destination, byte length, unsigned object offset.
+    /// Mechanism failures use status::Error; successful prefixes are retained.
     HandleReadAt = 673,
     /// Writes bytes at an explicit object offset without moving its cursor.
     /// Arguments: Handle, source, byte length, unsigned object offset.
+    /// Mechanism failures use status::Error; successful prefixes are retained.
     HandleWriteAt = 674,
     /// Writes an available prefix to a stream. Arguments: Handle, source,
     /// length, per-call options. STREAM_WRITE_COMPLETE requests all-or-none.
