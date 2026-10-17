@@ -82,6 +82,8 @@ pub enum SyscallNumber {
     PortIn = 520,
     /// Writes the low width bytes under the same native port contract.
     PortOut = 521,
+    /// Copies native display geometry. Backend and usercopy failures retain
+    /// status::Error categories rather than selecting a POSIX errno.
     GetFramebufferInfo = 528,
     /// Maps borrowed display storage under display authority. Validation,
     /// allocation, capacity and VM failures use status::Error.
@@ -169,7 +171,10 @@ pub enum SyscallNumber {
     /// profile authority. Failures use status::Error; a build without sampling
     /// returns Unsupported rather than a retryable NotReady.
     PerformanceSnapshot = 612,
+    /// Positive byte limit, or a native authority/backend failure.
     FramebufferTransferLimit = 613,
+    /// Commits display storage under display authority. Validation and
+    /// platform failures use status::Error without errno translation.
     CommitFramebuffer = 614,
     /// StorageControl's mechanism with an explicit, bounded authority name.
     DeviceControl = 615,

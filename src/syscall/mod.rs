@@ -257,7 +257,7 @@ struct UserFramebufferInfo {
 }
 
 pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
-    use crate::syscall::types::{ENXIO, SUCCESS};
+    use mnu_abi::status::Error;
 
     let mediated = crate::hypervisor_guest::is_active();
     let out = if let Some(info) = crate::util::vga::get_info() {
@@ -273,12 +273,11 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
                 0
             },
         }
-    } else if let Some(info) = mediated
-        .then(crate::platform::display_info)
-        .transpose()
-        .ok()
-        .flatten()
-    {
+    } else if mediated {
+        let info = match crate::platform::display_info() {
+            Ok(info) => info,
+            Err(error) => return error.native().into_raw(),
+        };
         UserFramebufferInfo {
             addr: info.surface_address,
             size: if info.shared_surface {
@@ -298,7 +297,7 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
             },
         }
     } else {
-        return ENXIO;
+        return Error::NotReady.into_raw();
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -306,9 +305,9 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
             core::mem::size_of::<UserFramebufferInfo>(),
         )
     };
-    match copy_to_user(out_ptr, bytes) {
+    match copy_to_user_native(out_ptr, bytes) {
         Ok(()) => SUCCESS,
-        Err(err) => err,
+        Err(error) => error.into_raw(),
     }
 }
 
@@ -383,37 +382,38 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
 
 pub fn framebuffer_transfer_limit() -> u64 {
     use crate::capability::Capability;
-    use crate::syscall::types::{EACCES, EIO};
+    use mnu_abi::status::Error;
 
     if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     if crate::hypervisor_guest::is_active() && crate::util::vga::get_info().is_some() {
         return FIRMWARE_PRESENT_MAX as u64;
     }
     match crate::platform::display_transfer_limit() {
         Ok(limit) if limit != 0 && limit <= PLATFORM_PRESENT_MAX => limit as u64,
-        _ => EIO,
+        Ok(_) => Error::BackingFailure.into_raw(),
+        Err(error) => error.native().into_raw(),
     }
 }
 
 pub fn commit_framebuffer(position: u64, size: u64) -> u64 {
     use crate::capability::Capability;
-    use crate::syscall::types::{EACCES, EINVAL, EIO, SUCCESS};
+    use mnu_abi::status::Error;
 
     if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
     let x = position as u32;
     let y = (position >> 32) as u32;
     let width = size as u32;
     let height = (size >> 32) as u32;
     if width == 0 || height == 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     match crate::platform::commit_display(x, y, width, height) {
         Ok(()) => SUCCESS,
-        Err(_) => EIO,
+        Err(error) => error.native().into_raw(),
     }
 }
 

@@ -13,6 +13,19 @@ pub enum PlatformError {
     Transport,
 }
 
+impl PlatformError {
+    /// Platform mechanism failures never select a userspace errno namespace.
+    pub(crate) const fn native(self) -> mnu_abi::status::Error {
+        use mnu_abi::status::Error;
+        match self {
+            Self::Unsupported => Error::Unsupported,
+            Self::Unavailable => Error::NotReady,
+            Self::InvalidRequest => Error::InvalidArgument,
+            Self::Transport => Error::BackingFailure,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DisplayInfo {
     pub width: u32,
