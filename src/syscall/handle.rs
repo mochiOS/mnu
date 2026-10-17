@@ -179,36 +179,36 @@ pub(crate) fn object_with_rights(
 }
 
 pub fn read(raw: u64, buffer: u64, length: u64) -> u64 {
-    let object = match object(raw, HandleRights::READ) {
+    let object = match object_native(raw, HandleRights::READ) {
         Ok(object) => object,
-        Err(error) => return error,
+        Err(error) => return error.into_raw(),
     };
     match object {
         KernelObject::File(file) => crate::syscall::fs::read_file_handle(&file, buffer, length),
         KernelObject::Provider(provider) => provider_read(&provider, buffer, length),
-        _ => EBADF,
+        _ => mnu_abi::status::Error::InvalidArgument.into_raw(),
     }
 }
 
 pub fn write(raw: u64, buffer: u64, length: u64) -> u64 {
-    let object = match object(raw, HandleRights::WRITE) {
+    let object = match object_native(raw, HandleRights::WRITE) {
         Ok(object) => object,
-        Err(error) => return error,
+        Err(error) => return error.into_raw(),
     };
     match object {
         KernelObject::File(file) => crate::syscall::fs::write_file_handle(&file, buffer, length),
         KernelObject::Provider(provider) => provider_write(&provider, buffer, length),
-        _ => EBADF,
+        _ => mnu_abi::status::Error::InvalidArgument.into_raw(),
     }
 }
 
 pub fn write_bounded(raw: u64, buffer: u64, length: u64, byte_end: u64) -> u64 {
-    match object(raw, HandleRights::WRITE) {
+    match object_native(raw, HandleRights::WRITE) {
         Ok(KernelObject::Provider(provider)) => {
             provider_write_impl(&provider, buffer, length, Some(byte_end))
         }
-        Ok(_) => ENOTSUP,
-        Err(error) => error,
+        Ok(_) => mnu_abi::status::Error::InvalidArgument.into_raw(),
+        Err(error) => error.into_raw(),
     }
 }
 
@@ -687,23 +687,31 @@ fn provider_read_chunk<'a>(
         data_length: 0,
     };
     let (response, data_len) = provider_call(provider, request, &[], storage)?;
-    let count = usize::try_from(response.value).map_err(|_| EIO)?;
+    let count = usize::try_from(response.value)
+        .map_err(|_| mnu_abi::status::Error::BackingFailure.into_raw())?;
     if count > length {
-        return Err(EIO);
+        return Err(mnu_abi::status::Error::BackingFailure.into_raw());
     }
-    let data = &mut storage[wire::RESPONSE_HEADER_LEN..wire::RESPONSE_HEADER_LEN + data_len];
+    let data = storage
+        .get_mut(wire::RESPONSE_HEADER_LEN..)
+        .and_then(|data| data.get_mut(..data_len))
+        .ok_or(mnu_abi::status::Error::BackingFailure.into_raw())?;
     if let Some(identity) = identity {
         if data.len() != wire::READ_POSITION_LEN + count {
-            return Err(EIO);
+            return Err(mnu_abi::status::Error::BackingFailure.into_raw());
         }
-        let offset = u64::from_le_bytes(data[..wire::READ_POSITION_LEN].try_into().map_err(|_| EIO)?);
+        let offset = u64::from_le_bytes(
+            data[..wire::READ_POSITION_LEN]
+                .try_into()
+                .map_err(|_| mnu_abi::status::Error::BackingFailure.into_raw())?,
+        );
         let data = &mut data[wire::READ_POSITION_LEN..];
         crate::mem::vm_object::overlay_provider_range(provider, identity, offset, data)?;
         Ok(data)
     } else if count == data.len() {
         Ok(data)
     } else {
-        Err(EIO)
+        Err(mnu_abi::status::Error::BackingFailure.into_raw())
     }
 }
 
@@ -812,8 +820,8 @@ fn provider_read_shared(
 
 fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
     let length = match usize::try_from(length) {
-        Ok(length) => length,
-        Err(_) => return EINVAL,
+        Ok(length) if length <= isize::MAX as usize => length,
+        _ => return mnu_abi::status::Error::LimitExceeded.into_raw(),
     };
     if length == 0 {
         return SUCCESS;
@@ -839,8 +847,12 @@ fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         mnu_abi::provider::MAX_DATA_LEN
     };
     let mut total = 0usize;
-    let mut response_storage =
-        vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + mnu_abi::provider::MAX_DATA_LEN];
+    let mut response_storage = match crate::util::object_snapshot::zeroed_native(
+        mnu_abi::provider::RESPONSE_HEADER_LEN + mnu_abi::provider::MAX_DATA_LEN,
+    ) {
+        Ok(storage) => storage,
+        Err(error) => return error.into_raw(),
+    };
     while total < length {
         let chunk = (length - total).min(maximum);
         let data = {
@@ -862,10 +874,20 @@ fn provider_read(provider: &ProviderObject, buffer: u64, length: u64) -> u64 {
         let data_len = data.len();
         let address = match buffer.checked_add(total as u64) {
             Some(address) => address,
-            None => return if total == 0 { EINVAL } else { total as u64 },
+            None => {
+                return if total == 0 {
+                    mnu_abi::status::Error::InvalidAddress.into_raw()
+                } else {
+                    total as u64
+                };
+            }
         };
-        if let Err(error) = crate::syscall::copy_to_user(address, data) {
-            return if total == 0 { error } else { total as u64 };
+        if let Err(error) = crate::syscall::copy_to_user_native(address, data) {
+            return if total == 0 {
+                error.into_raw()
+            } else {
+                total as u64
+            };
         }
         total += data_len;
         if data_len < chunk {
@@ -886,8 +908,8 @@ fn provider_write_impl(
     byte_end: Option<u64>,
 ) -> u64 {
     let length = match usize::try_from(length) {
-        Ok(length) => length,
-        Err(_) => return EINVAL,
+        Ok(length) if length <= isize::MAX as usize => length,
+        _ => return mnu_abi::status::Error::LimitExceeded.into_raw(),
     };
     if length == 0 {
         // A Provider owns the meaning of an empty operation too. Do not
@@ -907,8 +929,11 @@ fn provider_write_impl(
         let mut response = [0; mnu_abi::provider::RESPONSE_HEADER_LEN + 8];
         return match provider_call(provider, request, &[], &mut response) {
             Ok((header, data_len @ (0 | 8)))
-                if header.value == 0 && (byte_end.is_none() || data_len == 8) => SUCCESS,
-            Ok(_) => EIO,
+                if header.value == 0 && (byte_end.is_none() || data_len == 8) =>
+            {
+                SUCCESS
+            }
+            Ok(_) => mnu_abi::status::Error::BackingFailure.into_raw(),
             Err(error) => error,
         };
     }
@@ -917,16 +942,35 @@ fn provider_write_impl(
         Err(error) => return error,
     };
     let mut total = 0usize;
-    let mut data = vec![0u8; mnu_abi::provider::MAX_DATA_LEN];
-    let mut response_storage = vec![0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + 8];
+    let mut data =
+        match crate::util::object_snapshot::zeroed_native(mnu_abi::provider::MAX_DATA_LEN) {
+            Ok(data) => data,
+            Err(error) => return error.into_raw(),
+        };
+    let mut response_storage = match crate::util::object_snapshot::zeroed_native(
+        mnu_abi::provider::RESPONSE_HEADER_LEN + 8,
+    ) {
+        Ok(storage) => storage,
+        Err(error) => return error.into_raw(),
+    };
     while total < length {
         let chunk = (length - total).min(data.len());
         let address = match buffer.checked_add(total as u64) {
             Some(address) => address,
-            None => return if total == 0 { EINVAL } else { total as u64 },
+            None => {
+                return if total == 0 {
+                    mnu_abi::status::Error::InvalidAddress.into_raw()
+                } else {
+                    total as u64
+                };
+            }
         };
-        if let Err(error) = crate::syscall::copy_from_user(address, &mut data[..chunk]) {
-            return if total == 0 { error } else { total as u64 };
+        if let Err(error) = crate::syscall::copy_from_user_native(address, &mut data[..chunk]) {
+            return if total == 0 {
+                error.into_raw()
+            } else {
+                total as u64
+            };
         }
         // Faulting the source buffer may load this same backing object. Only
         // serialize the provider operation and resident-page update afterward.
@@ -961,7 +1005,13 @@ fn provider_write_impl(
             {
                 written
             }
-            _ => return if total == 0 { EIO } else { total as u64 },
+            _ => {
+                return if total == 0 {
+                    mnu_abi::status::Error::BackingFailure.into_raw()
+                } else {
+                    total as u64
+                };
+            }
         };
         let mut reached_end = false;
         if written != 0 && data_len == 8 {
@@ -971,18 +1021,20 @@ fn provider_write_impl(
                     .unwrap(),
             );
             if let Some(end) = byte_end {
-                let Some(after) = start.checked_add(written as u64).filter(|after| *after <= end)
+                let Some(after) = start
+                    .checked_add(written as u64)
+                    .filter(|after| *after <= end)
                 else {
-                    return if total == 0 { EIO } else { total as u64 };
+                    return if total == 0 {
+                        mnu_abi::status::Error::BackingFailure.into_raw()
+                    } else {
+                        total as u64
+                    };
                 };
                 reached_end = after == end;
             }
             if let Some(guard) = &_io_guard {
-                crate::mem::vm_object::update_provider_range(
-                    guard,
-                    start,
-                    &data[..written],
-                );
+                crate::mem::vm_object::update_provider_range(guard, start, &data[..written]);
             }
         }
         total += written;
