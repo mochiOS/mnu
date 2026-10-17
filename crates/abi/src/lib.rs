@@ -57,8 +57,9 @@ pub const MEMORY_OBJECT_RESIZABLE: u64 = 1;
 /// The completion supports READ, WAIT, DUPLICATE and TRANSFER, not mutation.
 pub const MEMORY_SYNC_DEFERRED: u64 = 1;
 /// Refresh shared backing aliases after writeback, preserving private/COW
-/// bytes. Requires DEFERRED and retained WRITE authority on every selected
-/// shared backing. Completion errors preserve rollback ownership.
+/// bytes. Requires DEFERRED and retained READ authority on every selected
+/// shared backing. Dirty bytes use their original retained writer references,
+/// never authority borrowed from a read-only alias. Errors retain rollback.
 pub const MEMORY_SYNC_REFRESH: u64 = 1 << 1;
 
 /// mnu native syscall numbers.

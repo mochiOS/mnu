@@ -1196,11 +1196,11 @@ pub fn memory_sync(addr: u64, length: u64, options: u64) -> u64 {
             if refresh
                 && region.is_shared()
                 && region.backing().file_object().is_some()
-                && !region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE)
+                && !region.permits_access(mnu_abi::MEMORY_ACCESS_READ)
             {
                 denied = true;
             }
-            let backing = if region.is_shared() && region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE)
+            let backing = if region.is_shared() && (refresh || region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE))
             {
                 match region.backing().file_object() {
                     Some(object) => {
