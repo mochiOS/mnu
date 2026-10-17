@@ -1165,8 +1165,6 @@ pub const EAGAIN: u64 = (-11i64) as u64;
 pub const ENOMEM: u64 = (-12i64) as u64;
 /// アクセス権がない
 pub const EACCES: u64 = (-13i64) as u64;
-/// ファイルが既に存在する
-pub const EEXIST: u64 = (-17i64) as u64;
 /// 無効な引数
 pub const EINVAL: u64 = (-22i64) as u64;
 /// ディスク/ストレージに空きがない
