@@ -5,6 +5,7 @@
 pub mod context;
 pub(crate) mod deferred;
 pub(crate) mod owned_work;
+pub(crate) mod owned_executor;
 pub mod fd_table;
 pub mod handle_table;
 pub(crate) mod handle_snapshot;

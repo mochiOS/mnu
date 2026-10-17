@@ -19,6 +19,15 @@ impl<T> Prepared<T> {
         Arc::get_mut(&mut storage).unwrap().0 = Some(value);
         Ok(Self(storage))
     }
+
+    /// Only an unpublished/rejected owner may be recovered. Queue/claim code
+    /// never hands out another Prepared for an admitted job.
+    pub(crate) fn into_value(self) -> T {
+        match Arc::try_unwrap(self.0) {
+            Ok(mut storage) => storage.0.take().unwrap(),
+            Err(_) => unreachable!("prepared work is not published"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
