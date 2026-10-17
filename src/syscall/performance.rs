@@ -1,19 +1,17 @@
 use crate::capability::Capability;
+use mnu_abi::status::Error;
 
-#[cfg(not(feature = "performance-instrumentation"))]
-use super::ENOTSUP;
 #[cfg(feature = "performance-instrumentation")]
 use super::SUCCESS;
-use super::{EACCES, EINVAL};
 
 pub fn snapshot(output: u64, output_len: u64) -> u64 {
     if !crate::syscall::security::caller_has_any_capability(&[Capability::DeveloperProfile]) {
-        return EACCES;
+        return Error::AccessDenied.into_raw();
     }
 
     let minimum = mnu_abi::performance::PERFORMANCE_SNAPSHOT_V1_SIZE;
     if output_len < minimum as u64 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
 
     #[cfg(feature = "performance-instrumentation")]
@@ -30,15 +28,15 @@ pub fn snapshot(output: u64, output_len: u64) -> u64 {
                 copy_len,
             )
         };
-        return match crate::syscall::copy_to_user(output, bytes) {
+        return match crate::syscall::copy_to_user_native(output, bytes) {
             Ok(()) => SUCCESS,
-            Err(error) => error,
+            Err(error) => error.into_raw(),
         };
     }
 
     #[cfg(not(feature = "performance-instrumentation"))]
     {
         let _ = output;
-        ENOTSUP
+        Error::Unsupported.into_raw()
     }
 }

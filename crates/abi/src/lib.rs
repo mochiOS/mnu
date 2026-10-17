@@ -142,6 +142,9 @@ pub enum SyscallNumber {
     /// Native authority/transport/usercopy failures use status::Error. The
     /// platform's response status remains opaque in StorageControlResponse.
     StorageControl = 611,
+    /// Copies the supported prefix of the versioned performance snapshot under
+    /// profile authority. Failures use status::Error; a build without sampling
+    /// returns Unsupported rather than a retryable NotReady.
     PerformanceSnapshot = 612,
     FramebufferTransferLimit = 613,
     CommitFramebuffer = 614,

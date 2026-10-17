@@ -30,6 +30,9 @@ pub enum Error {
     NotFound = 9,
     /// The peer endpoint no longer accepts data from this object.
     PeerClosed = 10,
+    /// This implementation does not provide the requested mechanism or mode.
+    /// Unlike NotReady, retrying without a configuration change cannot help.
+    Unsupported = 11,
 }
 
 impl Error {
@@ -52,6 +55,7 @@ impl Error {
             8 => Some(Self::AlreadyExists),
             9 => Some(Self::NotFound),
             10 => Some(Self::PeerClosed),
+            11 => Some(Self::Unsupported),
             _ => None,
         }
     }
