@@ -1665,6 +1665,27 @@ where
     table.get_mut(id).map(f)
 }
 
+/// Borrow two distinct live processes under one table lock, without exposing
+/// partially committed authority changes to removal or another transfer.
+pub(crate) fn with_process_pair_mut<R>(
+    source: ProcessId,
+    destination: ProcessId,
+    f: impl FnOnce(&mut Process, &mut Process) -> R,
+) -> Option<R> {
+    if source == destination {
+        return None;
+    }
+    let mut table = PROCESS_TABLE.lock();
+    let mut processes = table.processes.iter_mut().filter_map(Option::as_mut);
+    let first = processes.find(|process| process.id() == source || process.id() == destination)?;
+    let second = processes.find(|process| process.id() == source || process.id() == destination)?;
+    Some(if first.id() == source {
+        f(first, second)
+    } else {
+        f(second, first)
+    })
+}
+
 pub(crate) fn with_mapping_table<R>(f: impl FnOnce(&ProcessTable) -> R) -> R {
     f(&PROCESS_TABLE.lock())
 }

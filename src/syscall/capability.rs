@@ -16,7 +16,7 @@ use crate::capability::{
     KernelCapability,
 };
 use crate::syscall::copy_from_user_native;
-use crate::syscall::types::{EACCES, EINVAL, ENOSYS, SUCCESS};
+use crate::syscall::types::SUCCESS;
 
 #[derive(Clone, Copy)]
 enum CapabilityToken {
@@ -159,7 +159,7 @@ pub fn drop_capability(_cap_ptr: u64, _cap_len: u64) -> u64 {
 pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
     let current = match current_process() {
         Some(pid) => pid,
-        None => return ENOSYS,
+        None => return Error::NotReady.into_raw(),
     };
     let spec = match read_capability_spec_from_user(_cap_ptr, _cap_len) {
         Ok(spec) => spec,
@@ -167,7 +167,7 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
     };
     let dest_process = match resolve_destination_process(_dest) {
         Some(pid) => pid,
-        None => return EINVAL,
+        None => return Error::NotFound.into_raw(),
     };
 
     let can_manage_capabilities =
@@ -175,58 +175,65 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
 
     if can_manage_capabilities {
         let Some((cap_spec, claimed_exe_path)) = spec.split_once('\x1f') else {
-            return EACCES;
+            return Error::AccessDenied.into_raw();
         };
         if !crate::task::with_process(dest_process, |proc| proc.exe_path() == claimed_exe_path)
             .unwrap_or(false)
         {
-            return EACCES;
+            return Error::AccessDenied.into_raw();
         }
         if let Some((selected_path, rights)) = parse_scoped_path_grant(cap_spec) {
             // A native grant is explicit authority, not a POSIX pathname lookup.
             if !selected_path.starts_with('/') {
-                return EINVAL;
+                return Error::InvalidArgument.into_raw();
             }
             return match path::grant_scoped_path(dest_process.as_u64(), selected_path, rights) {
                 Ok(()) => SUCCESS,
-                Err(_) => EINVAL,
+                Err(_) => Error::InvalidArgument.into_raw(),
             };
         }
         let cap = match intern_capability_token(cap_spec) {
             Some(cap) => cap,
-            None => return EINVAL,
+            None => return Error::InvalidArgument.into_raw(),
         };
         match cap {
             CapabilityToken::Plain(capability) => {
                 if !capability.is_delegable() {
-                    return EACCES;
+                    return Error::AccessDenied.into_raw();
                 }
                 let inserted = crate::task::with_process_mut(dest_process, |proc| {
-                    proc.capabilities_mut().insert(capability)
+                    if proc.exe_path() != claimed_exe_path {
+                        return Err(Error::AccessDenied);
+                    }
+                    proc.capabilities_mut().try_insert(capability)
                 });
-                return if inserted.is_some() { SUCCESS } else { ENOSYS };
+                return match inserted {
+                    Some(Ok(())) => SUCCESS,
+                    Some(Err(error)) => error.into_raw(),
+                    None => Error::NotFound.into_raw(),
+                };
             }
-            CapabilityToken::Authority(_) => return EACCES,
+            CapabilityToken::Authority(_) => return Error::AccessDenied.into_raw(),
         }
     }
 
     let cap = match parse_capability_token(spec.as_str()) {
         Some(cap) => cap,
-        None => return EINVAL,
+        None => return Error::InvalidArgument.into_raw(),
     };
 
     match cap {
         CapabilityToken::Plain(capability) => {
             if !crate::task::process::process_has_capability(current, capability) {
-                return EACCES;
+                return Error::AccessDenied.into_raw();
             }
             if !capability.is_delegable() {
-                return EACCES;
+                return Error::AccessDenied.into_raw();
             }
         }
         CapabilityToken::Authority(authority) => {
             if !crate::task::process::process_has_kernel_authority(current, &authority) {
-                return EACCES;
+                return Error::AccessDenied.into_raw();
             }
         }
     }
@@ -234,26 +241,36 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
         return SUCCESS;
     }
 
-    let removed = crate::task::with_process_mut(current, |proc| match cap {
-        CapabilityToken::Plain(capability) => proc.capabilities_mut().remove(capability),
-        CapabilityToken::Authority(authority) => {
-            proc.kernel_authorities_mut().remove_exact(&authority)
-        }
-    })
-    .unwrap_or(false);
-    if !removed {
-        return EACCES;
+    // Validate exact ownership and reserve the receiver's storage before
+    // removing the sender's grant. Both processes remain live under one lock.
+    let moved = crate::task::process::with_process_pair_mut(
+        current,
+        dest_process,
+        |source, destination| {
+            match cap {
+                CapabilityToken::Plain(capability) => {
+                    if !source.capabilities().contains_exact(capability) {
+                        return Err(Error::AccessDenied);
+                    }
+                    destination.capabilities_mut().try_insert(capability)?;
+                    source.capabilities_mut().remove(capability);
+                }
+                CapabilityToken::Authority(authority) => {
+                    if !source.kernel_authorities().contains_exact(&authority) {
+                        return Err(Error::AccessDenied);
+                    }
+                    destination.kernel_authorities_mut().try_insert(authority)?;
+                    source.kernel_authorities_mut().remove_exact(&authority);
+                }
+            }
+            Ok(())
+        },
+    );
+    match moved {
+        Some(Ok(())) => SUCCESS,
+        Some(Err(error)) => error.into_raw(),
+        None => Error::NotFound.into_raw(),
     }
-
-    let inserted = crate::task::with_process_mut(dest_process, |proc| match cap {
-        CapabilityToken::Plain(capability) => proc.capabilities_mut().insert(capability),
-        CapabilityToken::Authority(authority) => proc.kernel_authorities_mut().insert(authority),
-    });
-    if inserted.is_none() {
-        return ENOSYS;
-    }
-
-    SUCCESS
 }
 
 pub fn restrict_capability(
