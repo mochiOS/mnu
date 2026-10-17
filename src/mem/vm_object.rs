@@ -355,7 +355,13 @@ impl VmObject {
             let page_index = current / PAGE_BYTES as u64;
             let page_offset = (current % PAGE_BYTES as u64) as usize;
 
-            let (page, valid_len) = self.page_with_len(page_index)?;
+            let (page, valid_len) = match self.page_with_len(page_index) {
+                Ok(page) => page,
+                Err(error) if copied == 0 => return Err(error),
+                // An ordinary byte read reports the completed prefix. Do not
+                // publish a failed later page or mistake its failure for EOF.
+                Err(_) => break,
+            };
 
             if page_offset >= valid_len {
                 break;
