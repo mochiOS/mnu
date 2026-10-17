@@ -1175,8 +1175,6 @@ pub const EEXIST: u64 = (-17i64) as u64;
 pub const EINVAL: u64 = (-22i64) as u64;
 /// ディスク/ストレージに空きがない
 pub const ENOSPC: u64 = (-28i64) as u64;
-/// パイプが壊れている
-pub const EPIPE: u64 = (-32i64) as u64;
 /// 引数が範囲外
 pub const ERANGE: u64 = (-34i64) as u64;
 /// 未実装
