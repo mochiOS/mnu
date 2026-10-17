@@ -2,7 +2,8 @@
 //! waiting. The VM coordinator must additionally revoke affected PTEs and
 //! acknowledge remote TLBs before calling `commit`.
 use super::*;
-use crate::mem::byte_extent;
+use crate::mem::{byte_extent, shared_pages::SizeError};
+use mnu_abi::status::Error;
 
 pub(crate) struct PreparedExtent {
     object: ObjectKey,
@@ -48,7 +49,7 @@ impl VmObject {
             object, _io_lock, ..
         } = &self.source
         else {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument.into_raw());
         };
         PreparedExtent::prepare(
             self.object_key(),
@@ -73,7 +74,7 @@ impl PreparedExtent {
         allocate: impl FnOnce([u8; PAGE_BYTES]) -> Result<Arc<[u8; PAGE_BYTES]>, u64>,
     ) -> Result<Self, u64> {
         if !matches!(key, ObjectKey::Provider { identity, .. } if identity != 0) {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument.into_raw());
         }
         let gate = PROVIDER_IO
             .lock()
@@ -120,7 +121,10 @@ impl PreparedExtent {
                 PAGE_BYTES as u64,
                 u64::MAX / PAGE_BYTES as u64,
             )
-            .map_err(|_| crate::syscall::EINVAL)
+            .map_err(|error| match error {
+                SizeError::Invalid => Error::InvalidArgument.into_raw(),
+                SizeError::LimitExceeded => Error::LimitExceeded.into_raw(),
+            })
         };
         let old_capacity = geometry(old_length)?.capacity;
         let plan = geometry(length)?;
@@ -128,15 +132,15 @@ impl PreparedExtent {
             Some(guard) => guard,
             None => gate
                 .try_lock()
-                .map_err(|_| crate::syscall::EIO)?
-                .ok_or(crate::syscall::EAGAIN)?,
+                .map_err(|_| Error::BackingFailure.into_raw())?
+                .ok_or(Error::NotReady.into_raw())?,
         };
         let boundary = if plan.zero.is_some() {
             let mut bytes = allocate([0; PAGE_BYTES])?;
             // Nothing may obtain an alias after preparation: the buffer stays
             // private inside this non-Clone transaction until publication.
             if Arc::get_mut(&mut bytes).is_none() {
-                return Err(crate::syscall::EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             Some(bytes)
         } else {
@@ -190,13 +194,13 @@ impl PreparedExtent {
 
     fn check<'a>(&mut self, cache: &'a [CachedPage]) -> Result<Option<BoundaryCheck<'a>>, u64> {
         if self.published {
-            return Err(crate::syscall::EINVAL);
+            return Err(Error::InvalidArgument.into_raw());
         }
         if self.gate.is_unavailable() {
-            return Err(crate::syscall::EIO);
+            return Err(Error::BackingFailure.into_raw());
         }
         if self.gate.generation() != self.epoch {
-            return Err(crate::syscall::EAGAIN);
+            return Err(Error::NotReady.into_raw());
         }
         let Some(zero) = &self.plan.zero else {
             return Ok(None);
@@ -208,27 +212,30 @@ impl PreparedExtent {
             return Ok(None);
         };
         let entry = &cache[index];
-        let boundary = self.boundary.as_mut().ok_or(crate::syscall::EINVAL)?;
-        Arc::get_mut(boundary).ok_or(crate::syscall::EINVAL)?;
+        let boundary = self
+            .boundary
+            .as_mut()
+            .ok_or(Error::BackingFailure.into_raw())?;
+        Arc::get_mut(boundary).ok_or(Error::BackingFailure.into_raw())?;
         let physical = entry
             .frame_phys
             .map(|frame| {
                 crate::mem::paging::physical_memory_offset()
                     .and_then(|offset| offset.checked_add(frame))
                     .filter(|start| start.checked_add(PAGE_BYTES as u64 - 1).is_some())
-                    .ok_or(crate::syscall::EIO)
+                    .ok_or(Error::BackingFailure.into_raw())
             })
             .transpose()?;
         let page_start = entry
             .key
             .page_index
             .checked_mul(PAGE_BYTES as u64)
-            .ok_or(crate::syscall::EINVAL)?;
+            .ok_or(Error::BackingFailure.into_raw())?;
         let within = self
             .plan
             .length
             .checked_sub(page_start)
-            .ok_or(crate::syscall::EINVAL)?
+            .ok_or(Error::BackingFailure.into_raw())?
             .min(PAGE_BYTES as u64) as usize;
         Ok(Some(BoundaryCheck {
             index,
@@ -265,8 +272,11 @@ impl PreparedExtent {
             within,
         }) = checked
         {
-            let boundary = self.boundary.as_mut().ok_or(crate::syscall::EINVAL)?;
-            let bytes = Arc::get_mut(boundary).ok_or(crate::syscall::EINVAL)?;
+            let boundary = self
+                .boundary
+                .as_mut()
+                .ok_or(Error::BackingFailure.into_raw())?;
+            let bytes = Arc::get_mut(boundary).ok_or(Error::BackingFailure.into_raw())?;
             if let Some(address) = physical {
                 for (offset, byte) in bytes.iter_mut().enumerate() {
                     // No Rust references to storage also owned by mappings.

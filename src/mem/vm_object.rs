@@ -1163,7 +1163,10 @@ fn backing_is_reserved(object: ObjectKey) -> bool {
 }
 
 fn retain_cache_gate(object: ObjectKey) -> Result<super::object_io::IoLock, u64> {
-    PROVIDER_IO.lock().existing(&object).ok_or(crate::syscall::EIO)
+    PROVIDER_IO
+        .lock()
+        .existing(&object)
+        .ok_or(mnu_abi::status::Error::BackingFailure.into_raw())
 }
 
 /// Caller serializes admission with extent reservation through PAGE_CACHE.
