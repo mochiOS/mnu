@@ -990,16 +990,17 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
 
 /// Public processor discovery; compatibility selectors remain in user space.
 fn processor_describe(destination: u64, length: u64) -> u64 {
+    use mnu_abi::status::Error;
     if length != core::mem::size_of::<mnu_abi::ProcessorInfo>() as u64 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let Some(boot) = crate::smp::boot_info() else {
-        return ENOSYS;
+        return Error::NotReady.into_raw();
     };
     let configured = boot.cpu_total.min(crate::percpu::MAX_CPUS as u32);
     let online = crate::mem::tlb_shootdown::online_cpu_count();
     if online == 0 || online > configured {
-        return EAGAIN;
+        return Error::NotReady.into_raw();
     }
     let info = mnu_abi::ProcessorInfo {
         configured,
@@ -1013,9 +1014,9 @@ fn processor_describe(destination: u64, length: u64) -> u64 {
             core::mem::size_of_val(&info),
         )
     };
-    match copy_to_user(destination, bytes) {
+    match copy_to_user_native(destination, bytes) {
         Ok(()) => SUCCESS,
-        Err(error) => error,
+        Err(error) => error.into_raw(),
     }
 }
 
@@ -1033,20 +1034,21 @@ fn boot_system_slot() -> u64 {
 /// Copies the unique GPT GUID of the ESP that launched mBoot. The value is
 /// unavailable on legacy images and is never guessed from disk ordering.
 fn boot_esp_guid(destination: u64, length: u64) -> u64 {
+    use mnu_abi::status::Error;
     if length != 16 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let Some(info) = crate::smp::boot_info() else {
-        return ENOSYS;
+        return Error::NotReady.into_raw();
     };
     if (info.feature_flags & crate::BOOT_FEATURE_BOOT_ESP_GUID) == 0
         || info.boot_esp_guid == [0; 16]
     {
-        return ENOSYS;
+        return Error::Unsupported.into_raw();
     }
-    match copy_to_user(destination, &info.boot_esp_guid) {
+    match copy_to_user_native(destination, &info.boot_esp_guid) {
         Ok(()) => SUCCESS,
-        Err(error) => error,
+        Err(error) => error.into_raw(),
     }
 }
 

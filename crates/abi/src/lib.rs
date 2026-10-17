@@ -156,6 +156,8 @@ pub enum SyscallNumber {
     /// Flushes under device authority. Local failures are native; driver
     /// status is opaque, and an unavailable backend returns NotReady.
     BlockFlush = 619,
+    /// Copies the boot-supplied ESP GUID. Failures use status::Error: missing
+    /// boot context is NotReady; a legacy/missing identity is Unsupported.
     BootEspGuid = 620,
     /// Discards one reference from the caller's table and removes inherited
     /// aliases to that selector. Requires no resource right; does not revoke
@@ -413,6 +415,8 @@ pub enum SyscallNumber {
     ProviderObjectReferenceCount = 691,
     /// Reads public logical processor counts. Arguments: ProcessorInfo output
     /// pointer and exact byte length. No scheduling or compatibility policy.
+    /// Failures use status::Error. Missing or inconsistent boot/online counts
+    /// are NotReady, never an invented single-processor result.
     ProcessorDescribe = 692,
     /// Captures references from the caller's own Handle table. No arguments.
     /// Returns a private READ/CONTROL/DUPLICATE Handle, without TRANSFER.
