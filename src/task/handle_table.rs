@@ -204,7 +204,12 @@ impl ProviderObject {
 pub(crate) fn register_provider_object(object: &Arc<ProviderObject>) -> bool {
     let mut objects = PROVIDER_OBJECTS.lock();
     let key = object.key();
-    if objects.get(&key).and_then(Weak::upgrade).is_some() {
+    if let Some(existing) = objects.get(&key).and_then(Weak::upgrade) {
+        // A concurrent final close may leave this temporary as the last
+        // owner. Its destructor reacquires PROVIDER_OBJECTS, so release the
+        // registry guard before releasing that strong reference.
+        drop(objects);
+        drop(existing);
         return false;
     }
     objects.insert(key, Arc::downgrade(object));
