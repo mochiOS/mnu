@@ -53,6 +53,8 @@ pub const MEMORY_MAP_OPTIONS_ALL: u64 = MEMORY_MAP_EXACT | MEMORY_MAP_SHARED | M
 pub const MEMORY_OBJECT_RESIZABLE: u64 = 1;
 
 /// mnu native syscall numbers.
+/// An unregistered number returns status::Error::Unsupported; compatibility
+/// environments select their own meaning and never gain a legacy fallback.
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyscallNumber {
@@ -362,8 +364,8 @@ pub enum SyscallNumber {
     /// per-call options. STREAM_IO_TRY never changes shared object options.
     StreamRead = 681,
     /// Waits on object readiness with an entry precondition. Arguments:
-    /// HandleWaitItem array, count, deadline, optional HandleWaitGuard pointer
-    /// (zero disables the precondition). Uses HandleWaitMany's native errors;
+    /// HandleWaitItem array, count, deadline, nonzero HandleWaitGuard pointer
+    /// (zero returns InvalidArgument). Uses HandleWaitMany's native errors;
     /// a changed precondition returns NotReady.
     HandleWaitManyGuarded = 682,
     /// Reads native CPU execution accounting. Arguments: Process Handle (zero

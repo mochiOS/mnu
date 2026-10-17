@@ -847,7 +847,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::HandleWaitMany as u64 => handle::wait_many(arg0, arg1, arg2, 0),
         x if x == SyscallNumber::HandleWaitManyGuarded as u64 => {
             if arg3 == 0 {
-                EINVAL
+                mnu_abi::status::Error::InvalidArgument.into_raw()
             } else {
                 handle::wait_many(arg0, arg1, arg2, arg3)
             }
@@ -974,7 +974,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ProcessCreate as u64 => {
             exec::process_create_syscall(arg0, arg1, arg2)
         }
-        _ => ENOSYS,
+        _ => mnu_abi::status::Error::Unsupported.into_raw(),
     };
 
     #[cfg(feature = "performance-instrumentation")]
