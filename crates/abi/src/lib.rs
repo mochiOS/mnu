@@ -60,6 +60,8 @@ pub enum SyscallNumber {
     /// Sends one message to an opaque endpoint. Failures use status::Error:
     /// NotReady for queue pressure, ResourceUnavailable for allocation failure.
     IpcSend = 514,
+    /// Nonblocking receive. Empty queues return status::Error::NotReady;
+    /// all other admission and delivery failures also use status::Error.
     IpcRecv = 515,
     Sleep = 517,
     FindProcessByName = 518,
@@ -67,6 +69,7 @@ pub enum SyscallNumber {
     PortOut = 521,
     GetFramebufferInfo = 528,
     MapFramebuffer = 529,
+    /// Blocking receive; native failures never report an empty wakeup.
     IpcRecvWait = 533,
     MapPhysicalRange = 536,
     IpcEndpointAlive = 551,
@@ -92,6 +95,8 @@ pub enum SyscallNumber {
     IpcCreate = 587,
     IpcCall = 588,
     IpcReply = 589,
+    /// Receives from the caller's queue or a caller-owned endpoint. Native
+    /// NotReady indicates an empty queue only for the nonblocking form.
     IpcWait = 590,
     CapClone = 591,
     CapDrop = 592,
@@ -133,6 +138,8 @@ pub enum SyscallNumber {
     /// Sends a message with attenuated object references. Admission, transfer
     /// validation and message delivery failures all use status::Error.
     IpcSendObjectHandles = 630,
+    /// Handle-aware receive with native failure categories and unpublished
+    /// reference reservation. Nonblocking empty queues return NotReady.
     IpcRecvObjectHandles = 631,
     IpcCallObjectHandles = 632,
     IpcReplyObjectHandles = 633,

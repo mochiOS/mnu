@@ -11,7 +11,7 @@ mod receive;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
-use super::{EACCES, EAGAIN, EINVAL};
+use super::{EACCES, EINVAL};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
@@ -1291,57 +1291,6 @@ impl Mailbox {
     }
 
 
-    /// 指定送信元からの有効メッセージを1件だけ取り出し、内容を out へコピーする
-    fn pop_from_sender_copy(
-        &mut self,
-        sender: u64,
-        receiver: u64,
-        receiver_slot: u16,
-        receiver_generation: u64,
-        out: &mut [u8],
-        reply_only: bool,
-    ) -> Option<(u64, usize, bool)> {
-        if self.count == 0 {
-            return None;
-        }
-
-        let original = self.count;
-        for _ in 0..original {
-            let slot_idx = self.dequeue_slot()?;
-            let Some(msg) = self.slots[slot_idx].as_deref() else {
-                self.quarantine("ipc mailbox queue points to an empty slot");
-                return None;
-            };
-            if msg.from != sender
-                || msg.to != receiver
-                || msg.to_slot != receiver_slot
-                || msg.to_generation != receiver_generation
-                || (reply_only && !msg.is_reply)
-            {
-                if self.enqueue_slot(slot_idx).is_err() {
-                    let _ = self.free_slot(slot_idx);
-                    return None;
-                }
-                continue;
-            }
-
-            let copy_len = core::cmp::min(msg.len, out.len());
-            if copy_len > 0 {
-                out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
-                record_ipc_copy(copy_len);
-            }
-            let from = msg.from;
-            let expects_reply = msg.expects_reply;
-            if !self.free_slot(slot_idx) {
-                return None;
-            }
-            return Some((from, copy_len, expects_reply));
-        }
-
-        None
-    }
-
-
     fn pop_reply_copy(
         &mut self,
         expected_sender: u64,
@@ -2125,7 +2074,7 @@ fn recv_from_thread_nonblocking(
         object_handles_output.is_some(),
     ) {
         Ok(Some(receive)) => receive,
-        Ok(None) => return EAGAIN,
+        Ok(None) => return Error::NotReady.into_raw(),
         Err(error) => return error,
     };
     let (from, copy_len, _) =
@@ -2227,113 +2176,4 @@ pub fn recv_object_handles(
         Err(error) => return error,
     };
     recv_blocking_for_thread(target, current, buf_ptr, max_len, Some(handles_ptr))
-}
-
-/// カーネル内部から、特定送信元のIPCをノンブロッキング受信する
-///
-/// - メッセージが無い場合は `Ok(None)`
-/// - 受信データは `buf` にコピーされる
-pub fn recv_from_sender_for_kernel_nonblocking(
-    sender_thread_id: u64,
-    buf: &mut [u8],
-) -> Result<Option<usize>, u64> {
-    let receiver = crate::task::current_thread_id().ok_or(EINVAL)?;
-    let receiver_u64 = receiver.as_u64();
-    let (idx, receiver_generation) =
-        crate::task::thread_slot_index_and_generation_by_u64(receiver_u64).ok_or(EINVAL)?;
-
-    if idx >= MAX_THREADS || idx > (u16::MAX as usize) {
-        return Err(EINVAL);
-    }
-
-    let n = {
-        let mut boxes = lock_mailboxes();
-        boxes[idx]
-            .pop_from_sender_copy(
-                sender_thread_id,
-                receiver_u64,
-                idx as u16,
-                receiver_generation,
-                buf,
-                false,
-            )
-            .map(|(_, n, _)| n)
-    };
-
-    Ok(n)
-}
-
-/// カーネル内部から、特定送信元のIPCをブロッキング受信する
-///
-/// - 受信データは `buf` へコピーされる（ユーザー空間検証は行わない）
-/// - 指定送信元以外のメッセージはキューに保持されたまま
-pub fn recv_blocking_from_sender_for_kernel(
-    sender_thread_id: u64,
-    buf: &mut [u8],
-) -> Result<usize, u64> {
-    let receiver = match crate::task::current_thread_id() {
-        Some(id) => id,
-        None => return Err(EINVAL),
-    };
-    let receiver_u64 = receiver.as_u64();
-
-    let (idx, receiver_generation) =
-        match crate::task::thread_slot_index_and_generation_by_u64(receiver_u64) {
-            Some(v) => v,
-            None => return Err(EINVAL),
-        };
-    if idx >= MAX_THREADS || idx > (u16::MAX as usize) {
-        return Err(EINVAL);
-    }
-
-    loop {
-        let n = {
-            let mut boxes = lock_mailboxes();
-            match boxes[idx].pop_from_sender_copy(
-                sender_thread_id,
-                receiver_u64,
-                idx as u16,
-                receiver_generation,
-                buf,
-                false,
-            ) {
-                Some((_, n, _)) => Some(n),
-                None => {
-                    boxes[idx].waiter = receiver_u64;
-                    None
-                }
-            }
-        };
-
-        match n {
-            Some(n) => return Ok(n),
-            None => {
-                {
-                    let mut boxes = lock_mailboxes();
-                    if let Some((_, n, _)) = boxes[idx].pop_from_sender_copy(
-                        sender_thread_id,
-                        receiver_u64,
-                        idx as u16,
-                        receiver_generation,
-                        buf,
-                        false,
-                    ) {
-                        if boxes[idx].waiter == receiver_u64 {
-                            boxes[idx].waiter = 0;
-                        }
-                        return Ok(n);
-                    }
-                }
-                if crate::task::sleep_thread_unless_woken(receiver) {
-                    crate::task::yield_now();
-                } else {
-                    let mut boxes = lock_mailboxes();
-                    if boxes[idx].waiter == receiver_u64 {
-                        boxes[idx].waiter = 0;
-                    }
-                    return Err(EAGAIN);
-                }
-            }
-        }
-    }
 }
