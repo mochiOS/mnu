@@ -11,8 +11,6 @@ mod receive;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
-use super::{EACCES, EINVAL};
-
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
 const MESSAGE_CACHE_CAP: usize = MAILBOX_CAP;
@@ -749,13 +747,6 @@ pub fn wait(buf_ptr: u64, max_len: u64, blocking: u64) -> u64 {
         Err(error) => return error,
     };
     recv_blocking_for_thread(target, current, buf_ptr, max_len, None)
-}
-
-pub fn send_to_endpoint(endpoint: IpcEndpoint, buf_ptr: u64, len: u64) -> u64 {
-    if !endpoint_is_valid(endpoint) {
-        return EINVAL;
-    }
-    send(endpoint.thread_id, buf_ptr, len)
 }
 
 #[inline]
@@ -1559,31 +1550,6 @@ pub(crate) fn send_provider_from_kernel(endpoint: IpcEndpoint, data: &[u8]) -> b
     true
 }
 
-/// Performs a synchronous IPC call without copying through userspace buffers.
-pub fn call_from_kernel(
-    dest_endpoint_handle: u64,
-    request: &[u8],
-    reply: &mut [u8],
-) -> Result<usize, u64> {
-    if request.len() > ipc_max_msg_size() || reply.len() > ipc_max_msg_size() {
-        return Err(EINVAL);
-    }
-    let dest_record = endpoint_record_from_handle(dest_endpoint_handle).ok_or(EINVAL)?;
-    if !dest_record.rights.contains(EndpointRights::RECV) {
-        return Err(EACCES);
-    }
-    call_endpoint_from_kernel(
-        IpcEndpoint {
-            thread_id: dest_record.thread_id,
-            slot: dest_record.slot,
-            generation: dest_record.generation,
-        },
-        dest_endpoint_handle,
-        request,
-        reply,
-    )
-}
-
 /// Performs a synchronous kernel-originated call against an exact endpoint
 /// identity rather than a process-visible endpoint handle.
 pub(crate) fn call_provider_from_kernel(
@@ -1601,21 +1567,6 @@ pub(crate) fn call_provider_from_kernel(
     let mut attachments = ObjectHandleAttachments::empty();
     attachments.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
     call_endpoint_with_attachments_from_kernel(endpoint, expected_sender, request, reply, attachments)
-}
-
-fn call_endpoint_from_kernel(
-    endpoint: IpcEndpoint,
-    expected_sender: u64,
-    request: &[u8],
-    reply: &mut [u8],
-) -> Result<usize, u64> {
-    call_endpoint_with_attachments_from_kernel(
-        endpoint,
-        expected_sender,
-        request,
-        reply,
-        ObjectHandleAttachments::empty(),
-    )
 }
 
 /// Attach only handles from the authenticated caller's own table, through the
