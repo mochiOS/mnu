@@ -12,7 +12,7 @@ pub use memory_update::create_admission as provider_memory_admission_create;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry, ProviderObject};
 
-use super::{EACCES, EBADF, EINVAL, SUCCESS};
+use super::SUCCESS;
 
 pub(crate) fn flush_provider_releases() {
     let mut releases = crate::task::handle_table::take_provider_releases();
@@ -41,10 +41,6 @@ pub(crate) fn flush_provider_releases() {
             crate::task::handle_table::requeue_provider_release(ticket);
         }
     }
-}
-
-fn current_process() -> Result<crate::task::ProcessId, u64> {
-    crate::syscall::security::current_process_id().ok_or(EINVAL)
 }
 
 /// Creates backing owned by the caller, not a view into another process.
@@ -87,11 +83,6 @@ pub fn memory_object_create(length: u64, options: u64) -> u64 {
     })
     .unwrap_or(Err(Error::NotReady));
     result.unwrap_or_else(Error::into_raw)
-}
-
-fn decode_handle(raw: u64) -> Result<ObjectHandle, u64> {
-    let raw = u32::try_from(raw).map_err(|_| EBADF)?;
-    ObjectHandle::from_raw(raw).ok_or(EBADF)
 }
 
 pub fn memory_object_length(raw: u64) -> u64 {
@@ -152,22 +143,6 @@ pub(crate) fn object_with_rights_native(
         Ok((entry.object().clone(), entry.rights()))
     })
     .unwrap_or(Err(Error::NotReady))
-}
-
-pub(crate) fn object_with_rights(
-    raw: u64,
-    required_right: HandleRights,
-) -> Result<(KernelObject, HandleRights), u64> {
-    let process_id = current_process()?;
-    let handle = decode_handle(raw)?;
-    crate::task::with_process(process_id, |process| {
-        let entry = process.object_handles().get(handle).ok_or(EBADF)?;
-        if !entry.rights().contains(required_right) {
-            return Err(EACCES);
-        }
-        Ok((entry.object().clone(), entry.rights()))
-    })
-    .unwrap_or(Err(EINVAL))
 }
 
 pub fn read(raw: u64, buffer: u64, length: u64) -> u64 {

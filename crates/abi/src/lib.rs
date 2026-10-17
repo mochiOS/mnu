@@ -88,6 +88,10 @@ pub enum SyscallNumber {
     ThreadCreate = 577,
     ThreadExit = 578,
     ThreadYield = 579,
+    /// Maps a byte range using native placement, sharing and Handle authority.
+    /// Local failures use status::Error; Provider failures remain opaque.
+    /// In particular, an occupied exact range is AlreadyExists, an unusable
+    /// virtual range InvalidAddress, and overflowing byte geometry LimitExceeded.
     MemoryMap = 582,
     MemoryUnmap = 583,
     /// Changes access within the caller's existing mappings. Failures use

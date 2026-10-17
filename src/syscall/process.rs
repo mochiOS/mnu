@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::types::{EAGAIN, EFAULT, EINVAL, ENOMEM, EPERM, ESRCH, SUCCESS};
+use super::types::{EAGAIN, EINVAL, ENOMEM, EPERM, ESRCH, SUCCESS};
 use crate::task::ThreadId;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -668,16 +668,17 @@ pub fn memory_map(
 }
 
 pub fn memory_map_bounded(request: u64, request_len: u64) -> u64 {
+    use mnu_abi::status::Error;
     if request_len != mnu_abi::memory_map::REQUEST_LEN as u64 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let mut bytes = [0; mnu_abi::memory_map::REQUEST_LEN];
     // Copy before PROCESS_TABLE: the source may itself need a user fault.
-    if crate::syscall::copy_from_user(request, &mut bytes).is_err() {
-        return EFAULT;
+    if let Err(error) = crate::syscall::copy_from_user_native(request, &mut bytes) {
+        return error.into_raw();
     }
     let Some(request) = mnu_abi::memory_map::Request::decode(&bytes) else {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     };
     memory_map_impl(
         request.address,
@@ -699,49 +700,49 @@ fn memory_map_impl(
     backing_offset: u64,
     byte_ceiling: Option<u64>,
 ) -> u64 {
-    use super::types::{EINVAL, ENOMEM};
+    use mnu_abi::status::Error;
 
     if length == 0 {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if access & !mnu_abi::MEMORY_ACCESS_ALL != 0
         || options & !mnu_abi::MEMORY_MAP_OPTIONS_ALL != 0
         || access & (mnu_abi::MEMORY_ACCESS_WRITE | mnu_abi::MEMORY_ACCESS_EXECUTE)
             == mnu_abi::MEMORY_ACCESS_WRITE | mnu_abi::MEMORY_ACCESS_EXECUTE
     {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     let exact = options & mnu_abi::MEMORY_MAP_EXACT != 0;
     let replace = options & mnu_abi::MEMORY_MAP_REPLACE != 0;
     let shared = options & mnu_abi::MEMORY_MAP_SHARED != 0;
     if replace && !exact {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
     if exact && (addr == 0 || addr & 4095 != 0) {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
 
     let anonymous = backing_handle == 0;
     if (anonymous && backing_offset != 0) || (!anonymous && backing_offset & 4095 != 0) {
-        return EINVAL;
+        return Error::InvalidArgument.into_raw();
     }
 
     let current_tid = match current_thread_id() {
         Some(tid) => tid,
-        None => return ENOMEM,
+        None => return Error::NotReady.into_raw(),
     };
     let pid = match crate::task::with_thread(current_tid, |t| t.process_id()) {
         Some(pid) => pid,
-        None => return ENOMEM,
+        None => return Error::NotReady.into_raw(),
     };
 
     // ページ境界に切り上げ（オーバーフロー安全）
     let size = match page_align_up(length) {
         Some(v) if v > 0 => v,
-        _ => return EINVAL,
+        _ => return Error::LimitExceeded.into_raw(),
     };
     if !anonymous && backing_offset.checked_add(size).is_none() {
-        return EINVAL;
+        return Error::LimitExceeded.into_raw();
     }
 
     let writable = access & mnu_abi::MEMORY_ACCESS_WRITE != 0;
@@ -753,9 +754,9 @@ fn memory_map_impl(
             rights = rights.union(crate::task::HandleRights::WRITE);
         }
         let (object, granted_rights) =
-            match crate::syscall::handle::object_with_rights(backing_handle, rights) {
+            match crate::syscall::handle::object_with_rights_native(backing_handle, rights) {
                 Ok(result) => result,
-                Err(error) => return error,
+                Err(error) => return error.into_raw(),
             };
         let mut max_access = if shared && !granted_rights.contains(crate::task::HandleRights::WRITE)
         {
@@ -776,12 +777,12 @@ fn memory_map_impl(
                 };
                 match Arc::try_new(object) {
                     Ok(object) => object,
-                    Err(_) => return ENOMEM,
+                    Err(_) => return Error::ResourceUnavailable.into_raw(),
                 }
             }
             crate::task::KernelObject::VmObject(object) => {
                 if object.memory_identity().is_none() {
-                    return EINVAL;
+                    return Error::InvalidArgument.into_raw();
                 }
                 // Reserve virtual space independently of the current extent.
                 // A resizable object can populate it later. RAM page faults
@@ -789,11 +790,11 @@ fn memory_map_impl(
                 // PTE; reserving a range grants no access to absent storage.
                 max_access &= !mnu_abi::MEMORY_ACCESS_EXECUTE;
                 if access & !max_access != 0 {
-                    return crate::syscall::EACCES;
+                    return Error::AccessDenied.into_raw();
                 }
                 object
             }
-            _ => return EINVAL,
+            _ => return Error::InvalidArgument.into_raw(),
         };
         Some((object, backing_offset, max_access))
     };
@@ -814,36 +815,39 @@ fn memory_map_impl(
 
         // ユーザー空間の上限アドレスを超えるaddrを拒否
         if addr != 0 && addr > USER_SPACE_END {
-            return Err(EINVAL);
+            return Err(Error::InvalidAddress.into_raw());
         }
 
         let pt_phys = match process.page_table() {
             Some(p) => p,
-            None => return Err(ENOMEM),
+            None => return Err(Error::NotReady.into_raw()),
         };
 
         if let Some(ceiling) = byte_ceiling.filter(|&value| value != u64::MAX && !replace) {
             use crate::mem::mapping_usage;
             // PROCESS_TABLE retains the root and excludes every mapping/PTE
             // writer. Do not use heap_end: it is a placement cursor, not use.
-            let used = mapping_usage::bytes(
-                process
-                    .memory_regions()
-                    .iter()
-                    .map(|region| (region.start(), region.end().unwrap_or(u64::MAX)))
-                    .chain(process.mmio_mappings().iter().map(|mapping| {
-                        (mapping.virt_start(), mapping.end().unwrap_or(u64::MAX))
-                    }))
-                    .chain(process.dma_buffers().iter().map(|buffer| {
-                        (buffer.virt_start(), buffer.end().unwrap_or(u64::MAX))
-                    })),
-                |start, end| unsafe {
-                    crate::mem::paging::next_user_page_entry(pt_phys, start, end)
-                },
-            )
-            .map_err(|_| EFAULT)?;
+            let used =
+                mapping_usage::bytes(
+                    process
+                        .memory_regions()
+                        .iter()
+                        .map(|region| (region.start(), region.end().unwrap_or(u64::MAX)))
+                        .chain(process.mmio_mappings().iter().map(|mapping| {
+                            (mapping.virt_start(), mapping.end().unwrap_or(u64::MAX))
+                        }))
+                        .chain(
+                            process.dma_buffers().iter().map(|buffer| {
+                                (buffer.virt_start(), buffer.end().unwrap_or(u64::MAX))
+                            }),
+                        ),
+                    |start, end| unsafe {
+                        crate::mem::paging::next_user_page_entry(pt_phys, start, end)
+                    },
+                )
+                .map_err(|_| Error::BackingFailure.into_raw())?;
             if !mapping_usage::permits(used, size, ceiling) {
-                return Err(ENOMEM);
+                return Err(Error::ResourceUnavailable.into_raw());
             }
         }
 
@@ -866,13 +870,16 @@ fn memory_map_impl(
         } else {
             match page_align_up(addr) {
                 Some(value) => Some(value),
-                None => return Err(EINVAL),
+                None => return Err(Error::InvalidAddress.into_raw()),
             }
         };
         let map_start = if exact {
-            let candidate = requested.ok_or(EINVAL)?;
-            if !is_user_range(candidate, size) || (!replace && !range_is_available(candidate)) {
-                return Err(EINVAL);
+            let candidate = requested.ok_or(Error::InvalidArgument.into_raw())?;
+            if !is_user_range(candidate, size) {
+                return Err(Error::InvalidAddress.into_raw());
+            }
+            if !replace && !range_is_available(candidate) {
+                return Err(Error::AlreadyExists.into_raw());
             }
             candidate
         } else if requested.is_some_and(range_is_available) {
@@ -880,12 +887,12 @@ fn memory_map_impl(
         } else {
             let mut candidate = match page_align_up(placement_base) {
                 Some(v) => v,
-                None => return Err(EINVAL),
+                None => return Err(Error::InvalidArgument.into_raw()),
             };
             while !range_is_available(candidate) {
                 candidate = match candidate.checked_add(4096) {
                     Some(v) if is_user_range(v, size) => v,
-                    _ => return Err(ENOMEM),
+                    _ => return Err(Error::ResourceUnavailable.into_raw()),
                 };
             }
             candidate
@@ -893,7 +900,7 @@ fn memory_map_impl(
 
         if !is_user_range(map_start, size) {
             crate::debug!("process::memory_map out of range");
-            return Err(EINVAL);
+            return Err(Error::InvalidAddress.into_raw());
         }
 
         let region = if anonymous {
@@ -901,14 +908,21 @@ fn memory_map_impl(
             // including pages neither process has faulted yet. Its storage
             // is populated lazily by the existing RAM-object pager.
             if shared {
-                let memory = crate::mem::shared_memory::SharedMemory::new(
-                    size, size / 4096,
-                ).map_err(mnu_abi::status::Error::into_raw)?;
-                let memory = Arc::try_new(memory).map_err(|_| ENOMEM)?;
+                let memory = crate::mem::shared_memory::SharedMemory::new(size, size / 4096)
+                    .map_err(mnu_abi::status::Error::into_raw)?;
+                let memory =
+                    Arc::try_new(memory).map_err(|_| Error::ResourceUnavailable.into_raw())?;
                 let object = Arc::try_new(crate::mem::vm_object::VmObject::shared_memory(memory))
-                    .map_err(|_| ENOMEM)?;
+                    .map_err(|_| Error::ResourceUnavailable.into_raw())?;
                 crate::task::MemoryRegion::file_backed(
-                    map_start, size, access, options, object, 0, writable, true,
+                    map_start,
+                    size,
+                    access,
+                    options,
+                    object,
+                    0,
+                    writable,
+                    true,
                     mnu_abi::MEMORY_ACCESS_ALL,
                 )
             } else {
@@ -921,11 +935,12 @@ fn memory_map_impl(
         } else {
             let (object, file_offset, max_access) = match file_backing {
                 Some(backing) => backing,
-                None => return Err(EINVAL),
+                None => return Err(Error::InvalidArgument.into_raw()),
             };
             // Reservations and new mapping admission share PROCESS_TABLE.
             // Do not publish metadata for a backing being changed by its owner.
-            object.with_memory_generation_native(object.memory_generation(), || Ok(()))
+            object
+                .with_memory_generation_native(object.memory_generation(), || Ok(()))
                 .map_err(mnu_abi::status::Error::into_raw)?;
             crate::task::MemoryRegion::file_backed(
                 map_start,
@@ -944,7 +959,7 @@ fn memory_map_impl(
                 .map_err(mnu_abi::status::Error::into_raw)?
         } else {
             if !process.add_memory_region(region) {
-                return Err(EINVAL);
+                return Err(Error::InvalidArgument.into_raw());
             }
             Vec::new()
         };
@@ -957,7 +972,7 @@ fn memory_map_impl(
         if !exact {
             let new_heap_end = match map_start.checked_add(size) {
                 Some(v) => v,
-                None => return Err(EINVAL),
+                None => return Err(Error::InvalidArgument.into_raw()),
             };
             process.set_heap_end(new_heap_end);
         }
@@ -973,9 +988,9 @@ fn memory_map_impl(
             for region in removed {
                 if region.is_shared() && region.permits_access(mnu_abi::MEMORY_ACCESS_WRITE) {
                     if let Some(object) = region.backing().file_object() {
-                        if let Err(error) = object.flush_unmapped_range(
-                            region.backing().file_offset(), region.len(),
-                        ) {
+                        if let Err(error) = object
+                            .flush_unmapped_range(region.backing().file_offset(), region.len())
+                        {
                             return error;
                         }
                     }
@@ -984,7 +999,7 @@ fn memory_map_impl(
             va
         }
         Some(Err(e)) => e,
-        None => ENOMEM,
+        None => Error::NotReady.into_raw(),
     }
 }
 
