@@ -72,11 +72,15 @@ pub enum SyscallNumber {
     /// Blocking receive; native failures never report an empty wakeup.
     IpcRecvWait = 533,
     MapPhysicalRange = 536,
+    /// Validates an opaque endpoint's live generation. Missing or stale
+    /// endpoints return status::Error::NotFound.
     IpcEndpointAlive = 551,
     ListProcesses = 552,
     CheckThreadCapability = 553,
     BlockRead = 555,
     BlockWrite = 556,
+    /// Returns the endpoint's native process identity. Requires ProcessInspect;
+    /// failures use status::Error, never POSIX process or errno semantics.
     IpcEndpointOwner = 557,
     /// Terminates the caller's process, preserving all 64 bits of the opaque
     /// terminal value. Compatibility layers interpret their own exit status.

@@ -145,22 +145,15 @@ pub fn endpoint_alive(handle: u64) -> u64 {
     if handle != 0 && endpoint_record_from_handle(handle).is_some() {
         super::SUCCESS
     } else {
-        super::EINVAL
+        mnu_abi::status::Error::NotFound.into_raw()
     }
 }
 
 pub fn endpoint_owner_process(handle: u64) -> u64 {
-    if !crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::ProcessInspect,
-    ]) {
-        return EACCES;
+    match endpoint_execution_identity(handle) {
+        Ok(identity) => identity.process_id,
+        Err(error) => error.into_raw(),
     }
-    let Some(record) = endpoint_record_from_handle(handle) else {
-        return EINVAL;
-    };
-    crate::task::thread_to_process_id(record.thread_id)
-        .map(|process_id| process_id.as_u64())
-        .unwrap_or(EINVAL)
 }
 
 /// Resolve only a generation-checked IPC endpoint. This grants no object
