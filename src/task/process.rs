@@ -62,6 +62,7 @@ pub struct MemoryRegion {
     access_ranges: alloc::vec::Vec<MemoryAccessRange>,
     options: u64,
     backing: MemoryBacking,
+    // Sorted and unique, including after clone, slice and range removal.
     dirty_pages: alloc::vec::Vec<u64>,
 }
 
@@ -362,8 +363,11 @@ impl MemoryRegion {
     }
 
     pub fn mark_dirty_page(&mut self, page_index: u64) {
-        if !self.dirty_pages.contains(&page_index) {
+        // Sequential first writes must not rescan every preceding dirty page.
+        if self.dirty_pages.last().is_none_or(|last| *last < page_index) {
             self.dirty_pages.push(page_index);
+        } else if let Err(index) = self.dirty_pages.binary_search(&page_index) {
+            self.dirty_pages.insert(index, page_index);
         }
     }
 
