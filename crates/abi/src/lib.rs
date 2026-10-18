@@ -1171,5 +1171,3 @@ pub const EINVAL: u64 = (-22i64) as u64;
 pub const ERANGE: u64 = (-34i64) as u64;
 /// 値が表現可能な範囲を超える
 pub const EOVERFLOW: u64 = (-75i64) as u64;
-/// 操作がサポートされていない
-pub const ENOTSUP: u64 = (-95i64) as u64;

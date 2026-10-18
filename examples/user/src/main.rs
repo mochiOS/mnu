@@ -409,7 +409,7 @@ fn verify_exec_measurements() -> bool {
 
     let mut snapshot = KernelPerformanceSnapshot::default();
     let result = user::performance_snapshot(&mut snapshot);
-    if result == mnu_abi::ENOTSUP {
+    if result == mnu_abi::status::Error::Unsupported.into_raw() {
         return true;
     }
     if is_error(result) {
