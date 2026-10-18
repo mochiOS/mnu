@@ -1153,8 +1153,6 @@ pub struct DmaAllocation {
 
 /// 成功
 pub const SUCCESS: u64 = 0;
-/// 操作が許可されていない
-pub const EPERM: u64 = (-1i64) as u64;
 /// ファイルが見つからない
 pub const ENOENT: u64 = (-2i64) as u64;
 /// I/Oエラー
