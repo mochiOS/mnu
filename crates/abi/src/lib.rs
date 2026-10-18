@@ -1165,7 +1165,5 @@ pub const ENOMEM: u64 = (-12i64) as u64;
 pub const EACCES: u64 = (-13i64) as u64;
 /// 無効な引数
 pub const EINVAL: u64 = (-22i64) as u64;
-/// 引数が範囲外
-pub const ERANGE: u64 = (-34i64) as u64;
 /// 値が表現可能な範囲を超える
 pub const EOVERFLOW: u64 = (-75i64) as u64;
