@@ -632,34 +632,35 @@ pub fn authorize_exec_syscall(
     0
 }
 
-/// Launches the boot-selected initial image from the authenticated initfs only.
-/// Runtime filesystem lookup, naming and executable selection are userspace policy.
+/// Launches only the byte range selected by the authenticated boot module.
+/// There is no filename lookup or fallback selection in the kernel.
 pub(crate) fn launch_bootstrap_image(
-    path: &str,
-    name: &str,
     initial_caps: CapabilitySet,
     initial_kernel_authorities: KernelAuthoritySet,
     requested_privilege: crate::task::PrivilegeLevel,
 ) -> u64 {
     use mnu_abi::status::Error;
 
-    let Some(data) = crate::init::fs::read_initfs(path) else {
-        return Error::NotFound.into_raw();
+    let selected = match mnu_abi::boot_module::decode(crate::init::fs::boot_module_bytes()) {
+        Ok(selected) => selected,
+        Err(mnu_abi::boot_module::Error::ImageTooLarge) => return Error::LimitExceeded.into_raw(),
+        Err(_) => return Error::InvalidArgument.into_raw(),
     };
+    let data = selected.initial_image;
     crate::performance::increment(
         crate::performance::CounterMetric::ExecutableBytesRead,
         data.len() as u64,
     );
     crate::util::log::release_boot_marker(format_args!(
-        "exec: loaded '{}' from initfs ({} bytes)",
-        path,
+        "exec: boot-selected initial image ({} bytes)",
         data.len()
     ));
     let mut measurement = ExecMeasurement::start();
     let result = exec_with_data(
-        &data,
-        name,
-        path,
+        data,
+        // Userspace chooses names and executable identities for later images.
+        "",
+        "",
         Some(initial_caps),
         Some(initial_kernel_authorities),
         Some(requested_privilege),

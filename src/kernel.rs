@@ -107,10 +107,7 @@ fn kernel_main() -> ! {
 
     // 起動後の構成はカーネルではなく init が決める。
     info!("Starting init");
-    let boot_launch = crate::policy::init_launch();
     let init_pid = crate::syscall::exec::launch_bootstrap_image(
-        boot_launch.exec_path,
-        boot_launch.process_name,
         caps.clone(),
         kernel_authorities,
         crate::task::PrivilegeLevel::Service,

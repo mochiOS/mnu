@@ -10,20 +10,6 @@ use crate::task::{PrivilegeLevel, ProcessId};
 /// 0 は未登録。
 static INIT_PID: AtomicU64 = AtomicU64::new(0);
 
-/// 起動に必要な最小メタデータ
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BootLaunch {
-    pub process_name: &'static str,
-    pub exec_path: &'static str,
-}
-
-pub fn init_launch() -> BootLaunch {
-    BootLaunch {
-        process_name: "init",
-        exec_path: "/init",
-    }
-}
-
 pub fn register_init_pid(pid: u64) {
     INIT_PID.store(pid, Ordering::SeqCst);
 }

@@ -37,6 +37,11 @@ fn ext2_image() -> &'static [u8] {
     unsafe { INITFS_SLICE }
 }
 
+/// Boot-chain-supplied module bytes, without interpreting a filesystem path.
+pub(crate) fn boot_module_bytes() -> &'static [u8] {
+    ext2_image()
+}
+
 #[inline]
 fn rootfs_image() -> &'static [u8] {
     unsafe { ROOTFS_SLICE }
