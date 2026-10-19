@@ -3,7 +3,7 @@
 //! special init bypass is accepted. Child references are retained until exit.
 
 use mochi_user_platform as platform;
-use platform::syscall::{EINVAL, EIO, ENOENT, EOVERFLOW, SysError};
+use platform::syscall::{EINVAL, EIO, ENOENT, NativeError, SysError};
 
 pub(crate) struct Child {
     handle: u32,
@@ -47,7 +47,8 @@ pub(crate) fn spawn(path: &str) -> Result<Child, SysError> {
     if endpoint == 0 {
         return Err(SysError::from_raw(ENOENT as i64));
     }
-    let endpoint = u32::try_from(endpoint).map_err(|_| SysError::from_raw(EOVERFLOW as i64))?;
+    let endpoint = u32::try_from(endpoint)
+        .map_err(|_| SysError::from_raw(NativeError::LimitExceeded.into_raw() as i64))?;
     let label = path
         .rsplit('/')
         .next()
