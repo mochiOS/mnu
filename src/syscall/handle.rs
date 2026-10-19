@@ -1084,7 +1084,7 @@ fn provider_seek(
     provider_seek_result(provider, offset, basis).unwrap_or_else(|error| error)
 }
 
-/// Reads one seekable object into kernel-owned storage without exposing any
+/// Reads one positional object into kernel-owned storage without exposing any
 /// filesystem path or provider identifier to the caller.
 /// Local failures use native statuses; lower I/O failures are propagated intact
 /// while the provider/pager error boundary is migrated separately.
@@ -1092,7 +1092,7 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
     use mnu_abi::status::Error;
 
     let readable = object_native(raw, HandleRights::READ).map_err(Error::into_raw)?;
-    if let KernelObject::VmObject(memory) = readable {
+    if let KernelObject::VmObject(memory) = &readable {
         let length = memory
             .memory_length()
             .ok_or(Error::InvalidArgument.into_raw())?;
@@ -1100,11 +1100,7 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
             memory.read_at(0, bytes)
         });
     }
-    // Provider snapshots retain the existing seek/cursor contract. RAM above
-    // has explicit-position reads, so it neither needs nor receives SEEK.
-    let object = object_native(raw, HandleRights::READ.union(HandleRights::SEEK))
-        .map_err(Error::into_raw)?;
-    let KernelObject::Provider(provider) = object else {
+    let KernelObject::Provider(provider) = readable else {
         return Err(Error::InvalidArgument.into_raw());
     };
     let identity = provider_cache_identity(&provider)?;
@@ -1112,34 +1108,25 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
         .map(|identity| crate::mem::vm_object::lock_provider_io(&provider, identity))
         .transpose()
         .map_err(mnu_abi::status::Error::into_raw)?;
-    let maximum = if identity.is_some() {
-        mnu_abi::provider::MAX_POSITIONED_READ_LEN
-    } else {
-        mnu_abi::provider::MAX_DATA_LEN
-    };
-    let length = provider_seek_result(&provider, 0, crate::syscall::fs::SeekBasis::End)?;
-    let length = usize::try_from(length).map_err(|_| Error::LimitExceeded.into_raw())?;
-    if length > maximum_length {
-        return Err(Error::LimitExceeded.into_raw());
-    }
-    provider_seek_result(&provider, 0, crate::syscall::fs::SeekBasis::Start)?;
-    let mut output = crate::util::object_snapshot::zeroed_native(length).map_err(Error::into_raw)?;
-    let mut offset = 0usize;
-    let mut response_storage = crate::util::object_snapshot::zeroed_native(
-        mnu_abi::provider::RESPONSE_HEADER_LEN + mnu_abi::provider::MAX_DATA_LEN,
+    crate::util::object_snapshot::read_to_end(
+        maximum_length,
+        mnu_abi::provider::MAX_DATA_LEN,
+        |offset, bytes| {
+            let count = provider_read_at(&provider, offset, bytes)?;
+            if count > bytes.len() {
+                return Err(Error::BackingFailure.into_raw());
+            }
+            if let Some(identity) = identity {
+                crate::mem::vm_object::overlay_provider_range(
+                    &provider,
+                    identity,
+                    offset,
+                    &mut bytes[..count],
+                )?;
+            }
+            Ok(count)
+        },
     )
-    .map_err(Error::into_raw)?;
-    while offset < output.len() {
-        let chunk = (output.len() - offset).min(maximum);
-        let data = provider_read_chunk(&provider, identity, chunk, &mut response_storage)?;
-        let data_len = data.len();
-        if data_len == 0 {
-            return Err(Error::BackingFailure.into_raw());
-        }
-        output[offset..offset + data_len].copy_from_slice(data);
-        offset += data_len;
-    }
-    Ok(output)
 }
 
 pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u64) -> u64 {
