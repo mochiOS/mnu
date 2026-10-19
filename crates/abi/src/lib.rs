@@ -2,6 +2,8 @@
 
 /// ブートローダーからmnuへ渡す起動情報のABIです。
 pub mod boot;
+/// Boot-selected initial image and opaque resources, without pathname policy.
+pub mod boot_module;
 
 /// Canonical metadata for named capabilities shared by kernel and user space.
 pub mod capability;
