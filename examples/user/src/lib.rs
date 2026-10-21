@@ -293,7 +293,7 @@ pub fn process_exit(code: u64) -> ! {
 
 pub fn process_wait(pid: u64, status_ptr: u64, flags: u64) -> u64 {
     if flags != 0 || pid == u64::MAX {
-        return mnu_abi::EINVAL;
+        return mochi_user_syscall::EINVAL;
     }
     let handle = unsafe {
         syscall2(
@@ -519,7 +519,7 @@ pub fn file_open(path: &str, flags: u64) -> u64 {
         Ok(file) => file.handle as u64,
         Err(ClientError::Transport(error)) => error.raw() as u64,
         Err(ClientError::Remote(status)) => status as i64 as u64,
-        Err(_) => mnu_abi::EIO,
+        Err(_) => mochi_user_syscall::EIO,
     }
 }
 
@@ -554,7 +554,7 @@ pub fn file_seek(handle: u64, offset: i64, whence: u64) -> u64 {
         0 => mnu_abi::HANDLE_SEEK_START,
         1 => mnu_abi::HANDLE_SEEK_CURRENT,
         2 => mnu_abi::HANDLE_SEEK_END,
-        _ => return mnu_abi::EINVAL,
+        _ => return mochi_user_syscall::EINVAL,
     };
     unsafe {
         syscall3(

@@ -3,13 +3,13 @@
 pub(crate) fn open_options(flags: u64) -> Result<u32, u64> {
     use mochios_posix_protocol as posix;
     if flags & !(3 | 0o100 | 0o200 | 0o1000 | 0o2000) != 0 {
-        return Err(mnu_abi::EINVAL);
+        return Err(mochi_user_syscall::EINVAL);
     }
     let mut options = match flags & 3 {
         0 => posix::OPEN_READ,
         1 => posix::OPEN_WRITE,
         2 => posix::OPEN_READ | posix::OPEN_WRITE,
-        _ => return Err(mnu_abi::EINVAL),
+        _ => return Err(mochi_user_syscall::EINVAL),
     };
     for (flag, option) in [
         (0o100, posix::OPEN_CREATE),

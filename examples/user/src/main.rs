@@ -558,12 +558,15 @@ fn run_thread_test() -> bool {
         return false;
     }
     let clone_result = user::clone_address_space();
-    if clone_result != mnu_abi::EAGAIN {
+    if clone_result == 0 || is_error(clone_result) {
         write_literal(b"thread: VM snapshot result=");
         write_decimal(clone_result);
-        write_literal(b" expected=");
-        write_decimal(mnu_abi::EAGAIN);
         write_literal(b"\n");
+        THREAD_TEST_RELEASE.store(true, Ordering::Release);
+        return false;
+    }
+    if user::file_close(clone_result) != mnu_abi::SUCCESS {
+        write_literal(b"thread: VM snapshot release failed\n");
         THREAD_TEST_RELEASE.store(true, Ordering::Release);
         return false;
     }

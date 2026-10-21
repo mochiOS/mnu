@@ -295,7 +295,7 @@ fn send_message(dest: u64, msg: &str) -> u64 {
 fn recv_message(buf: &mut [u8]) -> Result<(u64, usize), u64> {
     let rc = ipc_recv_wait(buf);
     if rc == 0 {
-        return Err(mnu_abi::EAGAIN);
+        return Err(mnu_abi::status::Error::NotReady.into_raw());
     }
     let from = rc >> 32;
     let len = (rc & 0xffff_ffff) as usize;

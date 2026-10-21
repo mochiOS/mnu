@@ -1155,15 +1155,3 @@ pub struct DmaAllocation {
 
 /// 成功
 pub const SUCCESS: u64 = 0;
-/// ファイルが見つからない
-pub const ENOENT: u64 = (-2i64) as u64;
-/// I/Oエラー
-pub const EIO: u64 = (-5i64) as u64;
-/// 受信/送信できない（キュー空/満杯）
-pub const EAGAIN: u64 = (-11i64) as u64;
-/// メモリ不足
-pub const ENOMEM: u64 = (-12i64) as u64;
-/// アクセス権がない
-pub const EACCES: u64 = (-13i64) as u64;
-/// 無効な引数
-pub const EINVAL: u64 = (-22i64) as u64;
