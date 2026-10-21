@@ -54,12 +54,6 @@ pub struct IpcConfig {
     pub max_msg_size: usize,
 }
 
-#[derive(Clone)]
-pub struct FsConfig {
-    pub service_retry_count: usize,
-    pub service_retry_ms: u64,
-}
-
 #[derive(Clone, Copy)]
 pub struct BlockConfig {
     pub max_sectors_per_call: u64,
@@ -101,7 +95,6 @@ pub struct CextConfig {
 pub struct KernelConfig {
     pub scheduler: SchedulerConfig,
     pub ipc: IpcConfig,
-    pub fs: FsConfig,
     pub block: BlockConfig,
     pub io: IoConfig,
     pub capability: CapabilityConfig,
@@ -127,10 +120,6 @@ impl Default for KernelConfig {
             ipc: IpcConfig {
                 mailbox_cap: 64,
                 max_msg_size: IPC_MESSAGE_CAPACITY,
-            },
-            fs: FsConfig {
-                service_retry_count: 3,
-                service_retry_ms: 10,
             },
             block: BlockConfig {
                 max_sectors_per_call: 128,
@@ -273,16 +262,6 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
         "ipc.max_msg_size" => {
             if let Some(v) = parse_usize(value) {
                 config.ipc.max_msg_size = v;
-            }
-        }
-        "fs.service_retry_count" => {
-            if let Some(v) = parse_usize(value) {
-                config.fs.service_retry_count = v;
-            }
-        }
-        "fs.service_retry_ms" => {
-            if let Some(v) = parse_u64(value) {
-                config.fs.service_retry_ms = v;
             }
         }
         "block.max_sectors_per_call" => {
