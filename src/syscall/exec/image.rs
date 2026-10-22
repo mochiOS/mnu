@@ -65,31 +65,31 @@ fn validate_load_segment(data: &[u8], segment: &crate::elf::Elf64Phdr) -> Result
         || segment.p_vaddr < USER_EXEC_ADDRESS_MIN
         || segment.p_vaddr >= USER_ADDRESS_MAX
     {
-        return Err(Error::InvalidArgument);
+        return Err(Error::InvalidFormat);
     }
     let memory_end = segment
         .p_vaddr
         .checked_add(segment.p_memsz)
-        .ok_or(Error::InvalidArgument)?;
+        .ok_or(Error::InvalidFormat)?;
     if memory_end > USER_ADDRESS_MAX {
-        return Err(Error::InvalidArgument);
+        return Err(Error::InvalidFormat);
     }
-    let source_offset = usize::try_from(segment.p_offset).map_err(|_| Error::InvalidArgument)?;
-    let source_len = usize::try_from(segment.p_filesz).map_err(|_| Error::InvalidArgument)?;
+    let source_offset = usize::try_from(segment.p_offset).map_err(|_| Error::InvalidFormat)?;
+    let source_len = usize::try_from(segment.p_filesz).map_err(|_| Error::InvalidFormat)?;
     source_offset
         .checked_add(source_len)
         .filter(|end| *end <= data.len())
-        .ok_or(Error::InvalidArgument)?;
+        .ok_or(Error::InvalidFormat)?;
 
     let alignment = segment.p_align;
     if alignment > 1
         && (!alignment.is_power_of_two()
             || (segment.p_vaddr.wrapping_sub(segment.p_offset) & (alignment - 1)) != 0)
     {
-        return Err(Error::InvalidArgument);
+        return Err(Error::InvalidFormat);
     }
     if segment.p_flags & (PF_EXECUTE | PF_WRITE) == PF_EXECUTE | PF_WRITE {
-        return Err(Error::InvalidArgument);
+        return Err(Error::InvalidFormat);
     }
     Ok(())
 }
@@ -102,28 +102,28 @@ fn parse_load_segments(
     let header = measurement
         .parse(|| crate::elf::parse_elf_header(data))
         .filter(|header| header.e_entry != 0)
-        .ok_or(Error::InvalidArgument)?;
+        .ok_or(Error::InvalidFormat)?;
     if header.e_machine != EM_X86_64
         || usize::from(header.e_phentsize) < core::mem::size_of::<crate::elf::Elf64Phdr>()
     {
-        return Err(Error::InvalidArgument);
+        return Err(Error::InvalidFormat);
     }
 
-    let header_offset = usize::try_from(header.e_phoff).map_err(|_| Error::InvalidArgument)?;
+    let header_offset = usize::try_from(header.e_phoff).map_err(|_| Error::InvalidFormat)?;
     let header_size = usize::from(header.e_phentsize);
     let mut segments = Vec::new();
     for index in 0..usize::from(header.e_phnum) {
         let offset = index
             .checked_mul(header_size)
             .and_then(|value| header_offset.checked_add(value))
-            .ok_or(Error::InvalidArgument)?;
+            .ok_or(Error::InvalidFormat)?;
         offset
             .checked_add(core::mem::size_of::<crate::elf::Elf64Phdr>())
             .filter(|end| *end <= data.len())
-            .ok_or(Error::InvalidArgument)?;
+            .ok_or(Error::InvalidFormat)?;
         let program_header = measurement
             .parse(|| crate::elf::parse_phdr(data, offset))
-            .ok_or(Error::InvalidArgument)?;
+            .ok_or(Error::InvalidFormat)?;
         if program_header.p_type == crate::elf::PT_LOAD {
             validate_load_segment(data, &program_header)?;
             segments
@@ -133,7 +133,7 @@ fn parse_load_segments(
         }
     }
     if segments.is_empty() {
-        return Err(Error::InvalidArgument);
+        return Err(Error::InvalidFormat);
     }
     let entry_is_executable = segments.iter().any(|segment| {
         segment.p_flags & PF_EXECUTE != 0
@@ -144,7 +144,7 @@ fn parse_load_segments(
                 .unwrap_or(false)
     });
     if !entry_is_executable {
-        return Err(Error::InvalidArgument);
+        return Err(Error::InvalidFormat);
     }
     Ok((header, segments))
 }
@@ -159,10 +159,10 @@ pub(super) fn map_elf_image(
     let load_base = segments[0]
         .p_vaddr
         .checked_sub(segments[0].p_offset)
-        .ok_or(Error::InvalidArgument)?;
+        .ok_or(Error::InvalidFormat)?;
     let phdr_vaddr = load_base
         .checked_add(header.e_phoff)
-        .ok_or(Error::InvalidArgument)?;
+        .ok_or(Error::InvalidFormat)?;
     let mut deferred_zero_regions = Vec::new();
     // Finish metadata allocation before the first page-table mutation.
     deferred_zero_regions

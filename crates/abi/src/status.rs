@@ -33,6 +33,9 @@ pub enum Error {
     /// This implementation does not provide the requested mechanism or mode.
     /// Unlike NotReady, retrying without a configuration change cannot help.
     Unsupported = 11,
+    /// The supplied object's contents do not match the format required by
+    /// the mechanism. Distinct from malformed call selectors or addresses.
+    InvalidFormat = 12,
 }
 
 impl Error {
@@ -56,6 +59,7 @@ impl Error {
             9 => Some(Self::NotFound),
             10 => Some(Self::PeerClosed),
             11 => Some(Self::Unsupported),
+            12 => Some(Self::InvalidFormat),
             _ => None,
         }
     }
