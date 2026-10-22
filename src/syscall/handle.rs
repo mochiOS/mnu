@@ -1419,7 +1419,12 @@ fn process_status_for(raw: u64) -> Result<mnu_abi::ProcessStatus, u64> {
     let KernelObject::Process(process) = object else {
         return Err(Error::InvalidArgument.into_raw());
     };
-    Ok(process_status_of(&process))
+    // Image replacement may release old Handles before publishing its final
+    // revision. Serialize live metadata with that existing commit lock so an
+    // observer woken by those releases cannot read a partial transition.
+    // A reclaimed process remains observable through its retained object.
+    Ok(crate::task::with_process(process.id(), |_| process_status_of(&process))
+        .unwrap_or_else(|| process_status_of(&process)))
 }
 
 fn process_status_of(process: &crate::task::process::ProcessObject) -> mnu_abi::ProcessStatus {
