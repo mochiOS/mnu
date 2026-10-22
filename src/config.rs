@@ -1,4 +1,3 @@
-use alloc::string::String;
 use core::convert::TryFrom;
 use spin::Once;
 
@@ -148,20 +147,20 @@ static CONFIG: Once<KernelConfig> = Once::new();
 
 #[inline]
 pub fn kernel() -> &'static KernelConfig {
-    CONFIG.call_once(load_kernel_config)
+    CONFIG.call_once(|| load_kernel_config(crate::init::fs::boot_module_bytes()))
 }
 
 pub fn init() {
     let _ = kernel();
 }
 
-fn load_kernel_config() -> KernelConfig {
+fn load_kernel_config(module_bytes: &[u8]) -> KernelConfig {
     let mut config = KernelConfig::default();
-    let Some(bytes) = crate::init::fs::kernel_read_initfs("/config/kernel.conf") else {
+    let Ok(module) = mnu_abi::boot_module::decode(module_bytes) else {
         return config;
     };
-    let Ok(text) = String::from_utf8(bytes) else {
-        crate::warn!("kernel.conf is not valid UTF-8, using defaults");
+    let Ok(text) = core::str::from_utf8(module.kernel_configuration) else {
+        crate::warn!("Boot kernel configuration is not valid UTF-8, using defaults");
         return config;
     };
 
