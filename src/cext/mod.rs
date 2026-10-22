@@ -242,108 +242,6 @@ struct CextMeta {
     elf: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
-struct BundleManifest {
-    id: String,
-    name: String,
-    version: u16,
-    abi: u16,
-    entry: String,
-    load_stage: String,
-    required: bool,
-    provides: Vec<String>,
-    requires: Vec<String>,
-}
-
-fn parse_array_values(value: &str) -> Option<Vec<String>> {
-    let value = value.trim();
-    let inner = value.strip_prefix('[')?.strip_suffix(']')?.trim();
-    if inner.is_empty() {
-        return Some(Vec::new());
-    }
-    let mut out = Vec::new();
-    for item in inner.split(',') {
-        let trimmed = item.trim();
-        let unquoted = trimmed.strip_prefix('"')?.strip_suffix('"')?;
-        out.push(unquoted.to_string());
-    }
-    Some(out)
-}
-
-fn parse_bundle_manifest(bytes: &[u8]) -> Option<BundleManifest> {
-    let text = core::str::from_utf8(bytes).ok()?;
-    let mut section = "";
-    let mut id = None;
-    let mut name = None;
-    let mut version = None;
-    let mut abi = None;
-    let mut entry = None;
-    let mut load_stage = None;
-    let mut required = None;
-    let mut provides = Vec::new();
-    let mut requires = Vec::new();
-
-    for raw in text.lines() {
-        let line = raw.split('#').next()?.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            section = &line[1..line.len() - 1];
-            continue;
-        }
-        let (key, value) = line.split_once('=')?;
-        let key = key.trim();
-        let value = value.trim();
-        match section {
-            "cext" => match key {
-                "id" => id = Some(value.strip_prefix('"')?.strip_suffix('"')?.to_string()),
-                "name" => name = Some(value.strip_prefix('"')?.strip_suffix('"')?.to_string()),
-                "version" => version = value.parse::<u16>().ok(),
-                "abi" => abi = value.parse::<u16>().ok(),
-                "entry" => entry = Some(value.strip_prefix('"')?.strip_suffix('"')?.to_string()),
-                _ => {}
-            },
-            "load" => match key {
-                "stage" => {
-                    load_stage = Some(value.strip_prefix('"')?.strip_suffix('"')?.to_string())
-                }
-                "required" => {
-                    required = Some(match value {
-                        "true" => true,
-                        "false" => false,
-                        _ => return None,
-                    })
-                }
-                _ => {}
-            },
-            "provides" => {
-                if key == "interfaces" {
-                    provides = parse_array_values(value)?;
-                }
-            }
-            "requires" => {
-                if key == "interfaces" {
-                    requires = parse_array_values(value)?;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Some(BundleManifest {
-        id: id?,
-        name: name?,
-        version: version?,
-        abi: abi?,
-        entry: entry?,
-        load_stage: load_stage?,
-        required: required?,
-        provides,
-        requires,
-    })
-}
-
 fn register_provider(kind: CextKind, init_addr: u64, version: u16) -> bool {
     match kind {
         CextKind::BlockDevice => register_disk_provider(init_addr, version),
@@ -351,130 +249,60 @@ fn register_provider(kind: CextKind, init_addr: u64, version: u16) -> bool {
     }
 }
 
-fn load_bundle_directories() -> bool {
-    let Some(entries) = crate::init::fs::initfs_readdir_path("/") else {
-        crate::util::log::release_boot_marker(format_args!("cext: initfs root unavailable"));
+fn load_boot_modules() -> bool {
+    let Ok(module) = mnu_abi::boot_module::decode(crate::init::fs::boot_module_bytes()) else {
+        crate::util::log::release_boot_marker(format_args!("cext: invalid boot module"));
         return false;
     };
-    let mut found_bundle = false;
-    let mut loaded_bundle = false;
-
-    for name in entries {
-        if !name.ends_with(".cext") {
-            continue;
-        }
-        found_bundle = true;
-        let dir_path = alloc::format!("/{}", name);
-        if !crate::init::fs::is_directory(&dir_path) {
-            crate::warn!("cext: {} is not a directory bundle", dir_path);
-            continue;
-        }
-        let manifest_path = alloc::format!("{}/manifest.toml", dir_path);
-        let entry_path_default = alloc::format!("{}/entry", dir_path);
-        let Some(manifest_bytes) = crate::init::fs::read_initfs(&manifest_path) else {
-            crate::warn!("cext: missing {}", manifest_path);
-            crate::util::log::release_boot_marker(format_args!("cext: missing manifest {}", name));
-            continue;
+    let Ok(entries) = mnu_abi::boot_extensions::decode(module.native_modules) else {
+        crate::util::log::release_boot_marker(format_args!("cext: invalid native module index"));
+        return false;
+    };
+    let mut loaded = false;
+    for index in 0..entries.len() {
+        let entry = entries.get(index).unwrap();
+        let Some(kind) = provider_kind(entry.adapter) else {
+            return false;
         };
-        let Some(manifest) = parse_bundle_manifest(&manifest_bytes) else {
-            crate::warn!("cext: invalid manifest {}", manifest_path);
-            crate::util::log::release_boot_marker(format_args!("cext: invalid manifest {}", name));
-            continue;
-        };
-        if manifest.abi != MCX_CEXT_ABI {
-            crate::warn!(
-                "cext: unsupported abi {} for {}",
-                manifest.abi,
-                manifest.name
-            );
-            crate::util::log::release_boot_marker(format_args!(
-                "cext: unsupported abi {} for {} (expected {})",
-                manifest.abi, manifest.name, MCX_CEXT_ABI
-            ));
-            continue;
-        }
-        if manifest.load_stage != "boot" {
-            continue;
-        }
-        // Select an explicit kernel adapter before reading or loading code.
-        let Some(kind) = provider_kind(&manifest.provides) else {
-            crate::warn!(
-                "cext: unsupported provider interfaces for {}",
-                manifest.name
-            );
-            continue;
-        };
-        let entry_path = if manifest.entry.starts_with('/') {
-            manifest.entry.clone()
-        } else {
-            alloc::format!("{}/{}", dir_path, manifest.entry)
-        };
-        let entry_path = if manifest.entry.is_empty() {
-            entry_path_default.clone()
-        } else {
-            entry_path
-        };
-        let Some(entry_bytes) = crate::init::fs::read_initfs(&entry_path) else {
-            crate::warn!("cext: missing {}", entry_path);
-            crate::util::log::release_boot_marker(format_args!("cext: missing entry {}", name));
-            if manifest.required {
-                crate::warn!("cext: required bundle {} is incomplete", manifest.name);
+        let Some(meta) = parse_cext(entry.bytes) else {
+            crate::warn!("cext: invalid selected module {}", index);
+            if entry.required {
+                return false;
             }
             continue;
         };
-        let Some(meta) = parse_cext(&entry_bytes) else {
-            crate::warn!("cext: invalid module package {}", entry_path);
-            crate::util::log::release_boot_marker(format_args!("cext: invalid package {}", name));
-            continue;
-        };
-        if meta.name != manifest.name || meta.module_version != manifest.version {
-            crate::warn!(
-                "cext: manifest/package mismatch for {} (manifest v{}, package {} v{})",
-                manifest.name,
-                manifest.version,
-                meta.name,
-                meta.module_version
-            );
-            continue;
-        }
         let Some(mut module) = load_elf_symbol(&meta.elf, "mnu_module_init") else {
-            crate::warn!("cext: mnu_module_init not found in {}", entry_path);
+            crate::warn!("cext: init symbol not found in selected module {}", index);
             crate::util::log::release_boot_marker(format_args!(
                 "cext: init symbol missing {}",
-                name
+                index
             ));
+            if entry.required {
+                return false;
+            }
             continue;
         };
         if register_provider(kind, module.address, meta.module_version) {
-            loaded_bundle = true;
+            loaded = true;
             module.keep_mapped();
-            load_cext(&manifest.name, kind, None);
-            crate::info!(
-                "cext: loaded bundle {} v{} id={} provides={:?} requires={:?}",
-                meta.name,
-                meta.module_version,
-                manifest.id,
-                manifest.provides,
-                manifest.requires
-            );
+            load_cext(&meta.name, kind, None);
+            crate::info!("cext: loaded module {} v{}", meta.name, meta.module_version);
             crate::util::log::release_boot_marker(format_args!(
                 "cext: loaded bundle {}",
                 meta.name
             ));
         } else {
-            crate::warn!("cext: module init failed for {}", manifest.name);
+            crate::warn!("cext: module init failed for {}", meta.name);
             crate::util::log::release_boot_marker(format_args!(
                 "cext: module init failed {}",
-                manifest.name
+                meta.name
             ));
+            if entry.required {
+                return false;
+            }
         }
     }
-
-    if found_bundle && !loaded_bundle {
-        crate::util::log::release_boot_marker(format_args!("cext: no boot bundles loaded"));
-    }
-
-    found_bundle
+    loaded
 }
 
 fn parse_cext(bytes: &[u8]) -> Option<CextMeta> {
@@ -897,7 +725,7 @@ pub fn init_runtime_config() {
 
 #[inline]
 pub fn load_modules() {
-    if !load_bundle_directories() {
+    if !load_boot_modules() {
         crate::warn!("cext: no boot bundles found");
     }
 }

@@ -4,6 +4,8 @@
 pub mod boot;
 /// Boot-selected initial image and opaque resources, without pathname policy.
 pub mod boot_module;
+/// Boot-selected native modules, with checked ranges and numeric adapters.
+pub mod boot_extensions;
 
 /// Canonical metadata for named capabilities shared by kernel and user space.
 pub mod capability;
