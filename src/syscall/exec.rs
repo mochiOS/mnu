@@ -641,7 +641,7 @@ pub(crate) fn launch_bootstrap_image(
 ) -> u64 {
     use mnu_abi::status::Error;
 
-    let selected = match mnu_abi::boot_module::decode(crate::init::fs::boot_module_bytes()) {
+    let selected = match mnu_abi::boot_module::decode(crate::init::boot_data::boot_module_bytes()) {
         Ok(selected) => selected,
         Err(mnu_abi::boot_module::Error::ImageTooLarge) => return Error::LimitExceeded.into_raw(),
         Err(_) => return Error::InvalidArgument.into_raw(),

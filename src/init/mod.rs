@@ -2,7 +2,7 @@
 
 use crate::{debug, interrupt, mem, task, util, BootInfo, MemoryRegion, Result};
 
-pub mod fs;
+pub mod boot_data;
 
 pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     util::console::init();
@@ -78,8 +78,9 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     #[cfg(feature = "frame-allocation-failure-injection")]
     crate::percpu::verify_syscall_frame_allocation_rollback()?;
 
-    fs::init();
-    crate::performance::mark_boot(crate::performance::BootMilestone::FilesystemMounted);
+    if !boot_data::boot_module_bytes().is_empty() {
+        crate::performance::mark_boot(crate::performance::BootMilestone::BootModuleAvailable);
+    }
     crate::config::init();
     if crate::hypervisor_guest::is_active() {
         // A platform backend can become ready after the kernel. Keep optional

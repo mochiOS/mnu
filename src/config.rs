@@ -147,7 +147,7 @@ static CONFIG: Once<KernelConfig> = Once::new();
 
 #[inline]
 pub fn kernel() -> &'static KernelConfig {
-    CONFIG.call_once(|| load_kernel_config(crate::init::fs::boot_module_bytes()))
+    CONFIG.call_once(|| load_kernel_config(crate::init::boot_data::boot_module_bytes()))
 }
 
 pub fn init() {

@@ -89,7 +89,7 @@ pub enum BootMilestone {
     BspReady,
     ApReady,
     SchedulerStarted,
-    FilesystemMounted,
+    BootModuleAvailable,
     SystemServicesStarted,
     CompositorStarted,
     UserInterfaceStarted,

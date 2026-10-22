@@ -178,9 +178,11 @@ pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
         }
         None => {}
     }
-    unsafe {
-        crate::init::fs::set_image(boot_info.initfs_addr, boot_info.initfs_size as usize);
-        crate::init::fs::set_rootfs(boot_info.rootfs_addr, boot_info.rootfs_size as usize);
+    let module_installed = unsafe {
+        crate::init::boot_data::install(boot_info.initfs_addr, boot_info.initfs_size as usize)
+    };
+    if module_installed.is_err() {
+        early_serial("kernel: boot module registration failed\n");
     }
     crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
     match kinit(boot_info) {

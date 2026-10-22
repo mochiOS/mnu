@@ -250,7 +250,7 @@ fn register_provider(kind: CextKind, init_addr: u64, version: u16) -> bool {
 }
 
 fn load_boot_modules() -> bool {
-    let Ok(module) = mnu_abi::boot_module::decode(crate::init::fs::boot_module_bytes()) else {
+    let Ok(module) = mnu_abi::boot_module::decode(crate::init::boot_data::boot_module_bytes()) else {
         crate::util::log::release_boot_marker(format_args!("cext: invalid boot module"));
         return false;
     };
