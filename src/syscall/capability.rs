@@ -10,7 +10,6 @@ extern crate alloc;
 use alloc::string::String;
 use mnu_abi::status::Error;
 
-use crate::capability::path::{self, PathRights, PATH_CREATE, PATH_LIST, PATH_READ, PATH_WRITE};
 use crate::capability::{
     kernel_authority_implies, parse_kernel_authority_spec, Capability, KernelAuthority,
     KernelCapability,
@@ -181,16 +180,6 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
             .unwrap_or(false)
         {
             return Error::AccessDenied.into_raw();
-        }
-        if let Some((selected_path, rights)) = parse_scoped_path_grant(cap_spec) {
-            // A native grant is explicit authority, not a POSIX pathname lookup.
-            if !selected_path.starts_with('/') {
-                return Error::InvalidArgument.into_raw();
-            }
-            return match path::grant_scoped_path(dest_process.as_u64(), selected_path, rights) {
-                Ok(()) => SUCCESS,
-                Err(_) => Error::InvalidArgument.into_raw(),
-            };
         }
         let cap = match intern_capability_token(cap_spec) {
             Some(cap) => cap,
@@ -381,20 +370,6 @@ fn read_capability_name(cap_ptr: u64, cap_len: u64, maximum: usize) -> Result<St
     String::from_utf8(bytes).map_err(|_| Error::InvalidArgument.into_raw())
 }
 
-fn parse_scoped_path_grant(spec: &str) -> Option<(&str, PathRights)> {
-    let scoped = spec.strip_prefix("fs.scope.")?;
-    let (mode, path) = scoped.split_once('@')?;
-    if path.is_empty() || path.as_bytes().contains(&0) {
-        return None;
-    }
-    let bits = match mode {
-        "read" => PATH_READ | PATH_LIST,
-        "read-write" => PATH_READ | PATH_LIST | PATH_WRITE | PATH_CREATE,
-        _ => return None,
-    };
-    Some((path, PathRights::new(bits)))
-}
-
 fn parse_capability_token(spec: &str) -> Option<CapabilityToken> {
     if let Some(authority) = parse_kernel_authority_spec(spec) {
         return Some(CapabilityToken::Authority(authority));
@@ -412,19 +387,4 @@ fn intern_capability_token(spec: &str) -> Option<CapabilityToken> {
 fn read_capability_token_from_user(cap_ptr: u64, cap_len: u64) -> Result<CapabilityToken, u64> {
     let spec = read_capability_spec_from_user(cap_ptr, cap_len)?;
     parse_capability_token(spec.as_str()).ok_or(Error::InvalidArgument.into_raw())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scoped_path_specs_are_explicit_and_bounded_to_one_path() {
-        let (path, rights) =
-            parse_scoped_path_grant("fs.scope.read-write@/home/alice/note.txt").unwrap();
-        assert_eq!(path, "/home/alice/note.txt");
-        assert!(rights.contains(PATH_READ | PATH_WRITE | PATH_CREATE));
-        assert!(parse_scoped_path_grant("fs.scope.read@/").is_some());
-        assert!(parse_scoped_path_grant("fs.scope.all@/home/alice").is_none());
-    }
 }

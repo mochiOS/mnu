@@ -1673,7 +1673,6 @@ pub fn add_process(process: Process) -> Option<ProcessId> {
 /// プロセスを削除
 pub fn remove_process(id: ProcessId) -> Option<Process> {
     release_process_borrowed_mappings(id).ok()?;
-    crate::capability::path::revoke_scoped_paths(id.as_u64());
     PROCESS_TABLE.lock().remove(id)
 }
 
@@ -1803,7 +1802,6 @@ fn destroy_exited_process(process: Process) -> (ProcessId, u64) {
     } else {
         None
     };
-    crate::capability::path::revoke_scoped_paths(pid.as_u64());
     if let Some(table_phys) = page_table {
         if let Err(e) = crate::mem::paging::destroy_user_page_table(table_phys) {
             crate::warn!(

@@ -5,7 +5,6 @@
 //! ここで変換を集中管理する。
 
 extern crate alloc;
-pub mod path;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

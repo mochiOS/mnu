@@ -104,8 +104,11 @@ mnuでは、次のような方針でCapabilityを扱います。
 - 物理メモリの参照や物理ページのマッピングは `memory.phys.map` / `memory.phys.translate` で分離する
 - `memory.phys.map` は単なる全体権限ではなく、`memory.phys.map@0xBASE:0xSIZE` のような物理範囲付き authority として扱う
 - Service権限だけで物理アドレス取得や物理ページ mapping を許可しない
-- パスレベルの権限は `capabilities.manage` を持つ core.service 系の起動経路を起点に、カーネル初期登録で管理する
-- 実際のパス定義はカーネルが検証し、path registry を参照して判定する
+- ファイルのパス解決とアクセス方針はユーザー空間で扱い、カーネルにはパス単位の許可を登録しない。資源の権限は FileHandle とその rights で委譲する
+
+旧 `fs.scope.*@path` レジストリはアクセス判定から参照されておらず、撤去した。
+パス文字列だけを渡すファイル許可プロンプトは、FileHandle を返す broker 経路へ移行するまで未対応エラーとなる。
+プロセス全体の権限への自動昇格や、永続許可の成功扱いは行わない。
 
 初期の range-scoped authority は initfs の `core.service` だけが持ちます。
 `core.service` はユーザー空間起動の入口として、対象デバイスの MMIO 範囲へ authority を縮小してから
