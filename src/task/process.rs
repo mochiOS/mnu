@@ -525,6 +525,7 @@ pub struct ProcessObject {
     id: ProcessId,
     state: AtomicU8,
     exit_code: AtomicU64,
+    image_revision: AtomicU64,
     user_cpu_ticks: AtomicU64,
     kernel_cpu_ticks: AtomicU64,
 }
@@ -539,6 +540,7 @@ impl ProcessObject {
             id,
             state: AtomicU8::new(mnu_abi::PROCESS_STATE_RUNNING as u8),
             exit_code: AtomicU64::new(0),
+            image_revision: AtomicU64::new(0),
             user_cpu_ticks: AtomicU64::new(0),
             kernel_cpu_ticks: AtomicU64::new(0),
         }
@@ -595,6 +597,23 @@ impl ProcessObject {
 
     pub fn exit_code(&self) -> u64 {
         self.exit_code.load(Ordering::Acquire)
+    }
+
+    pub fn image_revision(&self) -> u64 {
+        self.image_revision.load(Ordering::Acquire)
+    }
+
+    /// Image transitions serialize preparation and commit for this process.
+    /// Reserve no value on failure: exhaustion must be detected before any
+    /// irreversible change to the live image, never wrapped or saturated.
+    pub(crate) fn next_image_revision(&self) -> Option<u64> {
+        self.image_revision().checked_add(1)
+    }
+
+    /// Called only after a new image and its opaque context are committed,
+    /// while the process's image-transition guard still excludes replacement.
+    pub(crate) fn commit_image_revision(&self, revision: u64) {
+        self.image_revision.store(revision, Ordering::Release);
     }
 
     fn mark_exited(&self, exit_code: u64) {

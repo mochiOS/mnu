@@ -239,8 +239,9 @@ pub enum SyscallNumber {
     /// Retains an endpoint owner's Process under ProcessInspect authority;
     /// SIGNAL additionally requires ProcessKill. Failures use status::Error.
     ProcessHandleOpen = 641,
-    /// Observes a retained WAIT Process Handle, including after its process
-    /// table record is reclaimed. Failures use status::Error.
+    /// Observes lifecycle and committed image revision through a retained
+    /// WAIT Process Handle, including after its process table record is
+    /// reclaimed. Failures use status::Error.
     ProcessHandleStatus = 642,
     /// Waits on the retained target of a WAIT Process Handle. Poll/deadline
     /// expiry or a deliverable upcall returns native NotReady. Storage or
@@ -566,6 +567,11 @@ pub struct ProcessStatus {
     pub state: u32,
     pub reserved: u32,
     pub exit_code: u64,
+    /// Number of successfully committed image replacements in this process.
+    /// Starts at zero for every newly created process, including creation
+    /// from a captured address space. Failed replacements do not advance it.
+    /// Observed through the same retained WAIT reference as lifecycle state.
+    pub image_revision: u64,
 }
 
 /// Initial userspace register state for a native thread.

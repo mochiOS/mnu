@@ -1433,6 +1433,7 @@ fn process_status_of(process: &crate::task::process::ProcessObject) -> mnu_abi::
         },
         reserved: 0,
         exit_code: process.exit_code(),
+        image_revision: process.image_revision(),
     }
 }
 

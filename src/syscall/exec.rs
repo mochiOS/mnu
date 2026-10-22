@@ -1265,6 +1265,11 @@ fn replace_current_process_image(
     } else {
         None
     };
+    let next_image_revision = crate::task::with_process(pid, |process| {
+        process.process_object().next_image_revision()
+    })
+    .ok_or_else(|| Error::NotReady.into_raw())?
+    .ok_or_else(|| Error::LimitExceeded.into_raw())?;
     crate::task::release_process_borrowed_mappings(pid)?;
     crate::task::scheduler::retire_image_siblings(pid, current_tid);
     stack_mapping.commit();
@@ -1287,6 +1292,9 @@ fn replace_current_process_image(
             *process.launch_context_mut() = context;
         }
         process.retain_launch_context_handles_for_exec();
+        process
+            .process_object()
+            .commit_image_revision(next_image_revision);
         previous
     })
     .flatten();
