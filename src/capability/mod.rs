@@ -208,6 +208,11 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// Validate an opaque label without interning it or assigning authority.
+    pub(crate) fn valid_name(name: &str) -> bool {
+        valid_capability_name(name)
+    }
+
     fn builtin_name(self) -> Option<&'static str> {
         use Capability::*;
         Some(match self {

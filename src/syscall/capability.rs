@@ -65,6 +65,7 @@ pub fn check_thread_capability(thread_id: u64, cap_ptr: u64, cap_len: u64) -> u6
                 0
             }
         }
+        None if Capability::valid_name(&name) => 0,
         None => Error::InvalidArgument.into_raw(),
     }
 }
@@ -102,6 +103,7 @@ pub fn query(cap_ptr: u64, cap_len: u64) -> u64 {
                 0
             }
         }
+        None if Capability::valid_name(&name) => 0,
         None => Error::InvalidArgument.into_raw(),
     }
 }
