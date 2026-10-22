@@ -77,8 +77,6 @@ pub struct ExecConfig {
     pub tls_base_min: u64,
     pub tls_aslr_max_pages: u64,
     pub initial_tls_size: u64,
-    pub brk_heap_base_min: u64,
-    pub brk_heap_aslr_max_pages: u64,
     pub memory_map_base_min: u64,
     pub memory_map_aslr_max_pages: u64,
     pub kernel_thread_stack_size: usize,
@@ -133,8 +131,6 @@ impl Default for KernelConfig {
                 tls_base_min: 0x3000_0000,
                 tls_aslr_max_pages: 0x4000,
                 initial_tls_size: 4096,
-                brk_heap_base_min: 0x4000_0000,
-                brk_heap_aslr_max_pages: 0x8000,
                 memory_map_base_min: 0x5000_0000,
                 memory_map_aslr_max_pages: 0x10000,
                 kernel_thread_stack_size: 4096 * 16,
@@ -307,16 +303,6 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
         "exec.initial_tls_size" => {
             if let Some(v) = parse_u64(value) {
                 config.exec.initial_tls_size = v;
-            }
-        }
-        "exec.brk_heap_base_min" => {
-            if let Some(v) = parse_u64(value) {
-                config.exec.brk_heap_base_min = v;
-            }
-        }
-        "exec.brk_heap_aslr_max_pages" => {
-            if let Some(v) = parse_u64(value) {
-                config.exec.brk_heap_aslr_max_pages = v;
             }
         }
         "exec.memory_map_base_min" => {

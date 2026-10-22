@@ -899,38 +899,6 @@ fn exec_with_data(
 
         crate::debug!("User stack allocated successfully");
 
-        // Pre-map initial heap pages to avoid immediate page faults from user allocations.
-        // Map two pages at the default heap base so small early allocations won't fault.
-        let exec_cfg = crate::config::kernel().exec;
-        let default_heap_base = exec_cfg.brk_heap_base_min.saturating_add(
-            aslr_offset_pages(aslr_seed ^ 0x4a11_6b5c, exec_cfg.brk_heap_aslr_max_pages) * 4096,
-        );
-        let heap_map_size: u64 = 4096 * 2;
-        let mut heap_pre_mapped = false;
-        if let Err(e) = crate::mem::paging::map_and_copy_segment_to(
-            new_pt_phys,
-            default_heap_base,
-            0,
-            heap_map_size,
-            &[],
-            true,
-            false,
-        ) {
-            crate::warn!(
-                "Failed to pre-map initial heap pages at {:#x}: {:?}",
-                default_heap_base,
-                e
-            );
-        } else {
-            crate::debug!(
-                "Pre-mapped {} bytes for heap at {:#x} for {}",
-                heap_map_size,
-                default_heap_base,
-                process_name
-            );
-            heap_pre_mapped = true;
-        }
-
         // プロセスを作成してページテーブルをセット
         let privilege = resolve_exec_privilege(requested_privilege);
         const DEFAULT_PROCESS_PRIORITY: u8 = 8;
@@ -971,10 +939,6 @@ fn exec_with_data(
             stack_end_vaddr,
             stack_end_vaddr + 4096
         );
-        if heap_pre_mapped {
-            proc.set_heap_start(default_heap_base);
-            proc.set_heap_end(default_heap_base + heap_map_size);
-        }
         let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
             Ok(base) => base,
             Err(error) => {
@@ -1203,22 +1167,6 @@ fn replace_current_process_image(
     ) {
         return Err(mapping_error_native(error).into_raw());
     }
-    let exec_cfg = crate::config::kernel().exec;
-    let heap_base = exec_cfg.memory_map_base_min.saturating_add(
-        aslr_offset_pages(aslr_seed ^ 0x4a11_6b5c, exec_cfg.memory_map_aslr_max_pages) * 4096,
-    );
-    let heap_map_size: u64 = 4096 * 2;
-    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
-        new_pt_phys,
-        heap_base,
-        0,
-        heap_map_size,
-        &[],
-        true,
-        false,
-    ) {
-        return Err(mapping_error_native(error).into_raw());
-    }
     let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
         Ok(base) => base,
         Err(error) => return Err(error.into_raw()),
@@ -1277,8 +1225,7 @@ fn replace_current_process_image(
     let old_pt_phys = crate::task::with_process_mut(pid, |process| {
         let previous = process.page_table();
         process.set_page_table(new_pt_phys);
-        process.set_heap_start(heap_base);
-        process.set_heap_end(heap_base + heap_map_size);
+        process.set_mapping_cursor(0);
         process.set_ipc_mapping_end(0);
         process.set_memory_regions(deferred_zero_regions);
         process.set_stack_bottom(stack_base_vaddr);

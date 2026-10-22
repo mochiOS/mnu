@@ -80,8 +80,7 @@ pub struct CloneSource {
     table: u64,
     regions: Vec<MemoryRegion>,
     excluded: Vec<(u64, u64)>,
-    heap_start: u64,
-    heap_end: u64,
+    mapping_cursor: u64,
     ipc_mapping_end: u64,
     stack_bottom: u64,
     stack_top: u64,
@@ -121,8 +120,7 @@ impl CloneSource {
             table,
             regions,
             excluded,
-            heap_start: process.heap_start(),
-            heap_end: process.heap_end(),
+            mapping_cursor: process.mapping_cursor(),
             ipc_mapping_end: process.ipc_mapping_end(),
             stack_bottom: process.stack_bottom(),
             stack_top: process.stack_top(),
@@ -154,8 +152,7 @@ impl CloneSource {
             table: Some(table),
             root,
             regions: self.regions,
-            heap_start: self.heap_start,
-            heap_end: self.heap_end,
+            mapping_cursor: self.mapping_cursor,
             ipc_mapping_end: self.ipc_mapping_end,
             stack_bottom: self.stack_bottom,
             stack_top: self.stack_top,
@@ -170,8 +167,7 @@ pub struct AddressSpaceImage {
     table: Option<u64>,
     root: Arc<super::detached_roots::Root>,
     regions: Vec<MemoryRegion>,
-    heap_start: u64,
-    heap_end: u64,
+    mapping_cursor: u64,
     ipc_mapping_end: u64,
     stack_bottom: u64,
     stack_top: u64,
@@ -200,8 +196,7 @@ impl AddressSpaceImage {
         process.set_page_table(table);
         process.set_pending_image_root(self.root.clone());
         process.set_memory_regions(core::mem::take(&mut self.regions));
-        process.set_heap_start(self.heap_start);
-        process.set_heap_end(self.heap_end);
+        process.set_mapping_cursor(self.mapping_cursor);
         process.set_ipc_mapping_end(self.ipc_mapping_end);
         process.set_stack_bottom(self.stack_bottom);
         process.set_stack_top(self.stack_top);

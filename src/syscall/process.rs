@@ -96,12 +96,17 @@ fn aslr_mix64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-fn randomized_heap_base(pid: crate::task::ProcessId, floor: u64, max_pages: u64) -> u64 {
+fn randomized_mapping_base(pid: crate::task::ProcessId, floor: u64, max_pages: u64) -> u64 {
     let seed = crate::cpu::boot_entropy_u64()
         ^ crate::interrupt::timer::get_ticks().rotate_left(17)
         ^ pid.as_u64().rotate_left(9)
         ^ floor.rotate_left(3);
-    floor.saturating_add((aslr_mix64(seed) % max_pages) * 4096)
+    let pages = if max_pages == 0 {
+        0
+    } else {
+        aslr_mix64(seed) % max_pages
+    };
+    floor.saturating_add(pages.saturating_mul(4096))
 }
 
 #[inline]
@@ -847,16 +852,15 @@ fn memory_map_impl(
 
     let result = crate::task::with_process_mut(pid, |process| {
         // Choose a placement cursor without publishing changes on failure.
-        let placement_base = if process.heap_start() == 0 {
+        let placement_base = if process.mapping_cursor() == 0 {
             let exec_cfg = crate::config::kernel().exec;
-            let default_heap_base = randomized_heap_base(
+            randomized_mapping_base(
                 pid,
                 exec_cfg.memory_map_base_min,
                 exec_cfg.memory_map_aslr_max_pages,
-            );
-            default_heap_base
+            )
         } else {
-            process.heap_end()
+            process.mapping_cursor()
         };
 
         // ユーザー空間の上限アドレスを超えるaddrを拒否
@@ -872,7 +876,7 @@ fn memory_map_impl(
         if let Some(ceiling) = byte_ceiling.filter(|&value| value != u64::MAX && !replace) {
             use crate::mem::mapping_usage;
             // PROCESS_TABLE retains the root and excludes every mapping/PTE
-            // writer. Do not use heap_end: it is a placement cursor, not use.
+            // writer. Placement hints are not reservations or memory use.
             let used =
                 mapping_usage::bytes(
                     process
@@ -1010,17 +1014,13 @@ fn memory_map_impl(
             Vec::new()
         };
 
-        if process.heap_start() == 0 {
-            process.set_heap_start(placement_base);
-            process.set_heap_end(placement_base);
-        }
-        // heap_end を更新してアドレス空間が重ならないようにする
+        // Advance only after publication, without reserving the skipped gap.
         if !exact {
-            let new_heap_end = match map_start.checked_add(size) {
+            let next_cursor = match map_start.checked_add(size) {
                 Some(v) => v,
                 None => return Err(Error::InvalidArgument.into_raw()),
             };
-            process.set_heap_end(new_heap_end);
+            process.set_mapping_cursor(next_cursor);
         }
 
         Ok((map_start, removed))

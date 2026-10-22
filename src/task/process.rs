@@ -738,10 +738,8 @@ pub struct Process {
     /// page_table をこの Process が所有しているかどうか
     page_table_owned: bool,
     pending_image_root: Option<Arc<crate::mem::detached_roots::Root>>,
-    /// ヒープ開始アドレス
-    heap_start: u64,
-    /// 現在のヒープ終了アドレス (program break)
-    heap_end: u64,
+    /// Next native VM placement hint; neither a reservation nor memory usage.
+    mapping_cursor: u64,
     /// DMA 専用仮想アドレス領域の開始
     dma_start: u64,
     /// DMA 専用仮想アドレス領域の現在位置
@@ -794,10 +792,6 @@ impl Process {
         let len = core::cmp::min(bytes.len(), 32);
         name_buf[..len].copy_from_slice(&bytes[..len]);
 
-        // デフォルトのヒープ領域（仮）。exec時に再設定されるべき。
-        // 0x40000000番地あたりを開始にする例が多いが、ここでは0にしておく。
-        let heap_start = 0;
-
         let id = ProcessId::new();
         let object =
             Arc::try_new(ProcessObject::new(id)).map_err(|_| Error::ResourceUnavailable)?;
@@ -820,8 +814,7 @@ impl Process {
             page_table: None, // TODO: ページテーブル実装後に設定
             page_table_owned: true,
             pending_image_root: None,
-            heap_start,
-            heap_end: heap_start,
+            mapping_cursor: 0,
             dma_start: 0,
             dma_end: 0,
             ipc_mapping_end: 0,
@@ -1008,24 +1001,12 @@ impl Process {
         self.pending_image_root.as_ref()
     }
 
-    /// ヒープ終了アドレスを取得
-    pub fn heap_end(&self) -> u64 {
-        self.heap_end
+    pub fn mapping_cursor(&self) -> u64 {
+        self.mapping_cursor
     }
 
-    /// ヒープ終了アドレスを設定
-    pub fn set_heap_end(&mut self, addr: u64) {
-        self.heap_end = addr;
-    }
-
-    /// ヒープ開始アドレスを取得
-    pub fn heap_start(&self) -> u64 {
-        self.heap_start
-    }
-
-    /// ヒープ開始アドレスを設定
-    pub fn set_heap_start(&mut self, addr: u64) {
-        self.heap_start = addr;
+    pub fn set_mapping_cursor(&mut self, addr: u64) {
+        self.mapping_cursor = addr;
     }
 
     pub fn dma_end(&self) -> u64 {
@@ -1060,10 +1041,9 @@ impl Process {
         self.stack_top
     }
 
-    /// System Monitor向けの、カーネルが追跡しているユーザー空間の総量。
-    /// 共有領域も各プロセスに一度ずつ数えるため、物理RSSではなくmapped sizeである。
+    /// Tracked virtual extents for native process inspection, not physical RSS.
+    /// A placement hint never reserves or accounts its intervening address gap.
     pub fn mapped_memory_bytes(&self) -> u64 {
-        let heap = self.heap_end.saturating_sub(self.heap_start);
         let stack = self.stack_top.saturating_sub(self.stack_bottom);
         let mapped_memory = self
             .memory_regions
@@ -1073,9 +1053,7 @@ impl Process {
             .dma_buffers
             .iter()
             .fold(0u64, |total, buffer| total.saturating_add(buffer.len()));
-        heap.saturating_add(stack)
-            .saturating_add(mapped_memory)
-            .saturating_add(dma)
+        stack.saturating_add(mapped_memory).saturating_add(dma)
     }
     pub fn set_stack_bottom(&mut self, addr: u64) {
         self.stack_bottom = addr;
@@ -1264,13 +1242,6 @@ impl Process {
         if dma_overlap {
             return Err(Error::AlreadyExists);
         }
-        if self.heap_start != 0
-            && self.heap_end != 0
-            && mapping.virt_start() < self.heap_end
-            && self.heap_start < mapping_end
-        {
-            return Err(Error::AlreadyExists);
-        }
         if self.stack_bottom != 0
             && self.stack_top != 0
             && mapping.virt_start() < self.stack_top
@@ -1332,13 +1303,6 @@ impl Process {
             buffer.virt_start < region_end && region.start() < buffer_end
         });
         if memory_overlap {
-            return false;
-        }
-        if self.heap_start != 0
-            && self.heap_end != 0
-            && buffer.virt_start < self.heap_end
-            && self.heap_start < buffer_end
-        {
             return false;
         }
         if self.stack_bottom != 0
