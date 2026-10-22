@@ -378,6 +378,55 @@ pub fn control(
     let KernelObject::Provider(provider) = object else {
         return Error::InvalidArgument.into_raw();
     };
+    provider_exchange(
+        &provider,
+        mnu_abi::provider::OP_CONTROL,
+        control_code,
+        input,
+        input_length,
+        output,
+        output_length,
+    )
+}
+
+/// A provider query is explicitly READ-authorized, not a weaker control call.
+pub fn query(
+    raw: u64,
+    code: u64,
+    input: u64,
+    input_length: u64,
+    output: u64,
+    output_length: u64,
+) -> u64 {
+    use mnu_abi::status::Error;
+    let object = match object_native(raw, HandleRights::READ) {
+        Ok(object) => object,
+        Err(error) => return error.into_raw(),
+    };
+    let KernelObject::Provider(provider) = object else {
+        return Error::InvalidArgument.into_raw();
+    };
+    provider_exchange(
+        &provider,
+        mnu_abi::provider::OP_QUERY,
+        code,
+        input,
+        input_length,
+        output,
+        output_length,
+    )
+}
+
+fn provider_exchange(
+    provider: &ProviderObject,
+    opcode: u16,
+    code: u64,
+    input: u64,
+    input_length: u64,
+    output: u64,
+    output_length: u64,
+) -> u64 {
+    use mnu_abi::status::Error;
     let input_length = match usize::try_from(input_length) {
         Ok(length) if length <= mnu_abi::provider::MAX_DATA_LEN => length,
         _ => return Error::LimitExceeded.into_raw(),
@@ -396,10 +445,10 @@ pub fn control(
         }
     }
     let request = mnu_abi::provider::RequestHeader {
-        opcode: mnu_abi::provider::OP_CONTROL,
+        opcode,
         object_id: provider.object_id,
         argument: 0,
-        basis: control_code,
+        basis: code,
         length: output_length as u32,
         data_length: input_length as u32,
     };
@@ -410,7 +459,7 @@ pub fn control(
         Err(error) => return error.into_raw(),
     };
     let (response, data_length) =
-        match provider_call(&provider, request, &input_bytes, &mut response_storage) {
+        match provider_call(provider, request, &input_bytes, &mut response_storage) {
             Ok(response) => response,
             Err(error) => return error,
         };
@@ -429,7 +478,7 @@ pub fn control(
 
 pub fn options_get(raw: u64) -> u64 {
     use mnu_abi::status::Error;
-    let object = match object_native(raw, HandleRights::CONTROL) {
+    let object = match object_native(raw, HandleRights::empty()) {
         Ok(object) => object,
         Err(error) => return error.into_raw(),
     };

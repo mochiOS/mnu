@@ -776,6 +776,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::HandleControl as u64 => {
             handle::control(arg0, arg1, arg2, arg3, arg4, arg5)
         }
+        x if x == SyscallNumber::HandleQuery as u64 => {
+            handle::query(arg0, arg1, arg2, arg3, arg4, arg5)
+        }
         x if x == SyscallNumber::ProcessHandleOpen as u64 => handle::process_open(arg0, arg1),
         x if x == SyscallNumber::ProcessHandleStatus as u64 => handle::process_status(arg0, arg1),
         x if x == SyscallNumber::ProcessExecutionRead as u64 => {

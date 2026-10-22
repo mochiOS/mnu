@@ -36,6 +36,10 @@ pub const OP_READ_SHARED: u16 = 11;
 /// Success includes one LE u64 starting position; an empty operation may
 /// succeed at any position. This does not modify the object's authority.
 pub const OP_WRITE_BOUNDED: u16 = 12;
+/// READ-authorized, provider-defined observation. `basis` is an opaque query
+/// selector, input is inline, and `length` is output capacity. Providers must
+/// explicitly implement queries, never dispatch them as mutation controls.
+pub const OP_QUERY: u16 = 13;
 /// A nonempty operation has no prefix within its supplied byte bound.
 /// This native provider condition has no resource-policy or signal meaning.
 pub const STATUS_BOUND_REACHED: i64 = -4094;
@@ -202,6 +206,7 @@ const fn valid_opcode(opcode: u16) -> bool {
             | OP_READ_WITH_POSITION
             | OP_READ_SHARED
             | OP_WRITE_BOUNDED
+            | OP_QUERY
     )
 }
 
@@ -251,7 +256,7 @@ const fn valid_request_fields(header: RequestHeader) -> bool {
                 && header.length == 0
                 && header.data_length == 0
         }
-        OP_CONTROL => {
+        OP_CONTROL | OP_QUERY => {
             header.argument == 0
                 && header.length as usize <= MAX_DATA_LEN
                 && header.data_length as usize <= MAX_DATA_LEN
@@ -291,7 +296,7 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
         return header.value == 0 && header.data_length == 0;
     }
     match header.opcode {
-        OP_READ | OP_READ_AT | OP_CONTROL => header.value == header.data_length as u64,
+        OP_READ | OP_READ_AT | OP_CONTROL | OP_QUERY => header.value == header.data_length as u64,
         OP_READ_WITH_POSITION => {
             header.data_length as usize >= READ_POSITION_LEN
                 && header.value == (header.data_length as usize - READ_POSITION_LEN) as u64

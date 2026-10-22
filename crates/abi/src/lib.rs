@@ -271,13 +271,13 @@ pub enum SyscallNumber {
     /// and NotReady (execution context).
     ContextHandleSet = 648,
     StreamPairCreate = 649,
-    /// Reads shared native I/O behavior through a caller-owned CONTROL Handle.
+    /// Reads shared native I/O behavior through any caller-owned Handle.
     /// Failures use status::Error: InvalidArgument for selector/object kind,
-    /// AccessDenied for missing CONTROL, NotReady for absent caller context.
+    /// NotReady for absent caller context. This grants no mutation authority.
     HandleOptionsGet = 650,
     /// Replaces shared I/O behavior, not descriptor-local flags. Unknown
     /// HANDLE_OPTIONS_ALL bits fail with native InvalidArgument before lookup;
-    /// selector, authority and context failures match HandleOptionsGet.
+    /// Requires CONTROL; selector and context failures match HandleOptionsGet.
     HandleOptionsSet = 651,
     /// Waits on a naturally aligned caller memory value using a native
     /// deadline. Failures use status::Error; successful AddressWaitResult
@@ -505,6 +505,12 @@ pub enum SyscallNumber {
     /// Zero length accesses neither pointer. Overlap is supported within one
     /// snapshot; failure may leave a destination prefix changed, never rollback.
     MemoryCopy = 699,
+    /// Sends a bounded, provider-defined read-only query through a READ Handle.
+    /// Args: Handle, opaque code, input pointer/length, output pointer/capacity.
+    /// The provider's query namespace is separate from mutation/control. The
+    /// kernel never translates queries into controls or interprets their codes.
+    /// Native validation errors use status::Error; provider failures are opaque.
+    HandleQuery = 700,
     CheckGravityExist = 999,
 }
 
@@ -1012,6 +1018,7 @@ mod object_handle_tests {
             SyscallNumber::HandleSameObject as u64,
             SyscallNumber::ProviderObjectSignal as u64,
             SyscallNumber::HandleControl as u64,
+            SyscallNumber::HandleQuery as u64,
             SyscallNumber::ProcessSuspendCurrent as u64,
             SyscallNumber::ProcessHandleSuspend as u64,
             SyscallNumber::AddressSpaceClone as u64,
