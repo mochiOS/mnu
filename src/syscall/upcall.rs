@@ -160,6 +160,37 @@ pub fn thread_status(handle: u64, output: u64) -> u64 {
     }
 }
 
+/// Sample a caller-owned thread object, not an ambient TID or service clock.
+/// Copy only after releasing the thread queue, since user memory may fault.
+pub fn thread_clock_read(handle: u64, output: u64, length: u64) -> u64 {
+    use mnu_abi::status::Error;
+    if length != core::mem::size_of::<mnu_abi::ClockInstant>() as u64 {
+        return Error::InvalidArgument.into_raw();
+    }
+    let object = match super::handle::object_native(handle, HandleRights::WAIT) {
+        Ok(object) => object,
+        Err(error) => return error.into_raw(),
+    };
+    let KernelObject::Thread(thread_id) = object else {
+        return Error::InvalidArgument.into_raw();
+    };
+    let rate = crate::interrupt::timer::ticks_per_second();
+    if rate == 0 {
+        return Error::NotReady.into_raw();
+    }
+    let Some(ticks) = crate::task::with_thread(thread_id, |thread| thread.cpu_ticks()) else {
+        return Error::NotFound.into_raw();
+    };
+    let seconds = ticks / rate;
+    let nanoseconds = (u128::from(ticks % rate) * 1_000_000_000 / u128::from(rate)) as u32;
+    let mut bytes = [0; core::mem::size_of::<mnu_abi::ClockInstant>()];
+    bytes[..8].copy_from_slice(&seconds.to_le_bytes());
+    bytes[8..12].copy_from_slice(&nanoseconds.to_le_bytes());
+    super::copy_to_user_native(output, &bytes)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(Error::into_raw)
+}
+
 pub fn return_from_context(token: u64, context_ptr: u64, context_len: u64) -> u64 {
     use mnu_abi::status::Error;
     let Some(thread_id) = crate::task::current_thread_id() else {

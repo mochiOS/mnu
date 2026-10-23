@@ -511,6 +511,12 @@ pub enum SyscallNumber {
     /// kernel never translates queries into controls or interprets their codes.
     /// Native validation errors use status::Error; provider failures are opaque.
     HandleQuery = 700,
+    /// Reads cumulative CPU execution time through a WAIT-capable Thread
+    /// Handle. Arguments: Handle, ClockInstant output pointer, exact byte
+    /// length. No TID lookup, clock-setting authority, timer or delivery policy.
+    /// Missing thread/rate returns NotFound/NotReady. Other failures retain
+    /// native authority, input-validation and output-copy categories.
+    ThreadClockRead = 701,
     CheckGravityExist = 999,
 }
 
@@ -1009,6 +1015,7 @@ mod object_handle_tests {
             SyscallNumber::ThreadHandleCreate as u64,
             SyscallNumber::ThreadInterrupt as u64,
             SyscallNumber::ThreadHandleStatus as u64,
+            SyscallNumber::ThreadClockRead as u64,
             SyscallNumber::ProcessHandleOpenById as u64,
             SyscallNumber::DebugWrite as u64,
             SyscallNumber::ContextHandleRemove as u64,
