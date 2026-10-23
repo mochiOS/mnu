@@ -1,27 +1,5 @@
 //! Process creation metadata shared by mnu and its user space.
 
-/// Marks an environment entry in the NUL-separated process creation metadata.
-pub const ENVIRONMENT_PREFIX: &str = "__MNU_EXEC_ENV=";
-
-/// Adds a rights-restricted process-local handle to a child's LaunchContext.
-///
-/// The value is `key:source_handle:rights`, with unsigned decimal fields. The
-/// kernel treats `key` as opaque and does not expose this metadata in argv or
-/// envp. The source handle must carry TRANSFER and all requested rights.
-pub const INHERITED_HANDLE_PREFIX: &str = "__MNU_EXEC_INHERIT_HANDLE=";
-
-/// Adds an opaque key/value pair to a child's LaunchContext.
-///
-/// The value is `key:value`, with unsigned decimal fields. mnu stores both
-/// fields without assigning application-level meaning to either one.
-pub const INHERITED_VALUE_PREFIX: &str = "__MNU_EXEC_INHERIT_VALUE=";
-
-/// Assigns an opaque security identity to a new process.
-///
-/// mnu uses this identity only for generic isolation mechanisms. The user space
-/// that launches the process decides what the identity represents.
-pub const SECURITY_IDENTITY_PREFIX: &str = "__MNU_EXEC_SECURITY_IDENTITY=";
-
 /// Structured application identity fields supplied by the trusted launcher.
 pub const APPLICATION_PACKAGE_ID_PREFIX: &str = "__MNU_EXEC_ID_PACKAGE=";
 pub const APPLICATION_DEVELOPER_ID_PREFIX: &str = "__MNU_EXEC_ID_DEVELOPER=";
