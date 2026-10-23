@@ -592,7 +592,7 @@ pub(crate) fn handle_user_memory_fault(
             }
         },
         Some(_) => None,
-        None => Some(Arc::new([0u8; crate::mem::vm_object::PAGE_BYTES])),
+        None => None,
     };
     // Loading a shared cache page may call provider IPC. Pin it before taking
     // the process-table lock; the retained frame also prevents cache eviction
@@ -662,14 +662,20 @@ pub(crate) fn handle_user_memory_fault(
                 }
             }
         } else {
-            let page = page.as_ref().ok_or(Error::InvalidArgument.into_raw())?;
+            // The mapper already zeroes each newly allocated physical frame.
+            // Anonymous pages need no second heap page filled with zeroes.
+            let source: &[u8] = match (pager.as_ref(), page.as_ref()) {
+                (None, None) => &[],
+                (Some(_), Some(page)) => page.as_slice(),
+                _ => return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw())),
+            };
             let install = || {
                 crate::mem::paging::map_and_copy_segment_to(
                     pt_phys,
                     page_addr,
-                    crate::mem::vm_object::PAGE_BYTES as u64,
+                    source.len() as u64,
                     4096,
-                    page.as_slice(),
+                    source,
                     is_write && region.allows_write_at(fault_addr),
                     executable,
                 )
