@@ -1218,6 +1218,8 @@ fn replace_current_process_image(
     })
     .ok_or_else(|| Error::NotReady.into_raw())?
     .ok_or_else(|| Error::LimitExceeded.into_raw())?;
+    let next_ipc_generation = crate::task::ipc_generation::reserve()
+        .ok_or_else(|| Error::LimitExceeded.into_raw())?;
     crate::task::release_process_borrowed_mappings(pid)?;
     crate::task::scheduler::retire_image_siblings(pid, current_tid);
     stack_mapping.commit();
@@ -1245,6 +1247,7 @@ fn replace_current_process_image(
         previous
     })
     .flatten();
+    crate::syscall::ipc::replace_thread_image_endpoint(current_tid, next_ipc_generation);
     // The new address space is committed. No old upcall entry, stack or saved
     // user context may be used when this native thread enters the new image.
     crate::task::with_thread_mut(current_tid, |thread| {

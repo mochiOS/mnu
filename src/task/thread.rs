@@ -487,6 +487,8 @@ pub struct Thread {
     pending_wakeup: bool,
     /// 低遅延IPCの待機/受信状態
     fast_ipc: IpcFastState,
+    /// Image-scoped IPC identity, independent of native thread/slot lifetime.
+    ipc_generation: u64,
     upcall: ThreadUpcallState,
     /// 直近の対話的な待機/起床の傾向
     interactive_score: u8,
@@ -907,6 +909,7 @@ impl Thread {
             syscall_user_context: SyscallUserContext::empty(),
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
+            ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
@@ -1033,6 +1036,7 @@ impl Thread {
             syscall_user_context: SyscallUserContext::empty(),
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
+            ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
@@ -1143,6 +1147,7 @@ impl Thread {
             syscall_user_context: user_context,
             pending_wakeup: false,
             fast_ipc: IpcFastState::new(),
+            ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
             interactive_score: 0,
             cpu_burst_score: 0,
@@ -1591,6 +1596,12 @@ impl ThreadQueue {
         })
     }
 
+    fn ipc_slot_index_and_generation(&self, id: ThreadId) -> Option<(usize, u64)> {
+        let slot = self.slot_index(id)?;
+        let generation = self.threads[slot].as_ref()?.ipc_generation;
+        (generation != 0).then_some((slot, generation))
+    }
+
     /// スレッドを削除
     ///
     /// # Returns
@@ -1874,7 +1885,7 @@ where
 pub fn remove_thread(id: ThreadId) -> Option<Thread> {
     let (removed, endpoint) = {
         let mut queue = THREAD_QUEUE.lock();
-        let endpoint = queue.slot_index_and_generation(id);
+        let endpoint = queue.ipc_slot_index_and_generation(id);
         (queue.remove(id), endpoint)
     };
     if let Some(thread) = removed.as_ref() {
@@ -1979,13 +1990,28 @@ pub fn thread_slot_index_and_generation_by_u64(id_val: u64) -> Option<(usize, u6
     thread_slot_index_and_generation(ThreadId::from_u64(id_val))
 }
 
-pub(crate) fn live_thread_slot_index_and_generation_by_u64(id_val: u64) -> Option<(usize, u64)> {
+pub(crate) fn ipc_slot_index_and_generation_by_u64(id_val: u64) -> Option<(usize, u64)> {
+    THREAD_QUEUE.lock().ipc_slot_index_and_generation(ThreadId::from_u64(id_val))
+}
+
+pub(crate) fn replace_ipc_generation(id: ThreadId, generation: u64) -> Option<(usize, u64)> {
+    let mut queue = THREAD_QUEUE.lock();
+    let slot = queue.slot_index(id)?;
+    let thread = queue.get_mut(id)?;
+    let previous = thread.ipc_generation;
+    thread.ipc_generation = generation;
+    thread.fast_ipc.clear();
+    thread.pending_wakeup = false;
+    Some((slot, previous))
+}
+
+pub(crate) fn live_ipc_slot_index_and_generation_by_u64(id_val: u64) -> Option<(usize, u64)> {
     let id = ThreadId::from_u64(id_val);
     let queue = THREAD_QUEUE.lock();
     if queue.get(id)?.state() == ThreadState::Terminated {
         return None;
     }
-    queue.slot_index_and_generation(id)
+    queue.ipc_slot_index_and_generation(id)
 }
 
 /// 現在実行中のスレッドIDを取得
@@ -2025,7 +2051,7 @@ pub fn set_thread_state(id: ThreadId, state: ThreadState) -> bool {
     }
     let (changed, endpoint) = {
         let mut queue = THREAD_QUEUE.lock();
-        let endpoint = queue.slot_index_and_generation(id);
+        let endpoint = queue.ipc_slot_index_and_generation(id);
         (queue.set_state(id, state), endpoint)
     };
     if changed {
@@ -2072,7 +2098,7 @@ pub(super) fn mark_thread_terminated(id: ThreadId) -> Option<bool> {
     let previous = queue.get(id)?.state();
     let retained = previous == ThreadState::Running
         || crate::percpu::thread_is_cpu_referenced(id.as_u64());
-    let endpoint = queue.slot_index_and_generation(id);
+    let endpoint = queue.ipc_slot_index_and_generation(id);
     let changed = queue.set_state(id, ThreadState::Terminated);
     drop(queue);
     if changed {

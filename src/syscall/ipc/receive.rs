@@ -151,7 +151,7 @@ fn copy_selected(
                 .map(|message| {
                     if reply.is_none() && message.expects_reply {
                         if let Some((caller_slot, generation)) =
-                            crate::task::thread_slot_index_and_generation_by_u64(caller)
+                            crate::task::ipc_slot_index_and_generation_by_u64(caller)
                         {
                             if caller_slot < MAX_THREADS {
                                 boxes[caller_slot].add_reply_target(

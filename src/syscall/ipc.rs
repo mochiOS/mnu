@@ -69,10 +69,11 @@ static NEXT_ENDPOINT_HANDLE: AtomicU64 = AtomicU64::new(ENDPOINT_HANDLE_BASE);
 static NEXT_CALL_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
 static ENDPOINTS: Mutex<Option<BTreeMap<u64, EndpointRecord>>> = Mutex::new(None);
-static THREAD_DEFAULT_ENDPOINTS: Mutex<Option<BTreeMap<u64, u64>>> = Mutex::new(None);
+// Keys are globally unique IPC lifetimes, not reusable native thread IDs.
+static DEFAULT_ENDPOINTS_BY_GENERATION: Mutex<Option<BTreeMap<u64, u64>>> = Mutex::new(None);
 
 pub fn endpoint_for_thread(thread_id: u64) -> Option<IpcEndpoint> {
-    let (slot, generation) = crate::task::thread_slot_index_and_generation_by_u64(thread_id)?;
+    let (slot, generation) = crate::task::ipc_slot_index_and_generation_by_u64(thread_id)?;
     Some(IpcEndpoint {
         thread_id,
         slot: slot as u16,
@@ -88,7 +89,7 @@ pub fn ensure_endpoint_handle_for_thread(thread_id: u64) -> Option<u64> {
 }
 
 pub fn endpoint_is_valid(endpoint: IpcEndpoint) -> bool {
-    match crate::task::thread::live_thread_slot_index_and_generation_by_u64(endpoint.thread_id) {
+    match crate::task::thread::live_ipc_slot_index_and_generation_by_u64(endpoint.thread_id) {
         Some((slot, generation)) => {
             slot as u16 == endpoint.slot && generation == endpoint.generation
         }
@@ -121,7 +122,7 @@ fn with_endpoints_mut<R>(f: impl FnOnce(&mut BTreeMap<u64, EndpointRecord>) -> R
 }
 
 fn with_default_endpoints_mut<R>(f: impl FnOnce(&mut BTreeMap<u64, u64>) -> R) -> R {
-    let mut guard = THREAD_DEFAULT_ENDPOINTS.lock();
+    let mut guard = DEFAULT_ENDPOINTS_BY_GENERATION.lock();
     let map = guard.get_or_insert_with(BTreeMap::new);
     f(map)
 }
@@ -190,16 +191,19 @@ fn endpoint_rights_for_thread(thread_id: u64) -> EndpointRights {
 }
 
 fn endpoint_handle_for_thread(thread_id: u64) -> Option<u64> {
-    let handle = with_default_endpoints_mut(|defaults| defaults.get(&thread_id).copied());
+    let endpoint = endpoint_for_thread(thread_id)?;
+    let handle = with_default_endpoints_mut(|defaults| defaults.get(&endpoint.generation).copied());
     let Some(handle) = handle else {
         return None;
     };
-    if endpoint_record_from_handle(handle).is_some() {
+    if endpoint_record_from_handle(handle)
+        .is_some_and(|record| record_matches_endpoint(&record, endpoint))
+    {
         Some(handle)
     } else {
         with_default_endpoints_mut(|defaults| {
-            if defaults.get(&thread_id).copied() == Some(handle) {
-                defaults.remove(&thread_id);
+            if defaults.get(&endpoint.generation).copied() == Some(handle) {
+                defaults.remove(&endpoint.generation);
             }
         });
         None
@@ -207,28 +211,61 @@ fn endpoint_handle_for_thread(thread_id: u64) -> Option<u64> {
 }
 
 fn ensure_endpoint_for_thread(thread_id: u64) -> Option<u64> {
-    if let Some(handle) = endpoint_handle_for_thread(thread_id) {
-        return Some(handle);
-    }
-    let (slot, generation) = crate::task::thread_slot_index_and_generation_by_u64(thread_id)?;
+    let endpoint = endpoint_for_thread(thread_id)?;
     let rights = endpoint_rights_for_thread(thread_id);
-    let handle = NEXT_ENDPOINT_HANDLE.fetch_add(1, Ordering::Relaxed);
-    if handle > ENDPOINT_HANDLE_LIMIT {
+    // Serialize creation of a default for this lifetime. Concurrent callers
+    // must agree on the sender identity used to authenticate synchronous replies.
+    let handle = with_default_endpoints_mut(|defaults| {
+        if !endpoint_is_valid(endpoint) {
+            return None;
+        }
+        if let Some(handle) = defaults.get(&endpoint.generation).copied() {
+            if endpoint_record_from_handle(handle)
+                .is_some_and(|record| record_matches_endpoint(&record, endpoint))
+            {
+                return Some(handle);
+            }
+        }
+        let handle = NEXT_ENDPOINT_HANDLE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                (next <= ENDPOINT_HANDLE_LIMIT).then(|| next + 1)
+            })
+            .ok()?;
+        let record = EndpointRecord {
+            thread_id,
+            slot: endpoint.slot,
+            generation: endpoint.generation,
+            rights,
+        };
+        with_endpoints_mut(|endpoints| {
+            endpoints.insert(handle, record);
+        });
+        defaults.insert(endpoint.generation, handle);
+        Some(handle)
+    })?;
+    // Replacement may commit while creating this record. Its generation key
+    // cannot overwrite the new image's default; clean a late old insertion.
+    if !endpoint_is_valid(endpoint) {
+        retire_endpoint_records(endpoint);
         return None;
     }
-    let record = EndpointRecord {
-        thread_id,
-        slot: slot as u16,
-        generation,
-        rights,
-    };
-    with_endpoints_mut(|endpoints| {
-        endpoints.insert(handle, record);
-    });
-    with_default_endpoints_mut(|defaults| {
-        defaults.insert(thread_id, handle);
-    });
     Some(handle)
+}
+
+fn record_matches_endpoint(record: &EndpointRecord, endpoint: IpcEndpoint) -> bool {
+    record.thread_id == endpoint.thread_id
+        && record.slot == endpoint.slot
+        && record.generation == endpoint.generation
+}
+
+fn retire_endpoint_records(endpoint: IpcEndpoint) {
+    // Same lock order as default creation; no thread/queue lock is held.
+    with_default_endpoints_mut(|defaults| {
+        defaults.remove(&endpoint.generation);
+        with_endpoints_mut(|endpoints| {
+            endpoints.retain(|_, record| !record_matches_endpoint(record, endpoint));
+        });
+    });
 }
 
 pub fn resolve_endpoint_handle(dest: u64) -> Option<u64> {
@@ -237,7 +274,7 @@ pub fn resolve_endpoint_handle(dest: u64) -> Option<u64> {
 
 pub fn resolve_sender_thread_id(sender: u64) -> Option<u64> {
     resolve_endpoint_handle(sender)
-        .or_else(|| crate::task::thread_slot_index_and_generation_by_u64(sender).map(|_| sender))
+        .or_else(|| crate::task::ipc_slot_index_and_generation_by_u64(sender).map(|_| sender))
 }
 
 pub fn create(flags: u64, _reserved: u64) -> u64 {
@@ -638,7 +675,7 @@ fn reply_with_attachments(
     };
     let target = {
         let boxes = lock_mailboxes();
-        let (idx, generation) = match crate::task::thread_slot_index_and_generation_by_u64(current) {
+        let (idx, generation) = match crate::task::ipc_slot_index_and_generation_by_u64(current) {
             Some(v) => v,
             None => return Error::NotReady.into_raw(),
         };
@@ -674,7 +711,7 @@ fn reply_with_attachments(
     );
     if status == 0 {
         let mut boxes = lock_mailboxes();
-        if let Some((idx, _)) = crate::task::thread_slot_index_and_generation_by_u64(current) {
+        if let Some((idx, _)) = crate::task::ipc_slot_index_and_generation_by_u64(current) {
             if idx < MAX_THREADS {
                 boxes[idx].remove_reply_target(target);
             }
@@ -696,7 +733,7 @@ fn recv_blocking_reply_for_thread(
     use mnu_abi::status::Error;
 
     let (idx, generation) =
-        match crate::task::thread_slot_index_and_generation_by_u64(receiver_thread_id) {
+        match crate::task::ipc_slot_index_and_generation_by_u64(receiver_thread_id) {
             Some(identity) => identity,
             None => return Error::NotReady.into_raw(),
         };
@@ -1438,6 +1475,35 @@ fn lock_mailboxes() -> SpinLockGuard<'static, [Mailbox; MAX_THREADS]> {
     guard
 }
 
+/// Commit the kept native thread's new IPC lifetime after image installation.
+/// Changing the generation precedes mailbox retirement: an old send which
+/// already validated under MAILBOXES must finish before retirement acquires
+/// that lock; later sends fail validation. Purge completes before user entry.
+pub(crate) fn replace_thread_image_endpoint(
+    thread: crate::task::ThreadId,
+    generation: crate::task::ipc_generation::Reserved,
+) {
+    if let Some((slot, previous)) =
+        crate::task::thread::replace_ipc_generation(thread, generation.into_raw())
+    {
+        // This is the kept current thread, still inside image replacement.
+        // It cannot yet have installed a new-image inbox wait. Delayed generic
+        // retirement cannot infer that from the unchanged native TID alone.
+        {
+            let mut boxes = lock_mailboxes();
+            if boxes[slot].waiter == thread.as_u64() {
+                boxes[slot].waiter = 0;
+            }
+        }
+        retire_endpoint(IpcEndpoint {
+            thread_id: thread.as_u64(),
+            slot: slot as u16,
+            generation: previous,
+        });
+    }
+    lifetime::remove_waiter(thread);
+}
+
 /// The caller has published termination and released the thread queue lock.
 /// Exact destination filtering also tolerates delayed cleanup after slot reuse.
 pub(crate) fn retire_endpoint(endpoint: IpcEndpoint) {
@@ -1446,7 +1512,7 @@ pub(crate) fn retire_endpoint(endpoint: IpcEndpoint) {
             let mut boxes = lock_mailboxes();
             let mailbox = &mut boxes[endpoint.slot as usize];
             let retired = mailbox.retire_destination(endpoint);
-            let current = crate::task::thread_slot_index_and_generation_by_u64(endpoint.thread_id);
+            let current = crate::task::ipc_slot_index_and_generation_by_u64(endpoint.thread_id);
             if mailbox.waiter == endpoint.thread_id
                 && current.is_none_or(|(slot, generation)| {
                     slot == endpoint.slot as usize && generation == endpoint.generation
@@ -1456,6 +1522,7 @@ pub(crate) fn retire_endpoint(endpoint: IpcEndpoint) {
             }
             retired
         };
+        retire_endpoint_records(endpoint);
         for message in retired.into_iter().flatten() {
             release_message(message);
         }
@@ -1470,7 +1537,7 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
         return false;
     }
     let (idx, dest_generation) =
-        match crate::task::thread_slot_index_and_generation_by_u64(dest_thread_id) {
+        match crate::task::ipc_slot_index_and_generation_by_u64(dest_thread_id) {
             Some(v) => v,
             None => return false,
         };
@@ -1621,7 +1688,7 @@ fn call_endpoint_with_attachments_from_kernel(
         .ok_or_else(|| Error::NotReady.into_raw())?;
     let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let (dest_slot, dest_generation) =
-        crate::task::thread_slot_index_and_generation_by_u64(endpoint.thread_id)
+        crate::task::ipc_slot_index_and_generation_by_u64(endpoint.thread_id)
             .filter(|(slot, generation)| {
                 *slot as u16 == endpoint.slot && *generation == endpoint.generation
             })
@@ -1629,7 +1696,7 @@ fn call_endpoint_with_attachments_from_kernel(
     // Resolve the reply destination before publishing a request: an absent
     // caller slot cannot receive a result and must not cause external work.
     let (caller_slot, caller_generation) =
-        crate::task::thread_slot_index_and_generation_by_u64(caller)
+        crate::task::ipc_slot_index_and_generation_by_u64(caller)
             .ok_or_else(|| Error::NotReady.into_raw())?;
     loop {
         if !endpoint_is_valid(endpoint) {
@@ -2002,7 +2069,7 @@ fn recv_from_thread_nonblocking(
     use mnu_abi::status::Error;
 
     let (idx, receiver_generation) =
-        match crate::task::thread_slot_index_and_generation_by_u64(receiver_thread_id) {
+        match crate::task::ipc_slot_index_and_generation_by_u64(receiver_thread_id) {
             Some(v) => v,
             None => return Error::NotReady.into_raw(),
         };
@@ -2052,7 +2119,7 @@ fn recv_blocking_for_thread(
     use mnu_abi::status::Error;
 
     let (idx, generation) =
-        match crate::task::thread_slot_index_and_generation_by_u64(receiver_thread_id) {
+        match crate::task::ipc_slot_index_and_generation_by_u64(receiver_thread_id) {
             Some(identity) => identity,
             None => return Error::NotReady.into_raw(),
         };

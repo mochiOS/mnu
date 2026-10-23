@@ -12,6 +12,7 @@ pub(crate) mod handle_snapshot;
 pub mod ids;
 pub(crate) mod image_origin;
 pub(crate) mod image_transition;
+pub(crate) mod ipc_generation;
 pub mod launch_context;
 pub mod process;
 pub mod scheduler;
@@ -56,3 +57,4 @@ pub use thread::{
     ThreadQueue, ThreadUpcallDelivery, ThreadUpcallError, UserUpcallContext,
 };
 pub use usermode::{jump_to_usermode, resume_usermode};
+pub(crate) use thread::ipc_slot_index_and_generation_by_u64;
