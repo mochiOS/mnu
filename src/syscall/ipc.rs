@@ -396,7 +396,7 @@ pub(crate) fn resolve_provider_endpoint_native(
     Ok((thread_id, slot, generation))
 }
 
-fn resolve_call_destination(raw: u64) -> Result<(u64, u64, u32), u64> {
+fn resolve_call_destination(raw: u64) -> Result<(IpcEndpoint, u64, u32), u64> {
     use mnu_abi::status::Error;
 
     if raw <= crate::task::PROCESS_MAX_OBJECT_HANDLES as u64 {
@@ -404,7 +404,7 @@ fn resolve_call_destination(raw: u64) -> Result<(u64, u64, u32), u64> {
         let sender_identity = ensure_endpoint_for_thread(endpoint.thread_id)
             .ok_or_else(|| Error::NotReady.into_raw())?;
         return Ok((
-            endpoint.thread_id,
+            endpoint,
             sender_identity,
             mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE,
         ));
@@ -414,7 +414,15 @@ fn resolve_call_destination(raw: u64) -> Result<(u64, u64, u32), u64> {
     if !record.rights.contains(EndpointRights::RECV) {
         return Err(Error::AccessDenied.into_raw());
     }
-    Ok((record.thread_id, raw, 0))
+    Ok((
+        IpcEndpoint {
+            thread_id: record.thread_id,
+            slot: record.slot,
+            generation: record.generation,
+        },
+        raw,
+        0,
+    ))
 }
 
 fn resolve_receive_thread(raw: u64, current_thread_id: u64) -> Result<u64, u64> {
@@ -451,7 +459,7 @@ pub fn call(
     ]) {
         return Error::AccessDenied.into_raw();
     }
-    let (dest_thread_id, expected_sender, delivery_flags) =
+    let (destination, expected_sender, delivery_flags) =
         match resolve_call_destination(dest_endpoint_handle) {
             Ok(destination) => destination,
             Err(error) => return error,
@@ -464,10 +472,6 @@ pub fn call(
         Some(handle) => handle,
         None => return Error::ResourceUnavailable.into_raw(),
     };
-    let destination = match endpoint_for_thread(dest_thread_id) {
-        Some(endpoint) => endpoint,
-        None => return Error::NotFound.into_raw(),
-    };
     let _lifetime = match lifetime::observe(destination, crate::task::ThreadId::from_u64(caller)) {
         Ok(observation) => observation,
         Err(error) => return error,
@@ -479,8 +483,8 @@ pub fn call(
         if !endpoint_is_valid(destination) {
             return Error::NotFound.into_raw();
         }
-        let status = send_call_to_thread_id(
-            dest_thread_id, sender, call_id, req_ptr, req_len, delivery_flags,
+        let status = send_call_to_endpoint(
+            destination, sender, call_id, req_ptr, req_len, delivery_flags,
         );
         if status != mnu_abi::status::Error::NotReady.into_raw() {
             break status;
@@ -535,7 +539,7 @@ pub fn call_object_handles(
     ]) {
         return Error::AccessDenied.into_raw();
     }
-    let (dest_thread_id, expected_sender, delivery_flags) =
+    let (destination, expected_sender, delivery_flags) =
         match resolve_call_destination(dest_endpoint_handle) {
             Ok(destination) => destination,
             Err(error) => return error,
@@ -547,10 +551,6 @@ pub fn call_object_handles(
     let sender = match ensure_endpoint_for_thread(caller) {
         Some(handle) => handle,
         None => return Error::ResourceUnavailable.into_raw(),
-    };
-    let destination = match endpoint_for_thread(dest_thread_id) {
-        Some(endpoint) => endpoint,
-        None => return Error::NotFound.into_raw(),
     };
     let _lifetime = match lifetime::observe(destination, crate::task::ThreadId::from_u64(caller)) {
         Ok(observation) => observation,
@@ -566,8 +566,8 @@ pub fn call_object_handles(
             Err(error) => return error,
         };
         attachments.delivery_flags = delivery_flags;
-        let status = send_to_thread_id_with_attachments(
-            dest_thread_id,
+        let status = send_to_endpoint_with_attachments(
+            destination,
             sender,
             call_id,
             req_ptr,
@@ -653,12 +653,17 @@ fn reply_with_attachments(
     if target.endpoint == 0 {
         return Error::BackingFailure.into_raw();
     }
-    let target_thread = match resolve_endpoint_handle(target.endpoint) {
-        Some(thread_id) => thread_id,
+    let record = match endpoint_record_from_handle(target.endpoint) {
+        Some(record) => record,
         None => return Error::NotFound.into_raw(),
     };
-    let status = send_to_thread_id_with_attachments(
-        target_thread,
+    let destination = IpcEndpoint {
+        thread_id: record.thread_id,
+        slot: record.slot,
+        generation: record.generation,
+    };
+    let status = send_to_endpoint_with_attachments(
+        destination,
         caller_handle,
         target.call_id,
         buf_ptr,
@@ -1720,9 +1725,9 @@ fn call_endpoint_with_attachments_from_kernel(
     }
 }
 
-fn send_to_thread_id(dest_thread_id: u64, sender_handle: u64, buf_ptr: u64, len: u64) -> u64 {
-    send_to_thread_id_with_kind(
-        dest_thread_id,
+fn send_to_endpoint(destination: IpcEndpoint, sender_handle: u64, buf_ptr: u64, len: u64) -> u64 {
+    send_to_endpoint_with_kind(
+        destination,
         sender_handle,
         0,
         buf_ptr,
@@ -1733,8 +1738,8 @@ fn send_to_thread_id(dest_thread_id: u64, sender_handle: u64, buf_ptr: u64, len:
     )
 }
 
-fn send_call_to_thread_id(
-    dest_thread_id: u64,
+fn send_call_to_endpoint(
+    destination: IpcEndpoint,
     sender_handle: u64,
     call_id: u64,
     buf_ptr: u64,
@@ -1743,8 +1748,8 @@ fn send_call_to_thread_id(
 ) -> u64 {
     let mut attachments = ObjectHandleAttachments::empty();
     attachments.delivery_flags = delivery_flags;
-    send_to_thread_id_with_kind(
-        dest_thread_id,
+    send_to_endpoint_with_kind(
+        destination,
         sender_handle,
         call_id,
         buf_ptr,
@@ -1755,8 +1760,8 @@ fn send_call_to_thread_id(
     )
 }
 
-fn send_to_thread_id_with_kind(
-    dest_thread_id: u64,
+fn send_to_endpoint_with_kind(
+    destination: IpcEndpoint,
     sender_handle: u64,
     call_id: u64,
     buf_ptr: u64,
@@ -1765,8 +1770,8 @@ fn send_to_thread_id_with_kind(
     expects_reply: bool,
     object_handles: ObjectHandleAttachments,
 ) -> u64 {
-    send_to_thread_id_with_attachments(
-        dest_thread_id,
+    send_to_endpoint_with_attachments(
+        destination,
         sender_handle,
         call_id,
         buf_ptr,
@@ -1781,8 +1786,8 @@ fn send_to_thread_id_with_kind(
 /// allocation failure (ResourceUnavailable), which must not be retried as
 /// though the receiver merely needed to drain its mailbox.
 #[allow(clippy::too_many_arguments)]
-fn send_to_thread_id_with_attachments(
-    dest_thread_id: u64,
+fn send_to_endpoint_with_attachments(
+    destination: IpcEndpoint,
     sender_handle: u64,
     call_id: u64,
     buf_ptr: u64,
@@ -1793,7 +1798,7 @@ fn send_to_thread_id_with_attachments(
 ) -> u64 {
     use mnu_abi::status::Error;
 
-    if dest_thread_id == 0 {
+    if destination.thread_id == 0 {
         return Error::InvalidArgument.into_raw();
     }
 
@@ -1807,14 +1812,15 @@ fn send_to_thread_id_with_attachments(
         return Error::InvalidAddress.into_raw();
     }
 
-    let (idx, dest_generation) =
-        match crate::task::thread_slot_index_and_generation_by_u64(dest_thread_id) {
-            Some(v) => v,
-            None => return Error::NotFound.into_raw(),
-        };
+    // Keep the exact authority resolved by the caller. Re-resolving a thread
+    // ID here could silently bind an old Handle to a replacement generation.
+    let idx = destination.slot as usize;
 
-    if idx >= MAX_THREADS || idx > (u16::MAX as usize) {
+    if idx >= MAX_THREADS {
         return Error::BackingFailure.into_raw();
+    }
+    if !endpoint_is_valid(destination) {
+        return Error::NotFound.into_raw();
     }
 
     #[cfg(feature = "performance-instrumentation")]
@@ -1829,9 +1835,9 @@ fn send_to_thread_id_with_attachments(
         return Error::ResourceUnavailable.into_raw();
     };
     message.from = sender_handle;
-    message.to = dest_thread_id;
-    message.to_slot = idx as u16;
-    message.to_generation = dest_generation;
+    message.to = destination.thread_id;
+    message.to_slot = destination.slot;
+    message.to_generation = destination.generation;
     message.is_reply = is_reply;
     message.expects_reply = expects_reply;
     message.call_id = call_id;
@@ -1847,11 +1853,7 @@ fn send_to_thread_id_with_attachments(
         record_ipc_copy(len);
     }
     let mut boxes = lock_mailboxes();
-    if !endpoint_is_valid(IpcEndpoint {
-        thread_id: dest_thread_id,
-        slot: idx as u16,
-        generation: dest_generation,
-    }) {
+    if !endpoint_is_valid(destination) {
         drop(boxes);
         release_message(message);
         return Error::NotFound.into_raw();
@@ -1866,7 +1868,7 @@ fn send_to_thread_id_with_attachments(
     crate::debug!(
         "[IPC SEND] from={} to={} len={}",
         sender_handle,
-        dest_thread_id,
+        destination.thread_id,
         len
     );
     let waiter = boxes[idx].take_waiter();
@@ -1902,7 +1904,11 @@ pub fn send(dest_endpoint_handle: u64, buf_ptr: u64, len: u64) -> u64 {
     if !dest_record.rights.contains(EndpointRights::RECV) {
         return Error::AccessDenied.into_raw();
     }
-    let dest_thread_id = dest_record.thread_id;
+    let destination = IpcEndpoint {
+        thread_id: dest_record.thread_id,
+        slot: dest_record.slot,
+        generation: dest_record.generation,
+    };
     let sender = match crate::task::current_thread_id() {
         Some(id) => match ensure_endpoint_for_thread(id.as_u64()) {
             Some(handle) => handle,
@@ -1926,7 +1932,7 @@ pub fn send(dest_endpoint_handle: u64, buf_ptr: u64, len: u64) -> u64 {
     ]) {
         return Error::AccessDenied.into_raw();
     }
-    send_to_thread_id(dest_thread_id, sender, buf_ptr, len)
+    send_to_endpoint(destination, sender, buf_ptr, len)
 }
 
 /// Sends one IPC message with rights-restricted process-local object handles.
@@ -1944,7 +1950,7 @@ pub fn send_object_handles(
     ]) {
         return Error::AccessDenied.into_raw();
     }
-    let (dest_thread_id, _, delivery_flags) = match resolve_call_destination(dest_endpoint_handle) {
+    let (destination, _, delivery_flags) = match resolve_call_destination(dest_endpoint_handle) {
         Ok(destination) => destination,
         Err(error) => return error,
     };
@@ -1960,8 +1966,8 @@ pub fn send_object_handles(
         Err(error) => return error,
     };
     object_handles.delivery_flags = delivery_flags;
-    send_to_thread_id_with_attachments(
-        dest_thread_id,
+    send_to_endpoint_with_attachments(
+        destination,
         sender,
         0,
         buf_ptr,
