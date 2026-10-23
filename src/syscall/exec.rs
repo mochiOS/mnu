@@ -1501,7 +1501,10 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
     };
     let executable = match crate::syscall::handle::read_all(image_handle, 64 * 1024 * 1024) {
         Ok(executable) => executable,
-        Err(errno) => return errno,
+        Err(errno) => {
+            crate::kernel::early_serial("ProcessCreate: image snapshot failed\n");
+            return errno;
+        }
     };
     let digest: [u8; 32] = Sha256::digest(&executable).into();
     if digest != authorization.executable_digest {

@@ -1,5 +1,5 @@
 //! Bounded owned bytes for consumers which verify content before interpreting
-//! it. No paths, cursor mutation, allocation under object locks, or ELF policy.
+//! it. No paths, cursor mutation, object lookup, or ELF policy.
 
 use alloc::vec::Vec;
 
@@ -28,6 +28,38 @@ pub fn read(
         return Err(mnu_abi::status::Error::BackingFailure.into_raw());
     }
     Ok(bytes)
+}
+
+/// Snapshot a declared byte extent with one allocation, retaining no aliases
+/// to the source. The caller excludes conflicting backing edits when required.
+/// Reject both early EOF and growth: a provider's length is only a bounded
+/// observation, never permission to acknowledge an incomplete snapshot.
+pub fn read_extent(
+    length: u64,
+    maximum: usize,
+    chunk: usize,
+    mut copy: impl FnMut(u64, &mut [u8]) -> Result<usize, u64>,
+) -> Result<Vec<u8>, u64> {
+    use mnu_abi::status::Error;
+    if chunk == 0 {
+        return Err(Error::InvalidArgument.into_raw());
+    }
+    read(length, maximum, |bytes| {
+        let mut done = 0;
+        while done < bytes.len() {
+            let count = chunk.min(bytes.len() - done);
+            let copied = copy(done as u64, &mut bytes[done..done + count])?;
+            if copied == 0 || copied > count {
+                return Err(Error::BackingFailure.into_raw());
+            }
+            done += copied;
+        }
+        let mut probe = [0];
+        if copy(length, &mut probe)? != 0 {
+            return Err(Error::BackingFailure.into_raw());
+        }
+        Ok(done)
+    })
 }
 
 /// Snapshot a bounded positional source without requiring cursor or metadata

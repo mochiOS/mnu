@@ -40,6 +40,11 @@ pub const OP_WRITE_BOUNDED: u16 = 12;
 /// selector, input is inline, and `length` is output capacity. Providers must
 /// explicitly implement queries, never dispatch them as mutation controls.
 pub const OP_QUERY: u16 = 13;
+/// Common READ-authorized query for a finite byte-addressed object's extent.
+/// Input is empty; success returns exactly one little-endian u64 byte length.
+/// Providers exposing nonzero OP_MEMORY_OBJECT backing implement this query.
+/// It neither moves a stream cursor nor exposes provider-specific metadata.
+pub const QUERY_BYTE_LENGTH: u64 = u64::from_le_bytes(*b"MNUBYTES");
 /// A nonempty operation has no prefix within its supplied byte bound.
 /// This native provider condition has no resource-policy or signal meaning.
 pub const STATUS_BOUND_REACHED: i64 = -4094;

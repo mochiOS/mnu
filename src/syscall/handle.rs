@@ -1157,25 +1157,56 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
         .map(|identity| crate::mem::vm_object::lock_provider_io(&provider, identity))
         .transpose()
         .map_err(mnu_abi::status::Error::into_raw)?;
-    crate::util::object_snapshot::read_to_end(
-        maximum_length,
-        mnu_abi::provider::MAX_DATA_LEN,
-        |offset, bytes| {
-            let count = provider_read_at(&provider, offset, bytes)?;
-            if count > bytes.len() {
-                return Err(Error::BackingFailure.into_raw());
-            }
-            if let Some(identity) = identity {
-                crate::mem::vm_object::overlay_provider_range(
-                    &provider,
-                    identity,
-                    offset,
-                    &mut bytes[..count],
-                )?;
-            }
-            Ok(count)
-        },
-    )
+    let extent = if identity.is_some() {
+        use mnu_abi::provider as wire;
+        let request = wire::RequestHeader {
+            opcode: wire::OP_QUERY,
+            object_id: provider.object_id,
+            argument: 0,
+            basis: wire::QUERY_BYTE_LENGTH,
+            length: 8,
+            data_length: 0,
+        };
+        let mut storage = [0; wire::RESPONSE_HEADER_LEN + 8];
+        let (_, length) = provider_call(&provider, request, &[], &mut storage)?;
+        if length != 8 {
+            return Err(Error::BackingFailure.into_raw());
+        }
+        Some(u64::from_le_bytes(
+            storage[wire::RESPONSE_HEADER_LEN..].try_into().unwrap(),
+        ))
+    } else {
+        None
+    };
+    let copy = |offset, bytes: &mut [u8]| {
+        let count = provider_read_at(&provider, offset, bytes)?;
+        if count > bytes.len() {
+            return Err(Error::BackingFailure.into_raw());
+        }
+        if let Some(identity) = identity {
+            crate::mem::vm_object::overlay_provider_range(
+                &provider,
+                identity,
+                offset,
+                &mut bytes[..count],
+            )?;
+        }
+        Ok(count)
+    };
+    if let Some(length) = extent {
+        crate::util::object_snapshot::read_extent(
+            length,
+            maximum_length,
+            mnu_abi::provider::MAX_DATA_LEN,
+            copy,
+        )
+    } else {
+        crate::util::object_snapshot::read_to_end(
+            maximum_length,
+            mnu_abi::provider::MAX_DATA_LEN,
+            copy,
+        )
+    }
 }
 
 pub fn provider_object_create(endpoint: u64, object_id: u64, requested_rights: u64) -> u64 {
