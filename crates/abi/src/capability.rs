@@ -100,6 +100,9 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     system!("file-association.read"),
     user!("file-association.write"),
     user!("notification.send"),
+    user!("keychain.access"),
+    system!("keychain.manage"),
+    system!("keychain.session"),
     privileged!("camera.access"),
     privileged!("microphone.access"),
     privileged!("location.access"),
@@ -190,5 +193,15 @@ mod tests {
         );
         assert!(!capability.delegable);
         assert!(!capability.user_grantable);
+    }
+}
+
+#[cfg(test)]
+mod keychain_tests {
+    #[test]
+    fn keychain_access_and_trusted_management_are_distinct() {
+        assert!(super::metadata("keychain.access").unwrap().user_grantable);
+        assert!(!super::metadata("keychain.manage").unwrap().user_grantable);
+        assert!(!super::metadata("keychain.session").unwrap().user_grantable);
     }
 }
