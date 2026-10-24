@@ -103,6 +103,7 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     user!("keychain.access"),
     system!("keychain.manage"),
     system!("keychain.session"),
+    system!("keychain.authentication"),
     privileged!("camera.access"),
     privileged!("microphone.access"),
     privileged!("location.access"),
@@ -203,5 +204,6 @@ mod keychain_tests {
         assert!(super::metadata("keychain.access").unwrap().user_grantable);
         assert!(!super::metadata("keychain.manage").unwrap().user_grantable);
         assert!(!super::metadata("keychain.session").unwrap().user_grantable);
+        assert!(!super::metadata("keychain.authentication").unwrap().user_grantable);
     }
 }
