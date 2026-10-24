@@ -37,8 +37,10 @@ impl ImageOrigin {
     /// a fresh, signed executable. Require both original measurement/identity
     /// and attenuation of the source's actual authority at capture time.
     pub fn permits(&self, authorization: &PendingExecSecurity) -> bool {
-        authorization.kind == PendingExecKind::Spawn
-            && authorization.identity == self.identity
+        matches!(
+            authorization.kind,
+            PendingExecKind::Spawn | PendingExecKind::SpawnInherit
+        ) && authorization.identity == self.identity
             && authorization.executable_digest == self.digest
             && authorization.capabilities.is_subset_of(&self.capabilities)
             && authorization

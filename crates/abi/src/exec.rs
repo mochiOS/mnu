@@ -15,6 +15,10 @@ pub const EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE: &str = "image-replace";
 /// The broker supplies only kind, unprivileged class and exact image digest;
 /// native authorities are cleared, as for every unprivileged replacement.
 pub const EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT: &str = "image-replace-inherit";
+/// Create from an owned captured image within the current security domain.
+/// The native layer captures the requester's measurement and ordinary grants;
+/// no caller-supplied digest, identity override or native authority is accepted.
+pub const EXEC_AUTHORIZATION_KIND_SPAWN_INHERIT: &str = "spawn-inherit";
 pub const EXEC_AUTHORIZATION_KIND_SPAWN: &str = "spawn";
 
 /// Kernel privilege requested by a manifest-based exec syscall.

@@ -25,7 +25,7 @@ use mnu_abi::exec::{
     EXECUTABLE_DIGEST_PREFIX, EXEC_AUTHORIZATION_CLASS_PREFIX,
     EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE, EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT,
     EXEC_AUTHORIZATION_KIND_PREFIX,
-    EXEC_AUTHORIZATION_KIND_SPAWN,
+    EXEC_AUTHORIZATION_KIND_SPAWN, EXEC_AUTHORIZATION_KIND_SPAWN_INHERIT,
 };
 use sha2::{Digest, Sha256};
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -479,10 +479,10 @@ fn exec_authorization_target(
     Ok((thread, process))
 }
 
-fn authorize_inherited_replacement(
+fn authorize_inherited_image(
     requester_endpoint: u64,
     path: String,
-    executable_digest: [u8; 32],
+    executable_digest: Option<[u8; 32]>,
 ) -> u64 {
     use mnu_abi::status::Error;
     let (thread, process) = match exec_authorization_target(requester_endpoint) {
@@ -501,6 +501,13 @@ fn authorize_inherited_replacement(
             .ok_or(Error::AccessDenied)?
             .try_clone()?;
         let capabilities = process.capabilities().try_clone()?;
+        let (kind, executable_digest) = match executable_digest {
+            Some(digest) => (crate::task::process::PendingExecKind::ImageReplace, digest),
+            None => (
+                crate::task::process::PendingExecKind::SpawnInherit,
+                process.image_digest().ok_or(Error::AccessDenied)?,
+            ),
+        };
         process.authorize_next_exec(crate::task::process::PendingExecSecurity {
             path,
             authorized_thread: thread,
@@ -508,7 +515,7 @@ fn authorize_inherited_replacement(
             capabilities,
             kernel_authorities: KernelAuthoritySet::empty(),
             identity,
-            kind: crate::task::process::PendingExecKind::ImageReplace,
+            kind,
             execution_class: ExecutionClass::Unprivileged,
         });
         Ok(())
@@ -582,6 +589,10 @@ pub fn authorize_exec_syscall(
                     inherit_security = true;
                     Some(crate::task::process::PendingExecKind::ImageReplace)
                 }
+                EXEC_AUTHORIZATION_KIND_SPAWN_INHERIT => {
+                    inherit_security = true;
+                    Some(crate::task::process::PendingExecKind::SpawnInherit)
+                }
                 EXEC_AUTHORIZATION_KIND_SPAWN => Some(crate::task::process::PendingExecKind::Spawn),
                 _ => None,
             };
@@ -599,16 +610,18 @@ pub fn authorize_exec_syscall(
         }
     }
     if inherit_security {
-        if identity_items.len() != 3
+        let inherited_spawn =
+            authorization_kind == Some(crate::task::process::PendingExecKind::SpawnInherit);
+        if identity_items.len() != if inherited_spawn { 2 } else { 3 }
             || caps_total_len != 0
             || execution_class != Some(ExecutionClass::Unprivileged)
         {
             return Error::InvalidArgument.into_raw();
         }
-        let Some(digest) = executable_digest else {
+        if inherited_spawn == executable_digest.is_some() {
             return Error::InvalidArgument.into_raw();
-        };
-        return authorize_inherited_replacement(requester_endpoint, path, digest);
+        }
+        return authorize_inherited_image(requester_endpoint, path, executable_digest);
     }
     let (
         Some(package),
@@ -650,6 +663,7 @@ pub fn authorize_exec_syscall(
             capabilities.is_subset_of(process.capabilities())
                 && kernel_authorities.is_subset_of(process.kernel_authorities())
         }
+        crate::task::process::PendingExecKind::SpawnInherit => false,
         crate::task::process::PendingExecKind::Spawn => process
             .capabilities()
             .contains(crate::capability::Capability::ProcessSpawn),
@@ -1523,7 +1537,11 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         Some(None) => return Error::AccessDenied.into_raw(),
         None => return Error::NotReady.into_raw(),
     };
-    if authorization.kind != crate::task::process::PendingExecKind::Spawn {
+    if !matches!(authorization.kind,
+        crate::task::process::PendingExecKind::Spawn | crate::task::process::PendingExecKind::SpawnInherit)
+        || (authorization.kind == crate::task::process::PendingExecKind::SpawnInherit
+            && !matches!(request.startup, mnu_abi::process_create::InitialState::Context(_)))
+    {
         return Error::AccessDenied.into_raw();
     }
     let mut specs = Vec::new();
@@ -1623,14 +1641,21 @@ fn consume_address_space_for_create(
     // Detached roots are pinned by the image, but resize may still revoke
     // their PTEs. Follow PROC -> image lock order through context validation
     // and one-shot ownership transfer, then prepare the new container outside.
-    crate::task::with_process(pid, |_| image.consume(authorization, context))
-        .ok_or(Error::NotReady)?
-        .map_err(|error| match error {
-            ConsumeError::Consumed => Error::NotReady,
-            ConsumeError::Backing(error) => error,
-            ConsumeError::Authorization => Error::AccessDenied,
-            ConsumeError::Context => Error::InvalidAddress,
-        })
+    crate::task::with_process(pid, |process| {
+        if authorization.kind == crate::task::process::PendingExecKind::SpawnInherit
+            && !process.permits_inherited_spawn_authorization(authorization)
+        {
+            return Err(ConsumeError::Authorization);
+        }
+        image.consume(authorization, context)
+    })
+    .ok_or(Error::NotReady)?
+    .map_err(|error| match error {
+        ConsumeError::Consumed => Error::NotReady,
+        ConsumeError::Backing(error) => error,
+        ConsumeError::Authorization => Error::AccessDenied,
+        ConsumeError::Context => Error::InvalidAddress,
+    })
 }
 
 fn create_from_address_space(

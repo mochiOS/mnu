@@ -654,6 +654,7 @@ pub struct PendingExecSecurity {
 pub enum PendingExecKind {
     ImageReplace,
     Spawn,
+    SpawnInherit,
 }
 
 impl ApplicationIdentity {
@@ -883,6 +884,21 @@ impl Process {
                 .is_subset_of(&self.kernel_authorities)
     }
 
+    /// Current-domain creation cannot restore authority revoked after capture
+    /// or authorization. Its identity and measurement come from this process.
+    pub(crate) fn permits_inherited_spawn_authorization(
+        &self,
+        authorization: &PendingExecSecurity,
+    ) -> bool {
+        authorization.kind == PendingExecKind::SpawnInherit
+            && self.application_identity.as_ref() == Some(&authorization.identity)
+            && self.image_digest == Some(authorization.executable_digest)
+            && authorization.capabilities.is_subset_of(&self.capabilities)
+            && authorization
+                .kernel_authorities
+                .is_subset_of(&self.kernel_authorities)
+    }
+
     pub(crate) fn take_exec_authorization(
         &mut self,
         path: &str,
@@ -900,8 +916,10 @@ impl Process {
         // Consume a matching one-shot even when it has become invalid. A
         // later capability grant must not resurrect an already rejected permit.
         let authorization = self.pending_exec_security.take()?;
-        if authorization.kind == PendingExecKind::ImageReplace
-            && !self.permits_image_authorization(&authorization)
+        if (authorization.kind == PendingExecKind::ImageReplace
+            && !self.permits_image_authorization(&authorization))
+            || (authorization.kind == PendingExecKind::SpawnInherit
+                && !self.permits_inherited_spawn_authorization(&authorization))
         {
             return None;
         }
