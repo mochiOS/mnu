@@ -1100,6 +1100,22 @@ fn check_image_byte_ceiling(
     Ok(())
 }
 
+fn check_image_authorization(
+    process: crate::task::ProcessId,
+    authorization: &crate::task::process::PendingExecSecurity,
+) -> Result<(), mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+    let allowed = crate::task::with_process(process, |process| {
+        process.permits_image_authorization(authorization)
+    })
+    .ok_or(Error::NotReady)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(Error::AccessDenied)
+    }
+}
+
 fn replace_current_process_image(
     data: &[u8],
     identity: &str,
@@ -1196,6 +1212,10 @@ fn replace_current_process_image(
     // Quiescence is reversible. In particular, a failed borrowed-PTE/TLB
     // transaction must resume siblings and keep the old stack alias/owner.
     let quiescence = crate::task::scheduler::quiesce_image_siblings(pid, current_tid);
+    // Siblings can revoke authority while the new image is being prepared.
+    // They are stopped now; reject stale grants before touching the old image.
+    // Both quiescence and the new VM remain rollback-owned on this failure.
+    check_image_authorization(pid, &authorization).map_err(Error::into_raw)?;
     // Copy opaque metadata only after sibling Handle/context mutation stops.
     // Preparation is fallible and leaves the live context entirely untouched.
     let next_context = if startup.context_updates().next().is_some() {

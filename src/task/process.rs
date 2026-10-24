@@ -870,22 +870,42 @@ impl Process {
         self.pending_exec_security = Some(authorization);
     }
 
+    /// A replacement may attenuate current authority, never restore a grant
+    /// revoked since its authorization. Caller holds the process-table borrow.
+    pub(crate) fn permits_image_authorization(
+        &self,
+        authorization: &PendingExecSecurity,
+    ) -> bool {
+        authorization.kind == PendingExecKind::ImageReplace
+            && authorization.capabilities.is_subset_of(&self.capabilities)
+            && authorization
+                .kernel_authorities
+                .is_subset_of(&self.kernel_authorities)
+    }
+
     pub(crate) fn take_exec_authorization(
         &mut self,
         path: &str,
         thread: crate::task::ThreadId,
     ) -> Option<PendingExecSecurity> {
-        if self
+        if !self
             .pending_exec_security
             .as_ref()
             .is_some_and(|authorization| {
                 authorization.path == path && authorization.authorized_thread == thread
             })
         {
-            self.pending_exec_security.take()
-        } else {
-            None
+            return None;
         }
+        // Consume a matching one-shot even when it has become invalid. A
+        // later capability grant must not resurrect an already rejected permit.
+        let authorization = self.pending_exec_security.take()?;
+        if authorization.kind == PendingExecKind::ImageReplace
+            && !self.permits_image_authorization(&authorization)
+        {
+            return None;
+        }
+        Some(authorization)
     }
 
     /// サービスIDを取得
