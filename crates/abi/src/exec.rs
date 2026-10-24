@@ -11,6 +11,10 @@ pub const EXECUTABLE_DIGEST_PREFIX: &str = "__MNU_EXEC_FILE_SHA256=";
 pub const EXEC_AUTHORIZATION_KIND_PREFIX: &str = "__MNU_EXEC_AUTH_KIND=";
 pub const EXEC_AUTHORIZATION_CLASS_PREFIX: &str = "__MNU_EXEC_AUTH_CLASS=";
 pub const EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE: &str = "image-replace";
+/// Keep the requester's application identity and current ordinary grants.
+/// The broker supplies only kind, unprivileged class and exact image digest;
+/// native authorities are cleared, as for every unprivileged replacement.
+pub const EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT: &str = "image-replace-inherit";
 pub const EXEC_AUTHORIZATION_KIND_SPAWN: &str = "spawn";
 
 /// Kernel privilege requested by a manifest-based exec syscall.

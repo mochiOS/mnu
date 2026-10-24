@@ -23,7 +23,8 @@ use mnu_abi::exec::{
     ExecutionClass, APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX,
     APPLICATION_PROVENANCE_PREFIX, APPLICATION_SUBJECT_KEY_ID_PREFIX,
     EXECUTABLE_DIGEST_PREFIX, EXEC_AUTHORIZATION_CLASS_PREFIX,
-    EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE, EXEC_AUTHORIZATION_KIND_PREFIX,
+    EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE, EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT,
+    EXEC_AUTHORIZATION_KIND_PREFIX,
     EXEC_AUTHORIZATION_KIND_SPAWN,
 };
 use sha2::{Digest, Sha256};
@@ -461,6 +462,64 @@ fn decode_hex(value: u8) -> Option<u8> {
     }
 }
 
+fn exec_authorization_target(
+    requester_endpoint: u64,
+) -> Result<(crate::task::ThreadId, crate::task::ProcessId), mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+    if requester_endpoint == 0 {
+        let thread = crate::task::current_thread_id().ok_or(Error::NotReady)?;
+        let process = crate::syscall::security::current_process_id().ok_or(Error::NotReady)?;
+        return Ok((thread, process));
+    }
+    let requester = crate::syscall::ipc::resolve_sender_thread_id(requester_endpoint)
+        .ok_or(Error::InvalidArgument)?;
+    let thread = crate::task::ThreadId::from_u64(requester);
+    let process =
+        crate::task::with_thread(thread, |thread| thread.process_id()).ok_or(Error::NotReady)?;
+    Ok((thread, process))
+}
+
+fn authorize_inherited_replacement(
+    requester_endpoint: u64,
+    path: String,
+    executable_digest: [u8; 32],
+) -> u64 {
+    use mnu_abi::status::Error;
+    let (thread, process) = match exec_authorization_target(requester_endpoint) {
+        Ok(target) => target,
+        Err(error) => return error.into_raw(),
+    };
+    let result = crate::task::with_process_mut(process, |process| {
+        if !process.capabilities().contains(Capability::ProcessSpawn) {
+            return Err(Error::AccessDenied);
+        }
+        // Capture identity and all ordinary grants under one table borrow.
+        // The broker cannot name a new identity or omit scoped/dynamic grants
+        // by enumerating a user-space list. Failed allocation publishes nothing.
+        let identity = process
+            .application_identity()
+            .ok_or(Error::AccessDenied)?
+            .try_clone()?;
+        let capabilities = process.capabilities().try_clone()?;
+        process.authorize_next_exec(crate::task::process::PendingExecSecurity {
+            path,
+            authorized_thread: thread,
+            executable_digest,
+            capabilities,
+            kernel_authorities: KernelAuthoritySet::empty(),
+            identity,
+            kind: crate::task::process::PendingExecKind::ImageReplace,
+            execution_class: ExecutionClass::Unprivileged,
+        });
+        Ok(())
+    });
+    match result {
+        Some(Ok(())) => 0,
+        Some(Err(error)) => error.into_raw(),
+        None => Error::NotReady.into_raw(),
+    }
+}
+
 pub fn authorize_exec_syscall(
     requester_endpoint: u64,
     path_ptr: u64,
@@ -488,6 +547,7 @@ pub fn authorize_exec_syscall(
     let mut provenance = None;
     let mut executable_digest = None;
     let mut authorization_kind = None;
+    let mut inherit_security = false;
     let mut execution_class = None;
     for item in &identity_items {
         if let Some(value) = item.strip_prefix(APPLICATION_PACKAGE_ID_PREFIX) {
@@ -518,6 +578,10 @@ pub fn authorize_exec_syscall(
                 EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE => {
                     Some(crate::task::process::PendingExecKind::ImageReplace)
                 }
+                EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT => {
+                    inherit_security = true;
+                    Some(crate::task::process::PendingExecKind::ImageReplace)
+                }
                 EXEC_AUTHORIZATION_KIND_SPAWN => Some(crate::task::process::PendingExecKind::Spawn),
                 _ => None,
             };
@@ -533,6 +597,18 @@ pub fn authorize_exec_syscall(
         } else {
             return Error::InvalidArgument.into_raw();
         }
+    }
+    if inherit_security {
+        if identity_items.len() != 3
+            || caps_total_len != 0
+            || execution_class != Some(ExecutionClass::Unprivileged)
+        {
+            return Error::InvalidArgument.into_raw();
+        }
+        let Some(digest) = executable_digest else {
+            return Error::InvalidArgument.into_raw();
+        };
+        return authorize_inherited_replacement(requester_endpoint, path, digest);
     }
     let (
         Some(package),
@@ -565,24 +641,9 @@ pub fn authorize_exec_syscall(
         Ok(grants) => grants,
         Err(error) => return error.into_raw(),
     };
-    let (target_thread, target_pid) = if requester_endpoint == 0 {
-        let Some(thread) = crate::task::current_thread_id() else {
-            return Error::NotReady.into_raw();
-        };
-        let Some(pid) = crate::syscall::security::current_process_id() else {
-            return Error::NotReady.into_raw();
-        };
-        (thread, pid)
-    } else {
-        let Some(requester_tid) = crate::syscall::ipc::resolve_sender_thread_id(requester_endpoint)
-        else {
-            return Error::InvalidArgument.into_raw();
-        };
-        let thread = crate::task::ThreadId::from_u64(requester_tid);
-        let Some(pid) = crate::task::with_thread(thread, |thread| thread.process_id()) else {
-            return Error::NotReady.into_raw();
-        };
-        (thread, pid)
+    let (target_thread, target_pid) = match exec_authorization_target(requester_endpoint) {
+        Ok(target) => target,
+        Err(error) => return error.into_raw(),
     };
     let allowed = match crate::task::with_process(target_pid, |process| match authorization_kind {
         crate::task::process::PendingExecKind::ImageReplace => {
