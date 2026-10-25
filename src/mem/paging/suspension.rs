@@ -99,7 +99,9 @@ impl SuspendedUserPage {
     pub(crate) unsafe fn detach(self) {
         let _smap_guard = crate::cpu::SmapSmepGuard::new();
         unsafe {
+            let previous_flags = (*self.entry).flags();
             (*self.entry).set_unused();
+            super::record_user_leaf_change(self.record.table, previous_flags, PageTableFlags::empty());
         }
     }
 }
@@ -152,7 +154,9 @@ impl RecordedUserPage {
             if !self.matches(entry) {
                 return false;
             }
+            let previous_flags = entry.flags();
             edit(entry, &self.original);
+            super::record_user_leaf_change(self.table, previous_flags, entry.flags());
             true
         })
         .unwrap_or(false);

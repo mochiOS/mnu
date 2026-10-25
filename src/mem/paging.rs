@@ -37,6 +37,13 @@ const COPY_ON_WRITE: PageTableFlags =
 const COW_WRITE_DISABLED: PageTableFlags =
     PageTableFlags::from_bits_retain(super::cow_access::WRITE_DISABLED);
 
+const RESIDENT_RAM: PageTableFlags =
+    PageTableFlags::from_bits_retain(super::residency::RAM_LEAF);
+
+fn record_user_leaf_change(table: u64, before: PageTableFlags, after: PageTableFlags) {
+    super::residency_native::transition(table, before.bits(), after.bits());
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForkPagePolicy {
     Private,
@@ -1284,6 +1291,8 @@ pub fn create_user_page_table() -> Result<u64> {
         return Err(error);
     }
 
+    super::residency_native::register(new_l4_phys)
+        .map_err(|_| Kernel::Memory(Memory::OutOfMemory))?;
     incomplete_table.0 = None;
     Ok(new_l4_phys)
 }
@@ -1562,6 +1571,7 @@ pub fn clone_user_page_table(
     }
 
     fn copy_page(
+        dst_table_phys: u64,
         dst_l4: &mut PageTable,
         vaddr: u64,
         src_phys: u64,
@@ -1573,15 +1583,17 @@ pub fn clone_user_page_table(
         let l1 = unsafe { &mut *l1_ptr };
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(vaddr));
         let l1e = &mut l1[page.p1_index()];
+        let previous_flags = l1e.flags();
         if !l1e.is_unused() && l1e.flags().contains(Flags::PRESENT) {
             return Err(Kernel::Memory(Memory::AlreadyMapped));
         }
 
         let new_frame = frame::allocate_frame()?;
         let new_phys = new_frame.start_address().as_u64();
-        let mut dst_flags = src_flags;
+        let mut dst_flags = src_flags | RESIDENT_RAM;
         dst_flags.remove(Flags::HUGE_PAGE);
         l1e.set_addr(PhysAddr::new(new_phys), dst_flags);
+        record_user_leaf_change(dst_table_phys, previous_flags, dst_flags);
 
         let src_ptr = (src_phys + phys_off) as *const u8;
         let dst_ptr = (new_phys + phys_off) as *mut u8;
@@ -1592,6 +1604,7 @@ pub fn clone_user_page_table(
     }
 
     fn share_page(
+        dst_table_phys: u64,
         dst_l4: &mut PageTable,
         vaddr: u64,
         src_phys: u64,
@@ -1602,12 +1615,14 @@ pub fn clone_user_page_table(
         let l1 = unsafe { &mut *l1_ptr };
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(vaddr));
         let l1e = &mut l1[page.p1_index()];
+        let previous_flags = l1e.flags();
         if !l1e.is_unused() && l1e.flags().contains(Flags::PRESENT) {
             return Err(Kernel::Memory(Memory::AlreadyMapped));
         }
 
         retain_shared_user_frame(src_phys)?;
         l1e.set_addr(PhysAddr::new(src_phys), flags);
+        record_user_leaf_change(dst_table_phys, previous_flags, flags);
         Ok(())
     }
 
@@ -1650,6 +1665,7 @@ pub fn clone_user_page_table(
                             continue;
                         }
                         copy_page(
+                            dst_table_phys,
                             dst_l4,
                             vaddr,
                             src_phys_base + ((sub as u64) << 12),
@@ -1682,7 +1698,7 @@ pub fn clone_user_page_table(
                     match policy {
                         ForkPagePolicy::Exclude => continue,
                         ForkPagePolicy::Shared => {
-                            share_page(dst_l4, vaddr, pte.addr().as_u64(), src_flags, phys_off)?;
+                            share_page(dst_table_phys, dst_l4, vaddr, pte.addr().as_u64(), src_flags, phys_off)?;
                             shared_pages += 1;
                         }
                         ForkPagePolicy::Private | ForkPagePolicy::PrivateWritable => {
@@ -1696,7 +1712,7 @@ pub fn clone_user_page_table(
                             // frame. Also required when destination setup
                             // below fails: the source PTE is already COW.
                             flush_page_if_active(src_table_phys, vaddr);
-                            share_page(dst_l4, vaddr, pte.addr().as_u64(), shared_flags, phys_off)?;
+                            share_page(dst_table_phys, dst_l4, vaddr, pte.addr().as_u64(), shared_flags, phys_off)?;
                             shared_pages += 1;
                         }
                     }
@@ -1860,7 +1876,7 @@ pub fn map_and_copy_segment_to(
     // ユーザーL4/L3/L2/L1テーブルは全て作成済み。ここからページをマップする。
     // 物理メモリ直接マップ経由でページテーブルを操作
 
-    let mut final_flags = Flags::PRESENT | Flags::USER_ACCESSIBLE;
+    let mut final_flags = Flags::PRESENT | Flags::USER_ACCESSIBLE | RESIDENT_RAM;
     if writable {
         final_flags |= Flags::WRITABLE;
     }
@@ -1925,6 +1941,7 @@ pub fn map_and_copy_segment_to(
 
         let l1 = unsafe { &mut *((l1_phys + phys_off) as *mut PageTable) };
 
+        let previous_flags = l1[l1_index].flags();
         // L1 エントリをセット
         if l1[l1_index].is_unused() {
             l1[l1_index].set_addr(PhysAddr::new(phys_frame_addr), final_flags);
@@ -1957,6 +1974,8 @@ pub fn map_and_copy_segment_to(
                 phys_frame_addr = existing_addr;
             }
         }
+
+        record_user_leaf_change(table_phys, previous_flags, l1[l1_index].flags());
 
         // ELFデータを物理フレームに直接書き込む
         let page_start = page_addr;
@@ -2191,8 +2210,11 @@ pub fn unmap_range_in_table(table_phys: u64, addr: u64, length: u64) -> Result<(
             page_addr += 4096;
             continue;
         }
+        let previous_flags = user_page_flags_in_table(table_phys, page_addr)
+            .unwrap_or_else(PageTableFlags::empty);
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
         if let Ok((frame, flush)) = pt.unmap(page) {
+            record_user_leaf_change(table_phys, previous_flags, PageTableFlags::empty());
             flush.ignore();
             release_user_frame(frame.start_address().as_u64());
         }
@@ -2227,9 +2249,12 @@ pub fn unmap_range_in_table_preserve_frames(table_phys: u64, addr: u64, length: 
             page_addr += 4096;
             continue;
         }
+        let previous_flags = user_page_flags_in_table(table_phys, page_addr)
+            .unwrap_or_else(PageTableFlags::empty);
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
         if let Ok((_, flush)) = pt.unmap(page) {
             // do not deallocate the physical frame; ownership transferred
+            record_user_leaf_change(table_phys, previous_flags, PageTableFlags::empty());
             flush.ignore();
         }
         page_addr += 4096;
@@ -2356,13 +2381,16 @@ fn destroy_user_page_table_inner(table_phys: u64, may_defer: bool) -> Result<()>
         l4[i].set_unused();
     }
 
+    super::residency_native::retire(table_phys);
     deallocate_4k_frame_by_phys(table_phys);
     Ok(())
 }
 
 #[derive(Clone, Copy)]
 pub enum MappingCache {
+    /// Known shared RAM; includes a resident RAM reference in the user root.
     WriteBack,
+    /// Borrowed device storage; not resident process RAM.
     Uncached,
 }
 
@@ -2410,7 +2438,11 @@ pub fn map_physical_range_to_user(
         | Flags::WRITABLE
         | Flags::USER_ACCESSIBLE
         | Flags::NO_EXECUTE
-        | cache.flags();
+        | cache.flags()
+        | match cache {
+            MappingCache::WriteBack => RESIDENT_RAM,
+            MappingCache::Uncached => Flags::empty(),
+        };
 
     let virt_start = virt_addr & !0xfffu64;
     let phys_start = phys_addr & !0xfffu64;
@@ -2420,6 +2452,9 @@ pub fn map_physical_range_to_user(
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_start + i * 4096));
         let frame = PhysFrame::containing_address(PhysAddr::new(phys_start + i * 4096));
 
+        let previous_flags = with_user_leaf_entry_mut(
+            table_phys, virt_start + i * 4096, |entry| entry.flags(),
+        ).unwrap_or_else(Flags::empty);
         let map_result = unsafe {
             let mut alloc_lock = frame::lock_allocator();
             let alloc_ref = alloc_lock
@@ -2429,10 +2464,14 @@ pub fn map_physical_range_to_user(
         };
 
         match map_result {
-            Ok(flush) => flush.ignore(),
+            Ok(flush) => {
+                flush.ignore();
+                record_user_leaf_change(table_phys, previous_flags, flags);
+            },
             Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => unsafe {
                 if let Ok((_, flush)) = pt.unmap(page) {
                     flush.ignore();
+                    record_user_leaf_change(table_phys, previous_flags, Flags::empty());
                 }
                 let mut alloc_lock2 = frame::lock_allocator();
                 let alloc_ref2 = alloc_lock2
@@ -2441,6 +2480,8 @@ pub fn map_physical_range_to_user(
                 pt.map_to(page, frame, flags, alloc_ref2)
                     .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?
                     .ignore();
+                drop(alloc_lock2);
+                record_user_leaf_change(table_phys, Flags::empty(), flags);
             },
             Err(_) => return Err(Kernel::Memory(Memory::InvalidAddress)),
         }
@@ -2470,7 +2511,7 @@ pub fn map_shared_frame_to_user(
     let mut page_table = unsafe { OffsetPageTable::new(l4, VirtAddr::new(phys_off)) };
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_addr));
     let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(frame_phys));
-    let mut flags = Flags::PRESENT | Flags::USER_ACCESSIBLE;
+    let mut flags = Flags::PRESENT | Flags::USER_ACCESSIBLE | RESIDENT_RAM;
     if writable {
         flags |= Flags::WRITABLE;
     }
@@ -2493,6 +2534,7 @@ pub fn map_shared_frame_to_user(
     };
     match map_result {
         Ok(flush) => {
+            record_user_leaf_change(table_phys, Flags::empty(), flags);
             flush.ignore();
             flush_page_if_active(table_phys, virt_addr);
             Ok(())
@@ -2673,10 +2715,12 @@ pub fn map_page_in_table(
         flags |= PageTableFlags::WRITABLE;
     }
     if user_accessible {
-        flags |= PageTableFlags::USER_ACCESSIBLE;
+        flags |= PageTableFlags::USER_ACCESSIBLE | RESIDENT_RAM;
     }
     flags |= PageTableFlags::NO_EXECUTE;
+    let previous_flags = l1e.flags();
     l1e.set_addr(PhysAddr::new(phys_addr), flags);
+    record_user_leaf_change(table_phys, previous_flags, flags);
 
     Ok(())
 }
@@ -2745,7 +2789,9 @@ pub fn unmap_page_in_table(table_phys: u64, virt_addr: u64) -> Result<()> {
     let l1e = &mut l1[l1i];
 
     // エントリをクリア
+    let previous_flags = l1e.flags();
     l1e.set_unused();
+    record_user_leaf_change(table_phys, previous_flags, PageTableFlags::empty());
 
     // TLBフラッシュ（現在のCR3がtable_physの場合のみ）
     let (current_cr3, _) = Cr3::read();
@@ -2815,7 +2861,9 @@ pub fn unmap_private_page_in_table(
         return Ok(false);
     }
 
+    let previous_flags = l1e.flags();
     l1e.set_unused();
+    record_user_leaf_change(table_phys, previous_flags, PageTableFlags::empty());
     let (current_cr3, _) = Cr3::read();
     if current_cr3.start_address().as_u64() == table_phys {
         unsafe {

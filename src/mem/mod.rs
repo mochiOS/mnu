@@ -13,6 +13,8 @@ mod frame_refs;
 pub mod gdt;
 pub mod paging;
 pub(crate) mod cow_access;
+pub(crate) mod residency;
+pub(crate) mod residency_native;
 pub(crate) mod object_io;
 pub(crate) mod object_io_native;
 pub(crate) mod range_plan;
