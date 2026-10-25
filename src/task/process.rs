@@ -1841,6 +1841,17 @@ pub fn flush_deferred_process_reclaims() {
             defer_process_reclaim(process_id);
             continue;
         }
+        // A departing thread leaves the queue before its kernel stack is
+        // detached from this root. Do not lose the destruction obligation in
+        // that window: the paging destructor must reject an attached stack.
+        let stack_attached = with_process(process_id, |process| {
+            process.page_table_owned()
+                && process.page_table().is_some_and(crate::task::kernel_stack_table_in_use)
+        }).unwrap_or(false);
+        if stack_attached {
+            defer_process_reclaim(process_id);
+            continue;
+        }
         // Keep failed revocations discoverable in PROCESS_TABLE and retry from
         // a later reclaim pass. Never destroy a root with live borrowed PTEs.
         if release_process_borrowed_mappings(process_id).is_err() {
