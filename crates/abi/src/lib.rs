@@ -527,6 +527,12 @@ pub enum SyscallNumber {
     /// explicit WAIT-capable Process Handle. Args: Handle, output, exact size.
     /// No PID/name lookup, resource policy, ancestry, units or aggregation.
     ProcessMemoryRead = 703,
+    /// Sets only the calling thread's local-base CPU register and saved
+    /// context. Args: base (zero or a canonical user address), reserved zero.
+    /// No memory is read, mapped or granted; no target Handle is accepted.
+    /// No language TLS/TCB format, POSIX state or allocation is interpreted.
+    /// Failures use status::Error; missing current context is NotReady.
+    ThreadLocalBaseSet = 704,
     CheckGravityExist = 999,
 }
 

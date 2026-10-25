@@ -178,7 +178,12 @@ name = "mochios-posix-protocol"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
+ "mochios-user-protocol",
 ]
+
+[[package]]
+name = "mochios-user-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "mochios-workspace-protocol"
@@ -381,16 +386,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[patch.unused]]
-name = "libc"
-version = "0.2.190"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
-
-[[patch.unused]]
-name = "libc"
-version = "0.2.190"
+name = "mboot-protocol"
+version = "0.1.0"
 
 [[patch.unused]]
 name = "viewkit"
@@ -421,10 +418,6 @@ name = "mochios-user-database"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "mochios-user-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "mochios-viewkit-gpu-protocol"
 version = "0.1.0"
 
@@ -433,5 +426,13 @@ name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "mboot-protocol"
-version = "0.1.0"
+name = "libc"
+version = "0.2.190"
+
+[[patch.unused]]
+name = "libc"
+version = "0.2.190"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
