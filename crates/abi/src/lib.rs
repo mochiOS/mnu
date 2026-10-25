@@ -523,6 +523,10 @@ pub enum SyscallNumber {
     /// native status::Error; never changes permissions, residency or backing.
     /// No target process selector, access grant, I/O or policy is involved.
     MemoryRangeCheck = 702,
+    /// Copies current and peak resident RAM bytes for the caller (zero) or an
+    /// explicit WAIT-capable Process Handle. Args: Handle, output, exact size.
+    /// No PID/name lookup, resource policy, ancestry, units or aggregation.
+    ProcessMemoryRead = 703,
     CheckGravityExist = 999,
 }
 
@@ -561,6 +565,15 @@ pub struct ProcessExecutionUsage {
     pub kernel_ticks: u64,
     pub ticks_per_second: u64,
     pub reserved: u64,
+}
+/// Resident user RAM references, counted per mapped leaf, with an independent
+/// peak over this process lifetime. Shared frames count in each address space;
+/// inaccessible retained RAM counts, virtual reservations and devices do not.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcessMemoryUsage {
+    pub current_bytes: u64,
+    pub peak_bytes: u64,
 }
 pub const PROCESS_STATE_EXITED: u32 = 2;
 /// Poll without sleeping when passed as a `HandleWaitMany` deadline.

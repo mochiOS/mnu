@@ -1493,6 +1493,38 @@ pub fn process_open_by_id(process_id: u64, requested_rights: u64) -> u64 {
     insert_process_handle(crate::task::ProcessId::from_u64(process_id), rights)
 }
 
+pub fn process_memory_read(raw: u64, output: u64, length: u64) -> u64 {
+    use mnu_abi::status::Error;
+    if length != core::mem::size_of::<mnu_abi::ProcessMemoryUsage>() as u64 {
+        return Error::InvalidArgument.into_raw();
+    }
+    let result = (|| {
+        let process = if raw == 0 {
+            let caller = crate::syscall::security::current_process_id().ok_or(Error::NotReady)?;
+            crate::task::with_process(caller, |process| process.process_object())
+                .ok_or(Error::NotReady)?
+        } else {
+            let KernelObject::Process(process) = object_native(raw, HandleRights::WAIT)? else {
+                return Err(Error::InvalidArgument);
+            };
+            process
+        };
+        let snapshot = process.memory_usage().ok_or(Error::NotReady)?;
+        let usage = mnu_abi::ProcessMemoryUsage {
+            current_bytes: snapshot.current_bytes,
+            peak_bytes: snapshot.peak_bytes,
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&usage as *const mnu_abi::ProcessMemoryUsage).cast::<u8>(),
+                core::mem::size_of::<mnu_abi::ProcessMemoryUsage>(),
+            )
+        };
+        crate::syscall::copy_to_user_native(output, bytes)
+    })();
+    result.map(|_| SUCCESS).unwrap_or_else(Error::into_raw)
+}
+
 fn process_status_for(raw: u64) -> Result<mnu_abi::ProcessStatus, u64> {
     use mnu_abi::status::Error;
     let object = object_native(raw, HandleRights::WAIT).map_err(Error::into_raw)?;

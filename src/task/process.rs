@@ -528,6 +528,7 @@ pub struct ProcessObject {
     image_revision: AtomicU64,
     user_cpu_ticks: AtomicU64,
     kernel_cpu_ticks: AtomicU64,
+    memory: crate::mem::residency_native::ProcessStats,
 }
 
 impl ProcessObject {
@@ -543,7 +544,12 @@ impl ProcessObject {
             image_revision: AtomicU64::new(0),
             user_cpu_ticks: AtomicU64::new(0),
             kernel_cpu_ticks: AtomicU64::new(0),
+            memory: crate::mem::residency_native::ProcessStats::new(),
         }
+    }
+
+    pub(crate) fn memory_usage(&self) -> Option<crate::mem::residency::Snapshot> {
+        self.memory.snapshot()
     }
 
     pub const fn id(&self) -> ProcessId {
@@ -1014,12 +1020,14 @@ impl Process {
 
     /// ページテーブルアドレスを設定
     pub fn set_page_table(&mut self, page_table: u64) {
+        self.object.memory.bind_root(page_table);
         self.page_table = Some(page_table);
         self.page_table_owned = true;
     }
 
     /// 既存のページテーブルを共有する
     pub fn set_shared_page_table(&mut self, page_table: u64) {
+        self.object.memory.bind_root(page_table);
         self.page_table = Some(page_table);
         self.page_table_owned = false;
     }
@@ -1811,8 +1819,10 @@ fn destroy_exited_process(process: Process) -> (ProcessId, u64) {
                 pid,
                 e
             );
+            return (pid, exit_code);
         }
     }
+    process.object.memory.detach();
     (pid, exit_code)
 }
 
