@@ -149,6 +149,88 @@ fn parse_load_segments(
     Ok((header, segments))
 }
 
+/// Select actual file-backed metadata, or a disjoint read-only copy. Do not
+/// infer a readable address from an unmapped file prefix / load bias.
+struct ProgramHeaders {
+    address: u64,
+    copy: Option<core::ops::Range<usize>>,
+}
+
+fn program_headers(
+    data: &[u8],
+    header: &crate::elf::Elf64Ehdr,
+    segments: &[crate::elf::Elf64Phdr],
+) -> Result<ProgramHeaders, Error> {
+    let offset = usize::try_from(header.e_phoff).map_err(|_| Error::InvalidFormat)?;
+    let length = usize::from(header.e_phnum)
+        .checked_mul(usize::from(header.e_phentsize))
+        .filter(|&length| length != 0)
+        .ok_or(Error::InvalidFormat)?;
+    let end = offset
+        .checked_add(length)
+        .filter(|&end| end <= data.len())
+        .ok_or(Error::InvalidFormat)?;
+    let candidate = segments.iter().enumerate().find_map(|(index, segment)| {
+        let file_end = segment.p_offset.checked_add(segment.p_filesz)?;
+        (header.e_phoff >= segment.p_offset && end as u64 <= file_end)
+            .then(|| {
+                segment
+                    .p_vaddr
+                    .checked_add(header.e_phoff - segment.p_offset)
+                    .map(|address| (index, address))
+            })
+            .flatten()
+    });
+    if let Some((index, address)) = candidate {
+        let page_start = address & !(PAGE_SIZE - 1);
+        let page_end = align_page_up(
+            address
+                .checked_add(length as u64)
+                .ok_or(Error::InvalidFormat)?,
+        )
+        .ok_or(Error::InvalidFormat)?;
+        // A later LOAD may replace permissions or bytes on a shared page.
+        // Keep the exported view independent in that case, too.
+        let shared_page = segments.iter().enumerate().any(|(other_index, other)| {
+            other_index != index
+                && other.p_memsz != 0
+                && segment_page_range(other)
+                    .map(|(start, end)| page_start < end && start < page_end)
+                    .unwrap_or(true)
+        });
+        if !shared_page {
+            return Ok(ProgramHeaders {
+                address,
+                copy: None,
+            });
+        }
+    }
+    let mut first_page = USER_ADDRESS_MAX;
+    let mut last_page = 0;
+    for segment in segments.iter().filter(|segment| segment.p_memsz != 0) {
+        let (start, end) = segment_page_range(segment).ok_or(Error::InvalidFormat)?;
+        first_page = first_page.min(start);
+        last_page = last_page.max(end);
+    }
+    let pages = align_page_up(length as u64).ok_or(Error::InvalidFormat)?;
+    // Use the same user-image window as LOAD segments. Lower canonical
+    // addresses can still contain supervisor mappings in a fresh target root.
+    let address = first_page
+        .checked_sub(pages)
+        .filter(|&address| address >= USER_EXEC_ADDRESS_MIN)
+        .or_else(|| {
+            last_page
+                .checked_add(pages)
+                .filter(|&end| end <= USER_ADDRESS_MAX)
+                .map(|_| last_page)
+        })
+        .ok_or(Error::ResourceUnavailable)?;
+    Ok(ProgramHeaders {
+        address,
+        copy: Some(offset..end),
+    })
+}
+
 #[inline(never)]
 pub(super) fn map_elf_image(
     data: &[u8],
@@ -156,18 +238,30 @@ pub(super) fn map_elf_image(
     measurement: &mut ExecMeasurement,
 ) -> Result<ElfImageLayout, Error> {
     let (header, segments) = parse_load_segments(data, measurement)?;
-    let load_base = segments[0]
-        .p_vaddr
-        .checked_sub(segments[0].p_offset)
-        .ok_or(Error::InvalidFormat)?;
-    let phdr_vaddr = load_base
-        .checked_add(header.e_phoff)
-        .ok_or(Error::InvalidFormat)?;
+    let headers = program_headers(data, &header, &segments)?;
+    let phdr_vaddr = headers.address;
     let mut deferred_zero_regions = Vec::new();
     // Finish metadata allocation before the first page-table mutation.
     deferred_zero_regions
         .try_reserve_exact(segments.len())
         .map_err(|_| Error::ResourceUnavailable)?;
+
+    if let Some(range) = headers.copy {
+        let bytes = &data[range];
+        measurement
+            .load(|| {
+                crate::mem::paging::map_and_copy_segment_to(
+                    table_phys,
+                    phdr_vaddr,
+                    bytes.len() as u64,
+                    bytes.len() as u64,
+                    bytes,
+                    false,
+                    false,
+                )
+            })
+            .map_err(mapping_error_native)?;
+    }
 
     for (index, segment) in segments.iter().enumerate() {
         let source_offset = segment.p_offset as usize;
