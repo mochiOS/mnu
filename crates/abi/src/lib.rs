@@ -517,6 +517,12 @@ pub enum SyscallNumber {
     /// Missing thread/rate returns NotFound/NotReady. Other failures retain
     /// native authority, input-validation and output-copy categories.
     ThreadClockRead = 701,
+    /// Checks that every touched page belongs to the caller's address space,
+    /// including reservations and retained inaccessible leaves. Args: byte
+    /// address, byte length. Zero length accesses nothing. Returns zero or a
+    /// native status::Error; never changes permissions, residency or backing.
+    /// No target process selector, access grant, I/O or policy is involved.
+    MemoryRangeCheck = 702,
     CheckGravityExist = 999,
 }
 

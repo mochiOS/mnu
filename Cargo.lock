@@ -159,12 +159,17 @@ name = "mochios-filesystem-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-net-device-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-posix-client"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
  "mochi-user-syscall",
  "mochios-filesystem-protocol",
+ "mochios-net-device-protocol",
  "mochios-posix-protocol",
 ]
 
@@ -380,6 +385,22 @@ name = "mboot-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "libc"
+version = "0.2.190"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
+name = "libc"
+version = "0.2.190"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
 name = "mochi-user-runtime"
 version = "0.1.0"
 
@@ -389,10 +410,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-linux-portal-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-net-device-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -418,19 +435,3 @@ version = "0.1.0"
 [[patch.unused]]
 name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "libc"
-version = "0.2.190"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
-
-[[patch.unused]]
-name = "libc"
-version = "0.2.190"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"

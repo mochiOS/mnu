@@ -42,6 +42,35 @@ fn memory_range_is_mapped(
     )
 }
 
+/// Observe only the caller's own reserved-or-retained virtual range. This
+/// neither faults in pages nor inspects backing objects or access contents.
+pub fn check_range(address: u64, length: u64) -> u64 {
+    if length == 0 {
+        return SUCCESS;
+    }
+    if !super::is_canonical_user_range(address, length) {
+        return Error::InvalidAddress.into_raw();
+    }
+    let start = address & !4095;
+    // Canonical-range validation above already checked the inclusive end.
+    let end = ((address + length - 1) & !4095) + 4096;
+    let Some(pid) = current_pid() else {
+        return Error::NotReady.into_raw();
+    };
+    match crate::task::with_process(pid, |process| {
+        let table = process.page_table().ok_or(Error::NotReady)?;
+        if memory_range_is_mapped(process, table, start, end) {
+            Ok(())
+        } else {
+            Err(Error::InvalidAddress)
+        }
+    }) {
+        Some(Ok(())) => SUCCESS,
+        Some(Err(error)) => error.into_raw(),
+        None => Error::NotReady.into_raw(),
+    }
+}
+
 #[inline(never)]
 fn protect_memory_pages(
     process: &crate::task::Process,
