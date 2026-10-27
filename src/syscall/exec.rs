@@ -1410,7 +1410,6 @@ fn process_image_replace_impl(
     use mnu_abi::status::Error;
 
     const MAX_IDENTITY_BYTES: usize = 256;
-    const MAX_EXECUTABLE_BYTES: usize = 64 * 1024 * 1024;
     const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::MAX_IMAGE_BYTES;
 
     if !caller_has_process_spawn_capability() {
@@ -1470,7 +1469,10 @@ fn process_image_replace_impl(
         return Error::AccessDenied.into_raw();
     }
 
-    let executable = match crate::syscall::handle::read_all(image_handle, MAX_EXECUTABLE_BYTES) {
+    let executable = match crate::syscall::handle::read_all(
+        image_handle,
+        mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES,
+    ) {
         Ok(executable) => executable,
         Err(errno) => return errno,
     };
@@ -1598,7 +1600,10 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
             );
         }
     };
-    let executable = match crate::syscall::handle::read_all(image_handle, 64 * 1024 * 1024) {
+    let executable = match crate::syscall::handle::read_all(
+        image_handle,
+        mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES,
+    ) {
         Ok(executable) => executable,
         Err(errno) => {
             crate::kernel::early_serial("ProcessCreate: image snapshot failed\n");

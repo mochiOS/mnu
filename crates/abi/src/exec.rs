@@ -1,5 +1,10 @@
 //! Process creation metadata shared by mnu and its user space.
 
+/// Maximum input retained by the current owned-image snapshot mechanism.
+/// This is a native resource bound, independent of image format, application
+/// identity and userspace address-space policy. Allocation remains fallible.
+pub const MAX_CAPTURED_IMAGE_BYTES: usize = 256 * 1024 * 1024;
+
 /// Structured application identity fields supplied by the trusted launcher.
 pub const APPLICATION_PACKAGE_ID_PREFIX: &str = "__MNU_EXEC_ID_PACKAGE=";
 pub const APPLICATION_DEVELOPER_ID_PREFIX: &str = "__MNU_EXEC_ID_DEVELOPER=";
