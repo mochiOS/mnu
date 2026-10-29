@@ -136,6 +136,8 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     privileged!("device.audio"),
     privileged!("device.input"),
     privileged!("device.storage"),
+    // Owner-issued bounded storage objects; does not authorize raw disk syscalls.
+    privileged!("device.storage.scoped"),
     privileged!("device.net"),
     user!("account.self.read"),
     user!("account.self.modify"),
