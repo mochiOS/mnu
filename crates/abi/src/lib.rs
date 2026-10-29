@@ -1072,10 +1072,15 @@ pub const STORAGE_CONTROL_INSPECT: u16 = 1;
 pub const STORAGE_CONTROL_CREATE_PARTITION: u16 = 2;
 pub const STORAGE_CONTROL_DELETE_PARTITION: u16 = 3;
 pub const STORAGE_CONTROL_INSTALL_PARTITION: u16 = 4;
+/// Open a driver-pinned 512-byte-sector region: disk epoch, first, count, zero.
+pub const STORAGE_CONTROL_OPEN_REGION: u16 = 5;
+/// Close the exact opaque region ID returned by OPEN_REGION; no flush implied.
+pub const STORAGE_CONTROL_CLOSE_REGION: u16 = 6;
 
 pub const STORAGE_STATUS_OK: u32 = 0;
 pub const STORAGE_STATUS_END: u32 = 6;
 
+pub const STORAGE_QUERY_DEVICE_IDENTITY: u64 = 3;
 pub const STORAGE_QUERY_DISK: u64 = 0;
 pub const STORAGE_QUERY_PARTITION_GUIDS: u64 = 1;
 pub const STORAGE_QUERY_PARTITION_RANGE: u64 = 2;
