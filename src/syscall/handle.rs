@@ -2,6 +2,8 @@ use alloc::sync::{Arc, Weak};
 
 mod snapshot;
 pub use snapshot::table_read;
+mod process_image;
+pub use process_image::read as process_image_read;
 mod capture;
 pub use capture::table_capture;
 mod provider_reference;

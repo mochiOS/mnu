@@ -789,6 +789,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ProcessMemoryRead as u64 => {
             handle::process_memory_read(arg0, arg1, arg2)
         }
+        x if x == SyscallNumber::ProcessImageRead as u64 => {
+            handle::process_image_read(arg0, arg1, arg2)
+        }
         x if x == SyscallNumber::ProcessHandleWait as u64 => handle::process_wait(arg0, arg1, arg2),
         x if x == SyscallNumber::ProcessHandleResume as u64 => handle::process_resume(arg0),
         x if x == SyscallNumber::ProcessHandleSuspend as u64 => handle::process_suspend(arg0),

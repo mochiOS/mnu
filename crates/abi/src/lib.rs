@@ -533,6 +533,13 @@ pub enum SyscallNumber {
     /// No language TLS/TCB format, POSIX state or allocation is interpreted.
     /// Failures use status::Error; missing current context is NotReady.
     ThreadLocalBaseSet = 704,
+    /// Reads a committed image measurement for this caller (zero) or an owned
+    /// WAIT-capable Process Handle. Args: Handle, output, exact record size.
+    /// No process lookup, signer trust, application identity or policy. The
+    /// image digest and revision are sampled together; this is not a digest
+    /// of live memory, later mappings or dependencies. Absent/ended execution
+    /// returns NotFound, not an invented measurement from a retained object.
+    ProcessImageRead = 705,
     CheckGravityExist = 999,
 }
 
@@ -580,6 +587,26 @@ pub struct ProcessExecutionUsage {
 pub struct ProcessMemoryUsage {
     pub current_bytes: u64,
     pub peak_bytes: u64,
+}
+
+pub const PROCESS_IMAGE_DIGEST_NONE: u32 = 0;
+pub const PROCESS_IMAGE_DIGEST_SHA256: u32 = 1;
+
+/// Measurement of the ELF bytes committed at image creation/replacement.
+/// Image revision has the same meaning as `ProcessStatus::image_revision`.
+/// Creation from a captured address space starts revision zero and retains
+/// the source measurement. This record grants no authority or signer trust.
+/// Unmeasured images use NONE and zero digest bytes; SHA256 may itself be zero.
+/// Consumers needing freshness must revalidate the process/revision before
+/// acting; successful observation does not pin or suspend the execution.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcessImageInfo {
+    pub process_id: u64,
+    pub image_revision: u64,
+    pub digest_kind: u32,
+    pub reserved: u32,
+    pub digest: [u8; 32],
 }
 pub const PROCESS_STATE_EXITED: u32 = 2;
 /// Poll without sleeping when passed as a `HandleWaitMany` deadline.
