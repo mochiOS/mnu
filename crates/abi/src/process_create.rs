@@ -15,9 +15,7 @@ pub const MAX_VALUES: usize = 256;
 pub const MAX_REQUEST_BYTES: usize = CAPTURE_HEADER_LEN
     + MAX_IDENTITY_BYTES
     + MAX_LABEL_BYTES
-    + crate::process_image::HEADER_LEN
-    + crate::process_image::MAX_RELOCATIONS * crate::process_image::RELOCATION_LEN
-    + crate::process_image::MAX_STACK_BYTES
+    + crate::process_image::MAX_IMAGE_BYTES
     + MAX_HANDLES * HANDLE_LEN
     + MAX_VALUES * VALUE_LEN;
 

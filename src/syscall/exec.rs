@@ -897,7 +897,7 @@ fn exec_with_data(
             phdr_vaddr,
             phentsize,
             phnum,
-            deferred_zero_regions,
+            mut deferred_zero_regions,
         } = match map_elf_image(data, new_pt_phys, measurement) {
             Ok(layout) => layout,
             Err(error) => {
@@ -974,6 +974,21 @@ fn exec_with_data(
 
         crate::debug!("User stack allocated successfully");
 
+        let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
+            Ok(base) => base,
+            Err(error) => {
+                crate::kernel::early_serial("exec: map TLS failed\n");
+                return error.into_raw();
+            }
+        };
+        if let Some(startup) = native_startup {
+            if let Err(error) =
+                initial_mappings::prepare(new_pt_phys, startup, &mut deferred_zero_regions)
+            {
+                return error.into_raw();
+            }
+        }
+
         // プロセスを作成してページテーブルをセット
         let privilege = resolve_exec_privilege(requested_privilege);
         const DEFAULT_PROCESS_PRIORITY: u8 = 8;
@@ -1014,13 +1029,6 @@ fn exec_with_data(
             stack_end_vaddr,
             stack_end_vaddr + 4096
         );
-        let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
-            Ok(base) => base,
-            Err(error) => {
-                crate::kernel::early_serial("exec: map TLS failed\n");
-                return error.into_raw();
-            }
-        };
         let pid = proc.id();
         // Allocate the creator's reference before publishing any runnable thread.
         let mut created_handle = CreatedProcessHandle(if native_startup.is_some() {
@@ -1582,9 +1590,9 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
     }));
     let startup = match request.startup {
         mnu_abi::process_create::InitialState::Image(startup) => {
-            // Mapping plans are currently an image-replacement operation.
-            // Never accept and silently ignore a requested initial mapping.
-            if startup.mappings().next().is_some() || startup.context_updates().next().is_some() {
+            // New images may reserve generic VM mappings. Context updates
+            // still apply only when replacing an existing address space.
+            if startup.context_updates().next().is_some() {
                 return Error::InvalidArgument.into_raw();
             }
             startup
