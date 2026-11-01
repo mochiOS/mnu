@@ -57,7 +57,7 @@ pub fn memory_object_create(length: u64, options: u64) -> u64 {
         None => return Error::NotReady.into_raw(),
     };
     let result = crate::task::with_process_mut(process_id, |process| {
-        let maximum_pages = process.resource_limits().max_mapped_pages as u64;
+        let maximum_pages = process.resource_limits().max_memory_object_pages as u64;
         let resizable = options & mnu_abi::MEMORY_OBJECT_RESIZABLE != 0;
         let backing = if resizable {
             crate::mem::shared_memory::SharedMemory::new_resizable(length, maximum_pages)

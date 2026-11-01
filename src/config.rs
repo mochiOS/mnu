@@ -64,6 +64,12 @@ pub struct IoConfig {
 }
 
 #[derive(Clone, Copy)]
+pub struct MemoryConfig {
+    /// Per-object logical extent, not an aggregate resident-page quota.
+    pub max_object_pages: usize,
+}
+
+#[derive(Clone, Copy)]
 pub struct CapabilityConfig {
     pub max_name_len: usize,
 }
@@ -94,6 +100,7 @@ pub struct KernelConfig {
     pub ipc: IpcConfig,
     pub block: BlockConfig,
     pub io: IoConfig,
+    pub memory: MemoryConfig,
     pub capability: CapabilityConfig,
     pub exec: ExecConfig,
     pub cext: CextConfig,
@@ -122,6 +129,7 @@ impl Default for KernelConfig {
                 max_sectors_per_call: 128,
             },
             io: IoConfig { max_iov: 1024 },
+            memory: MemoryConfig { max_object_pages: 65536 },
             capability: CapabilityConfig { max_name_len: 512 },
             exec: ExecConfig {
                 stack_top_base: 0x0000_7FFF_FFF0_0000,
@@ -267,6 +275,13 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
         "io.max_iov" => {
             if let Some(v) = parse_u64(value) {
                 config.io.max_iov = v;
+            }
+        }
+        "memory.max_object_pages" => {
+            if let Some(pages) = parse_usize(value)
+                .filter(|pages| *pages != 0 && *pages <= usize::MAX / 4096)
+            {
+                config.memory.max_object_pages = pages;
             }
         }
         "capability.max_name_len" => {

@@ -18,7 +18,9 @@ pub struct ResourceLimits {
     pub max_threads: usize,
     pub max_ipc_queue: usize,
     pub max_ipc_bytes: usize,
-    pub max_mapped_pages: usize,
+    /// Maximum extent of each native RAM object created by this process.
+    /// Mapping admission and resident accounting are independent mechanisms.
+    pub max_memory_object_pages: usize,
     pub max_mmio_ranges: usize,
     pub max_irq_binds: usize,
     pub max_cext_instances: usize,
@@ -30,7 +32,7 @@ impl Default for ResourceLimits {
             max_threads: 64,
             max_ipc_queue: crate::config::kernel().ipc.mailbox_cap,
             max_ipc_bytes: crate::config::kernel().ipc.max_msg_size,
-            max_mapped_pages: 4096,
+            max_memory_object_pages: crate::config::kernel().memory.max_object_pages,
             max_mmio_ranges: 16,
             max_irq_binds: 8,
             max_cext_instances: 8,
