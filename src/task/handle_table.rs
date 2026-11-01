@@ -19,6 +19,7 @@ pub struct ProviderObject {
     release_ticket: Option<deferred::Deferred<'static, ProviderRelease>>,
     io_options: AtomicU64,
     memory_identity: AtomicU64,
+    memory_features: AtomicU64,
     memory_identity_unavailable: AtomicBool,
     signal_state: crate::interrupt::spinlock::SpinLock<ProviderSignalState>,
 }
@@ -116,6 +117,7 @@ impl ProviderObject {
             release_ticket: Some(release_ticket),
             io_options: AtomicU64::new(0),
             memory_identity: AtomicU64::new(0),
+            memory_features: AtomicU64::new(0),
             memory_identity_unavailable: AtomicBool::new(false),
             signal_state: crate::interrupt::spinlock::SpinLock::new(ProviderSignalState::default()),
         })
@@ -147,7 +149,12 @@ impl ProviderObject {
         (identity != 0).then_some(identity)
     }
 
-    pub(crate) fn set_memory_identity(&self, identity: u64) {
+    pub(crate) fn memory_features(&self) -> u64 {
+        self.memory_features.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_memory_identity(&self, identity: u64, features: u64) {
+        self.memory_features.store(features, Ordering::Release);
         self.memory_identity.store(identity, Ordering::Release);
     }
 

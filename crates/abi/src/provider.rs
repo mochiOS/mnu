@@ -15,10 +15,14 @@ pub const OP_READ_AT: u16 = 6;
 pub const OP_WRITE_AT: u16 = 7;
 pub const OP_SYNC: u16 = 8;
 /// Queries stable byte-addressed backing without changing the stream cursor.
-/// A successful empty response returns its nonzero identity in `value`, or
-/// zero if this object provides no memory backing. Provider errors are not
-/// interpreted as feature detection. The answer is stable for its lifetime.
+/// Success returns a nonzero identity in `value`, or zero without a payload
+/// when this object provides no memory backing. Optional features follow the
+/// identity. Errors are not feature detection; metadata is stable for its lifetime.
 pub const OP_MEMORY_OBJECT: u16 = 9;
+/// Optional OP_MEMORY_OBJECT response features. An empty payload advertises
+/// none; otherwise exactly one LE u64 follows a nonzero backing identity.
+pub const MEMORY_FEATURE_READ_AT_SHARED: u64 = 1;
+pub const MEMORY_FEATURES_ALL: u64 = MEMORY_FEATURE_READ_AT_SHARED;
 /// Sequential read with an atomically captured starting byte position.
 /// Successful payloads contain a little-endian u64 position, then `value` bytes.
 pub const OP_READ_WITH_POSITION: u16 = 10;
@@ -40,6 +44,12 @@ pub const OP_WRITE_BOUNDED: u16 = 12;
 /// selector, input is inline, and `length` is output capacity. Providers must
 /// explicitly implement queries, never dispatch them as mutation controls.
 pub const OP_QUERY: u16 = 13;
+/// Positioned read into an attached MemoryObject. `basis` selects its byte
+/// offset and the inline body is one LE u64 source position. It does not move
+/// the source cursor. Reply/decline semantics match OP_READ_SHARED, with the
+/// requested source position in every non-declining successful reply.
+/// Only providers advertising MEMORY_FEATURE_READ_AT_SHARED receive this op.
+pub const OP_READ_AT_SHARED: u16 = 14;
 /// Common READ-authorized query for a finite byte-addressed object's extent.
 /// Input is empty; success returns exactly one little-endian u64 byte length.
 /// Providers exposing nonzero OP_MEMORY_OBJECT backing implement this query.
@@ -94,6 +104,7 @@ impl RequestHeader {
             || data.len() > MAX_DATA_LEN
             || self.data_length as usize != data.len()
             || !valid_request_fields(self)
+            || !valid_request_payload(self, data)
         {
             return Err(DecodeError::InvalidFields);
         }
@@ -134,7 +145,9 @@ impl RequestHeader {
         if data_len > MAX_DATA_LEN || input.len() != REQUEST_HEADER_LEN + data_len {
             return Err(DecodeError::InvalidLength);
         }
-        if !valid_request_fields(header) {
+        if !valid_request_fields(header)
+            || !valid_request_payload(header, &input[REQUEST_HEADER_LEN..])
+        {
             return Err(DecodeError::InvalidFields);
         }
         Ok((header, &input[REQUEST_HEADER_LEN..]))
@@ -148,6 +161,7 @@ impl ResponseHeader {
             || data.len() > MAX_DATA_LEN
             || self.data_length as usize != data.len()
             || !valid_response_fields(self)
+            || !valid_response_payload(self, data)
         {
             return Err(DecodeError::InvalidFields);
         }
@@ -189,7 +203,9 @@ impl ResponseHeader {
         {
             return Err(DecodeError::InvalidLength);
         }
-        if !valid_response_fields(header) {
+        if !valid_response_fields(header)
+            || !valid_response_payload(header, &input[RESPONSE_HEADER_LEN..])
+        {
             return Err(DecodeError::InvalidFields);
         }
         Ok((header, &input[RESPONSE_HEADER_LEN..]))
@@ -212,6 +228,7 @@ const fn valid_opcode(opcode: u16) -> bool {
             | OP_READ_SHARED
             | OP_WRITE_BOUNDED
             | OP_QUERY
+            | OP_READ_AT_SHARED
     )
 }
 
@@ -232,6 +249,13 @@ const fn valid_request_fields(header: RequestHeader) -> bool {
         OP_READ_SHARED => {
             header.argument == 0
                 && header.data_length == 0
+                && header.length != 0
+                && header.length as usize <= MAX_SHARED_READ_LEN
+                && header.basis.checked_add(header.length as u64).is_some()
+        }
+        OP_READ_AT_SHARED => {
+            header.argument == 0
+                && header.data_length == 8
                 && header.length != 0
                 && header.length as usize <= MAX_SHARED_READ_LEN
                 && header.basis.checked_add(header.length as u64).is_some()
@@ -306,7 +330,7 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
             header.data_length as usize >= READ_POSITION_LEN
                 && header.value == (header.data_length as usize - READ_POSITION_LEN) as u64
         }
-        OP_READ_SHARED => {
+        OP_READ_SHARED | OP_READ_AT_SHARED => {
             (header.data_length == 0 && header.value == 0)
                 || (header.data_length as usize == READ_POSITION_LEN
                     && header.value <= MAX_SHARED_READ_LEN as u64)
@@ -316,9 +340,35 @@ const fn valid_response_fields(header: ResponseHeader) -> bool {
         OP_WRITE => header.data_length == 0 || header.data_length == 8,
         OP_WRITE_BOUNDED => header.data_length == 8 && header.value <= MAX_DATA_LEN as u64,
         OP_WRITE_AT | OP_SEEK | OP_RELEASE | OP_SYNC => header.data_length == 0,
-        OP_MEMORY_OBJECT => header.data_length == 0,
+        OP_MEMORY_OBJECT => header.data_length == 0 || header.data_length == 8,
         _ => false,
     }
+}
+
+fn valid_request_payload(header: RequestHeader, data: &[u8]) -> bool {
+    header.opcode != OP_READ_AT_SHARED
+        || (data.len() == 8 && get_u64(data, 0).checked_add(header.length as u64).is_some())
+}
+
+/// Decode optional immutable backing features. Errors are never a decline.
+pub fn memory_features(identity: u64, data: &[u8]) -> Result<u64, DecodeError> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+    if data.len() != 8 || identity == 0 {
+        return Err(DecodeError::InvalidFields);
+    }
+    let features = get_u64(data, 0);
+    if features & !MEMORY_FEATURES_ALL != 0 {
+        return Err(DecodeError::InvalidFields);
+    }
+    Ok(features)
+}
+
+fn valid_response_payload(header: ResponseHeader, data: &[u8]) -> bool {
+    header.opcode != OP_MEMORY_OBJECT
+        || header.status != 0
+        || memory_features(header.value, data).is_ok()
 }
 
 fn validate_common(input: &[u8]) -> Result<(), DecodeError> {

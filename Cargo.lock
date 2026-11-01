@@ -418,12 +418,12 @@ name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "libc"
-version = "0.2.190"
-
-[[patch.unused]]
 name = "viewkit"
 version = "2.0.0"
+
+[[patch.unused]]
+name = "libc"
+version = "0.2.190"
 
 [[patch.unused]]
 name = "mboot-protocol"

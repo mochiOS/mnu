@@ -259,6 +259,17 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
     } else {
         None
     };
+    if !write && length > mnu_abi::provider::MAX_DATA_LEN as u64 {
+        if let (KernelObject::Provider(provider), Some(identity)) = (&object, identity) {
+            if provider.memory_features() & mnu_abi::provider::MEMORY_FEATURE_READ_AT_SHARED != 0 {
+                if let Some(result) =
+                    provider_read_shared_at(provider, identity, buffer, length as usize, offset)
+                {
+                    return result;
+                }
+            }
+        }
+    }
     let capacity = (length as usize).min(mnu_abi::provider::MAX_DATA_LEN);
     let mut data = alloc::vec::Vec::new();
     if data.try_reserve_exact(capacity).is_err() {
@@ -669,15 +680,17 @@ pub(crate) fn provider_memory_object(provider: &ProviderObject) -> Result<u64, u
         length: 0,
         data_length: 0,
     };
-    let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
+    let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN + 8];
     let (response, data_len) = provider_call(provider, request, &[], &mut response_storage)?;
-    if data_len != 0 {
-        return Err(Error::BackingFailure.into_raw());
-    }
+    let features = mnu_abi::provider::memory_features(
+        response.value,
+        &response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN..][..data_len],
+    )
+    .map_err(|_| Error::BackingFailure.into_raw())?;
     if response.value == 0 {
         provider.set_memory_identity_unavailable();
     } else {
-        provider.set_memory_identity(response.value);
+        provider.set_memory_identity(response.value, features);
     }
     Ok(response.value)
 }
@@ -751,6 +764,29 @@ fn provider_read_shared(
     buffer: u64,
     length: usize,
 ) -> Option<u64> {
+    provider_read_shared_impl(provider, identity, buffer, length, None)
+}
+
+fn provider_read_shared_at(
+    provider: &ProviderObject,
+    identity: u64,
+    buffer: u64,
+    length: usize,
+    offset: u64,
+) -> Option<u64> {
+    if offset.checked_add(length as u64).is_none() {
+        return Some(mnu_abi::status::Error::LimitExceeded.into_raw());
+    }
+    provider_read_shared_impl(provider, identity, buffer, length, Some(offset))
+}
+
+fn provider_read_shared_impl(
+    provider: &ProviderObject,
+    identity: u64,
+    buffer: u64,
+    length: usize,
+    offset: Option<u64>,
+) -> Option<u64> {
     use mnu_abi::{provider as wire, status::Error};
     let capacity = length.min(wire::MAX_SHARED_READ_LEN);
     let backing_length = (capacity as u64 + 4095) & !4095;
@@ -778,34 +814,35 @@ fn provider_read_shared(
     let mut total = 0usize;
     while total < length {
         let chunk = (length - total).min(capacity);
+        // Positioned callers checked the entire source range before entering.
+        let position = offset.map(|offset| offset + total as u64);
+        let position_bytes = position.unwrap_or(0).to_le_bytes();
+        let payload = if position.is_some() { &position_bytes[..] } else { &[] };
         let request = wire::RequestHeader {
-            opcode: wire::OP_READ_SHARED,
+            opcode: if position.is_some() { wire::OP_READ_AT_SHARED } else { wire::OP_READ_SHARED },
             object_id: provider.object_id,
             argument: 0,
             basis: 0,
             length: chunk as u32,
-            data_length: 0,
+            data_length: payload.len() as u32,
         };
-        let mut encoded = [0u8; wire::REQUEST_HEADER_LEN];
-        if request.encode(&[], &mut encoded).is_err() {
-            return Some(if total == 0 {
-                Error::InvalidArgument.into_raw()
-            } else {
-                total as u64
-            });
-        }
+        let mut encoded = [0u8; wire::REQUEST_HEADER_LEN + 8];
+        let encoded_length = match request.encode(payload, &mut encoded) {
+            Ok(length) => length,
+            Err(_) => return Some(if total == 0 { Error::InvalidArgument.into_raw() } else { total as u64 }),
+        };
         let mut response = [0u8; wire::RESPONSE_HEADER_LEN + wire::READ_POSITION_LEN];
         let result = (|| -> Result<Option<usize>, u64> {
             let _io_guard = crate::mem::vm_object::lock_provider_io(provider, identity)
                 .map_err(mnu_abi::status::Error::into_raw)?;
             let reply_length = crate::syscall::ipc::call_provider_with_handle_from_kernel(
                 provider_endpoint(provider),
-                &encoded,
+                &encoded[..encoded_length],
                 &mut response,
                 handle,
                 requested,
             )?;
-            let (reply, position) = wire::ResponseHeader::decode(
+            let (reply, reply_position) = wire::ResponseHeader::decode(
                 response
                     .get(..reply_length)
                     .ok_or(Error::BackingFailure.into_raw())?,
@@ -817,21 +854,24 @@ fn provider_read_shared(
             if reply.status != 0 {
                 return Err(reply.status as u64);
             }
-            if position.is_empty() {
+            if reply_position.is_empty() {
                 // Only the validated, empty successful reply authorizes a
                 // transport change. No error value is feature detection.
                 return Ok(None);
             }
             let count =
                 usize::try_from(reply.value).map_err(|_| Error::BackingFailure.into_raw())?;
-            if count > chunk || position.len() != wire::READ_POSITION_LEN {
+            if count > chunk || reply_position.len() != wire::READ_POSITION_LEN {
                 return Err(Error::BackingFailure.into_raw());
             }
             let start = u64::from_le_bytes(
-                position
+                reply_position
                     .try_into()
                     .map_err(|_| Error::BackingFailure.into_raw())?,
             );
+            if position.is_some_and(|position| position != start) {
+                return Err(Error::BackingFailure.into_raw());
+            }
             if object.read_at(0, &mut data[..count])? != count {
                 return Err(Error::BackingFailure.into_raw());
             }
