@@ -446,6 +446,15 @@ fn resolve_call_destination(raw: u64) -> Result<(IpcEndpoint, u64, u32), u64> {
             mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE,
         ));
     }
+    // A retained SEND reference is authority for exactly that live endpoint.
+    // Only ambient/global addressing requires the process-wide IPC grant.
+    // Check it before lookup so unprivileged callers cannot probe global IDs.
+    if !crate::syscall::security::caller_has_any_capability(&[
+        crate::capability::Capability::IpcClient,
+        crate::capability::Capability::IpcServer,
+    ]) {
+        return Err(Error::AccessDenied.into_raw());
+    }
     let record = endpoint_record_from_handle(raw)
         .ok_or_else(|| Error::NotFound.into_raw())?;
     if !record.rights.contains(EndpointRights::RECV) {
@@ -490,12 +499,6 @@ pub fn call(
 ) -> u64 {
     use mnu_abi::status::Error;
 
-    if !crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::IpcClient,
-        crate::capability::Capability::IpcServer,
-    ]) {
-        return Error::AccessDenied.into_raw();
-    }
     let (destination, expected_sender, delivery_flags) =
         match resolve_call_destination(dest_endpoint_handle) {
             Ok(destination) => destination,
@@ -569,12 +572,6 @@ pub fn call_object_handles(
 
     if handles_ptr == 0 {
         return Error::InvalidAddress.into_raw();
-    }
-    if !crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::IpcClient,
-        crate::capability::Capability::IpcServer,
-    ]) {
-        return Error::AccessDenied.into_raw();
     }
     let (destination, expected_sender, delivery_flags) =
         match resolve_call_destination(dest_endpoint_handle) {
@@ -2011,12 +2008,6 @@ pub fn send_object_handles(
 ) -> u64 {
     use mnu_abi::status::Error;
 
-    if !crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::IpcClient,
-        crate::capability::Capability::IpcServer,
-    ]) {
-        return Error::AccessDenied.into_raw();
-    }
     let (destination, _, delivery_flags) = match resolve_call_destination(dest_endpoint_handle) {
         Ok(destination) => destination,
         Err(error) => return error,
