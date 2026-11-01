@@ -780,42 +780,55 @@ fn provider_read_shared_at(
     provider_read_shared_impl(provider, identity, buffer, length, Some(offset))
 }
 
-fn provider_read_shared_impl(
-    provider: &ProviderObject,
-    identity: u64,
-    buffer: u64,
-    length: usize,
-    offset: Option<u64>,
-) -> Option<u64> {
-    use mnu_abi::{provider as wire, status::Error};
-    let capacity = length.min(wire::MAX_SHARED_READ_LEN);
-    let backing_length = (capacity as u64 + 4095) & !4095;
-    let raw = memory_object_create(backing_length, 0);
-    if (raw as i64) < 0 {
-        return Some(raw);
+/// Reusable transfer storage for both user copies and owned object snapshots.
+/// The producer receives only READ/WRITE/MAP on this anonymous object.
+struct ProviderReadTransfer {
+    _owned: TemporaryMemoryHandle,
+    object: KernelObject,
+    handle: ObjectHandle,
+}
+
+impl ProviderReadTransfer {
+    fn new(capacity: usize) -> Result<Self, u64> {
+        use mnu_abi::status::Error;
+        if capacity == 0 || capacity > mnu_abi::provider::MAX_SHARED_READ_LEN {
+            return Err(Error::InvalidArgument.into_raw());
+        }
+        let backing_length = (capacity as u64 + 4095) & !4095;
+        let raw = memory_object_create(backing_length, 0);
+        if (raw as i64) < 0 {
+            return Err(raw);
+        }
+        let owned = TemporaryMemoryHandle(raw);
+        let object = match object_native(raw, HandleRights::MAP) {
+            Ok(object @ KernelObject::VmObject(_)) => object,
+            Ok(_) => return Err(Error::BackingFailure.into_raw()),
+            Err(error) => return Err(error.into_raw()),
+        };
+        let handle = u32::try_from(raw)
+            .ok()
+            .and_then(ObjectHandle::from_raw)
+            .ok_or(Error::BackingFailure.into_raw())?;
+        Ok(Self {
+            _owned: owned,
+            object,
+            handle,
+        })
     }
-    let _handle = TemporaryMemoryHandle(raw);
-    let object = match object_native(raw, HandleRights::MAP) {
-        Ok(KernelObject::VmObject(object)) => object,
-        Ok(_) => return Some(Error::BackingFailure.into_raw()),
-        Err(error) => return Some(error.into_raw()),
-    };
-    let handle = match u32::try_from(raw).ok().and_then(ObjectHandle::from_raw) {
-        Some(handle) => handle,
-        None => return Some(Error::BackingFailure.into_raw()),
-    };
-    let requested = HandleRights::READ
-        .union(HandleRights::WRITE)
-        .union(HandleRights::MAP);
-    let mut data = match crate::util::object_snapshot::zeroed_native(capacity) {
-        Ok(data) => data,
-        Err(error) => return Some(error.into_raw()),
-    };
-    let mut total = 0usize;
-    while total < length {
-        let chunk = (length - total).min(capacity);
-        // Positioned callers checked the entire source range before entering.
-        let position = offset.map(|offset| offset + total as u64);
+
+    /// The caller holds the backing I/O guard through transfer and overlay.
+    /// None is an explicit transport decline; errors never authorize replay.
+    fn read_locked(
+        &self,
+        provider: &ProviderObject,
+        identity: u64,
+        position: Option<u64>,
+        data: &mut [u8],
+    ) -> Result<Option<usize>, u64> {
+        use mnu_abi::{provider as wire, status::Error};
+        let KernelObject::VmObject(object) = &self.object else {
+            return Err(Error::BackingFailure.into_raw());
+        };
         let position_bytes = position.unwrap_or(0).to_le_bytes();
         let payload = if position.is_some() { &position_bytes[..] } else { &[] };
         let request = wire::RequestHeader {
@@ -823,24 +836,21 @@ fn provider_read_shared_impl(
             object_id: provider.object_id,
             argument: 0,
             basis: 0,
-            length: chunk as u32,
+            length: data.len() as u32,
             data_length: payload.len() as u32,
         };
         let mut encoded = [0u8; wire::REQUEST_HEADER_LEN + 8];
         let encoded_length = match request.encode(payload, &mut encoded) {
             Ok(length) => length,
-            Err(_) => return Some(if total == 0 { Error::InvalidArgument.into_raw() } else { total as u64 }),
+            Err(_) => return Err(Error::InvalidArgument.into_raw()),
         };
         let mut response = [0u8; wire::RESPONSE_HEADER_LEN + wire::READ_POSITION_LEN];
-        let result = (|| -> Result<Option<usize>, u64> {
-            let _io_guard = crate::mem::vm_object::lock_provider_io(provider, identity)
-                .map_err(mnu_abi::status::Error::into_raw)?;
             let reply_length = crate::syscall::ipc::call_provider_with_handle_from_kernel(
                 provider_endpoint(provider),
                 &encoded[..encoded_length],
                 &mut response,
-                handle,
-                requested,
+                self.handle,
+                HandleRights::READ.union(HandleRights::WRITE).union(HandleRights::MAP),
             )?;
             let (reply, reply_position) = wire::ResponseHeader::decode(
                 response
@@ -861,7 +871,7 @@ fn provider_read_shared_impl(
             }
             let count =
                 usize::try_from(reply.value).map_err(|_| Error::BackingFailure.into_raw())?;
-            if count > chunk || reply_position.len() != wire::READ_POSITION_LEN {
+        if count > data.len() || reply_position.len() != wire::READ_POSITION_LEN {
                 return Err(Error::BackingFailure.into_raw());
             }
             let start = u64::from_le_bytes(
@@ -881,7 +891,36 @@ fn provider_read_shared_impl(
                 start,
                 &mut data[..count],
             )?;
-            Ok(Some(count))
+        Ok(Some(count))
+    }
+}
+
+fn provider_read_shared_impl(
+    provider: &ProviderObject,
+    identity: u64,
+    buffer: u64,
+    length: usize,
+    offset: Option<u64>,
+) -> Option<u64> {
+    use mnu_abi::{provider as wire, status::Error};
+    let capacity = length.min(wire::MAX_SHARED_READ_LEN);
+    let transfer = match ProviderReadTransfer::new(capacity) {
+        Ok(transfer) => transfer,
+        Err(error) => return Some(error),
+    };
+    let mut data = match crate::util::object_snapshot::zeroed_native(capacity) {
+        Ok(data) => data,
+        Err(error) => return Some(error.into_raw()),
+    };
+    let mut total = 0usize;
+    while total < length {
+        let chunk = (length - total).min(capacity);
+        // Positioned callers checked the entire source range before entering.
+        let position = offset.map(|offset| offset + total as u64);
+        let result = (|| {
+            let _io_guard = crate::mem::vm_object::lock_provider_io(provider, identity)
+                .map_err(mnu_abi::status::Error::into_raw)?;
+            transfer.read_locked(provider, identity, position, &mut data[..chunk])
         })();
         let count = match result {
             Ok(Some(count)) => count,
@@ -1195,6 +1234,23 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
         return Err(Error::InvalidArgument.into_raw());
     };
     let identity = provider_cache_identity(&provider)?;
+    let capacity = maximum_length.min(mnu_abi::provider::MAX_SHARED_READ_LEN);
+    // Declare this owner before the guard so its Handle is reclaimed after
+    // releasing backing serialization, on every success and failure path.
+    let transfer = if identity.is_some()
+        && capacity > mnu_abi::provider::MAX_DATA_LEN
+        && provider.memory_features() & mnu_abi::provider::MEMORY_FEATURE_READ_AT_SHARED != 0
+    {
+        Some(ProviderReadTransfer::new(capacity)?)
+    } else {
+        None
+    };
+    let chunk = if transfer.is_some() {
+        capacity
+    } else {
+        mnu_abi::provider::MAX_DATA_LEN
+    };
+    let mut declined = false;
     let _io_guard = identity
         .map(|identity| crate::mem::vm_object::lock_provider_io(&provider, identity))
         .transpose()
@@ -1221,6 +1277,14 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
         None
     };
     let copy = |offset, bytes: &mut [u8]| {
+        if !declined {
+            if let (Some(transfer), Some(identity)) = (&transfer, identity) {
+                match transfer.read_locked(&provider, identity, Some(offset), bytes)? {
+                    Some(count) => return Ok(count),
+                    None => declined = true,
+                }
+            }
+        }
         let count = provider_read_at(&provider, offset, bytes)?;
         if count > bytes.len() {
             return Err(Error::BackingFailure.into_raw());
@@ -1239,13 +1303,13 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
         crate::util::object_snapshot::read_extent(
             length,
             maximum_length,
-            mnu_abi::provider::MAX_DATA_LEN,
+            chunk,
             copy,
         )
     } else {
         crate::util::object_snapshot::read_to_end(
             maximum_length,
-            mnu_abi::provider::MAX_DATA_LEN,
+            chunk,
             copy,
         )
     }
