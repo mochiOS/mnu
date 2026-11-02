@@ -144,6 +144,10 @@ pub fn drop_capability(_cap_ptr: u64, _cap_len: u64) -> u64 {
         Ok(cap) => cap,
         Err(e) => return e,
     };
+    let _mutation = match crate::task::authority_transition::begin_mutation(current) {
+        Ok(guard) => guard,
+        Err(error) => return error.into_raw(),
+    };
     let removed = crate::task::with_process_mut(current, |proc| match cap {
         CapabilityToken::Plain(cap) => proc.capabilities_mut().remove(cap),
         CapabilityToken::Authority(authority) => {
@@ -170,6 +174,15 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
         Some(pid) => pid,
         None => return Error::NotFound.into_raw(),
     };
+    let _source_mutation = match crate::task::authority_transition::begin_mutation(current) {
+        Ok(guard) => guard,
+        Err(error) => return error.into_raw(),
+    };
+    let _destination_mutation =
+        match crate::task::authority_transition::begin_mutation(dest_process) {
+            Ok(guard) => guard,
+            Err(error) => return error.into_raw(),
+        };
 
     let can_manage_capabilities =
         crate::task::process::process_has_capability(current, Capability::CapabilitiesManage);
@@ -281,6 +294,10 @@ pub fn restrict_capability(
     let restriction = match read_capability_token_from_user(_restriction_ptr, _restriction_len) {
         Ok(cap) => cap,
         Err(e) => return e,
+    };
+    let _mutation = match crate::task::authority_transition::begin_mutation(current) {
+        Ok(guard) => guard,
+        Err(error) => return error.into_raw(),
     };
     let changed = match (cap, restriction) {
         (CapabilityToken::Plain(cap), CapabilityToken::Plain(restriction)) => {

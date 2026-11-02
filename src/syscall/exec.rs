@@ -517,8 +517,8 @@ fn authorize_inherited_image(
             identity,
             kind,
             execution_class: ExecutionClass::Unprivileged,
-        });
-        Ok(())
+            authority_revision: 0,
+        })
     });
     match result {
         Some(Ok(())) => 0,
@@ -696,15 +696,15 @@ pub fn authorize_exec_syscall(
         ),
         kind: authorization_kind,
         execution_class,
+        authority_revision: 0,
     };
-    if crate::task::with_process_mut(target_pid, |process| {
+    match crate::task::with_process_mut(target_pid, |process| {
         process.authorize_next_exec(authorization)
-    })
-    .is_none()
-    {
-        return Error::NotReady.into_raw();
+    }) {
+        Some(Ok(())) => 0,
+        Some(Err(error)) => error.into_raw(),
+        None => Error::NotReady.into_raw(),
     }
-    0
 }
 
 /// Launches only the byte range selected by the authenticated boot module.
@@ -1295,6 +1295,8 @@ fn replace_current_process_image(
     // Quiescence is reversible. In particular, a failed borrowed-PTE/TLB
     // transaction must resume siblings and keep the old stack alias/owner.
     let quiescence = crate::task::scheduler::quiesce_image_siblings(pid, current_tid);
+    let _authority_commit =
+        crate::task::authority_transition::begin_commit(pid).map_err(Error::into_raw)?;
     // Siblings can revoke authority while the new image is being prepared.
     // They are stopped now; reject stale grants before touching the old image.
     // Both quiescence and the new VM remain rollback-owned on this failure.

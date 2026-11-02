@@ -12,6 +12,7 @@ pub(crate) mod handle_snapshot;
 pub mod ids;
 pub(crate) mod image_origin;
 pub(crate) mod image_transition;
+pub(crate) mod authority_transition;
 pub(crate) mod ipc_generation;
 pub mod launch_context;
 pub mod process;

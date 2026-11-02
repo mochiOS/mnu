@@ -6,7 +6,6 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crate::capability::{CapabilitySet, KernelAuthority, KernelAuthoritySet, KernelCapability};
-use crate::result::{Kernel, Process as ProcessError, Result};
 
 use super::handle_table::ObjectHandleTable;
 use super::ids::{PrivilegeLevel, ProcessId, ProcessState};
@@ -528,6 +527,7 @@ pub struct ProcessObject {
     state: AtomicU8,
     exit_code: AtomicU64,
     image_revision: AtomicU64,
+    authority_activity: super::authority_transition::Activity,
     user_cpu_ticks: AtomicU64,
     kernel_cpu_ticks: AtomicU64,
     memory: crate::mem::residency_native::ProcessStats,
@@ -544,6 +544,7 @@ impl ProcessObject {
             state: AtomicU8::new(mnu_abi::PROCESS_STATE_RUNNING as u8),
             exit_code: AtomicU64::new(0),
             image_revision: AtomicU64::new(0),
+            authority_activity: super::authority_transition::Activity::new(),
             user_cpu_ticks: AtomicU64::new(0),
             kernel_cpu_ticks: AtomicU64::new(0),
             memory: crate::mem::residency_native::ProcessStats::new(),
@@ -611,6 +612,10 @@ impl ProcessObject {
         self.image_revision.load(Ordering::Acquire)
     }
 
+    pub(crate) fn authority_activity(&self) -> &super::authority_transition::Activity {
+        &self.authority_activity
+    }
+
     /// Image transitions serialize preparation and commit for this process.
     /// Reserve no value on failure: exhaustion must be detected before any
     /// irreversible change to the live image, never wrapped or saturated.
@@ -656,6 +661,8 @@ pub struct PendingExecSecurity {
     pub identity: ApplicationIdentity,
     pub kind: PendingExecKind,
     pub execution_class: mnu_abi::exec::ExecutionClass,
+    /// Native process authority generation captured at publication.
+    pub authority_revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -727,6 +734,7 @@ pub struct Process {
     /// Measurement of the original loaded bytes, not of mutable runtime pages.
     image_digest: Option<[u8; 32]>,
     pending_exec_security: Option<PendingExecSecurity>,
+    exec_authority_revision: u64,
     /// プロセス名 (固定長バッファ)
     name: [u8; 32],
     /// 有効な名前の長さ
@@ -814,6 +822,7 @@ impl Process {
             application_identity: None,
             image_digest: None,
             pending_exec_security: None,
+            exec_authority_revision: 1,
             name: name_buf,
             name_len: len,
             state: ProcessState::Running,
@@ -875,17 +884,25 @@ impl Process {
         self.image_digest = Some(digest);
     }
 
-    pub(crate) fn authorize_next_exec(&mut self, authorization: PendingExecSecurity) {
+    pub(crate) fn authorize_next_exec(
+        &mut self,
+        mut authorization: PendingExecSecurity,
+    ) -> core::result::Result<(), mnu_abi::status::Error> {
+        // Exhaustion never wraps back to a previously approved generation.
+        if self.exec_authority_revision == u64::MAX {
+            return Err(mnu_abi::status::Error::LimitExceeded);
+        }
+        authorization.authority_revision = self.exec_authority_revision;
         self.pending_exec_security = Some(authorization);
+        Ok(())
     }
 
     /// A replacement may attenuate current authority, never restore a grant
     /// revoked since its authorization. Caller holds the process-table borrow.
-    pub(crate) fn permits_image_authorization(
-        &self,
-        authorization: &PendingExecSecurity,
-    ) -> bool {
+    pub(crate) fn permits_image_authorization(&self, authorization: &PendingExecSecurity) -> bool {
         authorization.kind == PendingExecKind::ImageReplace
+            && authorization.authority_revision == self.exec_authority_revision
+            && self.exec_authority_revision != u64::MAX
             && authorization.capabilities.is_subset_of(&self.capabilities)
             && authorization
                 .kernel_authorities
@@ -899,6 +916,8 @@ impl Process {
         authorization: &PendingExecSecurity,
     ) -> bool {
         authorization.kind == PendingExecKind::SpawnInherit
+            && authorization.authority_revision == self.exec_authority_revision
+            && self.exec_authority_revision != u64::MAX
             && self.application_identity.as_ref() == Some(&authorization.identity)
             && self.image_digest == Some(authorization.executable_digest)
             && authorization.capabilities.is_subset_of(&self.capabilities)
@@ -924,8 +943,10 @@ impl Process {
         // Consume a matching one-shot even when it has become invalid. A
         // later capability grant must not resurrect an already rejected permit.
         let authorization = self.pending_exec_security.take()?;
-        if (authorization.kind == PendingExecKind::ImageReplace
-            && !self.permits_image_authorization(&authorization))
+        if authorization.authority_revision != self.exec_authority_revision
+            || self.exec_authority_revision == u64::MAX
+            || (authorization.kind == PendingExecKind::ImageReplace
+                && !self.permits_image_authorization(&authorization))
             || (authorization.kind == PendingExecKind::SpawnInherit
                 && !self.permits_inherited_spawn_authorization(&authorization))
         {
@@ -946,10 +967,12 @@ impl Process {
 
     /// capability 集合を可変取得（kernel 内部用）
     pub(crate) fn capabilities_mut(&mut self) -> &mut CapabilitySet {
+        self.advance_exec_authority_revision();
         &mut self.capabilities
     }
 
     pub(crate) fn kernel_authorities_mut(&mut self) -> &mut KernelAuthoritySet {
+        self.advance_exec_authority_revision();
         &mut self.kernel_authorities
     }
 
@@ -958,11 +981,20 @@ impl Process {
     /// # 注意
     /// capability は sandbox の根幹なので、ユーザー空間へ公開しないこと。
     pub(crate) fn set_capabilities_for_exec(&mut self, caps: CapabilitySet) {
+        self.advance_exec_authority_revision();
         self.capabilities = caps;
     }
 
     pub(crate) fn set_kernel_authorities_for_exec(&mut self, authorities: KernelAuthoritySet) {
+        self.advance_exec_authority_revision();
         self.kernel_authorities = authorities;
+    }
+
+    /// Every mutable authority access invalidates outstanding permits, even
+    /// when the operation later restores the same set or fails without change.
+    fn advance_exec_authority_revision(&mut self) {
+        self.exec_authority_revision = self.exec_authority_revision.saturating_add(1);
+        self.pending_exec_security = None;
     }
 
     /// プロセス名を取得
@@ -1944,23 +1976,6 @@ pub fn release_process_borrowed_mappings(pid: ProcessId) -> core::result::Result
 /// 現在のプロセス数を取得
 pub fn process_count() -> usize {
     PROCESS_TABLE.lock().count()
-}
-
-/// プロセス生成時に capability を設定する（カーネル内部用）
-///
-/// これは syscall として公開してはいけない。
-/// ユーザープロセスがこれを呼べると、自己昇格で sandbox を回避できるため。
-pub fn set_process_capabilities(pid: ProcessId, caps: CapabilitySet) -> Result<()> {
-    let updated = with_process_mut(pid, |proc| {
-        proc.capabilities = caps;
-    })
-    .is_some();
-
-    if updated {
-        Ok(())
-    } else {
-        Err(Kernel::Process(ProcessError::ProcessNotFound))
-    }
 }
 
 /// プロセスが指定 capability を持つか（階層継承を含む）
