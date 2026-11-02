@@ -207,6 +207,11 @@ memory_object_create(size: u64, options: u64) -> handle
 memory_object_length(handle) -> u64
 ```
 
+長さの取得には、呼び出し元が保持するHandleのREADまたはMAP権限を要求します。
+READだけの参照でも長さを観測でき、MAP権限を追加する必要はありません。
+同じHandle参照からオブジェクトと権限を取得し、native RAM backingだけを調べます。
+ProviderやProvider-backed VMは所有者への問い合わせを行わず拒否します。
+
 固定長backingはoptionsを0、sizeを正のページサイズ倍数にします。
 このHandleを指定した`memory_map`で共有マッピングを作成します。
 既存のprivateマッピングを後から共有扱いには変更しません。
