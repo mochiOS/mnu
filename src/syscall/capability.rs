@@ -205,12 +205,32 @@ pub fn transfer_capability(_dest: u64, _cap_ptr: u64, _cap_len: u64) -> u64 {
                 if !capability.is_delegable() {
                     return Error::AccessDenied.into_raw();
                 }
-                let inserted = crate::task::with_process_mut(dest_process, |proc| {
-                    if proc.exe_path() != claimed_exe_path {
-                        return Err(Error::AccessDenied);
-                    }
-                    proc.capabilities_mut().try_insert(capability)
-                });
+                // The earlier role check only selects this request format.
+                // Revalidate live authority with the destination update under
+                // one table lock, including grants back to the caller itself.
+                let inserted = if dest_process == current {
+                    crate::task::with_process_mut(current, |proc| {
+                        if !proc.capabilities().contains(Capability::CapabilitiesManage)
+                            || proc.exe_path() != claimed_exe_path
+                        {
+                            return Err(Error::AccessDenied);
+                        }
+                        proc.capabilities_mut().try_insert(capability)
+                    })
+                } else {
+                    crate::task::process::with_process_pair_mut(
+                        current,
+                        dest_process,
+                        |source, destination| {
+                            if !source.capabilities().contains(Capability::CapabilitiesManage)
+                                || destination.exe_path() != claimed_exe_path
+                            {
+                                return Err(Error::AccessDenied);
+                            }
+                            destination.capabilities_mut().try_insert(capability)
+                        },
+                    )
+                };
                 return match inserted {
                     Some(Ok(())) => SUCCESS,
                     Some(Err(error)) => error.into_raw(),
