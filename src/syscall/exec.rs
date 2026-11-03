@@ -20,12 +20,12 @@ use image::{map_elf_image, ElfImageLayout};
 use launch::ImageLaunch;
 
 use mnu_abi::exec::{
-    ExecutionClass, APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX,
-    APPLICATION_PROVENANCE_PREFIX, APPLICATION_SUBJECT_KEY_ID_PREFIX,
-    EXECUTABLE_DIGEST_PREFIX, EXEC_AUTHORIZATION_CLASS_PREFIX,
+    APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX, APPLICATION_PROVENANCE_PREFIX,
+    APPLICATION_SUBJECT_KEY_ID_PREFIX, EXEC_AUTHORIZATION_CLASS_PREFIX,
+    EXEC_AUTHORIZATION_IMAGE_REVISION_PREFIX, EXEC_AUTHORIZATION_KIND_IMAGE_INSTALL,
     EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE, EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT,
-    EXEC_AUTHORIZATION_KIND_PREFIX,
-    EXEC_AUTHORIZATION_KIND_SPAWN, EXEC_AUTHORIZATION_KIND_SPAWN_INHERIT,
+    EXEC_AUTHORIZATION_KIND_PREFIX, EXEC_AUTHORIZATION_KIND_SPAWN,
+    EXEC_AUTHORIZATION_KIND_SPAWN_INHERIT, EXECUTABLE_DIGEST_PREFIX, ExecutionClass,
 };
 use sha2::{Digest, Sha256};
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -251,13 +251,13 @@ fn read_nul_identity_fields(
         if s.is_empty() {
             continue;
         }
+        if out.len() == max_fields {
+            return Err(Error::InvalidArgument);
+        }
         let text = core::str::from_utf8(s).map_err(|_| Error::InvalidArgument)?;
         let text = storage::text(text)?;
         out.try_reserve(1).map_err(|_| Error::ResourceUnavailable)?;
         out.push(text);
-        if out.len() >= max_fields {
-            break;
-        }
     }
     Ok(out)
 }
@@ -485,11 +485,7 @@ fn authorize_inherited_image(
     executable_digest: Option<[u8; 32]>,
 ) -> u64 {
     use mnu_abi::status::Error;
-    let (thread, process) = match exec_authorization_target(requester_endpoint) {
-        Ok(target) => target,
-        Err(error) => return error.into_raw(),
-    };
-    let result = crate::task::with_process_mut(process, |process| {
+    let result = with_authorized_exec_target(requester_endpoint, |thread, process| {
         if !process.capabilities().contains(Capability::ProcessSpawn) {
             return Err(Error::AccessDenied);
         }
@@ -521,10 +517,45 @@ fn authorize_inherited_image(
         })
     });
     match result {
-        Some(Ok(())) => 0,
-        Some(Err(error)) => error.into_raw(),
-        None => Error::NotReady.into_raw(),
+        Ok(()) => 0,
+        Err(error) => error.into_raw(),
     }
+}
+
+/// Revalidate the issuer with permit publication under one table borrow.
+/// Parsing and allocation of caller data happen before entering this helper.
+fn with_authorized_exec_target<T>(
+    requester_endpoint: u64,
+    operation: impl FnOnce(
+        crate::task::ThreadId,
+        &mut crate::task::Process,
+    ) -> Result<T, mnu_abi::status::Error>,
+) -> Result<T, mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+    let issuer = crate::syscall::security::current_process_id().ok_or(Error::NotReady)?;
+    let (thread, target) = exec_authorization_target(requester_endpoint)?;
+    let result = if issuer == target {
+        crate::task::with_process_mut(target, |process| {
+            if !process
+                .capabilities()
+                .contains(Capability::CapabilitiesManage)
+            {
+                return Err(Error::AccessDenied);
+            }
+            operation(thread, process)
+        })
+    } else {
+        crate::task::process::with_process_pair_mut(issuer, target, |source, destination| {
+            if !source
+                .capabilities()
+                .contains(Capability::CapabilitiesManage)
+            {
+                return Err(Error::AccessDenied);
+            }
+            operation(thread, destination)
+        })
+    };
+    result.ok_or(Error::NotReady)?
 }
 
 pub fn authorize_exec_syscall(
@@ -544,7 +575,7 @@ pub fn authorize_exec_syscall(
         Ok(path) => path,
         Err(error) => return error.into_raw(),
     };
-    let identity_items = match read_nul_identity_fields(identity_ptr, 1024, 7) {
+    let identity_items = match read_nul_identity_fields(identity_ptr, 1024, 8) {
         Ok(items) => items,
         Err(error) => return error.into_raw(),
     };
@@ -556,14 +587,30 @@ pub fn authorize_exec_syscall(
     let mut authorization_kind = None;
     let mut inherit_security = false;
     let mut execution_class = None;
+    let mut image_revision = None;
     for item in &identity_items {
         if let Some(value) = item.strip_prefix(APPLICATION_PACKAGE_ID_PREFIX) {
+            if package.is_some() {
+                return Error::InvalidArgument.into_raw();
+            }
             package = Some(value);
         } else if let Some(value) = item.strip_prefix(APPLICATION_DEVELOPER_ID_PREFIX) {
+            if developer.is_some() {
+                return Error::InvalidArgument.into_raw();
+            }
             developer = Some(value);
         } else if let Some(value) = item.strip_prefix(APPLICATION_SUBJECT_KEY_ID_PREFIX) {
+            if subject_key.is_some() {
+                return Error::InvalidArgument.into_raw();
+            }
             subject_key = decode_subject_key_id(value);
+            if subject_key.is_none() {
+                return Error::InvalidArgument.into_raw();
+            }
         } else if let Some(value) = item.strip_prefix(APPLICATION_PROVENANCE_PREFIX) {
+            if provenance.is_some() {
+                return Error::InvalidArgument.into_raw();
+            }
             provenance = match value {
                 "built-in" => Some(crate::task::process::ApplicationProvenance::BuiltIn),
                 "verified-package" => {
@@ -572,11 +619,17 @@ pub fn authorize_exec_syscall(
                 "development" => Some(crate::task::process::ApplicationProvenance::Development),
                 _ => None,
             };
+            if provenance.is_none() {
+                return Error::InvalidArgument.into_raw();
+            }
         } else if let Some(value) = item.strip_prefix(EXECUTABLE_DIGEST_PREFIX) {
             if executable_digest.is_some() {
                 return Error::InvalidArgument.into_raw();
             }
             executable_digest = decode_subject_key_id(value);
+            if executable_digest.is_none() {
+                return Error::InvalidArgument.into_raw();
+            }
         } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_KIND_PREFIX) {
             if authorization_kind.is_some() {
                 return Error::InvalidArgument.into_raw();
@@ -584,6 +637,9 @@ pub fn authorize_exec_syscall(
             authorization_kind = match value {
                 EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE => {
                     Some(crate::task::process::PendingExecKind::ImageReplace)
+                }
+                EXEC_AUTHORIZATION_KIND_IMAGE_INSTALL => {
+                    Some(crate::task::process::PendingExecKind::ImageInstall { image_revision: 0 })
                 }
                 EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT => {
                     inherit_security = true;
@@ -596,6 +652,20 @@ pub fn authorize_exec_syscall(
                 EXEC_AUTHORIZATION_KIND_SPAWN => Some(crate::task::process::PendingExecKind::Spawn),
                 _ => None,
             };
+            if authorization_kind.is_none() {
+                return Error::InvalidArgument.into_raw();
+            }
+        } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_IMAGE_REVISION_PREFIX) {
+            if image_revision.is_some()
+                || value.is_empty()
+                || !value.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Error::InvalidArgument.into_raw();
+            }
+            image_revision = value.parse::<u64>().ok().filter(|revision| *revision != 0);
+            if image_revision.is_none() {
+                return Error::InvalidArgument.into_raw();
+            }
         } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_CLASS_PREFIX) {
             if execution_class.is_some() {
                 return Error::InvalidArgument.into_raw();
@@ -605,6 +675,9 @@ pub fn authorize_exec_syscall(
                 "unprivileged" => Some(ExecutionClass::Unprivileged),
                 _ => None,
             };
+            if execution_class.is_none() {
+                return Error::InvalidArgument.into_raw();
+            }
         } else {
             return Error::InvalidArgument.into_raw();
         }
@@ -646,6 +719,17 @@ pub fn authorize_exec_syscall(
     if !valid_security_identity(package) || !valid_security_identity(developer) {
         return Error::InvalidArgument.into_raw();
     }
+    let authorization_kind = match (authorization_kind, image_revision) {
+        (crate::task::process::PendingExecKind::ImageInstall { .. }, Some(image_revision))
+            if execution_class == ExecutionClass::Unprivileged =>
+        {
+            crate::task::process::PendingExecKind::ImageInstall { image_revision }
+        }
+        (crate::task::process::PendingExecKind::ImageInstall { .. }, _) | (_, Some(_)) => {
+            return Error::InvalidArgument.into_raw();
+        }
+        (kind, None) => kind,
+    };
     let caps_list = match read_nul_caps_from_user(caps_ptr, caps_total_len) {
         Ok(caps) => caps,
         Err(error) => return error.into_raw(),
@@ -654,26 +738,6 @@ pub fn authorize_exec_syscall(
         Ok(grants) => grants,
         Err(error) => return error.into_raw(),
     };
-    let (target_thread, target_pid) = match exec_authorization_target(requester_endpoint) {
-        Ok(target) => target,
-        Err(error) => return error.into_raw(),
-    };
-    let allowed = match crate::task::with_process(target_pid, |process| match authorization_kind {
-        crate::task::process::PendingExecKind::ImageReplace => {
-            capabilities.is_subset_of(process.capabilities())
-                && kernel_authorities.is_subset_of(process.kernel_authorities())
-        }
-        crate::task::process::PendingExecKind::SpawnInherit => false,
-        crate::task::process::PendingExecKind::Spawn => process
-            .capabilities()
-            .contains(crate::capability::Capability::ProcessSpawn),
-    }) {
-        Some(allowed) => allowed,
-        None => return Error::NotReady.into_raw(),
-    };
-    if !allowed {
-        return Error::AccessDenied.into_raw();
-    }
     let package = match storage::text(package) {
         Ok(package) => package,
         Err(error) => return error.into_raw(),
@@ -682,28 +746,44 @@ pub fn authorize_exec_syscall(
         Ok(developer) => developer,
         Err(error) => return error.into_raw(),
     };
-    let authorization = crate::task::process::PendingExecSecurity {
-        path,
-        authorized_thread: target_thread,
-        executable_digest,
-        capabilities,
-        kernel_authorities,
-        identity: crate::task::process::ApplicationIdentity::new(
-            package,
-            developer,
-            subject_key,
-            provenance,
-        ),
-        kind: authorization_kind,
-        execution_class,
-        authority_revision: 0,
-    };
-    match crate::task::with_process_mut(target_pid, |process| {
-        process.authorize_next_exec(authorization)
-    }) {
-        Some(Ok(())) => 0,
-        Some(Err(error)) => error.into_raw(),
-        None => Error::NotReady.into_raw(),
+    let result = with_authorized_exec_target(requester_endpoint, |target_thread, process| {
+        let allowed = match authorization_kind {
+            crate::task::process::PendingExecKind::ImageReplace => {
+                capabilities.is_subset_of(process.capabilities())
+                    && kernel_authorities.is_subset_of(process.kernel_authorities())
+            }
+            crate::task::process::PendingExecKind::ImageInstall { image_revision } => {
+                process.process_object().image_revision() == image_revision
+                    && kernel_authorities.is_empty()
+            }
+            crate::task::process::PendingExecKind::SpawnInherit => false,
+            crate::task::process::PendingExecKind::Spawn => process
+                .capabilities()
+                .contains(crate::capability::Capability::ProcessSpawn),
+        };
+        if !allowed {
+            return Err(Error::AccessDenied);
+        }
+        process.authorize_next_exec(crate::task::process::PendingExecSecurity {
+            path,
+            authorized_thread: target_thread,
+            executable_digest,
+            capabilities,
+            kernel_authorities,
+            identity: crate::task::process::ApplicationIdentity::new(
+                package,
+                developer,
+                subject_key,
+                provenance,
+            ),
+            kind: authorization_kind,
+            execution_class,
+            authority_revision: 0,
+        })
+    });
+    match result {
+        Ok(()) => 0,
+        Err(error) => error.into_raw(),
     }
 }
 
@@ -1473,8 +1553,11 @@ fn process_image_replace_impl(
         Some(None) => return Error::AccessDenied.into_raw(),
         None => return Error::NotReady.into_raw(),
     };
-    if authorization.kind != crate::task::process::PendingExecKind::ImageReplace
-        || authorization.execution_class != ExecutionClass::Unprivileged
+    if !matches!(
+        authorization.kind,
+        crate::task::process::PendingExecKind::ImageReplace
+            | crate::task::process::PendingExecKind::ImageInstall { .. }
+    ) || authorization.execution_class != ExecutionClass::Unprivileged
     {
         return Error::AccessDenied.into_raw();
     }

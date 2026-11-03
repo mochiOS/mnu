@@ -668,6 +668,7 @@ pub struct PendingExecSecurity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PendingExecKind {
     ImageReplace,
+    ImageInstall { image_revision: u64 },
     Spawn,
     SpawnInherit,
 }
@@ -899,14 +900,25 @@ impl Process {
 
     /// A replacement may attenuate current authority, never restore a grant
     /// revoked since its authorization. Caller holds the process-table borrow.
+    /// Explicit installation additionally requires the same measured image
+    /// revision and can install ordinary grants only at the image commit.
     pub(crate) fn permits_image_authorization(&self, authorization: &PendingExecSecurity) -> bool {
-        authorization.kind == PendingExecKind::ImageReplace
-            && authorization.authority_revision == self.exec_authority_revision
+        authorization.authority_revision == self.exec_authority_revision
             && self.exec_authority_revision != u64::MAX
-            && authorization.capabilities.is_subset_of(&self.capabilities)
-            && authorization
-                .kernel_authorities
-                .is_subset_of(&self.kernel_authorities)
+            && match authorization.kind {
+                PendingExecKind::ImageReplace => {
+                    authorization.capabilities.is_subset_of(&self.capabilities)
+                        && authorization
+                            .kernel_authorities
+                            .is_subset_of(&self.kernel_authorities)
+                }
+                PendingExecKind::ImageInstall { image_revision } => {
+                    image_revision != 0
+                        && image_revision == self.process_object().image_revision()
+                        && authorization.kernel_authorities.is_empty()
+                }
+                _ => false,
+            }
     }
 
     /// Current-domain creation cannot restore authority revoked after capture
@@ -945,8 +957,10 @@ impl Process {
         let authorization = self.pending_exec_security.take()?;
         if authorization.authority_revision != self.exec_authority_revision
             || self.exec_authority_revision == u64::MAX
-            || (authorization.kind == PendingExecKind::ImageReplace
-                && !self.permits_image_authorization(&authorization))
+            || (matches!(
+                authorization.kind,
+                PendingExecKind::ImageReplace | PendingExecKind::ImageInstall { .. }
+            ) && !self.permits_image_authorization(&authorization))
             || (authorization.kind == PendingExecKind::SpawnInherit
                 && !self.permits_inherited_spawn_authorization(&authorization))
         {
