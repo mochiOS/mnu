@@ -662,7 +662,7 @@ pub fn authorize_exec_syscall(
             {
                 return Error::InvalidArgument.into_raw();
             }
-            image_revision = value.parse::<u64>().ok().filter(|revision| *revision != 0);
+            image_revision = value.parse::<u64>().ok();
             if image_revision.is_none() {
                 return Error::InvalidArgument.into_raw();
             }
@@ -753,7 +753,8 @@ pub fn authorize_exec_syscall(
                     && kernel_authorities.is_subset_of(process.kernel_authorities())
             }
             crate::task::process::PendingExecKind::ImageInstall { image_revision } => {
-                process.process_object().image_revision() == image_revision
+                process.image_digest().is_some()
+                    && process.process_object().image_revision() == image_revision
                     && kernel_authorities.is_empty()
             }
             crate::task::process::PendingExecKind::SpawnInherit => false,

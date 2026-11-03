@@ -17,8 +17,8 @@ pub const EXEC_AUTHORIZATION_KIND_PREFIX: &str = "__MNU_EXEC_AUTH_KIND=";
 pub const EXEC_AUTHORIZATION_CLASS_PREFIX: &str = "__MNU_EXEC_AUTH_CLASS=";
 pub const EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE: &str = "image-replace";
 /// Install launcher-selected ordinary authority only with the new image.
-/// Requires the exact nonzero current target image revision. Issuing this
-/// permit never grants authority to the running target or to its parent.
+/// Requires the exact measured target image revision, including initial 0.
+/// Issuing this permit never grants authority to the running target or its parent.
 pub const EXEC_AUTHORIZATION_KIND_IMAGE_INSTALL: &str = "image-install";
 pub const EXEC_AUTHORIZATION_IMAGE_REVISION_PREFIX: &str = "__MNU_EXEC_IMAGE_REVISION=";
 /// Keep the requester's application identity and current ordinary grants.

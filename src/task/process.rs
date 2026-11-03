@@ -913,7 +913,7 @@ impl Process {
                             .is_subset_of(&self.kernel_authorities)
                 }
                 PendingExecKind::ImageInstall { image_revision } => {
-                    image_revision != 0
+                    self.image_digest.is_some()
                         && image_revision == self.process_object().image_revision()
                         && authorization.kernel_authorities.is_empty()
                 }

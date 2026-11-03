@@ -473,6 +473,10 @@ name = "mboot-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
 name = "mochi-user-runtime"
 version = "0.1.0"
 
@@ -503,10 +507,6 @@ version = "0.1.0"
 [[patch.unused]]
 name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
 
 [[patch.unused]]
 name = "viewkit"
