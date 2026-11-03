@@ -803,6 +803,19 @@ pub(crate) fn launch_bootstrap_image(
         Err(_) => return Error::InvalidArgument.into_raw(),
     };
     let data = selected.initial_image;
+    let startup = if selected.initial_startup.is_empty() {
+        None
+    } else {
+        match mnu_abi::process_image::decode(selected.initial_startup) {
+            Ok(startup)
+                if startup.mappings().next().is_none()
+                    && startup.context_updates().next().is_none() =>
+            {
+                Some(startup)
+            }
+            _ => return Error::InvalidArgument.into_raw(),
+        }
+    };
     crate::performance::increment(
         crate::performance::CounterMetric::ExecutableBytesRead,
         data.len() as u64,
@@ -823,7 +836,7 @@ pub(crate) fn launch_bootstrap_image(
         None,
         &[],
         &[],
-        ImageLaunch::Bootstrap,
+        ImageLaunch::Bootstrap(startup),
         &mut measurement,
     );
     measurement.finish(result)
@@ -1112,7 +1125,7 @@ fn exec_with_data(
         );
         let pid = proc.id();
         // Allocate the creator's reference before publishing any runnable thread.
-        let mut created_handle = CreatedProcessHandle(if native_startup.is_some() {
+        let mut created_handle = CreatedProcessHandle(if !is_boot_init {
             match crate::syscall::handle::retain_created_process(&proc) {
                 Ok(handle) => Some(handle),
                 Err(error) => return error.into_raw(),
@@ -1161,7 +1174,7 @@ fn exec_with_data(
             kstack_size,
         );
         thread.set_fs_base(initial_fs_base);
-        if native_startup.is_some() {
+        if !is_boot_init {
             thread.suspend();
         }
 
