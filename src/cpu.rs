@@ -483,20 +483,16 @@ impl SmapSmepGuard {
     /// On drop, the previous state is restored.
     pub fn new() -> Self {
         unsafe {
-            let smap = is_smap_enabled();
-            // SMEP state read from CR4 directly
             let cr4 = read_cr4();
+            const CR4_SMAP_BIT: u64 = 1 << 21;
             const CR4_SMEP_BIT: u64 = 1 << 20;
+            let smap = (cr4 & CR4_SMAP_BIT) != 0;
             let smep = (cr4 & CR4_SMEP_BIT) != 0;
-
-            if smap {
-                disable_smap();
-            }
-            if smep {
-                // clear SMEP bit
-                let mut cr4 = read_cr4();
-                cr4 &= !CR4_SMEP_BIT;
-                write_cr4(cr4);
+            let guarded = cr4 & !(CR4_SMAP_BIT | CR4_SMEP_BIT);
+            if guarded != cr4 {
+                // Both protections cover the same guard scope. One CR4 write
+                // preserves that scope without two serializing VM exits.
+                write_cr4(guarded);
             }
 
             SmapSmepGuard {
@@ -510,15 +506,13 @@ impl SmapSmepGuard {
 impl Drop for SmapSmepGuard {
     fn drop(&mut self) {
         unsafe {
-            // restore SMEP first
-            if self.smep_was {
-                let mut cr4 = read_cr4();
-                const CR4_SMEP_BIT: u64 = 1 << 20;
-                cr4 |= CR4_SMEP_BIT;
-                write_cr4(cr4);
-            }
-            if self.smap_was {
-                enable_smap();
+            let restore = (u64::from(self.smep_was) << 20)
+                | (u64::from(self.smap_was) << 21);
+            if restore != 0 {
+                let cr4 = read_cr4();
+                if cr4 & restore != restore {
+                    write_cr4(cr4 | restore);
+                }
             }
         }
     }
@@ -526,8 +520,10 @@ impl Drop for SmapSmepGuard {
 
 pub fn reassert_runtime_hardening() {
     unsafe {
-        let mut cr0 = read_cr0();
-        let mut cr4 = read_cr4();
+        let current_cr0 = read_cr0();
+        let current_cr4 = read_cr4();
+        let mut cr0 = current_cr0;
+        let mut cr4 = current_cr4;
         cr0 |= 1 << 16;
         if UMIP_SUPPORTED.load(Ordering::Acquire) {
             cr4 |= 1 << 11;
@@ -538,8 +534,12 @@ pub fn reassert_runtime_hardening() {
         if SMAP_SUPPORTED.load(Ordering::Acquire) {
             cr4 |= 1 << 21;
         }
-        write_cr0(cr0);
-        write_cr4(cr4);
+        if cr0 != current_cr0 {
+            write_cr0(cr0);
+        }
+        if cr4 != current_cr4 {
+            write_cr4(cr4);
+        }
         let spec_ctrl_mask = SPEC_CTRL_MASK.load(Ordering::Acquire);
         if spec_ctrl_mask != 0 {
             const IA32_SPEC_CTRL: u32 = 0x48;
