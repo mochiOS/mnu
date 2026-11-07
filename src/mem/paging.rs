@@ -22,8 +22,9 @@ use x86_64::{
 
 /// アクティブなページテーブルへのグローバル参照と物理メモリオフセット
 pub static PAGE_TABLE: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
-/// 物理メモリオフセット（init時に設定） - 仮想アドレス = 物理アドレス + オフセット
-pub static PHYS_OFFSET: Mutex<Option<u64>> = Mutex::new(None);
+/// 起動時に一度だけ設定する物理メモリオフセット。
+/// APIC の割り込み処理からも参照するため、読み取りではロックを取得しない。
+static PHYS_OFFSET: spin::Once<u64> = spin::Once::new();
 /// カーネルの元のL4ページテーブルの物理アドレス（init時に設定）
 pub static KERNEL_L4_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// `KERNEL_L4_PHYS` has been initialized. Physical address zero is valid for an
@@ -110,7 +111,7 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
     info!("Current L4 table phys: {:#x}", old_l4_phys);
 
     // グローバル状態を設定
-    *PHYS_OFFSET.lock() = Some(physical_memory_offset);
+    PHYS_OFFSET.call_once(|| physical_memory_offset);
     KERNEL_L4_PHYS.store(old_l4_phys, core::sync::atomic::Ordering::Relaxed);
     KERNEL_L4_READY.store(true, core::sync::atomic::Ordering::Release);
 
@@ -126,7 +127,7 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
 pub fn init_page_table() -> Result<()> {
     info!("Initializing PAGE_TABLE...");
 
-    let phys_offset = *PHYS_OFFSET.lock();
+    let phys_offset = physical_memory_offset();
     let phys_offset = match phys_offset {
         Some(off) => off,
         None => {
@@ -384,7 +385,7 @@ pub fn read_u64_in_table(table_phys: u64, vaddr: u64) -> Option<u64> {
 /// ## Returns
 /// カーネルが使用する物理メモリオフセット（仮想アドレス = 物理アドレス + オフセット）
 pub fn physical_memory_offset() -> Option<u64> {
-    *PHYS_OFFSET.lock()
+    PHYS_OFFSET.get().copied()
 }
 
 fn user_page_flags_in_table(table_phys: u64, page_addr: u64) -> Option<PageTableFlags> {
