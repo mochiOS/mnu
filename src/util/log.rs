@@ -40,7 +40,7 @@ pub fn set_level(level: LogLevel) {
     LOG_LEVEL.store(level_to_u8(level), Ordering::Relaxed);
 }
 
-/// ログ出力（シリアルとVGAの両方）
+/// シリアルへのログ出力
 pub fn log(level: LogLevel, args: core::fmt::Arguments) {
     if !should_log(level) {
         return;

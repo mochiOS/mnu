@@ -261,7 +261,7 @@ pub fn get_framebuffer_info(out_ptr: u64) -> u64 {
     use mnu_abi::status::Error;
 
     let mediated = crate::hypervisor_guest::is_active();
-    let out = if let Some(info) = crate::util::vga::get_info() {
+    let out = if let Some(info) = crate::util::framebuffer::get_info() {
         UserFramebufferInfo {
             addr: if mediated { 0 } else { info.addr },
             size: info.size as u64,
@@ -340,7 +340,8 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
     if pixels_len != expected as u64 || expected == 0 {
         return Error::InvalidArgument.into_raw();
     }
-    let firmware = crate::hypervisor_guest::is_active() && crate::util::vga::get_info().is_some();
+    let firmware = crate::hypervisor_guest::is_active()
+        && crate::util::framebuffer::get_info().is_some();
     let transfer_limit = if firmware {
         FIRMWARE_PRESENT_MAX
     } else {
@@ -390,7 +391,7 @@ pub fn framebuffer_transfer_limit() -> u64 {
     if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
         return Error::AccessDenied.into_raw();
     }
-    if crate::hypervisor_guest::is_active() && crate::util::vga::get_info().is_some() {
+    if crate::hypervisor_guest::is_active() && crate::util::framebuffer::get_info().is_some() {
         return FIRMWARE_PRESENT_MAX as u64;
     }
     match crate::platform::display_transfer_limit() {
@@ -440,7 +441,7 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
             info.surface_size,
             false,
         )
-    } else if let Some(info) = crate::util::vga::get_info() {
+    } else if let Some(info) = crate::util::framebuffer::get_info() {
         (
             info.addr & !0xfff,
             info.addr & 0xfff,
