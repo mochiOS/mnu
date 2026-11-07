@@ -4,7 +4,7 @@
 
 use core::arch::asm;
 use core::mem::offset_of;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
@@ -65,11 +65,16 @@ static CPU_STATES: [PerCpuState; MAX_CPUS] = [const { PerCpuState::new() }; MAX_
 static SYSCALL_STATE_PHYS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static SYSCALL_STACK_PHYS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static SINGLE_CPU_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+static RDTSCP_CPU_ID: AtomicBool = AtomicBool::new(false);
 
-/// Cache identity only when boot topology contains exactly one enabled CPU.
-/// This avoids a serializing CPUID (and a VM exit in a guest) on every access
+/// Initialize CPU-owned identity before AP startup. A uniprocessor caches its
+/// sole ID; SMP uses TSC_AUX when available to avoid CPUID/VM exits on accesses
 /// to thread, allocator, syscall and scheduler CPU-local state.
 pub(crate) fn configure_boot_cpu(boot_info: &crate::BootInfo) {
+    if supports_rdtscp() {
+        initialize_tsc_aux();
+        RDTSCP_CPU_ID.store(true, Ordering::Release);
+    }
     if boot_info.cpu_enabled == 1 && boot_info.cpu_apic_id_count == 1 {
         let id = local_apic_id();
         if id < MAX_CPUS as u32 && id == boot_info.cpu_apic_ids[0] {
@@ -80,7 +85,41 @@ pub(crate) fn configure_boot_cpu(boot_info: &crate::BootInfo) {
 
 /// Must precede any CPU-local access on a newly entering secondary CPU.
 pub(crate) fn enable_multiple_cpus() {
+    if RDTSCP_CPU_ID.load(Ordering::Acquire) {
+        if supports_rdtscp() {
+            initialize_tsc_aux();
+        } else {
+            // A heterogeneous CPU must disable the fast path globally before
+            // entering code which consults CPU-local state.
+            RDTSCP_CPU_ID.store(false, Ordering::Release);
+        }
+    }
     SINGLE_CPU_ID.store(u64::MAX, Ordering::Release);
+}
+
+fn supports_rdtscp() -> bool {
+    // CPUID is available on x86_64. Extended leaves are checked before
+    // querying RDTSCP; this detection runs only when a CPU enters the kernel.
+    core::arch::x86_64::__cpuid(0x8000_0000).eax >= 0x8000_0001
+        && core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 27) != 0
+}
+
+fn initialize_tsc_aux() {
+    let id = local_apic_id();
+    if id >= MAX_CPUS as u32 {
+        halt_unsupported_cpu(id);
+    }
+    // SAFETY: called on each CPU at CPL0, before that CPU uses the fast path.
+    // TSC_AUX is CPU-owned identity, never thread state or a userspace address.
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") 0xC000_0103u32,
+            in("eax") id,
+            in("edx") 0u32,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 }
 
 #[inline]
@@ -238,7 +277,24 @@ pub fn current_cpu_id() -> usize {
     if single < MAX_CPUS as u64 {
         return single as usize;
     }
-    let apic_id = local_apic_id() as usize;
+    let apic_id = if RDTSCP_CPU_ID.load(Ordering::Acquire) {
+        let id: u32;
+        // SAFETY: feature detection and per-CPU TSC_AUX initialization precede
+        // publication of the fast path. RDTSCP reads the executing CPU even
+        // after a thread migrates, without a serializing CPUID/VM exit.
+        unsafe {
+            asm!(
+                "rdtscp",
+                out("eax") _,
+                out("edx") _,
+                out("ecx") id,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        id as usize
+    } else {
+        local_apic_id() as usize
+    };
     if apic_id < MAX_CPUS {
         apic_id
     } else {
