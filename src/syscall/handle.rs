@@ -911,7 +911,11 @@ fn provider_read_shared_impl(
     offset: Option<u64>,
 ) -> Option<u64> {
     use mnu_abi::{provider as wire, status::Error};
-    let capacity = length.min(wire::MAX_SHARED_READ_LEN);
+    // A read may return a successful prefix. Bound one syscall to a single
+    // shared transfer so a large request cannot monopolize a CPU in kernel
+    // mode while unrelated ready threads wait for user-mode preemption.
+    let length = length.min(wire::MAX_SHARED_READ_LEN);
+    let capacity = length;
     let transfer = match ProviderReadTransfer::new(capacity) {
         Ok(transfer) => transfer,
         Err(error) => return Some(error),
