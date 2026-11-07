@@ -160,6 +160,7 @@ pub fn init() {
             ));
         }
         idt[crate::mem::tlb_shootdown::VECTOR].set_handler_fn(tlb_shootdown_handler);
+        idt[crate::task::scheduler::WAKE_VECTOR].set_handler_fn(cpu_wake_handler);
 
         idt
     });
@@ -186,6 +187,13 @@ extern "x86-interrupt" fn tlb_shootdown_handler(mut stack_frame: InterruptStackF
     let entered_from_user = enter_from_user(&stack_frame);
     normalize_user_iret_frame(&mut stack_frame);
     crate::mem::tlb_shootdown::service_pending();
+    crate::smp::local_apic_eoi();
+    leave_to_user(entered_from_user);
+}
+
+extern "x86-interrupt" fn cpu_wake_handler(mut stack_frame: InterruptStackFrame) {
+    let entered_from_user = enter_from_user(&stack_frame);
+    normalize_user_iret_frame(&mut stack_frame);
     crate::smp::local_apic_eoi();
     leave_to_user(entered_from_user);
 }

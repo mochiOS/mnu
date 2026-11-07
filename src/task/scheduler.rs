@@ -335,6 +335,10 @@ pub fn wake_registered_waiter(id: ThreadId) {
     wake_waiter(id, true);
 }
 
+/// Wake an idle remote CPU without advancing its timer or preempting kernel
+/// work. Its idle loop rechecks the ready queue after the interrupt returns.
+pub(crate) const WAKE_VECTOR: u8 = 50;
+
 /// State, wake latch, and ready bitmap must change under the same queue lock.
 /// Otherwise a concurrently selected thread could be marked Ready while it
 /// is already running, or lose a wakeup between the state check and latch.
@@ -346,18 +350,30 @@ fn wake_waiter(id: ThreadId, latch_running: bool) {
     let Some(thread) = queue.get_slot_mut(slot) else {
         return;
     };
-    match thread.state() {
+    let wake_cpu = match thread.state() {
         ThreadState::Sleeping | ThreadState::Blocked => {
             thread.note_interactive_wakeup();
+            let cpu = thread.cpu_affinity();
             queue.set_state_at_slot(slot, ThreadState::Ready);
+            cpu
         }
         ThreadState::Ready => {
             thread.set_pending_wakeup();
+            None
         }
         ThreadState::Running if latch_running => {
             thread.set_pending_wakeup();
+            None
         }
-        _ => {}
+        _ => None,
+    };
+    // Never send an IPI while holding the thread queue: the awakened CPU
+    // needs the same lock before it can select its now-ready thread.
+    drop(queue);
+    if let Some(cpu) = wake_cpu {
+        if cpu != crate::percpu::current_cpu_id() {
+            let _ = crate::smp::send_fixed_ipi(cpu as u32, WAKE_VECTOR);
+        }
     }
 }
 
