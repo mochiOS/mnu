@@ -185,6 +185,7 @@ pub enum Capability {
     ProcessKill,
 
     DisplayRead,
+    DisplayPresent,
     UsbAccess,
     SerialAccess,
     SystemTimeRead,
@@ -228,6 +229,7 @@ impl Capability {
             ProcessInspect => "process.inspect",
             ProcessKill => "process.kill",
             DisplayRead => "display.read",
+            DisplayPresent => "display.present",
             UsbAccess => "usb.access",
             SerialAccess => "serial.access",
             SystemTimeRead => "system.time.read",
@@ -301,6 +303,7 @@ impl Capability {
             ProcessInspect,
             ProcessKill,
             DisplayRead,
+            DisplayPresent,
             UsbAccess,
             SerialAccess,
             SystemTimeRead,

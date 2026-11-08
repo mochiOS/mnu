@@ -85,6 +85,7 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     privileged!("window.decorate"),
     privileged!("window.capture"),
     user!("display.read"),
+    privileged!("display.present"),
     privileged!("display.capture"),
     user!("input.keyboard"),
     privileged!("input.keyboard.global"),

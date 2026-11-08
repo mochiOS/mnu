@@ -317,7 +317,7 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
     use crate::capability::Capability;
     use mnu_abi::status::Error;
 
-    if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayPresent]) {
         return Error::AccessDenied.into_raw();
     }
     let x = position as u32;
@@ -406,7 +406,7 @@ pub fn commit_framebuffer(position: u64, size: u64) -> u64 {
     use crate::capability::Capability;
     use mnu_abi::status::Error;
 
-    if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayPresent]) {
         return Error::AccessDenied.into_raw();
     }
     let x = position as u32;
@@ -426,7 +426,7 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     use crate::capability::Capability;
     use mnu_abi::status::Error;
 
-    if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayRead]) {
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::DisplayPresent]) {
         return Error::AccessDenied.into_raw();
     }
     if virt_addr == 0 || size == 0 || (virt_addr & 0xfff) != 0 || (size & 0xfff) != 0 {
