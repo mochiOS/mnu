@@ -14,6 +14,7 @@ pub mod performance;
 pub mod memory;
 mod memory_copy;
 pub mod process;
+mod process_stack;
 pub mod security;
 pub mod storage;
 pub mod syscall_entry;
@@ -790,6 +791,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ProcessMemoryRead as u64 => {
             handle::process_memory_read(arg0, arg1, arg2)
         }
+        x if x == SyscallNumber::ProcessInitialStackRead as u64 => process_stack::read(arg0, arg1),
         x if x == SyscallNumber::ProcessImageRead as u64 => {
             handle::process_image_read(arg0, arg1, arg2)
         }

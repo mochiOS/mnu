@@ -973,7 +973,7 @@ pub(super) fn page_fault_handler(
 /// fault_addr がスタック下端の直下にある場合、新しいページをマップして true を返す。
 /// 最大スタックサイズは 8 MiB。
 fn try_grow_user_stack(fault_addr: u64) -> bool {
-    const MAX_STACK_SIZE: u64 = 8 * 1024 * 1024; // 8 MiB
+    use crate::mem::user_stack::MAX_INITIAL_STACK_BYTES as MAX_STACK_SIZE;
 
     let tid = match crate::task::current_thread_id() {
         Some(t) => t,
@@ -1001,18 +1001,7 @@ fn try_grow_user_stack(fault_addr: u64) -> bool {
         }
         let new_page = fault_addr & !4095;
         let map_size = stack_bottom - new_page;
-        let reserved = process.memory_regions().iter().any(|region| {
-            region
-                .end()
-                .is_none_or(|end| new_page < end && region.start() < stack_bottom)
-        });
-        if reserved
-            || process.find_mmio_mapping_by_addr(new_page, map_size).is_some()
-            || process.find_dma_buffer_by_addr(new_page, map_size).is_some()
-            || crate::mem::paging::is_user_range_occupied_in_table(
-                page_table, new_page, map_size,
-            )
-        {
+        if crate::mem::user_stack::collides(process, new_page, map_size) {
             return false;
         }
         if crate::mem::paging::map_and_copy_segment_to(

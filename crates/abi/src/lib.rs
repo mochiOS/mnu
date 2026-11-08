@@ -540,6 +540,10 @@ pub enum SyscallNumber {
     /// of live memory, later mappings or dependencies. Absent/ended execution
     /// returns NotFound, not an invented measurement from a retained object.
     ProcessImageRead = 705,
+    /// Observes only the caller's initial native stack. Args: output, exact
+    /// ProcessInitialStackInfo byte size. No target selector or authority is
+    /// accepted. Bounds describe a snapshot, not a mapping or reservation.
+    ProcessInitialStackRead = 706,
     CheckGravityExist = 999,
 }
 
@@ -587,6 +591,24 @@ pub struct ProcessExecutionUsage {
 pub struct ProcessMemoryUsage {
     pub current_bytes: u64,
     pub peak_bytes: u64,
+}
+
+/// A snapshot of this process's kernel-managed initial stack.
+///
+/// The upper bound is exclusive and omits the upper unmapped guard. The lower
+/// bound includes downward growth currently admitted by the kernel's limit
+/// and vacant address space. Future mappings can restrict that growth. This
+/// observation neither maps memory nor pins/reserves the intervening range.
+/// Caller-provided worker stacks are managed by their runtime, not this API.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcessInitialStackInfo {
+    /// Lowest address the initial stack can currently occupy or grow into.
+    pub lower_bound: u64,
+    /// Lowest currently committed stack page.
+    pub committed_lower_bound: u64,
+    /// First byte above the usable stack; no upper guard bytes are included.
+    pub upper_bound: u64,
 }
 
 pub const PROCESS_IMAGE_DIGEST_NONE: u32 = 0;

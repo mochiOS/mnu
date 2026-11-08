@@ -3,6 +3,8 @@ the mnu kernel ChangeLog   - version 0.12
     - Release creator: tas0dev
 
 Changes:
+* Added self-only native initial-stack bounds snapshots.
+* Shared stack collision checks with growth admission.
 * Hardened KPTI entry and return paths for syscalls,
   interrupts, and exceptions on x86_64.
 * Isolated per-CPU descriptor tables and syscall state
