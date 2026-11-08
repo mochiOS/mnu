@@ -45,9 +45,10 @@ pub fn init_syscall_current_cpu() {
     let lstar_val = syscall_entry as *const () as u64;
 
     // IA32_FMASK: SYSCALL 時に RFLAGS からクリアするビット
-    // IF (bit 9) をクリアして割り込み禁止にする
+    // Mask user debugging, direction, privilege and access-check state before
+    // the first entry instruction. The saved user flags remain in R11.
     const IA32_FMASK: u32 = 0xC000_0084;
-    let fmask_val: u64 = 0x200; // IF ビット
+    let fmask_val: u64 = (1 << 8) | (1 << 9) | (1 << 10) | (3 << 12) | (1 << 14) | (1 << 18);
 
     unsafe {
         // EFER.SCE を設定
