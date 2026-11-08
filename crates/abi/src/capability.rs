@@ -101,6 +101,7 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     system!("file-association.read"),
     user!("file-association.write"),
     user!("notification.send"),
+    system!("notification.manage"),
     user!("keychain.access"),
     system!("keychain.manage"),
     system!("keychain.session"),
