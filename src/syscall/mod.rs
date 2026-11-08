@@ -179,12 +179,7 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
             size,
         },
     );
-    let has_mmio_device = crate::syscall::security::caller_has_any_capability(&[
-        crate::capability::Capability::DeviceGpu,
-        crate::capability::Capability::DeviceNet,
-        crate::capability::Capability::SerialAccess,
-    ]);
-    if !has_mmio_device && !crate::task::process_has_kernel_authority(pid, &requested_authority) {
+    if !crate::task::process_has_kernel_authority(pid, &requested_authority) {
         return Error::AccessDenied.into_raw();
     }
     map_borrowed_range_for_process(

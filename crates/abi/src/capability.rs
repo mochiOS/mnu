@@ -130,6 +130,7 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
     privileged!("vm.control"),
     system!("dma.allocate"),
     system!("memory.phys.map"),
+    system!("io.port"),
     system!("memory.phys.translate"),
     system!("kernel.module.load"),
     system!("kernel.debug"),
@@ -159,6 +160,28 @@ pub const CAPABILITIES: &[CapabilityMetadata] = &[
 ];
 
 pub fn metadata(name: &str) -> Option<&'static CapabilityMetadata> {
+    if let Some((kind, range)) = name.split_once('@') {
+        let (base, size) = range.split_once(':')?;
+        let number = |raw: &str| -> Option<u64> {
+            if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                raw.parse().ok()
+            }
+        };
+        let (base, size) = (number(base)?, number(size)?);
+        let end = base.checked_add(size)?;
+        if size == 0
+            || match kind {
+                "io.port" => end > 65536,
+                "memory.phys.map" => base & 4095 != 0 || size & 4095 != 0,
+                _ => true,
+            }
+        {
+            return None;
+        }
+        return CAPABILITIES.iter().find(|metadata| metadata.name == kind);
+    }
     CAPABILITIES.iter().find(|metadata| metadata.name == name)
 }
 

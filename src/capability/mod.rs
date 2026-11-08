@@ -22,6 +22,7 @@ pub enum KernelCapability {
     MmioMap,
     DmaAllocate,
     PhysMap,
+    PortIo,
     PhysTranslate,
     IrqBind,
     CextLoad,
@@ -41,6 +42,7 @@ pub enum KernelObjectRef {
     IpcEndpoint(u64),
     VmObject(u64),
     MmioRegion { base: u64, size: u64 },
+    IoPortRange { base: u64, size: u64 },
     IrqLine(u32),
     CextInstance(u64),
     DeviceHandle(u64),
@@ -72,17 +74,25 @@ fn parse_u64_component(raw: &str) -> Option<u64> {
 }
 
 pub fn parse_kernel_authority_spec(spec: &str) -> Option<KernelAuthority> {
-    let phys = spec.strip_prefix("memory.phys.map@")?;
-    let (base_raw, size_raw) = phys.split_once(':')?;
+    let (kind, range) = spec.split_once('@')?;
+    let (base_raw, size_raw) = range.split_once(':')?;
     let base = parse_u64_component(base_raw)?;
     let size = parse_u64_component(size_raw)?;
+    let end = base.checked_add(size)?;
     if size == 0 {
         return None;
     }
-    Some(KernelAuthority::new(
-        KernelCapability::PhysMap,
-        KernelObjectRef::MmioRegion { base, size },
-    ))
+    match kind {
+        "memory.phys.map" if base & 4095 == 0 && size & 4095 == 0 => Some(KernelAuthority::new(
+            KernelCapability::PhysMap,
+            KernelObjectRef::MmioRegion { base, size },
+        )),
+        "io.port" if end <= 65536 => Some(KernelAuthority::new(
+            KernelCapability::PortIo,
+            KernelObjectRef::IoPortRange { base, size },
+        )),
+        _ => None,
+    }
 }
 
 pub fn kernel_authority_implies(parent: &KernelAuthority, child: &KernelAuthority) -> bool {
@@ -97,6 +107,16 @@ pub fn kernel_authority_implies(parent: &KernelAuthority, child: &KernelAuthorit
                 size: parent_size,
             },
             KernelObjectRef::MmioRegion {
+                base: child_base,
+                size: child_size,
+            },
+        )
+        | (
+            KernelObjectRef::IoPortRange {
+                base: parent_base,
+                size: parent_size,
+            },
+            KernelObjectRef::IoPortRange {
                 base: child_base,
                 size: child_size,
             },
@@ -127,6 +147,7 @@ impl KernelCapability {
             MmioMap => "mmio.map",
             DmaAllocate => "dma.allocate",
             PhysMap => "memory.phys.map",
+            PortIo => "io.port",
             PhysTranslate => "memory.phys.translate",
             IrqBind => "irq.bind",
             CextLoad => "cext.load",
@@ -152,6 +173,7 @@ impl KernelCapability {
             "mmio.map" => Some(MmioMap),
             "dma.allocate" => Some(DmaAllocate),
             "memory.phys.map" => Some(PhysMap),
+            "io.port" => Some(PortIo),
             "memory.phys.translate" => Some(PhysTranslate),
             "irq.bind" => Some(IrqBind),
             "cext.load" => Some(CextLoad),

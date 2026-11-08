@@ -5,14 +5,23 @@ use crate::capability::Capability;
 use crate::util::console;
 use mnu_abi::status::Error;
 
-fn caller_has_port_io_access() -> bool {
-    crate::syscall::security::caller_has_any_capability(&[
-        Capability::UsbAccess,
-        Capability::DeviceInput,
-        Capability::DeviceGpu,
-        Capability::DeviceNet,
-        Capability::SerialAccess,
-    ])
+fn caller_has_port_io_access(port: u64, width: u64) -> bool {
+    use crate::capability::{KernelAuthority, KernelCapability, KernelObjectRef};
+    if !matches!(width, 1 | 2 | 4) || port.checked_add(width).is_none_or(|end| end > 65536) {
+        return false;
+    }
+    crate::syscall::security::current_process_id().is_some_and(|pid| {
+        crate::task::process_has_kernel_authority(
+            pid,
+            &KernelAuthority::new(
+                KernelCapability::PortIo,
+                KernelObjectRef::IoPortRange {
+                    base: port,
+                    size: width,
+                },
+            ),
+        )
+    })
 }
 
 /// Writes raw bytes to the kernel's early diagnostic console.
@@ -135,7 +144,7 @@ fn write_port_u32(port: u16, value: u32) {
 }
 
 pub fn port_in(port: u64, width: u64) -> u64 {
-    if !caller_has_port_io_access() {
+    if !caller_has_port_io_access(port, width) {
         return Error::AccessDenied.into_raw();
     }
     let port = match u16::try_from(port) {
@@ -151,7 +160,7 @@ pub fn port_in(port: u64, width: u64) -> u64 {
 }
 
 pub fn port_out(port: u64, value: u64, width: u64) -> u64 {
-    if !caller_has_port_io_access() {
+    if !caller_has_port_io_access(port, width) {
         return Error::AccessDenied.into_raw();
     }
     let port = match u16::try_from(port) {
