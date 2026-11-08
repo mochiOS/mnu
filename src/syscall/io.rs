@@ -42,7 +42,12 @@ pub fn debug_write(buf_ptr: u64, len: u64) -> u64 {
     if buf_ptr == 0 || buf_ptr.checked_add(len).is_none() {
         return Error::InvalidAddress.into_raw();
     }
-    let mut bytes = [0u8; 32];
+    // Alignment keeps this fixed buffer inside one physical page. Hypercalls
+    // consume guest physical addresses, including on guarded kernel stacks.
+    #[repr(align(32))]
+    struct DebugBuffer([u8; 32]);
+    let mut buffer = DebugBuffer([0u8; 32]);
+    let bytes = &mut buffer.0;
     let mut done = 0usize;
     while done < len as usize {
         let count = bytes.len().min(len as usize - done);
@@ -56,9 +61,18 @@ pub fn debug_write(buf_ptr: u64, len: u64) -> u64 {
             };
         }
         if crate::hypervisor_guest::is_active() {
+            let Some(physical) =
+                crate::mem::paging::translate_addr(x86_64::VirtAddr::new(bytes.as_ptr() as u64))
+            else {
+                return if done == 0 {
+                    Error::BackingFailure.into_raw()
+                } else {
+                    done as u64
+                };
+            };
             let result = crate::hypervisor_guest::invoke(
                 mnu_abi::hypervisor::HypercallNumber::ConsoleWrite,
-                bytes.as_ptr() as u64,
+                physical.as_u64(),
                 count as u64,
                 0,
             );
