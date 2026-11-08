@@ -20,34 +20,76 @@ fn caller_has_port_io_access() -> bool {
 /// This is a native debugging mechanism, not a POSIX file descriptor or
 /// standard-stream operation. Normal application I/O uses object handles.
 pub fn debug_write(buf_ptr: u64, len: u64) -> u64 {
+    if !crate::syscall::security::caller_has_any_capability(&[Capability::KernelDebug]) {
+        return Error::AccessDenied.into_raw();
+    }
+    const MAX_DEBUG_WRITE: u64 = 4096;
+    if len > MAX_DEBUG_WRITE {
+        return Error::LimitExceeded.into_raw();
+    }
     if len == 0 {
         return SUCCESS;
     }
-    let length = match usize::try_from(len) {
-        Ok(length) if length <= isize::MAX as usize => length,
-        _ => return Error::LimitExceeded.into_raw(),
-    };
     if buf_ptr == 0 || buf_ptr.checked_add(len).is_none() {
         return Error::InvalidAddress.into_raw();
     }
-
-    let mut buf = match crate::util::object_snapshot::zeroed_native(length) {
-        Ok(buf) => buf,
-        Err(error) => return error.into_raw(),
-    };
-    if let Err(error) = crate::syscall::copy_from_user_native(buf_ptr, &mut buf) {
-        return error.into_raw();
-    }
-
-    // シリアルには常に出力する（デバッグ用）
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut serial = console::SERIAL.lock();
-        for &byte in &buf {
-            serial.send_byte(byte);
+    let mut bytes = [0u8; 32];
+    let mut done = 0usize;
+    while done < len as usize {
+        let count = bytes.len().min(len as usize - done);
+        if let Err(error) =
+            crate::syscall::copy_from_user_native(buf_ptr + done as u64, &mut bytes[..count])
+        {
+            return if done == 0 {
+                error.into_raw()
+            } else {
+                done as u64
+            };
         }
-    });
-
-    len
+        if crate::hypervisor_guest::is_active() {
+            let result = crate::hypervisor_guest::invoke(
+                mnu_abi::hypervisor::HypercallNumber::ConsoleWrite,
+                bytes.as_ptr() as u64,
+                count as u64,
+                0,
+            );
+            if result != mnu_abi::hypervisor::HYPERCALL_SUCCESS {
+                return if done == 0 {
+                    Error::BackingFailure.into_raw()
+                } else {
+                    done as u64
+                };
+            }
+            done += count;
+        } else {
+            let written = x86_64::instructions::interrupts::without_interrupts(|| {
+                let Some(mut serial) = console::SERIAL.try_lock() else {
+                    return 0;
+                };
+                let mut written = 0;
+                for &byte in &bytes[..count] {
+                    if !serial.try_send_byte(byte) {
+                        break;
+                    }
+                    written += 1;
+                }
+                written
+            });
+            done += written;
+            if written != count {
+                return if done == 0 {
+                    Error::NotReady.into_raw()
+                } else {
+                    done as u64
+                };
+            }
+        }
+        // Neither a UART lock nor a usercopy pin survives a scheduling point.
+        if done < len as usize {
+            crate::task::yield_now();
+        }
+    }
+    done as u64
 }
 
 fn read_port_u8(port: u16) -> u8 {

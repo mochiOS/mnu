@@ -71,11 +71,21 @@ impl SerialPort {
 
     /// 1バイト送信
     pub fn send_byte(&mut self, byte: u8) {
+        let _ = self.try_send_byte(byte);
+    }
+
+    /// A missing or stalled UART must not trap the kernel in an infinite poll.
+    pub fn try_send_byte(&mut self, byte: u8) -> bool {
         unsafe {
-            // 送信準備完了を待つ
-            while self.line_status.read() & 0x20 == 0 {}
-            self.data.write(byte);
+            for _ in 0..65_536 {
+                if self.line_status.read() & 0x20 != 0 {
+                    self.data.write(byte);
+                    return true;
+                }
+                core::hint::spin_loop();
+            }
         }
+        false
     }
 
     /// 文字列を送信

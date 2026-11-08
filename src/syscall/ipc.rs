@@ -1043,6 +1043,7 @@ struct UserReceive {
 struct ReplyTarget {
     endpoint: u64,
     call_id: u64,
+    source: IpcEndpoint,
 }
 
 #[derive(Debug)]
@@ -1084,17 +1085,29 @@ impl Mailbox {
         }
     }
 
-    fn add_reply_target(&mut self, endpoint: u64, call_id: u64, owner: (u64, u64)) {
+    fn add_reply_target(&mut self, endpoint: u64, call_id: u64, owner: (u64, u64)) -> Result<Option<ReplyTarget>, u64> {
+        use mnu_abi::status::Error;
         // Mailboxes are indexed by reusable thread slots. Reply authority may
         // never survive into a different thread or a new slot generation.
         if self.reply_owner != Some(owner) {
             self.reply_targets.clear();
             self.reply_owner = Some(owner);
         }
-        let target = ReplyTarget { endpoint, call_id };
-        if endpoint != 0 && call_id != 0 && !self.reply_targets.contains(&target) {
-            self.reply_targets.push(target);
+        self.reply_targets.retain(|target| endpoint_is_valid(target.source));
+        // A caller can retire after enqueue. Consume its request without
+        // minting stale reply authority rather than wedging the receive queue.
+        let Some(record) = endpoint_record_from_handle(endpoint) else { return Ok(None) };
+        let target = ReplyTarget { endpoint, call_id, source: IpcEndpoint {
+            thread_id: record.thread_id, slot: record.slot, generation: record.generation,
+        }};
+        if !endpoint_is_valid(target.source) { return Ok(None); }
+        if self.reply_targets.contains(&target) { return Ok(None); }
+        if endpoint == 0 || call_id == 0 || self.reply_targets.len() >= MAILBOX_CAP {
+            return Err(Error::LimitExceeded.into_raw());
         }
+        self.reply_targets.try_reserve(1).map_err(|_| Error::ResourceUnavailable.into_raw())?;
+        self.reply_targets.push(target);
+        Ok(Some(target))
     }
 
     fn reply_target(&self, endpoint: u64, owner: (u64, u64)) -> Option<ReplyTarget> {
@@ -1507,6 +1520,9 @@ pub(crate) fn retire_endpoint(endpoint: IpcEndpoint) {
     if (endpoint.slot as usize) < MAX_THREADS {
         let retired = {
             let mut boxes = lock_mailboxes();
+            for mailbox in boxes.iter_mut() {
+                mailbox.reply_targets.retain(|target| target.source != endpoint);
+            }
             let mailbox = &mut boxes[endpoint.slot as usize];
             let retired = mailbox.retire_destination(endpoint);
             let current = crate::task::ipc_slot_index_and_generation_by_u64(endpoint.thread_id);

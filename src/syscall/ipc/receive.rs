@@ -2,8 +2,8 @@
 //! Commit only the same globally unique queue entry after dropping its locks.
 
 use super::{
-    IpcEndpoint, MAILBOX_CAP, MAX_THREADS, Mailbox, Message, ObjectHandleAttachments, UserReceive,
     allocate_message, endpoint_is_valid, lock_mailboxes, record_ipc_copy, release_message,
+    IpcEndpoint, Mailbox, Message, ObjectHandleAttachments, UserReceive, MAILBOX_CAP, MAX_THREADS,
 };
 use alloc::boxed::Box;
 use mnu_abi::status::Error;
@@ -146,24 +146,28 @@ fn copy_selected(
         if !endpoint_is_valid(endpoint) {
             Err(Error::NotFound.into_raw())
         } else {
-            boxes[slot]
-                .commit_receive(message_slot, snapshot.message_id)
-                .map(|message| {
-                    if reply.is_none() && message.expects_reply {
-                        if let Some((caller_slot, generation)) =
-                            crate::task::ipc_slot_index_and_generation_by_u64(caller)
-                        {
-                            if caller_slot < MAX_THREADS {
-                                boxes[caller_slot].add_reply_target(
-                                    message.from,
-                                    message.call_id,
-                                    (caller, generation),
-                                );
-                            }
-                        }
+            (|| {
+                // Reserve reply authority before consuming the message. Failure
+                // leaves it queued; snapshot attachments are released below.
+                let added = if reply.is_none() && snapshot.expects_reply {
+                    let (caller_slot, generation) =
+                        crate::task::ipc_slot_index_and_generation_by_u64(caller)
+                            .filter(|(slot, _)| *slot < MAX_THREADS)
+                            .ok_or_else(|| Error::NotReady.into_raw())?;
+                    boxes[caller_slot]
+                        .add_reply_target(snapshot.from, snapshot.call_id, (caller, generation))?
+                        .map(|target| (caller_slot, target))
+                } else {
+                    None
+                };
+                let result = boxes[slot].commit_receive(message_slot, snapshot.message_id);
+                if result.is_err() {
+                    if let Some((slot, target)) = added {
+                        boxes[slot].remove_reply_target(target);
                     }
-                    message
-                })
+                }
+                result
+            })()
         }
     };
     let copy_len = snapshot.len;
