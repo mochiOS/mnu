@@ -544,6 +544,18 @@ pub enum SyscallNumber {
     /// ProcessInitialStackInfo byte size. No target selector or authority is
     /// accepted. Bounds describe a snapshot, not a mapping or reservation.
     ProcessInitialStackRead = 706,
+    /// Snapshot RAM residency in the caller's own virtual range, without
+    /// faulting it in. Args: aligned address, byte length, byte-vector output,
+    /// exact capacity (one byte per touched 4KiB page, at most 256). Returns
+    /// byte count or native error. A set byte means a retained RAM leaf or
+    /// cached RAM backing, including inaccessible pages. No source-page I/O
+    /// or cache population occurs; device mappings are not resident RAM.
+    MemoryResidencyRead = 707,
+    /// Discard private anonymous RAM pages while retaining reservations and
+    /// access rights. Args: aligned address, page-multiple length. Next access
+    /// faults zero-filled pages. File/shared/device/unreserved ranges are
+    /// rejected before mutation; only this caller's address space is affected.
+    MemoryDiscard = 708,
     CheckGravityExist = 999,
 }
 

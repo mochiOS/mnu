@@ -55,6 +55,11 @@ impl SharedMemory {
     pub fn length(&self) -> u64 {
         self.pages.lock().length()
     }
+
+    /// Inspect retained backing RAM without triggering lazy population.
+    pub(crate) fn page_is_resident(&self, index: u64) -> bool {
+        self.pages.lock().is_resident(index)
+    }
     pub fn contains_range(&self, offset: u64, length: u64) -> bool {
         self.pages.lock().contains_range(offset, length)
     }

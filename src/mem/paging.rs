@@ -545,6 +545,14 @@ pub fn has_user_page_entry_in_table(table_phys: u64, page_addr: u64) -> bool {
     .unwrap_or(false)
 }
 
+/// Observe retained RAM, including PROT_NONE leaves, without materializing a
+/// reservation or disclosing physical frame addresses. Caller holds PROC.
+pub(crate) fn user_page_is_resident(table: u64, page: u64) -> bool {
+    with_user_leaf_entry_mut(table, page, |entry| {
+        super::residency::is_resident(entry.flags().bits())
+    }).unwrap_or(false)
+}
+
 #[path = "paging/suspension.rs"]
 mod suspension;
 pub(crate) use suspension::{suspend_user_page, RecordedUserPage, SuspendedUserPage};

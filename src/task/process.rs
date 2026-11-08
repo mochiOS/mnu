@@ -279,6 +279,20 @@ impl MemoryRegion {
         &self.backing
     }
 
+    /// Read-only RAM backing observation for an address in this retained
+    /// region. Caller holds VM exclusion; no fault or provider I/O occurs.
+    pub(crate) fn backing_page_is_resident(&self, address: u64) -> Result<bool, mnu_abi::status::Error> {
+        let relative = address.checked_sub(self.start)
+            .filter(|offset| *offset < self.len).ok_or(mnu_abi::status::Error::InvalidAddress)?;
+        match &self.backing {
+            MemoryBacking::Anonymous { data, .. } => Ok(relative < data.len() as u64),
+            MemoryBacking::File { object, offset, .. } => {
+                let page = offset.checked_add(relative).ok_or(mnu_abi::status::Error::InvalidAddress)? / 4096;
+                object.page_is_resident(page)
+            }
+        }
+    }
+
     pub fn backing_mut(&mut self) -> &mut MemoryBacking {
         &mut self.backing
     }

@@ -3,6 +3,10 @@
 use super::types::SUCCESS;
 use mnu_abi::status::Error;
 
+#[path = "memory_observation.rs"]
+mod memory_observation;
+pub use memory_observation::{residency, discard};
+
 #[inline]
 fn current_pid() -> Option<crate::task::ids::ProcessId> {
     crate::task::current_thread_id()

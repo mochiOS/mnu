@@ -98,6 +98,11 @@ impl<Page> SharedPages<Page> {
         self.length
     }
 
+    /// Read-only population observation; never allocates or clones a page.
+    pub(crate) fn is_resident(&self, index: u64) -> bool {
+        self.pages.contains_key(&index)
+    }
+
     pub(crate) fn contains_range(&self, offset: u64, length: u64) -> bool {
         offset
             .checked_add(length)

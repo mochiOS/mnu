@@ -264,6 +264,18 @@ impl VmObject {
         }
     }
 
+    /// Observe backing RAM without reads, cache population, allocation or LRU
+    /// mutation. File pages already cached may be resident without a user PTE.
+    pub(crate) fn page_is_resident(&self, index: u64) -> Result<bool, Error> {
+        if let VmObjectSource::Memory(memory) = &self.source {
+            return Ok(memory.page_is_resident(index));
+        }
+        let key = self.page_key(index);
+        let cache = PAGE_CACHE.lock();
+        ensure_unreserved(key.object).map_err(|raw| Error::from_raw(raw).unwrap_or(Error::BackingFailure))?;
+        Ok(cache.iter().any(|entry| entry.key == key && entry.valid_len != 0))
+    }
+
     pub fn page(&self, page_index: u64) -> Result<Arc<[u8; PAGE_BYTES]>, VmPageError> {
         self.fault_page_with_len(page_index).map(|(bytes, _)| bytes)
     }
