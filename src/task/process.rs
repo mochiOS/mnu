@@ -1852,7 +1852,14 @@ pub(crate) fn resize_shared_memory(
 
 /// プロセスを終了状態（Zombie）へ遷移させる
 pub fn mark_process_exited(id: ProcessId, exit_code: u64) -> bool {
-    {
+    let current = crate::task::current_thread_id().and_then(|tid| {
+        crate::task::with_thread_mut(tid, |thread| {
+            (thread.process_id() == id).then(|| (tid.as_u64(), thread.take_exception()))
+        })
+        .flatten()
+    });
+    let exception = current.and_then(|(_, exception)| exception);
+    let record = {
         let mut table = PROCESS_TABLE.lock();
         let Some(proc) = table.get_mut(id) else {
             return false;
@@ -1860,7 +1867,34 @@ pub fn mark_process_exited(id: ProcessId, exit_code: u64) -> bool {
         if !proc.mark_exited(exit_code) {
             return false;
         }
-    }
+        (exit_code != 0 || exception.is_some()).then(|| {
+            use mnu_abi::diagnostic::*;
+            let mut record = ExitRecord {
+                timestamp_ns: crate::syscall::time::monotonic_nanoseconds(),
+                process_id: id.as_u64(),
+                thread_id: current.map(|(tid, _)| tid).unwrap_or(0),
+                image_revision: proc.object.image_revision(),
+                exit_code,
+                kind: EXIT_KIND_STATUS,
+                image_digest: proc.image_digest().unwrap_or([0; 32]),
+                digest_kind: if proc.image_digest().is_some() { mnu_abi::PROCESS_IMAGE_DIGEST_SHA256 } else { 0 },
+                architecture: 62,
+                ..Default::default()
+            };
+            if let Some(fault) = exception {
+                record.timestamp_ns = fault.timestamp_ns;
+                record.kind = EXIT_KIND_EXCEPTION;
+                record.vector = fault.vector;
+                record.cause = fault.cause;
+                record.error_code = fault.error_code;
+                record.instruction = fault.instruction;
+                record.stack_pointer = fault.stack_pointer;
+                record.address = fault.address;
+            }
+            record
+        })
+    };
+    if let Some(record) = record { crate::util::process_diagnostics::publish(record); }
     wake_process_exit_waiters(id);
     defer_process_reclaim(id);
     true

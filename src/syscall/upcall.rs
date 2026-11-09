@@ -480,6 +480,17 @@ pub(crate) fn prepare_user_exception(
     if super::copy_to_user_native(delivery.stack_top + 8, &(cause as u64).to_ne_bytes()).is_err() {
         return false;
     }
+    crate::task::with_thread_mut(id, |thread| thread.note_exception(
+        crate::util::process_diagnostics::Exception {
+            timestamp_ns: super::time::monotonic_nanoseconds(),
+            vector: 14,
+            cause: cause as u32,
+            error_code: raw[15],
+            instruction: context.user_rip,
+            stack_pointer: context.user_rsp,
+            address,
+        },
+    ));
     context.user_rip = delivery.entry;
     context.user_rsp = delivery.stack_top;
     context.rdi = delivery.payload;

@@ -106,6 +106,7 @@ struct ThreadUpcallState {
     saved_context: Option<UserUpcallContext>,
     saved_fx_state: super::context::FxSaveArea,
     restore_pending: bool,
+    exception_diagnostic: Option<crate::util::process_diagnostics::Exception>,
 }
 
 impl ThreadUpcallState {
@@ -123,6 +124,7 @@ impl ThreadUpcallState {
             saved_context: None,
             saved_fx_state: super::context::FxSaveArea::initial(),
             restore_pending: false,
+            exception_diagnostic: None,
         }
     }
 
@@ -244,6 +246,7 @@ impl ThreadUpcallState {
         let context = self.saved_context.take()?;
         self.restore_pending = false;
         self.active_token = 0;
+        self.exception_diagnostic = None;
         self.saved_fx_state.restore_current();
         Some(context)
     }
@@ -1297,6 +1300,14 @@ impl Thread {
         vector: u64,
     ) -> Option<ThreadUpcallDelivery> {
         self.upcall.begin_exception(context, vector)
+    }
+
+    pub fn note_exception(&mut self, exception: crate::util::process_diagnostics::Exception) {
+        self.upcall.exception_diagnostic = Some(exception);
+    }
+
+    pub fn take_exception(&mut self) -> Option<crate::util::process_diagnostics::Exception> {
+        self.upcall.exception_diagnostic.take()
     }
 
     pub fn take_restored_upcall_context(&mut self) -> Option<UserUpcallContext> {

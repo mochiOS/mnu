@@ -924,6 +924,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
         x if x == SyscallNumber::DebugWrite as u64 => io::debug_write(arg0, arg1),
         x if x == SyscallNumber::DiagnosticRead as u64 => diagnostic::read(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::DiagnosticStreamRead as u64 => diagnostic::read_stream(arg0, arg1, arg2, arg3, arg4),
         x if x == SyscallNumber::PortIn as u64 => io::port_in(arg0, arg1),
         x if x == SyscallNumber::PortOut as u64 => io::port_out(arg0, arg1, arg2),
         x if x == SyscallNumber::ProcessImageReplace as u64 => {

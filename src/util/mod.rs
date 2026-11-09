@@ -1,5 +1,6 @@
 pub mod console;
 pub mod diagnostic_buffer;
+pub mod process_diagnostics;
 pub mod object_snapshot;
 pub mod fifo;
 pub mod log;

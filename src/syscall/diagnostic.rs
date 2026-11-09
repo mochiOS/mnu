@@ -2,16 +2,26 @@
 //! POSIX credentials, filesystem permissions, or a particular consumer.
 
 use crate::util::diagnostic_buffer::CursorError;
-use mnu_abi::diagnostic::{READ_MAX_BYTES, RESULT_LEN, ReadResult};
+use mnu_abi::diagnostic::{
+    ReadResult, EXIT_RECORD_LEN, READ_MAX_BYTES, RESULT_LEN, STREAM_AUDIT, STREAM_PROCESS_EXIT,
+};
 use mnu_abi::status::Error;
 
 pub fn read(cursor: u64, output: u64, capacity: u64, result: u64) -> u64 {
+    read_stream(cursor, output, capacity, result, STREAM_AUDIT)
+}
+
+pub fn read_stream(cursor: u64, output: u64, capacity: u64, result: u64, stream: u64) -> u64 {
     if !crate::syscall::security::caller_has_any_capability(&[
         crate::capability::Capability::DiagnosticsRead,
     ]) {
         return Error::AccessDenied.into_raw();
     }
-    if capacity > READ_MAX_BYTES as u64 {
+    if capacity > READ_MAX_BYTES as u64
+        || !matches!(stream, STREAM_AUDIT | STREAM_PROCESS_EXIT)
+        || (stream == STREAM_PROCESS_EXIT
+            && (cursor % EXIT_RECORD_LEN as u64 != 0 || capacity % EXIT_RECORD_LEN as u64 != 0))
+    {
         return Error::InvalidArgument.into_raw();
     }
     if result == 0
@@ -27,7 +37,12 @@ pub fn read(cursor: u64, output: u64, capacity: u64, result: u64) -> u64 {
         }
     }
     let mut bytes = [0; READ_MAX_BYTES];
-    let snapshot = match crate::audit::read_cursor(cursor, &mut bytes[..capacity as usize]) {
+    let read = if stream == STREAM_AUDIT {
+        crate::audit::read_cursor(cursor, &mut bytes[..capacity as usize])
+    } else {
+        crate::util::process_diagnostics::read(cursor, &mut bytes[..capacity as usize])
+    };
+    let snapshot = match read {
         Ok(snapshot) => snapshot,
         Err(CursorError::Ahead | CursorError::Exhausted) => {
             return Error::InvalidArgument.into_raw();

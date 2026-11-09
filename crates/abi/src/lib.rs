@@ -556,6 +556,11 @@ pub enum SyscallNumber {
     /// faults zero-filled pages. File/shared/device/unreserved ranges are
     /// rejected before mutation; only this caller's address space is affected.
     MemoryDiscard = 708,
+    /// Read one bounded native diagnostic stream. Requires diagnostics.read.
+    /// Arguments: absolute byte cursor, output, capacity, ReadResult output,
+    /// stream selector. Process exit records require record-aligned ranges.
+    /// No names, filesystem access, process selection or reporting policy.
+    DiagnosticStreamRead = 709,
     CheckGravityExist = 999,
 }
 
