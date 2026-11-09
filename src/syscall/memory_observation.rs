@@ -5,6 +5,11 @@ use mnu_abi::{SUCCESS, status::Error};
 /// Bounded observation of the caller's RAM leaves. Never faults source pages
 /// in, consults another process, or exports a physical address. Output copying
 /// runs after releasing PROC, and may itself fault in an output page.
+///
+/// The source address is page-aligned and length is nonzero. Capacity must
+/// equal the rounded page count, at most 256. Each output byte describes one
+/// page at the observation point; it is not a pin or a promise of future
+/// residency. Retained RAM behind an inaccessible leaf still counts as RAM.
 pub fn residency(address: u64, length: u64, output: u64, capacity: u64) -> u64 {
     if address & 4095 != 0 || length == 0 {
         return Error::InvalidArgument.into_raw();
@@ -57,6 +62,11 @@ pub fn residency(address: u64, length: u64, output: u64, capacity: u64) -> u64 {
 /// Release RAM references using the existing transactional PTE revocation and
 /// TLB acknowledgement mechanism. Keep the original reservation/access policy;
 /// shared/file/device mappings never enter this operation.
+///
+/// Both endpoints are page-aligned. Validation covers the complete range
+/// before any revocation, so a hole or an unsupported backing cannot discard a
+/// validated prefix. Captured anonymous bytes are reset only after successful
+/// revocation; changing the access policy is a separate operation.
 pub fn discard(address: u64, length: u64) -> u64 {
     use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
     use crate::task::process::MemoryBacking;
