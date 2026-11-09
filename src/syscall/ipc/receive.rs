@@ -46,6 +46,11 @@ impl Mailbox {
             let mut snapshot =
                 allocate_message().ok_or_else(|| Error::ResourceUnavailable.into_raw())?;
             snapshot.message_id = message.message_id;
+            // These values authorize the reply only after usercopy succeeds.
+            // Keep them with the selected identity; no Handle is cloned here.
+            snapshot.from = message.from;
+            snapshot.call_id = message.call_id;
+            snapshot.expects_reply = message.expects_reply;
             snapshot.len = message.len.min(max_copy);
             snapshot.data[..snapshot.len].copy_from_slice(&message.data[..snapshot.len]);
             // No Handle references are cloned or published before usercopy.
