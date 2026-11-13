@@ -475,7 +475,19 @@ name = "viewkit"
 version = "2.0.0"
 
 [[patch.unused]]
+name = "mboot-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
 name = "bootui"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-fonts"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -508,16 +520,4 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-virtio-gpu-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-fonts"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
-
-[[patch.unused]]
-name = "mboot-protocol"
 version = "0.1.0"

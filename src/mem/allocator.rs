@@ -260,8 +260,11 @@ unsafe impl GlobalAlloc for HardenedKernelHeap {
             Some(v) => v,
             None => return ptr::null_mut(),
         };
+        // Keep every raw block's end aligned as well as its beginning.
+        // Otherwise first-fit repeatedly leaves unusable alignment fragments
+        // (e.g. 24-byte holes) before the next guarded allocation.
         let raw_layout = match Layout::from_size_align(payload_size, user_align) {
-            Ok(v) => v,
+            Ok(v) => v.pad_to_align(),
             Err(_) => return ptr::null_mut(),
         };
         let Ok(raw_size) = u32::try_from(raw_layout.size()) else {
