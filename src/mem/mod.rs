@@ -4,42 +4,41 @@
 
 use crate::{debug, info, interrupt, MemoryRegion, Result};
 
-pub mod allocator;
 pub mod address_space;
+pub mod allocator;
 pub(crate) mod byte_extent;
-pub(crate) mod user_stack;
 pub(crate) mod cache_range;
+pub(crate) mod cow_access;
+pub(crate) mod detached_roots;
+pub(crate) mod extent_transaction;
 pub mod frame;
 mod frame_refs;
 pub mod gdt;
-pub mod paging;
-pub(crate) mod cow_access;
-pub(crate) mod residency;
-pub(crate) mod residency_native;
+pub(crate) mod mapping_admission;
+pub(crate) mod mapping_preservation_native;
+pub(crate) mod mapping_replace;
+pub(crate) mod mapping_revocation;
+pub(crate) mod mapping_revocation_native;
+pub(crate) mod mapping_targets;
+pub(crate) mod mapping_usage;
 pub(crate) mod object_io;
 pub(crate) mod object_io_native;
+pub mod paging;
 pub(crate) mod range_plan;
-pub(crate) mod writeback;
-pub(crate) mod writeback_worker;
-pub(crate) mod shared_pages;
-pub mod shared_memory;
-pub mod tss;
-pub(crate) mod user;
-pub mod vm_object;
-pub(crate) mod tlb_rendezvous;
-pub(crate) mod tlb_shootdown;
-pub(crate) mod mapping_revocation;
-pub(crate) mod mapping_usage;
-pub(crate) mod sparse_page_walk;
-pub(crate) mod mapping_revocation_native;
-pub(crate) mod mapping_preservation_native;
-pub(crate) mod mapping_admission;
-pub(crate) mod mapping_replace;
-pub(crate) mod mapping_targets;
-pub(crate) mod extent_transaction;
-pub(crate) mod detached_roots;
+pub(crate) mod residency;
+pub(crate) mod residency_native;
 pub(crate) mod root_lifetime;
 pub(crate) mod root_lifetime_native;
+pub mod shared_memory;
+pub(crate) mod shared_pages;
+pub(crate) mod sparse_page_walk;
+pub(crate) mod tlb_rendezvous;
+pub(crate) mod tlb_shootdown;
+pub mod tss;
+pub(crate) mod user_stack;
+pub mod vm_object;
+pub(crate) mod writeback;
+pub(crate) mod writeback_worker;
 
 /// メモリの初期化
 ///

@@ -180,10 +180,7 @@ impl ThreadUpcallState {
         context: UserUpcallContext,
         payload: u64,
     ) -> Option<ThreadUpcallDelivery> {
-        if self.entry == 0
-            || self.stack_top == 0
-            || self.active_token != 0
-            || self.restore_pending
+        if self.entry == 0 || self.stack_top == 0 || self.active_token != 0 || self.restore_pending
         {
             return None;
         }
@@ -230,7 +227,8 @@ impl ThreadUpcallState {
         {
             return Err(ThreadUpcallError::InvalidToken);
         }
-        let fx_state = self.saved_fx_state
+        let fx_state = self
+            .saved_fx_state
             .with_user_bytes(fx_state)
             .ok_or(ThreadUpcallError::InvalidContext)?;
         self.saved_context = Some(context);
@@ -263,171 +261,13 @@ impl ThreadUpcallState {
         }
         let mut current = super::context::FxSaveArea::initial();
         current.save_current();
-        let selected = current.with_user_bytes(bytes)
+        let selected = current
+            .with_user_bytes(bytes)
             .ok_or(ThreadUpcallError::InvalidContext)?;
         self.saved_context = Some(context);
         self.saved_fx_state = selected;
         self.restore_pending = true;
         Ok(())
-    }
-}
-
-// L4 風の short IPC を register 相当で運ぶための上限。
-// ここを少し広げると、小さめの RPC が slow path に落ちにくくなる。
-const FAST_IPC_MAX_BYTES: usize = 128;
-
-#[derive(Clone, Copy, Debug)]
-pub struct IpcFastState {
-    waiting: bool,
-    wait_cpu: usize,
-    has_request: bool,
-    reply_ready: bool,
-    awaiting_reply: bool,
-    sender_tid: u64,
-    reply_ptr: u64,
-    reply_len: usize,
-    reply_result_len: usize,
-    msg_len: usize,
-    msg: [u8; FAST_IPC_MAX_BYTES],
-}
-
-impl IpcFastState {
-    pub const fn new() -> Self {
-        Self {
-            waiting: false,
-            wait_cpu: usize::MAX,
-            has_request: false,
-            reply_ready: false,
-            awaiting_reply: false,
-            sender_tid: 0,
-            reply_ptr: 0,
-            reply_len: 0,
-            reply_result_len: 0,
-            msg_len: 0,
-            msg: [0; FAST_IPC_MAX_BYTES],
-        }
-    }
-
-    pub fn clear(&mut self) {
-        *self = Self::new();
-    }
-
-    pub fn waiting(&self) -> bool {
-        self.waiting
-    }
-
-    pub fn set_waiting(&mut self, waiting: bool) {
-        self.waiting = waiting;
-    }
-
-    pub fn wait_cpu(&self) -> Option<usize> {
-        if self.wait_cpu == usize::MAX {
-            None
-        } else {
-            Some(self.wait_cpu)
-        }
-    }
-
-    pub fn set_wait_cpu(&mut self, cpu: Option<usize>) {
-        self.wait_cpu = cpu.unwrap_or(usize::MAX);
-    }
-
-    pub fn has_request(&self) -> bool {
-        self.has_request
-    }
-
-    pub fn sender_tid(&self) -> u64 {
-        self.sender_tid
-    }
-
-    pub fn reply_ready(&self) -> bool {
-        self.reply_ready
-    }
-
-    pub fn set_reply_ready(&mut self, ready: bool) {
-        self.reply_ready = ready;
-    }
-
-    pub fn awaiting_reply(&self) -> bool {
-        self.awaiting_reply
-    }
-
-    pub fn set_awaiting_reply(&mut self, awaiting: bool) {
-        self.awaiting_reply = awaiting;
-    }
-
-    pub fn reply_ptr(&self) -> u64 {
-        self.reply_ptr
-    }
-
-    pub fn reply_len(&self) -> usize {
-        self.reply_len
-    }
-
-    pub fn reply_result_len(&self) -> usize {
-        self.reply_result_len
-    }
-
-    pub fn request_len(&self) -> usize {
-        self.msg_len
-    }
-
-    pub fn request_bytes(&self) -> &[u8] {
-        &self.msg[..self.msg_len]
-    }
-
-    pub fn set_request(&mut self, sender_tid: u64, data: &[u8]) {
-        self.has_request = true;
-        self.sender_tid = sender_tid;
-        self.msg_len = core::cmp::min(data.len(), FAST_IPC_MAX_BYTES);
-        self.msg[..self.msg_len].copy_from_slice(&data[..self.msg_len]);
-        if self.msg_len < FAST_IPC_MAX_BYTES {
-            self.msg[self.msg_len..].fill(0);
-        }
-    }
-
-    pub fn take_request(&mut self) -> Option<(u64, usize, [u8; FAST_IPC_MAX_BYTES])> {
-        if !self.has_request {
-            return None;
-        }
-        let sender = self.sender_tid;
-        let len = self.msg_len;
-        let data = self.msg;
-        self.has_request = false;
-        self.reply_ready = false;
-        self.awaiting_reply = false;
-        self.msg_len = 0;
-        self.msg = [0; FAST_IPC_MAX_BYTES];
-        self.wait_cpu = usize::MAX;
-        Some((sender, len, data))
-    }
-
-    pub fn set_reply_target(&mut self, reply_ptr: u64, reply_len: usize) {
-        self.reply_ptr = reply_ptr;
-        self.reply_len = reply_len;
-        self.reply_result_len = 0;
-    }
-
-    pub fn take_reply_target(&mut self) -> (u64, usize) {
-        let ptr = self.reply_ptr;
-        let len = self.reply_len;
-        self.reply_ptr = 0;
-        self.reply_len = 0;
-        self.reply_ready = false;
-        self.reply_result_len = 0;
-        self.awaiting_reply = false;
-        self.wait_cpu = usize::MAX;
-        (ptr, len)
-    }
-
-    pub fn set_reply_result_len(&mut self, len: usize) {
-        self.reply_result_len = len;
-    }
-
-    pub fn take_reply_result_len(&mut self) -> usize {
-        let len = self.reply_result_len;
-        self.reply_result_len = 0;
-        len
     }
 }
 
@@ -489,7 +329,6 @@ pub struct Thread {
     /// IPC受信などで眠る前に起床要求が来たことを示すフラグ
     pending_wakeup: bool,
     /// 低遅延IPCの待機/受信状態
-    fast_ipc: IpcFastState,
     /// Image-scoped IPC identity, independent of native thread/slot lifetime.
     ipc_generation: u64,
     upcall: ThreadUpcallState,
@@ -911,7 +750,6 @@ impl Thread {
             syscall_user_cr3: 0,
             syscall_user_context: SyscallUserContext::empty(),
             pending_wakeup: false,
-            fast_ipc: IpcFastState::new(),
             ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
             interactive_score: 0,
@@ -1038,7 +876,6 @@ impl Thread {
             syscall_user_cr3: 0,
             syscall_user_context: SyscallUserContext::empty(),
             pending_wakeup: false,
-            fast_ipc: IpcFastState::new(),
             ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
             interactive_score: 0,
@@ -1129,8 +966,8 @@ impl Thread {
             process_id,
             process_object: None,
             name: [
-                b'r', b'e', b's', b'u', b'm', b'e', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0,
+                b'r', b'e', b's', b'u', b'm', b'e', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ],
             name_len: 6,
             state: ThreadState::Ready,
@@ -1149,7 +986,6 @@ impl Thread {
             syscall_user_cr3: 0,
             syscall_user_context: user_context,
             pending_wakeup: false,
-            fast_ipc: IpcFastState::new(),
             ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
             interactive_score: 0,
@@ -1182,7 +1018,9 @@ impl Thread {
     }
 
     pub fn process_cpu_ticks(&self) -> Option<u64> {
-        self.process_object.as_ref().map(|process| process.cpu_ticks())
+        self.process_object
+            .as_ref()
+            .map(|process| process.cpu_ticks())
     }
 
     pub fn set_in_syscall(&mut self, in_syscall: bool) {
@@ -1215,18 +1053,6 @@ impl Thread {
         let v = self.pending_wakeup;
         self.pending_wakeup = false;
         v
-    }
-
-    pub fn fast_ipc(&self) -> &IpcFastState {
-        &self.fast_ipc
-    }
-
-    pub fn fast_ipc_mut(&mut self) -> &mut IpcFastState {
-        &mut self.fast_ipc
-    }
-
-    pub fn clear_fast_ipc(&mut self) {
-        self.fast_ipc.clear();
     }
 
     pub fn install_upcall(
@@ -1264,13 +1090,11 @@ impl Thread {
     }
 
     pub fn pending_upcall_defer_word(&self) -> Option<u64> {
-        self.has_deliverable_upcall().then_some(self.upcall.defer_word)
+        self.has_deliverable_upcall()
+            .then_some(self.upcall.defer_word)
     }
 
-    pub fn begin_upcall(
-        &mut self,
-        context: UserUpcallContext,
-    ) -> Option<ThreadUpcallDelivery> {
+    pub fn begin_upcall(&mut self, context: UserUpcallContext) -> Option<ThreadUpcallDelivery> {
         self.upcall.begin(context)
     }
 
@@ -1520,8 +1344,7 @@ impl ThreadQueue {
 
         if let Some((limits, object)) = crate::task::with_process(thread.process_id(), |p| {
             (p.resource_limits(), p.process_object())
-        })
-        {
+        }) {
             if !object.accepts_threads() {
                 return None;
             }
@@ -1539,8 +1362,7 @@ impl ThreadQueue {
         }
 
         let id = thread.id();
-        let is_ready =
-            thread.state() == ThreadState::Ready && !thread.is_scheduling_suspended();
+        let is_ready = thread.state() == ThreadState::Ready && !thread.is_scheduling_suspended();
 
         // 空きスロットを探す
         for (idx, slot) in self.threads.iter_mut().enumerate() {
@@ -2002,7 +1824,9 @@ pub fn thread_slot_index_and_generation_by_u64(id_val: u64) -> Option<(usize, u6
 }
 
 pub(crate) fn ipc_slot_index_and_generation_by_u64(id_val: u64) -> Option<(usize, u64)> {
-    THREAD_QUEUE.lock().ipc_slot_index_and_generation(ThreadId::from_u64(id_val))
+    THREAD_QUEUE
+        .lock()
+        .ipc_slot_index_and_generation(ThreadId::from_u64(id_val))
 }
 
 pub(crate) fn replace_ipc_generation(id: ThreadId, generation: u64) -> Option<(usize, u64)> {
@@ -2011,7 +1835,6 @@ pub(crate) fn replace_ipc_generation(id: ThreadId, generation: u64) -> Option<(u
     let thread = queue.get_mut(id)?;
     let previous = thread.ipc_generation;
     thread.ipc_generation = generation;
-    thread.fast_ipc.clear();
     thread.pending_wakeup = false;
     Some((slot, previous))
 }
@@ -2107,8 +1930,8 @@ pub(super) fn begin_thread_exit(id: ThreadId) -> Option<ProcessId> {
 pub(super) fn mark_thread_terminated(id: ThreadId) -> Option<bool> {
     let mut queue = THREAD_QUEUE.lock();
     let previous = queue.get(id)?.state();
-    let retained = previous == ThreadState::Running
-        || crate::percpu::thread_is_cpu_referenced(id.as_u64());
+    let retained =
+        previous == ThreadState::Running || crate::percpu::thread_is_cpu_referenced(id.as_u64());
     let endpoint = queue.ipc_slot_index_and_generation(id);
     let changed = queue.set_state(id, ThreadState::Terminated);
     drop(queue);
