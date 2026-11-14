@@ -389,8 +389,7 @@ pub(crate) fn remove_endpoint_waiter(endpoint: IpcEndpoint, waiter: crate::task:
 fn process_local_endpoint(raw: u64, required: HandleRights) -> Result<IpcEndpoint, u64> {
     use mnu_abi::status::Error;
 
-    let object = crate::syscall::handle::object_native(raw, required)
-        .map_err(Error::into_raw)?;
+    let object = crate::syscall::handle::object_native(raw, required).map_err(Error::into_raw)?;
     let KernelObject::IpcEndpoint {
         thread_id,
         slot,
@@ -418,7 +417,8 @@ pub(crate) fn resolve_provider_endpoint_native(
         thread_id,
         slot,
         generation,
-    } = object else {
+    } = object
+    else {
         return Err(Error::InvalidArgument);
     };
     let endpoint = IpcEndpoint {
@@ -433,18 +433,25 @@ pub(crate) fn resolve_provider_endpoint_native(
     Ok((thread_id, slot, generation))
 }
 
-fn resolve_call_destination(raw: u64) -> Result<(IpcEndpoint, u64, u32), u64> {
+/// Identity and delivery semantics resolved once at the userspace boundary.
+struct CallDestination {
+    endpoint: IpcEndpoint,
+    reply_sender: u64,
+    delivery_flags: u32,
+}
+
+fn resolve_call_destination(raw: u64) -> Result<CallDestination, u64> {
     use mnu_abi::status::Error;
 
     if raw <= crate::task::PROCESS_MAX_OBJECT_HANDLES as u64 {
         let endpoint = process_local_endpoint(raw, HandleRights::SEND)?;
         let sender_identity = ensure_endpoint_for_thread(endpoint.thread_id)
             .ok_or_else(|| Error::NotReady.into_raw())?;
-        return Ok((
+        return Ok(CallDestination {
             endpoint,
-            sender_identity,
-            mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE,
-        ));
+            reply_sender: sender_identity,
+            delivery_flags: mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE,
+        });
     }
     // A retained SEND reference is authority for exactly that live endpoint.
     // Only ambient/global addressing requires the process-wide IPC grant.
@@ -455,20 +462,19 @@ fn resolve_call_destination(raw: u64) -> Result<(IpcEndpoint, u64, u32), u64> {
     ]) {
         return Err(Error::AccessDenied.into_raw());
     }
-    let record = endpoint_record_from_handle(raw)
-        .ok_or_else(|| Error::NotFound.into_raw())?;
+    let record = endpoint_record_from_handle(raw).ok_or_else(|| Error::NotFound.into_raw())?;
     if !record.rights.contains(EndpointRights::RECV) {
         return Err(Error::AccessDenied.into_raw());
     }
-    Ok((
-        IpcEndpoint {
+    Ok(CallDestination {
+        endpoint: IpcEndpoint {
             thread_id: record.thread_id,
             slot: record.slot,
             generation: record.generation,
         },
-        raw,
-        0,
-    ))
+        reply_sender: raw,
+        delivery_flags: 0,
+    })
 }
 
 fn resolve_receive_thread(raw: u64, current_thread_id: u64) -> Result<u64, u64> {
@@ -477,8 +483,7 @@ fn resolve_receive_thread(raw: u64, current_thread_id: u64) -> Result<u64, u64> 
     let thread_id = if raw <= crate::task::PROCESS_MAX_OBJECT_HANDLES as u64 {
         process_local_endpoint(raw, HandleRights::RECEIVE)?.thread_id
     } else {
-        let record = endpoint_record_from_handle(raw)
-            .ok_or_else(|| Error::NotFound.into_raw())?;
+        let record = endpoint_record_from_handle(raw).ok_or_else(|| Error::NotFound.into_raw())?;
         if !record.rights.contains(EndpointRights::RECV) {
             return Err(Error::AccessDenied.into_raw());
         }
@@ -499,11 +504,14 @@ pub fn call(
 ) -> u64 {
     use mnu_abi::status::Error;
 
-    let (destination, expected_sender, delivery_flags) =
-        match resolve_call_destination(dest_endpoint_handle) {
-            Ok(destination) => destination,
-            Err(error) => return error,
-        };
+    let CallDestination {
+        endpoint: destination,
+        reply_sender: expected_sender,
+        delivery_flags,
+    } = match resolve_call_destination(dest_endpoint_handle) {
+        Ok(destination) => destination,
+        Err(error) => return error,
+    };
     let caller = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
         None => return Error::NotReady.into_raw(),
@@ -524,7 +532,12 @@ pub fn call(
             return Error::NotFound.into_raw();
         }
         let status = send_call_to_endpoint(
-            destination, sender, call_id, req_ptr, req_len, delivery_flags,
+            destination,
+            sender,
+            call_id,
+            req_ptr,
+            req_len,
+            delivery_flags,
         );
         if status != mnu_abi::status::Error::NotReady.into_raw() {
             break status;
@@ -573,11 +586,14 @@ pub fn call_object_handles(
     if handles_ptr == 0 {
         return Error::InvalidAddress.into_raw();
     }
-    let (destination, expected_sender, delivery_flags) =
-        match resolve_call_destination(dest_endpoint_handle) {
-            Ok(destination) => destination,
-            Err(error) => return error,
-        };
+    let CallDestination {
+        endpoint: destination,
+        reply_sender: expected_sender,
+        delivery_flags,
+    } = match resolve_call_destination(dest_endpoint_handle) {
+        Ok(destination) => destination,
+        Err(error) => return error,
+    };
     let caller = match crate::task::current_thread_id() {
         Some(id) => id.as_u64(),
         None => return Error::NotReady.into_raw(),
@@ -641,12 +657,7 @@ pub fn reply(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
 
 /// Replies to a synchronous call and transfers rights-restricted generic
 /// object handles to the caller.
-pub fn reply_object_handles(
-    dest_thread_id: u64,
-    buf_ptr: u64,
-    len: u64,
-    handles_ptr: u64,
-) -> u64 {
+pub fn reply_object_handles(dest_thread_id: u64, buf_ptr: u64, len: u64, handles_ptr: u64) -> u64 {
     let attachments = match decode_outgoing_object_handles(handles_ptr) {
         Ok(handles) => handles,
         Err(error) => return error,
@@ -819,36 +830,43 @@ fn decode_outgoing_object_handles(pointer: u64) -> Result<ObjectHandleAttachment
     let mut bytes = [0u8; core::mem::size_of::<mnu_abi::IpcObjectHandles>()];
     crate::syscall::copy_from_user_native(pointer, &mut bytes).map_err(Error::into_raw)?;
     let count = u32::from_le_bytes(
-        bytes[0..4].try_into().map_err(|_| Error::InvalidArgument.into_raw())?,
+        bytes[0..4]
+            .try_into()
+            .map_err(|_| Error::InvalidArgument.into_raw())?,
     ) as usize;
     let delivery_flags = u32::from_le_bytes(
-        bytes[4..8].try_into().map_err(|_| Error::InvalidArgument.into_raw())?,
+        bytes[4..8]
+            .try_into()
+            .map_err(|_| Error::InvalidArgument.into_raw())?,
     );
     if count > MAX_OBJECT_HANDLES || delivery_flags != 0 {
         return Err(Error::InvalidArgument.into_raw());
     }
-    let process_id = crate::syscall::security::current_process_id()
-        .ok_or_else(|| Error::NotReady.into_raw())?;
+    let process_id =
+        crate::syscall::security::current_process_id().ok_or_else(|| Error::NotReady.into_raw())?;
     let mut attachments = ObjectHandleAttachments::empty();
     for index in 0..count {
         let offset = 8 + index * 16;
         let raw = u32::from_le_bytes(
-            bytes[offset..offset + 4].try_into()
+            bytes[offset..offset + 4]
+                .try_into()
                 .map_err(|_| Error::InvalidArgument.into_raw())?,
         );
         let item_reserved = u32::from_le_bytes(
-            bytes[offset + 4..offset + 8].try_into()
+            bytes[offset + 4..offset + 8]
+                .try_into()
                 .map_err(|_| Error::InvalidArgument.into_raw())?,
         );
         let requested_bits = u64::from_le_bytes(
-            bytes[offset + 8..offset + 16].try_into()
+            bytes[offset + 8..offset + 16]
+                .try_into()
                 .map_err(|_| Error::InvalidArgument.into_raw())?,
         );
         if item_reserved != 0 {
             return Err(Error::InvalidArgument.into_raw());
         }
-        let handle = ObjectHandle::from_raw(raw)
-            .ok_or_else(|| Error::InvalidArgument.into_raw())?;
+        let handle =
+            ObjectHandle::from_raw(raw).ok_or_else(|| Error::InvalidArgument.into_raw())?;
         let requested = HandleRights::from_bits(requested_bits)
             .ok_or_else(|| Error::InvalidArgument.into_raw())?;
         let exported = export_object_handle(process_id, handle, requested)?;
@@ -870,8 +888,7 @@ fn export_object_handle(
             .object_handles()
             .get(handle)
             .ok_or_else(|| Error::InvalidArgument.into_raw())?;
-        if !source.rights().contains(HandleRights::TRANSFER)
-            || !source.rights().contains(requested)
+        if !source.rights().contains(HandleRights::TRANSFER) || !source.rights().contains(requested)
         {
             return Err(Error::AccessDenied.into_raw());
         }
@@ -1085,7 +1102,12 @@ impl Mailbox {
         }
     }
 
-    fn add_reply_target(&mut self, endpoint: u64, call_id: u64, owner: (u64, u64)) -> Result<Option<ReplyTarget>, u64> {
+    fn add_reply_target(
+        &mut self,
+        endpoint: u64,
+        call_id: u64,
+        owner: (u64, u64),
+    ) -> Result<Option<ReplyTarget>, u64> {
         use mnu_abi::status::Error;
         // Mailboxes are indexed by reusable thread slots. Reply authority may
         // never survive into a different thread or a new slot generation.
@@ -1093,19 +1115,34 @@ impl Mailbox {
             self.reply_targets.clear();
             self.reply_owner = Some(owner);
         }
-        self.reply_targets.retain(|target| endpoint_is_valid(target.source));
+        self.reply_targets
+            .retain(|target| endpoint_is_valid(target.source));
         // A caller can retire after enqueue. Consume its request without
         // minting stale reply authority rather than wedging the receive queue.
-        let Some(record) = endpoint_record_from_handle(endpoint) else { return Ok(None) };
-        let target = ReplyTarget { endpoint, call_id, source: IpcEndpoint {
-            thread_id: record.thread_id, slot: record.slot, generation: record.generation,
-        }};
-        if !endpoint_is_valid(target.source) { return Ok(None); }
-        if self.reply_targets.contains(&target) { return Ok(None); }
+        let Some(record) = endpoint_record_from_handle(endpoint) else {
+            return Ok(None);
+        };
+        let target = ReplyTarget {
+            endpoint,
+            call_id,
+            source: IpcEndpoint {
+                thread_id: record.thread_id,
+                slot: record.slot,
+                generation: record.generation,
+            },
+        };
+        if !endpoint_is_valid(target.source) {
+            return Ok(None);
+        }
+        if self.reply_targets.contains(&target) {
+            return Ok(None);
+        }
         if endpoint == 0 || call_id == 0 || self.reply_targets.len() >= MAILBOX_CAP {
             return Err(Error::LimitExceeded.into_raw());
         }
-        self.reply_targets.try_reserve(1).map_err(|_| Error::ResourceUnavailable.into_raw())?;
+        self.reply_targets
+            .try_reserve(1)
+            .map_err(|_| Error::ResourceUnavailable.into_raw())?;
         self.reply_targets.push(target);
         Ok(Some(target))
     }
@@ -1244,10 +1281,7 @@ impl Mailbox {
     /// Detach only the retired destination's messages. The caller releases
     /// their attachments after dropping the mailbox lock. Filtering preserves
     /// FIFO order for a newer generation already occupying this reusable slot.
-    fn retire_destination(
-        &mut self,
-        endpoint: IpcEndpoint,
-    ) -> [Option<Box<Message>>; MAILBOX_CAP] {
+    fn retire_destination(&mut self, endpoint: IpcEndpoint) -> [Option<Box<Message>>; MAILBOX_CAP] {
         let mut retired = [const { None }; MAILBOX_CAP];
         if self.count > MAILBOX_CAP {
             self.quarantine("ipc mailbox count exceeds capacity during retirement");
@@ -1325,7 +1359,6 @@ impl Mailbox {
         }
         Ok(())
     }
-
 
     fn pop_reply_copy(
         &mut self,
@@ -1521,7 +1554,9 @@ pub(crate) fn retire_endpoint(endpoint: IpcEndpoint) {
         let retired = {
             let mut boxes = lock_mailboxes();
             for mailbox in boxes.iter_mut() {
-                mailbox.reply_targets.retain(|target| target.source != endpoint);
+                mailbox
+                    .reply_targets
+                    .retain(|target| target.source != endpoint);
             }
             let mailbox = &mut boxes[endpoint.slot as usize];
             let retired = mailbox.retire_destination(endpoint);
@@ -1647,11 +1682,17 @@ pub(crate) fn call_provider_from_kernel(
     if !endpoint_is_valid(endpoint) {
         return Err(Error::NotFound.into_raw());
     }
-    let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id)
-        .ok_or_else(|| Error::NotReady.into_raw())?;
+    let expected_sender =
+        ensure_endpoint_for_thread(endpoint.thread_id).ok_or_else(|| Error::NotReady.into_raw())?;
     let mut attachments = ObjectHandleAttachments::empty();
     attachments.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
-    call_endpoint_with_attachments_from_kernel(endpoint, expected_sender, request, reply, attachments)
+    call_endpoint_with_attachments_from_kernel(
+        endpoint,
+        expected_sender,
+        request,
+        reply,
+        attachments,
+    )
 }
 
 /// Attach only handles from the authenticated caller's own table, through the
@@ -1668,16 +1709,20 @@ pub(crate) fn call_provider_with_handle_from_kernel(
     if !endpoint_is_valid(endpoint) {
         return Err(Error::NotFound.into_raw());
     }
-    let process_id = crate::syscall::security::current_process_id()
-        .ok_or_else(|| Error::NotReady.into_raw())?;
+    let process_id =
+        crate::syscall::security::current_process_id().ok_or_else(|| Error::NotReady.into_raw())?;
     let mut attachments = ObjectHandleAttachments::empty();
     attachments.handles[0] = Some(export_object_handle(process_id, handle, requested)?);
     attachments.count = 1;
     attachments.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
-    let expected_sender = ensure_endpoint_for_thread(endpoint.thread_id)
-        .ok_or_else(|| Error::NotReady.into_raw())?;
+    let expected_sender =
+        ensure_endpoint_for_thread(endpoint.thread_id).ok_or_else(|| Error::NotReady.into_raw())?;
     call_endpoint_with_attachments_from_kernel(
-        endpoint, expected_sender, request, reply, attachments,
+        endpoint,
+        expected_sender,
+        request,
+        reply,
+        attachments,
     )
 }
 
@@ -1697,8 +1742,7 @@ fn call_endpoint_with_attachments_from_kernel(
         .ok_or_else(|| Error::NotReady.into_raw())?
         .as_u64();
     let _lifetime = lifetime::observe(endpoint, crate::task::ThreadId::from_u64(caller))?;
-    let sender = ensure_endpoint_for_thread(caller)
-        .ok_or_else(|| Error::NotReady.into_raw())?;
+    let sender = ensure_endpoint_for_thread(caller).ok_or_else(|| Error::NotReady.into_raw())?;
     let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let (dest_slot, dest_generation) =
         crate::task::ipc_slot_index_and_generation_by_u64(endpoint.thread_id)
@@ -2024,7 +2068,11 @@ pub fn send_object_handles(
 ) -> u64 {
     use mnu_abi::status::Error;
 
-    let (destination, _, delivery_flags) = match resolve_call_destination(dest_endpoint_handle) {
+    let CallDestination {
+        endpoint: destination,
+        delivery_flags,
+        ..
+    } = match resolve_call_destination(dest_endpoint_handle) {
         Ok(destination) => destination,
         Err(error) => return error,
     };
@@ -2051,7 +2099,6 @@ pub fn send_object_handles(
         object_handles,
     )
 }
-
 
 fn finish_user_receive(
     receiver_thread_id: u64,
@@ -2179,12 +2226,7 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
 }
 
 /// Receives one message and installs attached generic object handles.
-pub fn recv_object_handles(
-    buf_ptr: u64,
-    max_len: u64,
-    handles_ptr: u64,
-    blocking: u64,
-) -> u64 {
+pub fn recv_object_handles(buf_ptr: u64, max_len: u64, handles_ptr: u64, blocking: u64) -> u64 {
     if handles_ptr == 0 {
         return mnu_abi::status::Error::InvalidAddress.into_raw();
     }
