@@ -13,7 +13,6 @@ mod selected;
 compile_error!("mnu does not yet provide CPU primitives for this architecture");
 
 pub use selected::context;
-#[cfg(target_arch = "x86_64")]
 pub use selected::exception;
 
 pub mod interrupts;

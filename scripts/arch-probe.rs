@@ -22,6 +22,7 @@ mod arm {
     const TIMER_IRQ: u32 = 27;
     static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
     static UNEXPECTED: AtomicU32 = AtomicU32::new(0);
+    static BREAKPOINTS: AtomicU32 = AtomicU32::new(0);
 
     core::arch::global_asm!(
         r#"
@@ -57,113 +58,9 @@ mod arm {
         msr daifset, #15
         mov x0, #(3 << 20)
         msr cpacr_el1, x0
-        adrp x0, arch_vectors
-        add x0, x0, :lo12:arch_vectors
-        msr vbar_el1, x0
         isb
         bl probe_main
         b .
-
-        .section .text.vectors, "ax"
-        .balign 2048
-    arch_vectors:
-        .macro vector target
-        b \target
-        .balign 128
-        .endm
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-        vector arch_irq
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-        vector probe_exception
-    arch_irq:
-        sub sp, sp, #784
-        stp x0, x1, [sp, #0]
-        stp x2, x3, [sp, #16]
-        stp x4, x5, [sp, #32]
-        stp x6, x7, [sp, #48]
-        stp x8, x9, [sp, #64]
-        stp x10, x11, [sp, #80]
-        stp x12, x13, [sp, #96]
-        stp x14, x15, [sp, #112]
-        stp x16, x17, [sp, #128]
-        stp x18, x19, [sp, #144]
-        stp x20, x21, [sp, #160]
-        stp x22, x23, [sp, #176]
-        stp x24, x25, [sp, #192]
-        stp x26, x27, [sp, #208]
-        stp x28, x29, [sp, #224]
-        stp x30, xzr, [sp, #240]
-        stp q0, q1, [sp, #256]
-        stp q2, q3, [sp, #288]
-        stp q4, q5, [sp, #320]
-        stp q6, q7, [sp, #352]
-        stp q8, q9, [sp, #384]
-        stp q10, q11, [sp, #416]
-        stp q12, q13, [sp, #448]
-        stp q14, q15, [sp, #480]
-        stp q16, q17, [sp, #512]
-        stp q18, q19, [sp, #544]
-        stp q20, q21, [sp, #576]
-        stp q22, q23, [sp, #608]
-        stp q24, q25, [sp, #640]
-        stp q26, q27, [sp, #672]
-        stp q28, q29, [sp, #704]
-        stp q30, q31, [sp, #736]
-        mrs x0, fpcr
-        str x0, [sp, #768]
-        mrs x0, fpsr
-        str x0, [sp, #776]
-        bl probe_irq
-        ldr x0, [sp, #768]
-        msr fpcr, x0
-        ldr x0, [sp, #776]
-        msr fpsr, x0
-        ldp q0, q1, [sp, #256]
-        ldp q2, q3, [sp, #288]
-        ldp q4, q5, [sp, #320]
-        ldp q6, q7, [sp, #352]
-        ldp q8, q9, [sp, #384]
-        ldp q10, q11, [sp, #416]
-        ldp q12, q13, [sp, #448]
-        ldp q14, q15, [sp, #480]
-        ldp q16, q17, [sp, #512]
-        ldp q18, q19, [sp, #544]
-        ldp q20, q21, [sp, #576]
-        ldp q22, q23, [sp, #608]
-        ldp q24, q25, [sp, #640]
-        ldp q26, q27, [sp, #672]
-        ldp q28, q29, [sp, #704]
-        ldp q30, q31, [sp, #736]
-        ldp x0, x1, [sp, #0]
-        ldp x2, x3, [sp, #16]
-        ldp x4, x5, [sp, #32]
-        ldp x6, x7, [sp, #48]
-        ldp x8, x9, [sp, #64]
-        ldp x10, x11, [sp, #80]
-        ldp x12, x13, [sp, #96]
-        ldp x14, x15, [sp, #112]
-        ldp x16, x17, [sp, #128]
-        ldp x18, x19, [sp, #144]
-        ldp x20, x21, [sp, #160]
-        ldp x22, x23, [sp, #176]
-        ldp x24, x25, [sp, #192]
-        ldp x26, x27, [sp, #208]
-        ldp x28, x29, [sp, #224]
-        ldr x30, [sp, #240]
-        add sp, sp, #784
-        eret
         "#
     );
 
@@ -179,6 +76,8 @@ mod arm {
         let level: u64;
         unsafe {
             asm!("mrs {}, CurrentEL", out(reg) level, options(nomem, nostack));
+            check(level == 4, "probe must run at EL1");
+            arch::exception::install_vectors();
             core::ptr::write_volatile((GICD + 0x100) as *mut u32, 1 << TIMER_IRQ);
             core::ptr::write_volatile(GICD as *mut u32, 1);
             core::ptr::write_volatile((GICC + 4) as *mut u32, 0xff);
@@ -225,8 +124,7 @@ mod arm {
         check(arch::interrupts::are_enabled(), "IRQ return changed mask");
     }
 
-    #[unsafe(no_mangle)]
-    extern "C" fn probe_irq() {
+    fn probe_irq() {
         unsafe {
             let acknowledgement = core::ptr::read_volatile((GICC + 0x0c) as *const u32);
             let interrupt = acknowledgement & 0x3ff;
@@ -242,9 +140,45 @@ mod arm {
         }
     }
 
+    pub fn check_exceptions() {
+        unsafe {
+            asm!("brk #0x112", options(nostack));
+        }
+        check(
+            BREAKPOINTS.load(Ordering::Acquire) == 2,
+            "nested BRK return",
+        );
+        emit("EL1 exception vectors PASS\n");
+    }
+
     #[unsafe(no_mangle)]
-    extern "C" fn probe_exception() -> ! {
-        fail("unexpected exception");
+    unsafe extern "C" fn mnu_aarch64_exception_dispatch(
+        raw: *mut arch::exception::ExceptionFrame,
+    ) -> u64 {
+        use arch::exception::{ExceptionKind, ExceptionOrigin};
+        // SAFETY: Only the production vector entry calls this symbol, after
+        // saving the complete frame on the current CPU's kernel stack.
+        let frame = unsafe { &mut *raw };
+        check(
+            frame.origin() == Some(ExceptionOrigin::CurrentSpx),
+            "unexpected exception origin",
+        );
+        match frame.kind() {
+            Some(ExceptionKind::Irq) => probe_irq(),
+            Some(ExceptionKind::Synchronous) if frame.syndrome() >> 26 == 0x3c => {
+                let immediate = frame.syndrome() & 0xffff;
+                check(immediate == 0x112 || immediate == 0x223, "unexpected BRK");
+                BREAKPOINTS.fetch_add(1, Ordering::Release);
+                if immediate == 0x112 {
+                    unsafe {
+                        asm!("brk #0x223", options(nostack));
+                    }
+                }
+                check(frame.advance_instruction(), "invalid BRK return PC");
+            }
+            _ => fail("unexpected exception"),
+        }
+        0
     }
 }
 
@@ -340,6 +274,7 @@ extern "C" fn probe_main() -> ! {
             "non-IRQ DAIF mask changed",
         );
         arm::check_wait();
+        arm::check_exceptions();
     }
     context_probe::run();
     #[cfg(target_arch = "aarch64")]

@@ -2,6 +2,7 @@
 //! interrupt routing and exception-vector installation are separate work.
 
 pub mod context;
+pub mod exception;
 
 pub mod interrupts {
     use core::arch::asm;
