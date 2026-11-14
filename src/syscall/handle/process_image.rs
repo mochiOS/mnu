@@ -2,7 +2,7 @@
 use alloc::sync::Arc;
 use mnu_abi::status::Error;
 
-use super::{HandleRights, KernelObject, object_native};
+use super::{object_native, HandleRights, KernelObject};
 
 pub fn read(raw: u64, output: u64, length: u64) -> u64 {
     if length != core::mem::size_of::<mnu_abi::ProcessImageInfo>() as u64 {
@@ -38,13 +38,8 @@ pub fn read(raw: u64, output: u64, length: u64) -> u64 {
             })
         })
         .ok_or(Error::NotFound)??;
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                (&info as *const mnu_abi::ProcessImageInfo).cast::<u8>(),
-                core::mem::size_of::<mnu_abi::ProcessImageInfo>(),
-            )
-        };
-        crate::syscall::copy_to_user_native(output, bytes)
+        let bytes = info.encode();
+        crate::syscall::copy_to_user_native(output, &bytes)
     })();
     result
         .map(|_| mnu_abi::SUCCESS)

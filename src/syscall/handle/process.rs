@@ -126,13 +126,8 @@ pub fn process_memory_read(raw: u64, output: u64, length: u64) -> u64 {
             current_bytes: snapshot.current_bytes,
             peak_bytes: snapshot.peak_bytes,
         };
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                (&usage as *const mnu_abi::ProcessMemoryUsage).cast::<u8>(),
-                core::mem::size_of::<mnu_abi::ProcessMemoryUsage>(),
-            )
-        };
-        crate::syscall::copy_to_user_native(output, bytes)
+        let bytes = usage.encode();
+        crate::syscall::copy_to_user_native(output, &bytes)
     })();
     result.map(|_| SUCCESS).unwrap_or_else(Error::into_raw)
 }
@@ -175,13 +170,8 @@ pub(super) fn write_process_status(output: u64, status: mnu_abi::ProcessStatus) 
     if output == 0 {
         return Error::InvalidAddress.into_raw();
     }
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&status as *const mnu_abi::ProcessStatus).cast::<u8>(),
-            core::mem::size_of::<mnu_abi::ProcessStatus>(),
-        )
-    };
-    crate::syscall::copy_to_user_native(output, bytes)
+    let bytes = status.encode();
+    crate::syscall::copy_to_user_native(output, &bytes)
         .map(|_| SUCCESS)
         .unwrap_or_else(Error::into_raw)
 }
@@ -230,13 +220,8 @@ pub fn process_execution_read(raw: u64, output: u64, length: u64) -> u64 {
         Ok(usage) => usage,
         Err(error) => return error,
     };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&usage as *const mnu_abi::ProcessExecutionUsage).cast::<u8>(),
-            core::mem::size_of::<mnu_abi::ProcessExecutionUsage>(),
-        )
-    };
-    crate::syscall::copy_to_user_native(output, bytes)
+    let bytes = usage.encode();
+    crate::syscall::copy_to_user_native(output, &bytes)
         .map(|_| SUCCESS)
         .unwrap_or_else(Error::into_raw)
 }

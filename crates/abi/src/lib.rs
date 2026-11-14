@@ -2,18 +2,18 @@
 
 /// ブートローダーからmnuへ渡す起動情報のABIです。
 pub mod boot;
-/// Boot-selected initial image and opaque resources, without pathname policy.
-pub mod boot_module;
 /// Boot-selected native modules, with checked ranges and numeric adapters.
 pub mod boot_extensions;
+/// Boot-selected initial image and opaque resources, without pathname policy.
+pub mod boot_module;
 
 /// Canonical metadata for named capabilities shared by kernel and user space.
 pub mod capability;
 pub mod completion;
 pub mod diagnostic;
 pub mod handle_snapshot;
-pub mod memory_map;
 pub mod memory_copy;
+pub mod memory_map;
 pub mod memory_update;
 pub mod status;
 
@@ -26,9 +26,9 @@ pub mod hypervisor;
 /// mnuの性能計測結果をユーザー空間へ渡す固定ABIです。
 pub mod performance;
 
+pub mod process_create;
 /// Relocatable initial-stack image for native process image replacement.
 pub mod process_image;
-pub mod process_create;
 
 /// Generic user-space-backed object operation protocol.
 pub mod provider;
@@ -600,6 +600,21 @@ pub struct ProcessExecutionUsage {
     pub ticks_per_second: u64,
     pub reserved: u64,
 }
+
+impl ProcessExecutionUsage {
+    pub const ENCODED_LEN: usize = 32;
+    pub fn encode(self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0; Self::ENCODED_LEN];
+        bytes[0..8].copy_from_slice(&self.user_ticks.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.kernel_ticks.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.ticks_per_second.to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.reserved.to_le_bytes());
+        bytes
+    }
+}
+const _: () =
+    assert!(core::mem::size_of::<ProcessExecutionUsage>() == ProcessExecutionUsage::ENCODED_LEN);
+
 /// Resident user RAM references, counted per mapped leaf, with an independent
 /// peak over this process lifetime. Shared frames count in each address space;
 /// inaccessible retained RAM counts, virtual reservations and devices do not.
@@ -609,6 +624,18 @@ pub struct ProcessMemoryUsage {
     pub current_bytes: u64,
     pub peak_bytes: u64,
 }
+
+impl ProcessMemoryUsage {
+    pub const ENCODED_LEN: usize = 16;
+    pub fn encode(self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0; Self::ENCODED_LEN];
+        bytes[0..8].copy_from_slice(&self.current_bytes.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.peak_bytes.to_le_bytes());
+        bytes
+    }
+}
+const _: () =
+    assert!(core::mem::size_of::<ProcessMemoryUsage>() == ProcessMemoryUsage::ENCODED_LEN);
 
 /// A snapshot of this process's kernel-managed initial stack.
 ///
@@ -647,6 +674,21 @@ pub struct ProcessImageInfo {
     pub reserved: u32,
     pub digest: [u8; 32],
 }
+
+impl ProcessImageInfo {
+    pub const ENCODED_LEN: usize = 56;
+    pub fn encode(self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0; Self::ENCODED_LEN];
+        bytes[0..8].copy_from_slice(&self.process_id.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.image_revision.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.digest_kind.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.reserved.to_le_bytes());
+        bytes[24..56].copy_from_slice(&self.digest);
+        bytes
+    }
+}
+const _: () = assert!(core::mem::size_of::<ProcessImageInfo>() == ProcessImageInfo::ENCODED_LEN);
+
 pub const PROCESS_STATE_EXITED: u32 = 2;
 /// Poll without sleeping when passed as a `HandleWaitMany` deadline.
 pub const HANDLE_WAIT_POLL: u64 = 0;
@@ -678,6 +720,20 @@ pub struct ProcessStatus {
     /// Observed through the same retained WAIT reference as lifecycle state.
     pub image_revision: u64,
 }
+
+impl ProcessStatus {
+    pub const ENCODED_LEN: usize = 32;
+    pub fn encode(self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0; Self::ENCODED_LEN];
+        bytes[0..8].copy_from_slice(&self.process_id.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.state.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.reserved.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.exit_code.to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.image_revision.to_le_bytes());
+        bytes
+    }
+}
+const _: () = assert!(core::mem::size_of::<ProcessStatus>() == ProcessStatus::ENCODED_LEN);
 
 /// Initial userspace register state for a native thread.
 ///
@@ -822,6 +878,30 @@ pub struct HandleWaitItem {
     pub interests: u64,
     pub observed: u64,
 }
+
+impl HandleWaitItem {
+    pub const ENCODED_LEN: usize = 24;
+    pub fn encode(self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0; Self::ENCODED_LEN];
+        bytes[0..4].copy_from_slice(&self.handle.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.minimum_write_bytes.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.interests.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.observed.to_le_bytes());
+        bytes
+    }
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::ENCODED_LEN {
+            return None;
+        }
+        Some(Self {
+            handle: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            minimum_write_bytes: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            interests: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
+            observed: u64::from_le_bytes(bytes[16..24].try_into().ok()?),
+        })
+    }
+}
+const _: () = assert!(core::mem::size_of::<HandleWaitItem>() == HandleWaitItem::ENCODED_LEN);
 
 /// An entry precondition on a readable, aligned word in the caller's memory.
 /// The wait returns without sleeping when its value differs from `expected`.

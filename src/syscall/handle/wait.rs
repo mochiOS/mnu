@@ -207,10 +207,21 @@ pub(super) fn copy_wait_items_to_user(
     items_ptr: u64,
     items: &[mnu_abi::HandleWaitItem],
 ) -> Result<(), u64> {
-    let bytes = unsafe {
-        core::slice::from_raw_parts(items.as_ptr().cast::<u8>(), core::mem::size_of_val(items))
-    };
-    crate::syscall::copy_to_user_native(items_ptr, bytes).map_err(mnu_abi::status::Error::into_raw)
+    use mnu_abi::HandleWaitItem;
+    let mut bytes = [0; HandleWaitItem::ENCODED_LEN * mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS];
+    let length = items
+        .len()
+        .checked_mul(HandleWaitItem::ENCODED_LEN)
+        .filter(|length| *length <= bytes.len())
+        .ok_or(mnu_abi::status::Error::InvalidArgument.into_raw())?;
+    for (item, output) in items
+        .iter()
+        .zip(bytes[..length].chunks_exact_mut(HandleWaitItem::ENCODED_LEN))
+    {
+        output.copy_from_slice(&item.encode());
+    }
+    crate::syscall::copy_to_user_native(items_ptr, &bytes[..length])
+        .map_err(mnu_abi::status::Error::into_raw)
 }
 
 /// Waits until one of the supplied process-local object handles observes an
@@ -253,10 +264,20 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
     }
     items.resize(count, mnu_abi::HandleWaitItem::default());
     if byte_len != 0 {
-        let bytes =
-            unsafe { core::slice::from_raw_parts_mut(items.as_mut_ptr().cast::<u8>(), byte_len) };
-        if let Err(error) = crate::syscall::copy_from_user_native(items_ptr, bytes) {
+        let mut bytes =
+            [0; mnu_abi::HandleWaitItem::ENCODED_LEN * mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS];
+        if let Err(error) = crate::syscall::copy_from_user_native(items_ptr, &mut bytes[..byte_len])
+        {
             return error.into_raw();
+        }
+        for (item, input) in items
+            .iter_mut()
+            .zip(bytes[..byte_len].chunks_exact(mnu_abi::HandleWaitItem::ENCODED_LEN))
+        {
+            let Some(decoded) = mnu_abi::HandleWaitItem::decode(input) else {
+                return Error::InvalidArgument.into_raw();
+            };
+            *item = decoded;
         }
     }
     let current = match crate::task::current_thread_id() {
