@@ -1738,6 +1738,22 @@ where
     table.get_mut(id).map(f)
 }
 
+/// Keep a root alive and exclude all VM writers while lending page-edit
+/// authority. The callback cannot retain that authority after releasing PROC.
+pub(crate) fn with_process_vm<R>(
+    id: ProcessId,
+    operation: impl for<'vm> FnOnce(&'vm mut Process, &mut crate::mem::paging::TableEdit<'vm>) -> R,
+) -> Option<R> {
+    let mut table = PROCESS_TABLE.lock();
+    let process = table.get_mut(id)?;
+    let root = process.page_table()?;
+    let mut exclusion = ();
+    // SAFETY: PROCESS_TABLE is held for this entire callback and owns all
+    // published process roots. The local borrow cannot escape the callback.
+    let mut edit = unsafe { crate::mem::paging::TableEdit::new(root, &mut exclusion) }.ok()?;
+    Some(operation(process, &mut edit))
+}
+
 /// Borrow two distinct live processes under one table lock, without exposing
 /// partially committed authority changes to removal or another transfer.
 pub(crate) fn with_process_pair_mut<R>(

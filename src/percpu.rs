@@ -239,7 +239,11 @@ pub(crate) fn verify_syscall_frame_allocation_rollback() -> crate::result::Resul
     Ok(())
 }
 
-pub fn map_syscall_shared_region_in_table(table_phys: u64) -> crate::result::Result<()> {
+/// # Safety
+/// The caller exclusively owns this unpublished page-table hierarchy.
+pub(crate) unsafe fn map_syscall_shared_region_in_table(
+    table_phys: u64,
+) -> crate::result::Result<()> {
     for cpu_id in 0..MAX_CPUS {
         let state_phys = SYSCALL_STATE_PHYS[cpu_id].load(Ordering::SeqCst);
         let stack_phys = SYSCALL_STACK_PHYS[cpu_id].load(Ordering::SeqCst);
@@ -409,10 +413,11 @@ pub(crate) fn begin_thread_switch(outgoing: u64) -> *mut u64 {
 /// A nonzero handoff marker also protects the outgoing stack and context after
 /// current_thread_id has already changed to the incoming execution context.
 pub(crate) fn thread_is_cpu_referenced(thread_id: u64) -> bool {
-    thread_id != 0 && CPU_STATES.iter().any(|state| {
-        state.current_thread_id.load(Ordering::SeqCst) == thread_id
-            || state.switching_from_thread_id.load(Ordering::SeqCst) == thread_id
-    })
+    thread_id != 0
+        && CPU_STATES.iter().any(|state| {
+            state.current_thread_id.load(Ordering::SeqCst) == thread_id
+                || state.switching_from_thread_id.load(Ordering::SeqCst) == thread_id
+        })
 }
 
 pub fn set_current_thread_raw_id(id: u64) {

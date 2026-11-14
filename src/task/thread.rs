@@ -6,7 +6,8 @@ use x86_64::VirtAddr;
 use super::context::Context;
 use super::ids::{ProcessId, ThreadId, ThreadState};
 mod stack_image;
-pub use stack_image::{prepare_kernel_stack_user_table, PreparedKernelStack};
+pub(crate) use stack_image::prepare_kernel_stack_user_table;
+pub use stack_image::PreparedKernelStack;
 
 const THREAD_UPCALL_QUEUE_CAPACITY: usize = 16;
 
@@ -447,7 +448,7 @@ fn release_stack_pages(base: u64, page_count: usize, user_page_table: u64) -> bo
     success
 }
 
-fn map_stack_page_in_user_table(table: u64, address: u64, physical: u64) -> bool {
+unsafe fn map_stack_page_in_user_table(table: u64, address: u64, physical: u64) -> bool {
     table == 0
         || (crate::mem::paging::translate_addr_in_table(table, VirtAddr::new(address)).is_none()
             && crate::mem::paging::map_page_in_table(table, address, physical, true, false).is_ok())
@@ -496,10 +497,16 @@ fn detach_kernel_stack_user_table(base: u64) -> bool {
 }
 
 pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
-    allocate_kernel_stack_in_table(size, 0)
+    // SAFETY: zero requests no userspace-root alias.
+    unsafe { allocate_kernel_stack_in_table(size, 0) }
 }
 
-pub fn allocate_kernel_stack_in_table(size: usize, user_page_table: u64) -> Option<u64> {
+/// # Safety
+/// Retain the supplied root and exclude hierarchy writers until this returns.
+pub(crate) unsafe fn allocate_kernel_stack_in_table(
+    size: usize,
+    user_page_table: u64,
+) -> Option<u64> {
     use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
 
     reclaim_current_cpu_kernel_stack();

@@ -54,10 +54,11 @@ pub fn thread_create(context_ptr: u64, context_len: u64) -> u64 {
         return Error::NotReady.into_raw();
     };
     let kstack_size = crate::config::kernel().exec.kernel_thread_stack_size;
-    let page_table = crate::task::with_process(pid, |process| process.page_table())
-        .flatten()
-        .unwrap_or(0);
-    let kstack = match crate::task::allocate_kernel_stack_in_table(kstack_size, page_table) {
+    let kstack = match crate::task::process::with_process_vm(pid, |_, edit| unsafe {
+        crate::task::allocate_kernel_stack_in_table(kstack_size, edit.table())
+    })
+    .flatten()
+    {
         Some(a) => a,
         None => return Error::ResourceUnavailable.into_raw(),
     };

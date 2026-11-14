@@ -1020,10 +1020,10 @@ fn try_grow_user_stack(fault_addr: u64) -> bool {
     // Capture, admission, PTE edits and metadata publication share the VM
     // writer lock with faults/unmap/resize. A reservation is not stack space,
     // even when its backing is absent and its PTEs are currently unused.
-    crate::task::with_process_mut(pid, |process| {
+    crate::task::process::with_process_vm(pid, |process, edit| {
         let stack_bottom = process.stack_bottom();
         let stack_top = process.stack_top();
-        let Some(page_table) = process.page_table() else {
+        let Some(_page_table) = process.page_table() else {
             return false;
         };
         if stack_bottom == 0 || stack_top == 0 || fault_addr >= stack_bottom {
@@ -1038,16 +1038,9 @@ fn try_grow_user_stack(fault_addr: u64) -> bool {
         if crate::mem::user_stack::collides(process, new_page, map_size) {
             return false;
         }
-        if crate::mem::paging::map_and_copy_segment_to(
-            page_table,
-            new_page,
-            0,
-            map_size,
-            &[],
-            true,
-            false,
-        )
-        .is_err()
+        if edit
+            .map_segment(new_page, 0, map_size, &[], true, false)
+            .is_err()
         {
             return false;
         }

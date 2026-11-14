@@ -1,8 +1,8 @@
 //! A prepared stack alias must not detach the running image's alias or change
 //! stack ownership while a later image-preparation operation can still fail.
 use super::{
-    KSTACK_PAGE_BYTES, KSTACK_SLOT_RESERVED, KSTACK_SLOTS, KernelStackSlot, VirtAddr,
-    map_stack_page_in_user_table, stack_slot_index, unmap_stack_from_table,
+    map_stack_page_in_user_table, stack_slot_index, unmap_stack_from_table, KernelStackSlot,
+    VirtAddr, KSTACK_PAGE_BYTES, KSTACK_SLOTS, KSTACK_SLOT_RESERVED,
 };
 
 pub struct PreparedKernelStack {
@@ -14,7 +14,12 @@ pub struct PreparedKernelStack {
     committed: bool,
 }
 
-pub fn prepare_kernel_stack_user_table(base: u64, target: u64) -> Option<PreparedKernelStack> {
+/// # Safety
+/// The target root remains owned and VM-exclusive through preparation.
+pub(crate) unsafe fn prepare_kernel_stack_user_table(
+    base: u64,
+    target: u64,
+) -> Option<PreparedKernelStack> {
     if target == 0 || target & 4095 != 0 {
         return None;
     }

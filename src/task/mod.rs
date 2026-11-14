@@ -48,10 +48,9 @@ pub use scheduler::{
 };
 pub(crate) use thread::ipc_slot_index_and_generation_by_u64;
 pub use thread::{
-    add_thread, allocate_kernel_stack, allocate_kernel_stack_in_table, count_threads_by_state,
-    current_thread_id, current_thread_slot, for_each_thread, free_kernel_stack,
-    kernel_stack_high_water_bytes, kernel_stack_table_in_use, peek_next_thread,
-    prepare_kernel_stack_user_table, reclaim_current_cpu_kernel_stack, remove_thread,
+    add_thread, allocate_kernel_stack, count_threads_by_state, current_thread_id,
+    current_thread_slot, for_each_thread, free_kernel_stack, kernel_stack_high_water_bytes,
+    kernel_stack_table_in_use, peek_next_thread, reclaim_current_cpu_kernel_stack, remove_thread,
     resume_process_threads, retire_current_kernel_stack, set_current_thread, set_thread_state,
     set_thread_state_at_slot, suspend_process_threads, thread_count, thread_id_exists,
     thread_slot_index, thread_slot_index_and_generation, thread_slot_index_and_generation_by_u64,
@@ -65,3 +64,5 @@ pub use usermode::{jump_to_usermode, resume_usermode};
 pub(crate) fn current_process_id() -> Option<ProcessId> {
     current_thread_id().and_then(|id| with_thread(id, |thread| thread.process_id()))
 }
+
+pub(crate) use thread::{allocate_kernel_stack_in_table, prepare_kernel_stack_user_table};

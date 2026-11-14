@@ -2,6 +2,9 @@
 //!
 //! 仮想メモリとページテーブル管理
 
+mod edit;
+pub(crate) use edit::TableEdit;
+
 use crate::info;
 use crate::mem::frame;
 use crate::mem::frame_refs::FrameReferenceTable;
@@ -38,8 +41,7 @@ const COPY_ON_WRITE: PageTableFlags =
 const COW_WRITE_DISABLED: PageTableFlags =
     PageTableFlags::from_bits_retain(super::cow_access::WRITE_DISABLED);
 
-const RESIDENT_RAM: PageTableFlags =
-    PageTableFlags::from_bits_retain(super::residency::RAM_LEAF);
+const RESIDENT_RAM: PageTableFlags = PageTableFlags::from_bits_retain(super::residency::RAM_LEAF);
 
 fn record_user_leaf_change(table: u64, before: PageTableFlags, after: PageTableFlags) {
     super::residency_native::transition(table, before.bits(), after.bits());
@@ -550,7 +552,8 @@ pub fn has_user_page_entry_in_table(table_phys: u64, page_addr: u64) -> bool {
 pub(crate) fn user_page_is_resident(table: u64, page: u64) -> bool {
     with_user_leaf_entry_mut(table, page, |entry| {
         super::residency::is_resident(entry.flags().bits())
-    }).unwrap_or(false)
+    })
+    .unwrap_or(false)
 }
 
 #[path = "paging/suspension.rs"]
@@ -587,7 +590,9 @@ pub fn protect_user_page_if_mapped(
         with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
             let mut flags = entry.flags();
             flags.insert(
-                PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::USER_ACCESSIBLE
+                    | PageTableFlags::NO_EXECUTE,
             );
             flags.remove(PageTableFlags::WRITABLE | COW_WRITE_DISABLED);
             entry.set_addr(entry.addr(), flags);
@@ -627,9 +632,10 @@ pub fn protect_user_page_if_mapped(
         } else {
             flags.insert(PageTableFlags::NO_EXECUTE);
         }
-        flags = PageTableFlags::from_bits_retain(
-            super::cow_access::with_write_access(flags.bits(), writable),
-        );
+        flags = PageTableFlags::from_bits_retain(super::cow_access::with_write_access(
+            flags.bits(),
+            writable,
+        ));
         entry.set_addr(entry.addr(), flags);
     })
     .ok_or(Kernel::Memory(Memory::NotMapped))?;
@@ -920,8 +926,7 @@ pub(crate) fn is_user_range_occupied_in_table(table_phys: u64, addr: u64, len: u
     let end = ((addr + len - 1) & !4095) + 4096;
     // Placement callers retain the target root under PROC. A non-present
     // user leaf still owns storage and must not be overwritten by a new map.
-    unsafe { next_user_page_entry(table_phys, start, end) }
-        .map_or(true, |page| page.is_some())
+    unsafe { next_user_page_entry(table_phys, start, end) }.map_or(true, |page| page.is_some())
 }
 
 pub fn is_user_range_writable_in_table(table_phys: u64, addr: u64, len: u64) -> bool {
@@ -1291,7 +1296,7 @@ pub fn create_user_page_table() -> Result<u64> {
         );
         return Err(error);
     }
-    if let Err(error) = crate::percpu::map_syscall_shared_region_in_table(new_l4_phys) {
+    if let Err(error) = unsafe { crate::percpu::map_syscall_shared_region_in_table(new_l4_phys) } {
         crate::kernel::early_serial("paging: syscall region mapping failed\n");
         crate::warn!(
             "Failed to map syscall shared region into user page table: {:?}",
@@ -1707,21 +1712,35 @@ pub fn clone_user_page_table(
                     match policy {
                         ForkPagePolicy::Exclude => continue,
                         ForkPagePolicy::Shared => {
-                            share_page(dst_table_phys, dst_l4, vaddr, pte.addr().as_u64(), src_flags, phys_off)?;
+                            share_page(
+                                dst_table_phys,
+                                dst_l4,
+                                vaddr,
+                                pte.addr().as_u64(),
+                                src_flags,
+                                phys_off,
+                            )?;
                             shared_pages += 1;
                         }
                         ForkPagePolicy::Private | ForkPagePolicy::PrivateWritable => {
-                            let shared_flags = Flags::from_bits_retain(
-                                super::cow_access::clone_private(
-                                    src_flags.bits(), policy == ForkPagePolicy::PrivateWritable,
-                                ),
-                            );
+                            let shared_flags =
+                                Flags::from_bits_retain(super::cow_access::clone_private(
+                                    src_flags.bits(),
+                                    policy == ForkPagePolicy::PrivateWritable,
+                                ));
                             pte.set_addr(pte.addr(), shared_flags);
                             // Revoke cached write access before sharing the
                             // frame. Also required when destination setup
                             // below fails: the source PTE is already COW.
                             flush_page_if_active(src_table_phys, vaddr);
-                            share_page(dst_table_phys, dst_l4, vaddr, pte.addr().as_u64(), shared_flags, phys_off)?;
+                            share_page(
+                                dst_table_phys,
+                                dst_l4,
+                                vaddr,
+                                pte.addr().as_u64(),
+                                shared_flags,
+                                phys_off,
+                            )?;
                             shared_pages += 1;
                         }
                     }
@@ -1830,7 +1849,10 @@ fn ensure_user_page_table_hierarchy(l4_virt: u64, vaddr: u64, phys_off: u64) -> 
 ///
 /// ## Returns
 /// 成功した場合は `Ok(())`、失敗した場合はエラー
-pub fn map_and_copy_segment_to(
+/// # Safety
+/// Retain this root and exclude every page-table writer through the edit.
+/// Prefer TableEdit for callers outside bootstrap/hierarchy internals.
+pub(crate) unsafe fn map_and_copy_segment_to(
     table_phys: u64,
     vaddr: u64,
     filesz: u64,
@@ -2219,8 +2241,8 @@ pub fn unmap_range_in_table(table_phys: u64, addr: u64, length: u64) -> Result<(
             page_addr += 4096;
             continue;
         }
-        let previous_flags = user_page_flags_in_table(table_phys, page_addr)
-            .unwrap_or_else(PageTableFlags::empty);
+        let previous_flags =
+            user_page_flags_in_table(table_phys, page_addr).unwrap_or_else(PageTableFlags::empty);
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
         if let Ok((frame, flush)) = pt.unmap(page) {
             record_user_leaf_change(table_phys, previous_flags, PageTableFlags::empty());
@@ -2258,8 +2280,8 @@ pub fn unmap_range_in_table_preserve_frames(table_phys: u64, addr: u64, length: 
             page_addr += 4096;
             continue;
         }
-        let previous_flags = user_page_flags_in_table(table_phys, page_addr)
-            .unwrap_or_else(PageTableFlags::empty);
+        let previous_flags =
+            user_page_flags_in_table(table_phys, page_addr).unwrap_or_else(PageTableFlags::empty);
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
         if let Ok((_, flush)) = pt.unmap(page) {
             // do not deallocate the physical frame; ownership transferred
@@ -2461,9 +2483,9 @@ pub fn map_physical_range_to_user(
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_start + i * 4096));
         let frame = PhysFrame::containing_address(PhysAddr::new(phys_start + i * 4096));
 
-        let previous_flags = with_user_leaf_entry_mut(
-            table_phys, virt_start + i * 4096, |entry| entry.flags(),
-        ).unwrap_or_else(Flags::empty);
+        let previous_flags =
+            with_user_leaf_entry_mut(table_phys, virt_start + i * 4096, |entry| entry.flags())
+                .unwrap_or_else(Flags::empty);
         let map_result = unsafe {
             let mut alloc_lock = frame::lock_allocator();
             let alloc_ref = alloc_lock
@@ -2476,7 +2498,7 @@ pub fn map_physical_range_to_user(
             Ok(flush) => {
                 flush.ignore();
                 record_user_leaf_change(table_phys, previous_flags, flags);
-            },
+            }
             Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => unsafe {
                 if let Ok((_, flush)) = pt.unmap(page) {
                     flush.ignore();
@@ -2601,7 +2623,9 @@ pub fn virt_to_phys_in_table(table_phys: u64, virt_addr: u64) -> Option<u64> {
 /// # Returns
 /// 成功時: Ok(())
 /// エラー時: Err(Kernel::Memory(Memory::*)
-pub fn map_page_in_table(
+/// # Safety
+/// Retain this root and exclude every hierarchy writer for the full call.
+pub(crate) unsafe fn map_page_in_table(
     table_phys: u64,
     virt_addr: u64,
     phys_addr: u64,

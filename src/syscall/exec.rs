@@ -160,6 +160,20 @@ impl UserPageTableGuard {
         Self(Some(GuardedTable::Image(root)))
     }
 
+    fn edit(&mut self) -> crate::result::Result<crate::mem::paging::TableEdit<'_>> {
+        let table = match self.0.as_ref() {
+            Some(GuardedTable::Raw(table)) => *table,
+            Some(GuardedTable::Image(_)) | None => {
+                return Err(crate::Kernel::Memory(
+                    crate::result::Memory::PermissionDenied,
+                ))
+            }
+        };
+        // SAFETY: Raw owns a freshly allocated unpublished root. No process
+        // or detached-image registry can edit it before construction finishes.
+        unsafe { crate::mem::paging::TableEdit::new(table, self) }
+    }
+
     fn disarm(&mut self) {
         self.0.take();
     }
@@ -710,7 +724,7 @@ pub(crate) fn launch_bootstrap_image(
 }
 
 pub(crate) fn map_initial_tls(
-    table_phys: u64,
+    edit: &mut crate::mem::paging::TableEdit<'_>,
     aslr_seed: u64,
 ) -> Result<u64, mnu_abi::status::Error> {
     use mnu_abi::status::Error;
@@ -725,8 +739,7 @@ pub(crate) fn map_initial_tls(
         .ok_or(Error::InvalidArgument)?;
     let mut tls_data = crate::util::object_snapshot::zeroed_native(length)?;
     tls_data[..8].copy_from_slice(&tls_base.to_ne_bytes());
-    match crate::mem::paging::map_and_copy_segment_to(
-        table_phys,
+    match edit.map_segment(
         tls_base,
         exec.initial_tls_size,
         exec.initial_tls_size,
@@ -861,7 +874,11 @@ fn exec_with_data(prepared: PreparedLaunch<'_>, measurement: &mut ExecMeasuremen
             phentsize,
             phnum,
             mut deferred_zero_regions,
-        } = match map_elf_image(data, new_pt_phys, measurement) {
+        } = match new_pt_guard
+            .edit()
+            .map_err(mapping_error_native)
+            .and_then(|mut edit| map_elf_image(data, &mut edit, measurement))
+        {
             Ok(layout) => layout,
             Err(error) => {
                 crate::kernel::early_serial("exec: map ELF failed\n");
@@ -906,30 +923,25 @@ fn exec_with_data(prepared: PreparedLaunch<'_>, measurement: &mut ExecMeasuremen
         );
 
         // Map the configured lower stack pages as zero-filled (writable, non-executable stack)
-        if let Err(e) = crate::mem::paging::map_and_copy_segment_to(
-            new_pt_phys,
-            stack_base_vaddr,
-            0,
-            (exec.user_stack_size_pages - 1) as u64 * 4096,
-            &[],
-            true,
-            false,
-        ) {
+        if let Err(e) = new_pt_guard.edit().and_then(|mut edit| {
+            edit.map_segment(
+                stack_base_vaddr,
+                0,
+                (exec.user_stack_size_pages - 1) as u64 * 4096,
+                &[],
+                true,
+                false,
+            )
+        }) {
             crate::kernel::early_serial("exec: map stack lower failed\n");
             crate::warn!("Failed to allocate user stack lower: {:?}", e);
             return mapping_error_native(e).into_raw();
         }
         // Map the top page with args (writable, non-executable stack)
         let top_page_vaddr = stack_end_vaddr - 4096;
-        if let Err(e) = crate::mem::paging::map_and_copy_segment_to(
-            new_pt_phys,
-            top_page_vaddr,
-            4096,
-            4096,
-            &page_data,
-            true,
-            false,
-        ) {
+        if let Err(e) = new_pt_guard.edit().and_then(|mut edit| {
+            edit.map_segment(top_page_vaddr, 4096, 4096, &page_data, true, false)
+        }) {
             crate::kernel::early_serial("exec: map stack top failed\n");
             crate::warn!("Failed to allocate user stack top: {:?}", e);
             return mapping_error_native(e).into_raw();
@@ -937,7 +949,11 @@ fn exec_with_data(prepared: PreparedLaunch<'_>, measurement: &mut ExecMeasuremen
 
         crate::debug!("User stack allocated successfully");
 
-        let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
+        let initial_fs_base = match new_pt_guard
+            .edit()
+            .map_err(mapping_error_native)
+            .and_then(|mut edit| map_initial_tls(&mut edit, aslr_seed))
+        {
             Ok(base) => base,
             Err(error) => {
                 crate::kernel::early_serial("exec: map TLS failed\n");
@@ -1009,19 +1025,25 @@ fn exec_with_data(prepared: PreparedLaunch<'_>, measurement: &mut ExecMeasuremen
         }
         // allocate kernel stack for the new thread
         let kstack_size = crate::config::kernel().exec.kernel_thread_stack_size;
-        let kstack =
-            match crate::task::thread::allocate_kernel_stack_in_table(kstack_size, new_pt_phys) {
-                Some(a) => a,
-                None => {
-                    crate::warn!("Failed to allocate kernel stack for thread");
-                    let _ = crate::task::remove_process(pid);
-                    if is_boot_init {
-                        let _ = release_init_pid(pid.as_u64());
-                    }
-                    // The page-table guard still owns this table on this path.
-                    return Error::ResourceUnavailable.into_raw();
+        let kstack = match crate::task::process::with_process_vm(pid, |_, edit| {
+            // SAFETY: this callback owns the VM lock and retains this root.
+            unsafe {
+                crate::task::thread::allocate_kernel_stack_in_table(kstack_size, edit.table())
+            }
+        })
+        .flatten()
+        {
+            Some(a) => a,
+            None => {
+                crate::warn!("Failed to allocate kernel stack for thread");
+                let _ = crate::task::remove_process(pid);
+                if is_boot_init {
+                    let _ = release_init_pid(pid.as_u64());
                 }
-            };
+                // The page-table guard still owns this table on this path.
+                return Error::ResourceUnavailable.into_raw();
+            }
+        };
         new_pt_guard.disarm();
 
         // ユーザーモードスレッドを作成
@@ -1184,7 +1206,11 @@ fn replace_current_process_image(
         phentsize,
         phnum,
         mut deferred_zero_regions,
-    } = match map_elf_image(data, new_pt_phys, &mut measurement) {
+    } = match new_pt_guard
+        .edit()
+        .map_err(mapping_error_native)
+        .and_then(|mut edit| map_elf_image(data, &mut edit, &mut measurement))
+    {
         Ok(layout) => layout,
         Err(error) => return Err(error.into_raw()),
     };
@@ -1199,30 +1225,30 @@ fn replace_current_process_image(
         Ok(stack) => stack,
         Err(error) => return Err(error.into_raw()),
     };
-    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
-        new_pt_phys,
-        stack_base_vaddr,
-        0,
-        (crate::config::kernel().exec.user_stack_size_pages - 1) as u64 * 4096,
-        &[],
-        true,
-        false,
-    ) {
+    if let Err(error) = new_pt_guard.edit().and_then(|mut edit| {
+        edit.map_segment(
+            stack_base_vaddr,
+            0,
+            (crate::config::kernel().exec.user_stack_size_pages - 1) as u64 * 4096,
+            &[],
+            true,
+            false,
+        )
+    }) {
         return Err(mapping_error_native(error).into_raw());
     }
     let top_page_vaddr = stack_end_vaddr - 4096;
-    if let Err(error) = crate::mem::paging::map_and_copy_segment_to(
-        new_pt_phys,
-        top_page_vaddr,
-        4096,
-        4096,
-        &page_data,
-        true,
-        false,
-    ) {
+    if let Err(error) = new_pt_guard
+        .edit()
+        .and_then(|mut edit| edit.map_segment(top_page_vaddr, 4096, 4096, &page_data, true, false))
+    {
         return Err(mapping_error_native(error).into_raw());
     }
-    let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
+    let initial_fs_base = match new_pt_guard
+        .edit()
+        .map_err(mapping_error_native)
+        .and_then(|mut edit| map_initial_tls(&mut edit, aslr_seed))
+    {
         Ok(base) => base,
         Err(error) => return Err(error.into_raw()),
     };
@@ -1246,8 +1272,9 @@ fn replace_current_process_image(
             Some(base) => base,
             None => return Err(Error::NotReady.into_raw()),
         };
-    let stack_mapping = crate::task::prepare_kernel_stack_user_table(kernel_stack, new_pt_phys)
-        .ok_or(Error::ResourceUnavailable.into_raw())?;
+    let stack_mapping =
+        unsafe { crate::task::prepare_kernel_stack_user_table(kernel_stack, new_pt_phys) }
+            .ok_or(Error::ResourceUnavailable.into_raw())?;
     // Quiescence is reversible. In particular, a failed borrowed-PTE/TLB
     // transaction must resume siblings and keep the old stack alias/owner.
     let quiescence = crate::task::scheduler::quiesce_image_siblings(pid, current_tid);
@@ -1700,7 +1727,11 @@ fn create_from_address_space(
         Err(error) => return error.into_raw(),
     };
     let stack_size = crate::config::kernel().exec.kernel_thread_stack_size;
-    let stack = match crate::task::allocate_kernel_stack_in_table(stack_size, table) {
+    let stack = match crate::task::process::with_mapping_table(|_| {
+        // SAFETY: the consumed image root is retained by table_guard; PROC
+        // excludes backing revocation while its kernel alias is constructed.
+        unsafe { crate::task::allocate_kernel_stack_in_table(stack_size, table) }
+    }) {
         Some(stack) => stack,
         None => return Error::ResourceUnavailable.into_raw(),
     };

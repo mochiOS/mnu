@@ -2,10 +2,10 @@ use crate::capability::Capability;
 use crate::syscall::types::SUCCESS;
 use crate::task::{DmaBuffer, ProcessId};
 use core::sync::atomic::{AtomicU64, Ordering};
-use mnu_abi::DmaAllocation;
 use mnu_abi::status::Error;
-use x86_64::PhysAddr;
+use mnu_abi::DmaAllocation;
 use x86_64::structures::paging::PhysFrame;
+use x86_64::PhysAddr;
 
 static NEXT_DMA_HANDLE: AtomicU64 = AtomicU64::new(1);
 const DMA_VA_BASE_MIN: u64 = 0x0000_7000_0000_0000;
@@ -88,6 +88,7 @@ fn install_dma_buffer(
     phys_start: u64,
     size: u64,
     page_count: usize,
+    edit: &mut crate::mem::paging::TableEdit<'_>,
 ) -> Result<u64, InstallError> {
     use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
     if process.page_table() != Some(pt_phys) {
@@ -108,7 +109,7 @@ fn install_dma_buffer(
     for idx in 0..page_count {
         let virt = virt_start + idx as u64 * 4096;
         let phys = phys_start + idx as u64 * 4096;
-        if crate::mem::paging::map_page_in_table(pt_phys, virt, phys, true, true).is_err() {
+        if edit.map_frame(virt, phys, true, true).is_err() {
             // SAFETY: the same process-table guard covers admission, PTE edits
             // and acknowledgements. DMA owns frames separately from its PTEs.
             let mut backend = unsafe { Native::for_process(process, false) };
@@ -177,8 +178,10 @@ pub fn alloc(length: u64, out_ptr: u64) -> u64 {
     crate::performance::record_frame_zero(zero_started, size as usize);
     let handle = NEXT_DMA_HANDLE.fetch_add(1, Ordering::Relaxed);
 
-    let outcome = crate::task::with_process_mut(pid, |process| {
-        install_dma_buffer(process, pid, pt_phys, handle, phys_start, size, page_count)
+    let outcome = crate::task::process::with_process_vm(pid, |process, edit| {
+        install_dma_buffer(
+            process, pid, pt_phys, handle, phys_start, size, page_count, edit,
+        )
     });
     let virt_start = match outcome {
         Some(Ok(start)) => start,

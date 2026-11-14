@@ -234,7 +234,7 @@ fn program_headers(
 #[inline(never)]
 pub(super) fn map_elf_image(
     data: &[u8],
-    table_phys: u64,
+    edit: &mut crate::mem::paging::TableEdit<'_>,
     measurement: &mut ExecMeasurement,
 ) -> Result<ElfImageLayout, Error> {
     let (header, segments) = parse_load_segments(data, measurement)?;
@@ -250,8 +250,7 @@ pub(super) fn map_elf_image(
         let bytes = &data[range];
         measurement
             .load(|| {
-                crate::mem::paging::map_and_copy_segment_to(
-                    table_phys,
+                edit.map_segment(
                     phdr_vaddr,
                     bytes.len() as u64,
                     bytes.len() as u64,
@@ -271,8 +270,7 @@ pub(super) fn map_elf_image(
             .map(|(start, _)| start - segment.p_vaddr)
             .unwrap_or(segment.p_memsz);
         let mapped = measurement.load(|| {
-            crate::mem::paging::map_and_copy_segment_to(
-                table_phys,
+            edit.map_segment(
                 segment.p_vaddr,
                 segment.p_filesz,
                 eager_memory_size,

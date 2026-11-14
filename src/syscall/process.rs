@@ -608,7 +608,7 @@ pub(crate) fn handle_user_memory_fault(
         _ => None,
     };
 
-    let result = crate::task::with_process_mut(pid, |process| {
+    let result = crate::task::process::with_process_vm(pid, |process, edit| {
         if process.page_table() != Some(pt_phys) {
             return Err(MemoryFault::Operation(Error::InvalidArgument.into()));
         }
@@ -668,9 +668,8 @@ pub(crate) fn handle_user_memory_fault(
                 (Some(_), Some(page)) => page.as_slice(),
                 _ => return Err(MemoryFault::Operation(Error::InvalidArgument.into())),
             };
-            let install = || {
-                crate::mem::paging::map_and_copy_segment_to(
-                    pt_phys,
+            let mut install = || {
+                edit.map_segment(
                     page_addr,
                     source.len() as u64,
                     4096,
