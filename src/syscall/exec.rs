@@ -1153,6 +1153,7 @@ fn check_image_byte_ceiling(
     )
     .map_err(|error| match error {
         mapping_usage::Error::InvalidRange => Error::InvalidAddress,
+        mapping_usage::Error::WorkLimit => Error::ResourceUnavailable,
         mapping_usage::Error::Backend(_) => Error::BackingFailure,
     })?;
     if !mapping_usage::permits(used, 0, byte_ceiling) {

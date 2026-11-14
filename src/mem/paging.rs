@@ -7,7 +7,7 @@ mod protection;
 mod reserved;
 pub(crate) use edit::TableEdit;
 pub(crate) use protection::PreparedProtection;
-pub(crate) use reserved::check_user_mapping_range;
+pub(crate) use reserved::{check_user_mapping_range, user_mapping_conflict};
 
 use crate::info;
 use crate::mem::frame;
@@ -544,10 +544,24 @@ fn with_user_leaf_entry_mut<R>(
 /// Retain the root and exclude every PTE writer until the discovered leaf
 /// has been used. Discovery itself never edits permissions or ownership.
 pub(crate) unsafe fn next_user_page_entry(table: u64, start: u64, end: u64) -> Result<Option<u64>> {
+    unsafe {
+        next_user_page_entry_bounded(table, start, end, &mut super::scan_budget::Budget::new())
+    }
+}
+
+pub(crate) unsafe fn next_user_page_entry_bounded(
+    table: u64,
+    start: u64,
+    end: u64,
+    budget: &mut super::scan_budget::Budget,
+) -> Result<Option<u64>> {
     use super::sparse_page_walk::{self, Entry};
     let offset = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
     let _smap_guard = crate::cpu::SmapSmepGuard::new();
     sparse_page_walk::next(table, start, end, |table, index, level| {
+        if !budget.take(1) {
+            return Err(Kernel::Memory(Memory::OutOfMemory));
+        }
         let pointer = table
             .checked_add(offset)
             .ok_or(Kernel::Memory(Memory::InvalidAddress))?;

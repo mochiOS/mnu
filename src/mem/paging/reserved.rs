@@ -1,5 +1,6 @@
 //! User placement must preserve the mappings needed to enter the kernel.
 use super::{Kernel, Memory, PageTable, PageTableFlags as Flags, Result};
+use crate::mem::scan_budget::Budget;
 use crate::mem::sparse_page_walk::{self, Entry};
 
 /// Bootstrap copies the first GiB's supervisor identity aliases into each
@@ -12,8 +13,32 @@ fn bootstrap_identity(address: u64, physical: u64) -> bool {
 /// Check the complete range before allocation or hierarchy/PTE mutation.
 /// The caller retains the root and excludes VM writers through publication.
 pub(crate) fn check_user_mapping_range(table: u64, start: u64, length: u64) -> Result<()> {
+    if first_conflict(table, start, length, true, &mut Budget::new())?.is_some() {
+        return Err(Kernel::Memory(Memory::PermissionDenied));
+    }
+    Ok(())
+}
+
+/// Return the end of an occupied span, including supervisor mappings and
+/// non-present retained user leaves. Caller excludes VM writers throughout.
+pub(crate) fn user_mapping_conflict(
+    table: u64,
+    start: u64,
+    length: u64,
+    budget: &mut Budget,
+) -> Result<Option<u64>> {
+    first_conflict(table, start, length, false, budget)
+}
+
+fn first_conflict(
+    table: u64,
+    start: u64,
+    length: u64,
+    allow_user: bool,
+    budget: &mut Budget,
+) -> Result<Option<u64>> {
     if length == 0 {
-        return Ok(());
+        return Ok(None);
     }
     let last = start
         .checked_add(length - 1)
@@ -21,17 +46,20 @@ pub(crate) fn check_user_mapping_range(table: u64, start: u64, length: u64) -> R
         .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
     let start = start & !4095;
     let end = (last & !4095) + 4096;
-    if super::required_kernel_ranges()
+    if let Some((_, limit)) = super::required_kernel_ranges()
         .into_iter()
-        .any(|(base, limit)| base < limit && start < limit && base < end)
+        .find(|&(base, limit)| base < limit && start < limit && base < end)
     {
-        return Err(Kernel::Memory(Memory::PermissionDenied));
+        return Ok(Some(limit));
     }
     let offset = super::physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
     let _smap = crate::cpu::SmapSmepGuard::new();
     let mut prefix = 0;
     let mut user_path = true;
-    let occupied = sparse_page_walk::next(table, start, end, |table, index, level| {
+    let occupied = sparse_page_walk::next_span(table, start, end, |table, index, level| {
+        if !budget.take(1) {
+            return Err(Kernel::Memory(Memory::OutOfMemory));
+        }
         let pointer = table
             .checked_add(offset)
             .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
@@ -45,26 +73,29 @@ pub(crate) fn check_user_mapping_range(table: u64, start: u64, length: u64) -> R
             return Ok(Entry::Absent);
         }
         if flags.contains(super::KERNEL_MAPPING) {
-            return Err(Kernel::Memory(Memory::PermissionDenied));
+            return Ok(Entry::Leaf);
         }
         if level > 1 && !flags.contains(Flags::PRESENT) {
             return Err(Kernel::Memory(Memory::NotMapped));
         }
         if level > 1 && flags.contains(Flags::HUGE_PAGE) {
-            if flags.contains(Flags::USER_ACCESSIBLE) || level != 2 {
-                return Err(Kernel::Memory(Memory::AlreadyMapped));
-            }
             // Bit 12 is PAT on a 2MiB leaf, not part of its physical base.
             let physical = entry.addr().as_u64() & !((1 << 21) - 1);
-            return if bootstrap_identity(prefix, physical) {
+            return if !flags.contains(Flags::USER_ACCESSIBLE)
+                && level == 2
+                && bootstrap_identity(prefix, physical)
+            {
                 Ok(Entry::Absent)
             } else {
-                Err(Kernel::Memory(Memory::PermissionDenied))
+                Ok(Entry::Leaf)
             };
         }
         if level == 1 {
             return Ok(
-                if user_path || bootstrap_identity(prefix, entry.addr().as_u64()) {
+                if (allow_user && user_path)
+                    || (!flags.contains(Flags::USER_ACCESSIBLE)
+                        && bootstrap_identity(prefix, entry.addr().as_u64()))
+                {
                     Entry::Absent
                 } else {
                     Entry::Leaf
@@ -77,8 +108,5 @@ pub(crate) fn check_user_mapping_range(table: u64, start: u64, length: u64) -> R
         sparse_page_walk::Error::Backend(error) => error,
         _ => Kernel::Memory(Memory::InvalidAddress),
     })?;
-    if occupied.is_some() {
-        return Err(Kernel::Memory(Memory::PermissionDenied));
-    }
-    Ok(())
+    Ok(occupied.map(|(_, end)| end))
 }

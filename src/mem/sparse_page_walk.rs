@@ -19,8 +19,29 @@ pub(crate) fn next<E>(
     root: u64,
     start: u64,
     end: u64,
-    mut inspect: impl FnMut(u64, usize, u8) -> Result<Entry, E>,
+    inspect: impl FnMut(u64, usize, u8) -> Result<Entry, E>,
 ) -> Result<Option<u64>, Error<E>> {
+    find(root, start, end, false, inspect).map(|span| span.map(|(address, _)| address))
+}
+
+/// Placement can skip an entire occupied huge leaf. Revocation's `next`
+/// deliberately continues to reject leaves larger than its 4KiB tokens.
+pub(crate) fn next_span<E>(
+    root: u64,
+    start: u64,
+    end: u64,
+    inspect: impl FnMut(u64, usize, u8) -> Result<Entry, E>,
+) -> Result<Option<(u64, u64)>, Error<E>> {
+    find(root, start, end, true, inspect)
+}
+
+fn find<E>(
+    root: u64,
+    start: u64,
+    end: u64,
+    huge_leaves: bool,
+    mut inspect: impl FnMut(u64, usize, u8) -> Result<Entry, E>,
+) -> Result<Option<(u64, u64)>, Error<E>> {
     if root == 0
         || root & 4095 != 0
         || start & 4095 != 0
@@ -41,7 +62,9 @@ pub(crate) fn next<E>(
                     address = ((address >> shift) + 1) << shift;
                     continue 'search;
                 }
-                Entry::Leaf if level == 1 => return Ok(Some(address)),
+                Entry::Leaf if level == 1 || (huge_leaves && level < 4) => {
+                    return Ok(Some((address, ((address >> shift) + 1) << shift)));
+                }
                 Entry::Branch(child) if level > 1 && child != 0 && child & 4095 == 0 => {
                     table = child;
                 }

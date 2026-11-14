@@ -29,6 +29,7 @@ pub(crate) mod residency;
 pub(crate) mod residency_native;
 pub(crate) mod root_lifetime;
 pub(crate) mod root_lifetime_native;
+pub(crate) mod scan_budget;
 pub mod shared_memory;
 pub(crate) mod shared_pages;
 pub(crate) mod sparse_page_walk;
