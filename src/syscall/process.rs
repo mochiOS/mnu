@@ -652,13 +652,12 @@ pub(crate) fn handle_user_memory_fault(
                 .map_to(pt_phys, page_addr, false, executable)?;
             if is_write {
                 object.mark_page_dirty(*page_index)?;
-                if crate::mem::paging::protect_user_page_if_mapped(
-                    pt_phys, page_addr, true, true, executable,
-                )
-                .is_err()
-                {
-                    return Err(MemoryFault::Operation(Error::ResourceUnavailable.into()));
-                }
+                let mut protection = edit
+                    .prepare_protection(page_addr, true, true, executable)
+                    .map_err(mnu_abi::status::Error::from)?
+                    .ok_or(Error::BackingFailure)?;
+                protection.apply();
+                protection.commit();
             }
         } else {
             // The mapper already zeroes each newly allocated physical frame.

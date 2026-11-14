@@ -3,7 +3,9 @@
 //! 仮想メモリとページテーブル管理
 
 mod edit;
+mod protection;
 pub(crate) use edit::TableEdit;
+pub(crate) use protection::PreparedProtection;
 
 use crate::info;
 use crate::mem::frame;
@@ -559,89 +561,6 @@ pub(crate) fn user_page_is_resident(table: u64, page: u64) -> bool {
 #[path = "paging/suspension.rs"]
 mod suspension;
 pub(crate) use suspension::{suspend_user_page, RecordedUserPage, SuspendedUserPage};
-
-#[inline(never)]
-pub fn protect_user_page_if_mapped(
-    table_phys: u64,
-    page_addr: u64,
-    present: bool,
-    writable: bool,
-    executable: bool,
-) -> Result<bool> {
-    use crate::result::{Kernel, Memory};
-
-    if present && writable && executable {
-        return Err(Kernel::Memory(Memory::PermissionDenied));
-    }
-    let initial_flags = match with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
-        (!entry.is_unused() && entry.flags().contains(PageTableFlags::USER_ACCESSIBLE))
-            .then(|| entry.flags())
-    })
-    .flatten()
-    {
-        Some(flags) => flags,
-        None => return Ok(false),
-    };
-
-    if writable && initial_flags.contains(COPY_ON_WRITE) {
-        // The native protection coordinator has authorized this write grant.
-        // Make a writable COW copy before publishing write access. NX is set
-        // first so restoring RW from RX never creates a transient W+X leaf.
-        with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
-            let mut flags = entry.flags();
-            flags.insert(
-                PageTableFlags::PRESENT
-                    | PageTableFlags::USER_ACCESSIBLE
-                    | PageTableFlags::NO_EXECUTE,
-            );
-            flags.remove(PageTableFlags::WRITABLE | COW_WRITE_DISABLED);
-            entry.set_addr(entry.addr(), flags);
-        })
-        .ok_or(Kernel::Memory(Memory::NotMapped))?;
-        flush_page_if_active(table_phys, page_addr);
-        let resolved = resolve_copy_on_write(table_phys, page_addr);
-        if !matches!(resolved, Ok(true)) {
-            // A failed explicit grant must not leave a formerly read-only
-            // COW reference eligible for a later write fault.
-            with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
-                entry.set_addr(entry.addr(), initial_flags);
-            })
-            .ok_or(Kernel::Memory(Memory::NotMapped))?;
-            flush_page_if_active(table_phys, page_addr);
-            return match resolved {
-                Err(error) => Err(error),
-                _ => Err(Kernel::Memory(Memory::PermissionDenied)),
-            };
-        }
-    }
-
-    with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
-        let mut flags = entry.flags();
-        flags.remove(
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
-        );
-        flags.insert(PageTableFlags::USER_ACCESSIBLE);
-        if present {
-            flags.insert(PageTableFlags::PRESENT);
-            if writable {
-                flags.insert(PageTableFlags::WRITABLE);
-            }
-            if !executable {
-                flags.insert(PageTableFlags::NO_EXECUTE);
-            }
-        } else {
-            flags.insert(PageTableFlags::NO_EXECUTE);
-        }
-        flags = PageTableFlags::from_bits_retain(super::cow_access::with_write_access(
-            flags.bits(),
-            writable,
-        ));
-        entry.set_addr(entry.addr(), flags);
-    })
-    .ok_or(Kernel::Memory(Memory::NotMapped))?;
-    flush_page_if_active(table_phys, page_addr);
-    Ok(true)
-}
 
 pub(crate) fn retain_shared_user_frame(phys: u64) -> Result<()> {
     SHARED_USER_FRAMES.lock().retain(phys)

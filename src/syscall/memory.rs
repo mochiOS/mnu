@@ -67,15 +67,17 @@ pub fn check_range(address: u64, length: u64) -> u64 {
 }
 
 #[inline(never)]
-fn protect_memory_pages(
+fn prepare_memory_pages<'owner>(
     process: &crate::task::Process,
-    table_phys: u64,
+    edit: &mut crate::mem::paging::TableEdit<'owner>,
     start: u64,
     end: u64,
     present: bool,
     writable: bool,
     executable: bool,
-) -> Result<(), Error> {
+) -> Result<alloc::vec::Vec<crate::mem::paging::PreparedProtection<'owner>>, Error> {
+    let table_phys = edit.table();
+    let mut prepared = alloc::vec::Vec::new();
     let mut page = start;
     while page < end {
         // The caller holds PROC, retaining this root and excluding native VM
@@ -92,17 +94,18 @@ fn protect_memory_pages(
                     && region.backing().file_object().is_some()
                     && !region.dirty_pages().contains(&page_index)
             });
-        crate::mem::paging::protect_user_page_if_mapped(
-            table_phys,
-            page,
-            present,
-            page_writable,
-            executable,
-        )
-        .map_err(memory_protection_error)?;
+        if let Some(protection) = edit
+            .prepare_protection(page, present, page_writable, executable)
+            .map_err(memory_protection_error)?
+        {
+            prepared
+                .try_reserve(1)
+                .map_err(|_| Error::ResourceUnavailable)?;
+            prepared.push(protection);
+        }
         page += 4096;
     }
-    Ok(())
+    Ok(prepared)
 }
 
 fn prepare_mapping_access(
@@ -169,7 +172,7 @@ pub fn protect(addr: u64, len: u64, access: u64) -> u64 {
         None => return Error::NotReady.into_raw(),
     };
     let end = start + length;
-    let result = crate::task::with_process_mut(pid, |process| {
+    let result = crate::task::process::with_process_vm(pid, |process, edit| {
         let table_phys = process.page_table().ok_or(Error::NotReady)?;
         if !memory_range_is_mapped(process, table_phys, start, end) {
             return Err(Error::InvalidAddress);
@@ -186,13 +189,29 @@ pub fn protect(addr: u64, len: u64, access: u64) -> u64 {
         crate::mem::mapping_admission::check_native(process.memory_regions(), start, end)?;
         // Metadata publication is infallible after this preparation point.
         let prepared = prepare_mapping_access(process, start, end, access)?;
-        let changed = protect_memory_pages(
-            process, table_phys, start, end, present, writable, executable,
-        );
-        // Partial failure may have changed permissions too. Complete remote
-        // invalidation before reporting success or returning an editing error.
-        crate::mem::tlb_shootdown::invalidate_all().map_err(|_| Error::BackingFailure)?;
-        changed?;
+        let mut pages =
+            prepare_memory_pages(process, edit, start, end, present, writable, executable)?;
+        // All discovery, authority checks and allocations have finished.
+        for page in &mut pages {
+            page.apply();
+        }
+        if crate::mem::tlb_shootdown::invalidate_all().is_err() {
+            for page in &mut pages {
+                page.restore();
+            }
+            // No frame ownership changed, so even failed remote transport can
+            // never make an unacknowledged translation reference freed RAM.
+            if crate::mem::tlb_shootdown::invalidate_all().is_err() {
+                crate::audit::log(
+                    crate::audit::AuditEventKind::Quarantine,
+                    "VM permission rollback awaits remote TLB acknowledgement",
+                );
+            }
+            return Err(Error::BackingFailure);
+        }
+        for page in pages {
+            page.commit();
+        }
         for (index, edit) in prepared {
             process.memory_regions_mut()[index].publish_access(edit);
         }
