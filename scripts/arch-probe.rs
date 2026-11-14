@@ -9,6 +9,10 @@ mod arch;
 #[path = "context-probe.rs"]
 mod context_probe;
 
+#[cfg(target_arch = "aarch64")]
+#[path = "user-probe.rs"]
+mod user_probe;
+
 use core::arch::asm;
 
 #[cfg(target_arch = "aarch64")]
@@ -84,7 +88,6 @@ mod arm {
             core::ptr::write_volatile(GICC as *mut u32, 1);
             asm!("dsb sy", "isb", options(nostack));
         }
-        check(level == 4, "probe must run at EL1");
     }
 
     fn arm_timer() {
@@ -159,6 +162,12 @@ mod arm {
         // SAFETY: Only the production vector entry calls this symbol, after
         // saving the complete frame on the current CPU's kernel stack.
         let frame = unsafe { &mut *raw };
+        if frame.origin() == Some(ExceptionOrigin::LowerAArch64)
+            && frame.kind() == Some(ExceptionKind::Synchronous)
+        {
+            crate::user_probe::handle(frame);
+            return 0;
+        }
         check(
             frame.origin() == Some(ExceptionOrigin::CurrentSpx),
             "unexpected exception origin",
@@ -278,10 +287,14 @@ extern "C" fn probe_main() -> ! {
     }
     context_probe::run();
     #[cfg(target_arch = "aarch64")]
-    emit("ARCH PRIMITIVES PASS aarch64\n");
+    {
+        user_probe::run()
+    }
     #[cfg(target_arch = "x86_64")]
-    emit("ARCH PRIMITIVES PASS x86_64\n");
-    exit(0)
+    {
+        emit("ARCH PRIMITIVES PASS x86_64\n");
+        exit(0)
+    }
 }
 
 #[cfg(target_arch = "x86_64")]

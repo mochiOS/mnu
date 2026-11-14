@@ -3,6 +3,7 @@
 
 pub mod context;
 pub mod exception;
+pub mod usermode;
 
 pub mod interrupts {
     use core::arch::asm;

@@ -1,0 +1,210 @@
+//! EL0 CPU transition diagnostic. MMU is off in this fixture: this checks
+//! exception privilege and register handling, not address-space isolation.
+use crate::arch::exception::ExceptionFrame;
+use crate::{arch, check, emit, exit, fail};
+use core::arch::{asm, naked_asm};
+use core::sync::atomic::{AtomicU32, Ordering};
+
+#[repr(C, align(16))]
+struct Stack([u8; 16384]);
+static mut USER_STACK: Stack = Stack([0; 16384]);
+static PHASE: AtomicU32 = AtomicU32::new(0);
+static PRIVILEGED_TRAPS: AtomicU32 = AtomicU32::new(0);
+
+extern "C" {
+    static probe_user_privileged: u8;
+}
+
+pub fn run() -> ! {
+    emit("Entering EL0 CPU diagnostic\n");
+    arch::interrupts::disable();
+    let top = core::ptr::addr_of!(USER_STACK) as u64 + core::mem::size_of::<Stack>() as u64;
+    // SAFETY: This one-CPU fixture owns both stacks and its flat physical RAM.
+    // This deliberately does not substitute for the future MMU/Domain checks.
+    unsafe { poison_and_enter(user_entry as *const () as u64, top, 0x99, 0x1234_5000) }
+}
+
+pub fn handle(frame: &mut ExceptionFrame) {
+    check(
+        frame.saved_state() & 0x1f == 0,
+        "exception did not originate at EL0t",
+    );
+    let bottom = core::ptr::addr_of!(USER_STACK) as u64;
+    let top = bottom + core::mem::size_of::<Stack>() as u64;
+    check(frame.user_stack_pointer() == top, "EL0 stack not retained");
+    let kernel_sp = arch::stack_pointer();
+    check(
+        kernel_sp < bottom || kernel_sp >= top,
+        "trap used user stack",
+    );
+
+    let privileged_pc = core::ptr::addr_of!(probe_user_privileged) as u64;
+    if frame.instruction_pointer() == privileged_pc {
+        check(PHASE.load(Ordering::Acquire) == 1, "privileged trap phase");
+        check(
+            matches!(frame.syndrome() >> 26, 0 | 0x18),
+            "privileged instruction syndrome",
+        );
+        check(
+            PRIVILEGED_TRAPS.fetch_add(1, Ordering::AcqRel) == 0,
+            "repeated privileged trap",
+        );
+        check(
+            frame.registers()[5] == 0x7654,
+            "trapped instruction modified register",
+        );
+        check(frame.advance_instruction(), "privileged trap return PC");
+        return;
+    }
+
+    check(frame.syndrome() >> 26 == 0x15, "expected AArch64 SVC");
+    match frame.syndrome() & 0xffff {
+        0x51 => {
+            check(PHASE.swap(1, Ordering::AcqRel) == 0, "initial SVC phase");
+            check(frame.registers()[0] == 0x99, "EL0 initial argument");
+            check(
+                frame.registers()[1..].iter().all(|value| *value == 0),
+                "kernel GPR leaked into EL0",
+            );
+            check(
+                frame.fp_registers().iter().all(|value| *value == 0),
+                "kernel SIMD leaked into EL0",
+            );
+            check(
+                frame.fp_control() == 0 && frame.fp_status() == 0,
+                "kernel FP control leaked into EL0",
+            );
+            check(frame.saved_state() == 0, "kernel flags leaked into EL0");
+            frame.registers_mut()[0] = 66;
+        }
+        0x52 => {
+            check(PHASE.swap(2, Ordering::AcqRel) == 1, "second SVC phase");
+            check(
+                PRIVILEGED_TRAPS.load(Ordering::Acquire) == 1,
+                "EL0 privilege was not enforced",
+            );
+            check(
+                frame.registers()[0] == 0x42 && frame.registers()[8] == 55,
+                "SVC argument registers",
+            );
+            check(frame.registers()[19] == 0x1234, "EL0 callee-saved register");
+            let pattern = 0x42u128 | (0x42u128 << 64);
+            check(
+                frame.fp_registers()[0] == pattern && frame.fp_registers()[31] == pattern,
+                "SVC SIMD capture",
+            );
+            check(
+                frame.fp_control() == 1 << 22 && frame.fp_status() == 2,
+                "SVC FP control capture",
+            );
+            frame.registers_mut()[0] = 77;
+        }
+        0x53 => {
+            check(PHASE.load(Ordering::Acquire) == 2, "final SVC phase");
+            check(
+                frame.registers()[0] == 0,
+                "EL0 return register/TLS/FP mismatch",
+            );
+            emit("EL0 SVC, privileged trap and register restoration PASS\n");
+            emit("ARCH PRIMITIVES PASS aarch64\n");
+            exit(0)
+        }
+        _ => fail("unexpected SVC immediate"),
+    }
+    // The real vector must restore the saved user SIMD/control after kernel
+    // code clobbers the live hardware registers, before it executes ERET.
+    unsafe {
+        asm!(
+            "movi v0.16b, #0xa5", "movi v31.16b, #0x5a",
+            "msr fpcr, {control}", "msr fpsr, {status}",
+            control = in(reg) 3u64 << 22, status = in(reg) 1u64,
+            out("v0") _, out("v31") _, options(nostack),
+        );
+    }
+}
+
+// Seed every non-argument register before invoking the production EL0 entry.
+#[unsafe(naked)]
+unsafe extern "C" fn poison_and_enter(_entry: u64, _stack: u64, _arg: u64, _tls: u64) -> ! {
+    naked_asm!(
+        r#"
+        .irp reg, 4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30
+        mov x\reg, #0xfeed
+        .endr
+        msr tpidrro_el0, x4
+        .irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+        movi v\reg\().16b, #0xa5
+        .endr
+        mov x4, #(3 << 22)
+        msr fpcr, x4
+        mov x4, #1
+        msr fpsr, x4
+        mov x4, #(15 << 28)
+        msr nzcv, x4
+        b {enter}
+        "#,
+        enter = sym arch::usermode::enter_user,
+    );
+}
+
+#[unsafe(naked)]
+unsafe extern "C" fn user_entry() -> ! {
+    naked_asm!(
+        "svc #0x51",
+        "cmp x0, #66",
+        "b.ne 2f",
+        "mrs x7, tpidr_el0",
+        "movz x9, #0x1234, lsl #16",
+        "movk x9, #0x5000",
+        "cmp x7, x9",
+        "b.ne 2f",
+        "mrs x7, tpidrro_el0",
+        "cbnz x7, 2f",
+        "mov x5, #0x7654",
+        ".global probe_user_privileged",
+        "probe_user_privileged:",
+        "mrs x5, CurrentEL", // Must trap at EL0 without changing x5.
+        "mov x6, #0x7654",
+        "cmp x5, x6",
+        "b.ne 2f",
+        "mov x19, #0x1234",
+        "mov x0, #0x42",
+        "dup v0.2d, x0",
+        "dup v31.2d, x0",
+        "mov x4, #(1 << 22)",
+        "msr fpcr, x4",
+        "mov x4, #2",
+        "msr fpsr, x4",
+        "mov x8, #55",
+        "svc #0x52",
+        "cmp x0, #77",
+        "b.ne 2f",
+        "mov x2, #0x1234",
+        "cmp x19, x2",
+        "b.ne 2f",
+        "umov x1, v0.d[0]",
+        "cmp x1, #0x42",
+        "b.ne 2f",
+        "umov x1, v0.d[1]",
+        "cmp x1, #0x42",
+        "b.ne 2f",
+        "umov x1, v31.d[0]",
+        "cmp x1, #0x42",
+        "b.ne 2f",
+        "umov x1, v31.d[1]",
+        "cmp x1, #0x42",
+        "b.ne 2f",
+        "mrs x1, fpcr",
+        "mov x2, #(1 << 22)",
+        "cmp x1, x2",
+        "b.ne 2f",
+        "mrs x1, fpsr",
+        "cmp x1, #2",
+        "b.ne 2f",
+        "mov x0, #0",
+        "b 3f",
+        "2: mov x0, #1",
+        "3: svc #0x53",
+        "b .",
+    );
+}
