@@ -490,6 +490,7 @@ pub(crate) fn handle_user_memory_fault(
             Some(p) => p,
             None => return Err(MemoryFault::Operation(Error::InvalidArgument.into())),
         };
+
         let region = match process.find_memory_region_mut(fault_addr) {
             Some(region) => region,
             None => {
@@ -888,46 +889,83 @@ fn memory_map_impl(
             None => return Err(Error::NotReady.into_raw()),
         };
 
+        let mut scan = crate::mem::scan_budget::Budget::new();
         if let Some(ceiling) = byte_ceiling.filter(|&value| value != u64::MAX && !replace) {
             use crate::mem::mapping_usage;
             // PROCESS_TABLE retains the root and excludes every mapping/PTE
             // writer. Placement hints are not reservations or memory use.
-            let used =
-                mapping_usage::bytes(
-                    process
-                        .memory_regions()
-                        .iter()
-                        .map(|region| (region.start(), region.end().unwrap_or(u64::MAX)))
-                        .chain(process.mmio_mappings().iter().map(|mapping| {
+            let used = mapping_usage::bytes_bounded(
+                process
+                    .memory_regions()
+                    .iter()
+                    .map(|region| (region.start(), region.end().unwrap_or(u64::MAX)))
+                    .chain(
+                        process.mmio_mappings().iter().map(|mapping| {
                             (mapping.virt_start(), mapping.end().unwrap_or(u64::MAX))
-                        }))
-                        .chain(
-                            process.dma_buffers().iter().map(|buffer| {
-                                (buffer.virt_start(), buffer.end().unwrap_or(u64::MAX))
-                            }),
-                        ),
-                    |start, end| unsafe {
-                        crate::mem::paging::next_user_page_entry(pt_phys, start, end)
-                    },
-                )
-                .map_err(|_| Error::BackingFailure.into_raw())?;
+                        }),
+                    )
+                    .chain(
+                        process
+                            .dma_buffers()
+                            .iter()
+                            .map(|buffer| (buffer.virt_start(), buffer.end().unwrap_or(u64::MAX))),
+                    ),
+                &mut scan,
+                |start, end, budget| unsafe {
+                    crate::mem::paging::next_user_page_entry_bounded(pt_phys, start, end, budget)
+                },
+            )
+            .map_err(|error| match error {
+                mapping_usage::Error::WorkLimit => Error::ResourceUnavailable.into_raw(),
+                _ => Error::BackingFailure.into_raw(),
+            })?;
             if !mapping_usage::permits(used, size, ceiling) {
                 return Err(Error::ResourceUnavailable.into_raw());
             }
         }
 
-        let range_is_available = |candidate: u64| {
-            is_user_range(candidate, size)
-                && !crate::mem::paging::is_user_range_occupied_in_table(pt_phys, candidate, size)
-                && process.memory_regions().iter().all(|region| {
-                    let Some(candidate_end) = candidate.checked_add(size) else {
-                        return false;
-                    };
-                    let Some(region_end) = region.end() else {
-                        return false;
-                    };
-                    candidate_end <= region.start() || candidate >= region_end
-                })
+        let mut conflict_end = |candidate: u64| -> Result<Option<u64>, u64> {
+            if !scan.take(1) {
+                return Err(Error::ResourceUnavailable.into_raw());
+            }
+            let end = candidate
+                .checked_add(size)
+                .ok_or(Error::InvalidAddress.into_raw())?;
+            let ranges = process
+                .memory_regions()
+                .iter()
+                .map(|region| (region.start(), region.end()))
+                .chain(
+                    process
+                        .mmio_mappings()
+                        .iter()
+                        .map(|mapping| (mapping.virt_start(), mapping.end())),
+                )
+                .chain(
+                    process
+                        .dma_buffers()
+                        .iter()
+                        .map(|buffer| (buffer.virt_start(), buffer.end())),
+                )
+                .chain(core::iter::once((
+                    process.stack_bottom(),
+                    Some(process.stack_top()),
+                )));
+            let mut occupied_end = None;
+            for (start, limit) in ranges {
+                if !scan.take(1) {
+                    return Err(Error::ResourceUnavailable.into_raw());
+                }
+                let limit = limit.ok_or(Error::InvalidAddress.into_raw())?;
+                if start < end && candidate < limit && start < limit {
+                    occupied_end = Some(occupied_end.unwrap_or(0).max(limit));
+                }
+            }
+            if occupied_end.is_some() {
+                return Ok(occupied_end);
+            }
+            crate::mem::paging::user_mapping_conflict(pt_phys, candidate, size, &mut scan)
+                .map_err(|error| Error::from(error).into_raw())
         };
 
         let requested = if addr == 0 {
@@ -943,19 +981,24 @@ fn memory_map_impl(
             if !is_user_range(candidate, size) {
                 return Err(Error::InvalidAddress.into_raw());
             }
-            if !replace && !range_is_available(candidate) {
+            if !replace && conflict_end(candidate)?.is_some() {
                 return Err(Error::AlreadyExists.into_raw());
             }
             candidate
-        } else if requested.is_some_and(range_is_available) {
+        } else if requested.is_some_and(|candidate| is_user_range(candidate, size))
+            && conflict_end(requested.unwrap_or(0))?.is_none()
+        {
             requested.unwrap_or(0)
         } else {
             let mut candidate = match page_align_up(placement_base) {
                 Some(v) => v,
                 None => return Err(Error::InvalidArgument.into_raw()),
             };
-            while !range_is_available(candidate) {
-                candidate = match candidate.checked_add(4096) {
+            if !is_user_range(candidate, size) {
+                return Err(Error::ResourceUnavailable.into_raw());
+            }
+            while let Some(limit) = conflict_end(candidate)? {
+                candidate = match page_align_up(limit) {
                     Some(v) if is_user_range(v, size) => v,
                     _ => return Err(Error::ResourceUnavailable.into_raw()),
                 };

@@ -39,7 +39,7 @@ pub(crate) fn replace(
     if let Some(ceiling) = byte_ceiling.filter(|&value| value != u64::MAX) {
         // Count the proposed metadata union, not old usage + new length. Old
         // PTEs inside the replacement are covered once by the new reservation.
-        let projected = mapping_usage::bytes(
+        let projected = mapping_usage::bytes_bounded(
             retained
                 .iter()
                 .map(|region| (region.start(), region.end().unwrap_or(u64::MAX)))
@@ -55,9 +55,15 @@ pub(crate) fn replace(
                         .iter()
                         .map(|buffer| (buffer.virt_start(), buffer.end().unwrap_or(u64::MAX))),
                 ),
-            |start, end| unsafe { paging::next_user_page_entry(table, start, end) },
+            &mut super::scan_budget::Budget::new(),
+            |start, end, budget| unsafe {
+                paging::next_user_page_entry_bounded(table, start, end, budget)
+            },
         )
-        .map_err(|_| Error::InvalidAddress)?;
+        .map_err(|error| match error {
+            mapping_usage::Error::WorkLimit => Error::ResourceUnavailable,
+            _ => Error::InvalidAddress,
+        })?;
         if projected > ceiling {
             return Err(Error::ResourceUnavailable);
         }
