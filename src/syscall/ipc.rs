@@ -161,6 +161,7 @@ pub(crate) fn resolve_provider_endpoint_native(
 }
 
 /// Identity and delivery semantics resolved once at the userspace boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CallDestination {
     endpoint: IpcEndpoint,
     reply_sender: u64,
