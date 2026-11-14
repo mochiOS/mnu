@@ -2,7 +2,7 @@
 //!
 //! CR0/CR4レジスタの設定、SSE/FPUの有効化など
 
-pub mod context;
+pub use crate::arch::exception as context;
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
