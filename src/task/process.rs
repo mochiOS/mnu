@@ -397,12 +397,22 @@ impl MemoryRegion {
         };
         let mut address = start;
         while address < end {
-            if !self.allows_write_at(address) {
+            let Some((access, limit)) = self.access_span(address) else {
+                return false;
+            };
+            if access & mnu_abi::MEMORY_ACCESS_WRITE == 0 {
                 return false;
             }
-            address = (address | 0xfff).saturating_add(1).min(end);
+            address = limit.min(end);
         }
         true
+    }
+
+    /// Exclusive end of the current readable protection interval. A lazy
+    /// reservation requires no resident PTE, but PROT_NONE remains a hole.
+    pub(crate) fn readable_until(&self, address: u64) -> Option<u64> {
+        let (access, end) = self.access_span(address)?;
+        (access != 0).then_some(end)
     }
 
     /// Prepare every allocation before a PTE edit. Failure leaves metadata intact.
@@ -474,15 +484,23 @@ impl MemoryRegion {
     }
 
     fn access_at(&self, address: u64) -> Option<u64> {
+        self.access_span(address).map(|(access, _)| access)
+    }
+
+    fn access_span(&self, address: u64) -> Option<(u64, u64)> {
         if !self.contains(address) {
             return None;
         }
-        Some(
-            self.access_ranges
-                .iter()
-                .find(|range| address >= range.start && address < range.end)
-                .map_or(self.access, |range| range.access),
-        )
+        // prepare_access/slice keep non-overlapping overrides sorted. Binary
+        // search bounds lookup work even for a heavily fragmented region.
+        let index = self
+            .access_ranges
+            .partition_point(|range| range.end <= address);
+        match self.access_ranges.get(index) {
+            Some(range) if range.start <= address => Some((range.access, range.end)),
+            Some(range) => Some((self.access, range.start.min(self.end()?))),
+            None => Some((self.access, self.end()?)),
+        }
     }
 
     pub fn permits_access(&self, access: u64) -> bool {

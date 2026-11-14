@@ -64,28 +64,47 @@ pub fn validate_user_ptr(ptr: u64, len: u64) -> bool {
         let Some(table_phys) = process.page_table() else {
             return false;
         };
-        if crate::mem::paging::is_user_range_mapped_in_table(table_phys, ptr, len) {
-            return true;
-        }
+        let mut scan = crate::mem::scan_budget::Budget::new();
         let end = ptr + len;
         let mut address = ptr;
         while address < end {
-            let next_page = (address | 0xfff).saturating_add(1).min(end);
-            let chunk_len = next_page - address;
-            let resident =
-                crate::mem::paging::is_user_range_mapped_in_table(table_phys, address, chunk_len);
-            if !resident {
-                let valid_region = process.find_memory_region(address).is_some_and(|region| {
-                    region.allows_read_at(address)
-                        && region
-                            .end()
-                            .is_some_and(|region_end| next_page <= region_end)
-                });
-                if !valid_region {
+            let mut covered = None;
+            let mut next = (address | 0xfff).saturating_add(1).min(end);
+            for region in process.memory_regions() {
+                if !scan.take(1) {
                     return false;
                 }
+                if region.contains(address) {
+                    // A usize-sized binary search uses at most this many
+                    // comparisons. Share the budget with metadata/PTE work.
+                    if !scan.take(usize::BITS as usize) {
+                        return false;
+                    }
+                    let Some(limit) = region.readable_until(address) else {
+                        return false;
+                    };
+                    covered = Some(limit.min(end));
+                    break;
+                }
+                if region.start() > address {
+                    next = next.min(region.start());
+                }
             }
-            address = next_page;
+            if let Some(limit) = covered {
+                if limit <= address {
+                    return false;
+                }
+                address = limit;
+                continue;
+            }
+            // ELF/initial-stack/borrowed pages may have no reservation record.
+            // Inspect only this page, never the caller's unbounded full range.
+            if !scan.take(4)
+                || !crate::mem::paging::is_user_range_mapped_in_table(table_phys, address, 1)
+            {
+                return false;
+            }
+            address = next;
         }
         true
     })
