@@ -149,7 +149,10 @@ impl fmt::Write for SliceWriter<'_> {
         let bytes = s.as_bytes();
         let remaining = self.buf.len().saturating_sub(self.pos);
         if bytes.len() > remaining {
-            let take = remaining;
+            let mut take = remaining;
+            while !s.is_char_boundary(take) {
+                take -= 1;
+            }
             self.buf[self.pos..self.pos + take].copy_from_slice(&bytes[..take]);
             self.pos += take;
             return Err(fmt::Error);
@@ -164,6 +167,16 @@ static AUDIT_LOG: SpinLock<[AuditRecord; AUDIT_CAPACITY]> =
     SpinLock::new([AuditRecord::empty(); AUDIT_CAPACITY]);
 static AUDIT_FILE: SpinLock<AuditFile> = SpinLock::new(AuditFile::new());
 static AUDIT_SEQ: AtomicUsize = AtomicUsize::new(1);
+
+/// Format bounded diagnostics without heap allocation, including under OOM.
+pub fn log_args(kind: AuditEventKind, arguments: fmt::Arguments<'_>) {
+    let mut bytes = [0; AUDIT_MSG_LEN];
+    let mut writer = SliceWriter::new(&mut bytes);
+    let _ = writer.write_fmt(arguments);
+    if let Ok(message) = core::str::from_utf8(writer.as_bytes()) {
+        log(kind, message);
+    }
+}
 
 pub fn log(kind: AuditEventKind, message: &str) {
     let seq = AUDIT_SEQ.fetch_add(1, Ordering::Relaxed) as u64;

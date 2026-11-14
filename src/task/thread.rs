@@ -326,6 +326,7 @@ pub struct Thread {
     syscall_user_cr3: u64,
     /// 直近の SYSCALL 入口で保存したユーザー文脈
     syscall_user_context: SyscallUserContext,
+    last_syscall: Option<(u64, [u64; 6])>,
     /// IPC受信などで眠る前に起床要求が来たことを示すフラグ
     pending_wakeup: bool,
     /// 低遅延IPCの待機/受信状態
@@ -749,6 +750,7 @@ impl Thread {
             in_syscall: false,
             syscall_user_cr3: 0,
             syscall_user_context: SyscallUserContext::empty(),
+            last_syscall: None,
             pending_wakeup: false,
             ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
@@ -875,6 +877,7 @@ impl Thread {
             in_syscall: false,
             syscall_user_cr3: 0,
             syscall_user_context: SyscallUserContext::empty(),
+            last_syscall: None,
             pending_wakeup: false,
             ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
@@ -985,6 +988,7 @@ impl Thread {
             in_syscall: false,
             syscall_user_cr3: 0,
             syscall_user_context: user_context,
+            last_syscall: None,
             pending_wakeup: false,
             ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
@@ -1965,4 +1969,18 @@ pub fn set_thread_state_at_slot(slot: usize, state: ThreadState) -> bool {
 /// スレッドIDからプロセスIDを取得
 pub fn thread_to_process_id(thread_id: u64) -> Option<ProcessId> {
     with_thread(ThreadId::from_u64(thread_id), |t| t.process_id())
+}
+
+/// Diagnostics follow the execution context across scheduling and migration.
+pub(crate) fn record_current_syscall(number: u64, arguments: [u64; 6]) {
+    if let Some(id) = current_thread_id() {
+        with_thread_mut(id, |thread| thread.last_syscall = Some((number, arguments)));
+    }
+}
+
+/// Failure reporting may run while the thread queue is already locked (OOM).
+/// Return no record in that case instead of waiting on the reporting context.
+pub(crate) fn current_syscall_snapshot() -> Option<(u64, [u64; 6])> {
+    let id = current_thread_id()?;
+    THREAD_QUEUE.try_lock()?.get(id)?.last_syscall
 }

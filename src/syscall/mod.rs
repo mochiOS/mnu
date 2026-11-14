@@ -10,9 +10,10 @@ pub mod fs;
 pub mod handle;
 pub mod io;
 pub mod ipc;
-pub mod performance;
 pub mod memory;
 mod memory_copy;
+mod owned_buffer;
+pub mod performance;
 pub mod process;
 mod process_stack;
 pub mod security;
@@ -22,18 +23,15 @@ pub mod task;
 mod thread_local;
 pub mod time;
 pub mod upcall;
-mod usercopy_error;
 mod user_output;
-mod owned_buffer;
-pub(crate) use user_output::with_user_output_native;
+mod usercopy_error;
 pub(crate) use upcall::prepare_user_exception;
+pub(crate) use user_output::with_user_output_native;
 
 mod types;
 
 use crate::capability::{KernelAuthority, KernelCapability, KernelObjectRef};
-use alloc::format;
 use alloc::string::String;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 
 const FIRMWARE_PRESENT_MAX: usize = mnu_abi::hypervisor::FIRMWARE_FRAMEBUFFER_MAX_TRANSFER;
@@ -117,11 +115,6 @@ fn is_canonical_user_range(addr: u64, len: u64) -> bool {
     end_inclusive <= USER_SPACE_END
 }
 
-fn current_process_name_for_log() -> Option<String> {
-    let pid = crate::syscall::security::current_process_id()?;
-    crate::task::with_process(pid, |p| p.name().to_string())
-}
-
 /// ユーザー空間の null 終端文字列を最大長付きで読み取り、カーネル所有の `String` を返す。
 pub fn read_user_cstring(ptr: u64, max_len: usize) -> Result<String, mnu_abi::status::Error> {
     use mnu_abi::status::Error;
@@ -183,7 +176,11 @@ pub fn map_physical_range(virt_addr: u64, phys_addr: u64, size: u64) -> u64 {
         return Error::AccessDenied.into_raw();
     }
     map_borrowed_range_for_process(
-        pid, virt_addr, phys_addr, size, crate::mem::paging::MappingCache::Uncached,
+        pid,
+        virt_addr,
+        phys_addr,
+        size,
+        crate::mem::paging::MappingCache::Uncached,
     )
 }
 
@@ -209,25 +206,22 @@ fn map_borrowed_range_for_process(
         if crate::mem::paging::is_user_range_occupied_in_table(pt_phys, virt_addr, size) {
             return Err(Error::AlreadyExists.into_raw());
         }
-        proc.add_mmio_mapping(mapping.clone()).map_err(Error::into_raw)?;
+        proc.add_mmio_mapping(mapping.clone())
+            .map_err(Error::into_raw)?;
         if let Err(error) = crate::mem::paging::map_physical_range_to_user(
-            pt_phys,
-            virt_addr,
-            phys_addr,
-            size,
-            cache,
-        )
-        {
+            pt_phys, virt_addr, phys_addr, size, cache,
+        ) {
             let failure = memory::memory_protection_error(error).into_raw();
             // Keep the root alive and exclude faults/clone/resize throughout
             // rollback. MMIO frames are borrowed: detach only after TLB ack.
             let mut backend = unsafe { Native::for_process(proc, false) };
-            transaction::revoke([(pt_phys, virt_addr, virt_addr + size)], &mut backend)
-                .map_err(|error| match error {
+            transaction::revoke([(pt_phys, virt_addr, virt_addr + size)], &mut backend).map_err(
+                |error| match error {
                     transaction::Error::InvalidRange => Error::InvalidArgument.into_raw(),
                     transaction::Error::Allocation => Error::ResourceUnavailable.into_raw(),
                     transaction::Error::Backend(error) => error.into_raw(),
-                })?;
+                },
+            )?;
             // If revocation fails, retain metadata for the restored partial
             // mapping. Never leave live PTEs without an ownership record.
             proc.remove_mmio_mapping(virt_addr, size);
@@ -336,8 +330,8 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
     if pixels_len != expected as u64 || expected == 0 {
         return Error::InvalidArgument.into_raw();
     }
-    let firmware = crate::hypervisor_guest::is_active()
-        && crate::util::framebuffer::get_info().is_some();
+    let firmware =
+        crate::hypervisor_guest::is_active() && crate::util::framebuffer::get_info().is_some();
     let transfer_limit = if firmware {
         FIRMWARE_PRESENT_MAX
     } else {
@@ -447,7 +441,8 @@ pub fn map_framebuffer(virt_addr: u64, size: u64) -> u64 {
     } else {
         return Error::NotReady.into_raw();
     };
-    let required = match framebuffer_size.checked_add(fb_offset)
+    let required = match framebuffer_size
+        .checked_add(fb_offset)
         .and_then(|bytes| bytes.checked_add(0xfff))
     {
         Some(v) => v & !0xfff,
@@ -486,10 +481,7 @@ fn retry_usercopy<T>(
 }
 
 /// ユーザー空間からバイト列をコピーする（コピー先はカーネル空間）。
-pub fn copy_from_user_native(
-    src_ptr: u64,
-    dst: &mut [u8],
-) -> Result<(), mnu_abi::status::Error> {
+pub fn copy_from_user_native(src_ptr: u64, dst: &mut [u8]) -> Result<(), mnu_abi::status::Error> {
     if dst.is_empty() {
         return Ok(());
     }
@@ -513,13 +505,11 @@ pub fn copy_from_user_native(
         let pid = crate::syscall::security::current_process_id()
             .map(|pid| pid.as_u64())
             .unwrap_or(0);
-        let process_name = current_process_name_for_log().unwrap_or_else(|| "?".to_string());
-        crate::audit::log(
+        crate::audit::log_args(
             crate::audit::AuditEventKind::Usercopy,
-            &format!(
-                "copy_from_user rejected unmapped or unreadable range pid={} process={} src={:#x} len={} last_syscall={} args=[{:#x},{:#x},{:#x},{:#x},{:#x}]",
+            format_args!(
+                "copy_from_user rejected unmapped or unreadable range pid={} src={:#x} len={} last_syscall={} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
                 pid,
-                process_name,
                 src_ptr,
                 dst.len(),
                 syscall_num,
@@ -527,7 +517,8 @@ pub fn copy_from_user_native(
                 syscall_args[1],
                 syscall_args[2],
                 syscall_args[3],
-                syscall_args[4]
+                syscall_args[4],
+                syscall_args[5]
             ),
         );
         err
@@ -586,7 +577,11 @@ fn fault_in_user_range(
 }
 
 /// Resident usercopy keeps the caller's root and leaf permissions stable.
-fn copy_out_of_current_root(table: u64, address: u64, bytes: &mut [u8]) -> crate::result::Result<()> {
+fn copy_out_of_current_root(
+    table: u64,
+    address: u64,
+    bytes: &mut [u8],
+) -> crate::result::Result<()> {
     let pid = security::current_process_id()
         .ok_or(crate::Kernel::Memory(crate::result::Memory::InvalidAddress))?;
     crate::task::with_process(pid, |process| {
@@ -602,7 +597,9 @@ fn copy_out_of_current_root(table: u64, address: u64, bytes: &mut [u8]) -> crate
         )?;
         crate::mem::paging::copy_from_user_in_table(table, address, bytes)
     })
-    .unwrap_or(Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress)))
+    .unwrap_or(Err(crate::Kernel::Memory(
+        crate::result::Memory::InvalidAddress,
+    )))
 }
 
 /// Resident usercopy keeps the caller's root and leaf permissions stable.
@@ -622,14 +619,13 @@ fn copy_into_current_root(table: u64, address: u64, bytes: &[u8]) -> crate::resu
         )?;
         crate::mem::paging::copy_to_user_in_table(table, address, bytes)
     })
-    .unwrap_or(Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress)))
+    .unwrap_or(Err(crate::Kernel::Memory(
+        crate::result::Memory::InvalidAddress,
+    )))
 }
 
 /// バイト列をユーザー空間へコピーする（コピー元はカーネル空間）。
-pub fn copy_to_user_native(
-    dst_ptr: u64,
-    src: &[u8],
-) -> Result<(), mnu_abi::status::Error> {
+pub fn copy_to_user_native(dst_ptr: u64, src: &[u8]) -> Result<(), mnu_abi::status::Error> {
     if src.is_empty() {
         return Ok(());
     }
@@ -653,13 +649,11 @@ pub fn copy_to_user_native(
         let pid = crate::syscall::security::current_process_id()
             .map(|pid| pid.as_u64())
             .unwrap_or(0);
-        let process_name = current_process_name_for_log().unwrap_or_else(|| "?".to_string());
-        crate::audit::log(
+        crate::audit::log_args(
             crate::audit::AuditEventKind::Usercopy,
-            &format!(
-                "copy_to_user rejected unmapped or unwritable range pid={} process={} dst={:#x} len={} last_syscall={} args=[{:#x},{:#x},{:#x},{:#x},{:#x}]",
+            format_args!(
+                "copy_to_user rejected unmapped or unwritable range pid={} dst={:#x} len={} last_syscall={} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
                 pid,
-                process_name,
                 dst_ptr,
                 src.len(),
                 syscall_num,
@@ -667,7 +661,8 @@ pub fn copy_to_user_native(
                 syscall_args[1],
                 syscall_args[2],
                 syscall_args[3],
-                syscall_args[4]
+                syscall_args[4],
+                syscall_args[5]
             ),
         );
         err
@@ -676,35 +671,9 @@ pub fn copy_to_user_native(
 
 pub use types::*;
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
-static LAST_SYSCALL_NUM: AtomicU64 = AtomicU64::new(0);
-static LAST_SYSCALL_ARG0: AtomicU64 = AtomicU64::new(0);
-static LAST_SYSCALL_ARG1: AtomicU64 = AtomicU64::new(0);
-static LAST_SYSCALL_ARG2: AtomicU64 = AtomicU64::new(0);
-static LAST_SYSCALL_ARG3: AtomicU64 = AtomicU64::new(0);
-static LAST_SYSCALL_ARG4: AtomicU64 = AtomicU64::new(0);
-
-fn record_syscall(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) {
-    LAST_SYSCALL_ARG0.store(arg0, Ordering::Relaxed);
-    LAST_SYSCALL_ARG1.store(arg1, Ordering::Relaxed);
-    LAST_SYSCALL_ARG2.store(arg2, Ordering::Relaxed);
-    LAST_SYSCALL_ARG3.store(arg3, Ordering::Relaxed);
-    LAST_SYSCALL_ARG4.store(arg4, Ordering::Relaxed);
-    LAST_SYSCALL_NUM.store(num, Ordering::Relaxed);
-}
-
-pub fn last_syscall_snapshot() -> (u64, [u64; 5]) {
-    (
-        LAST_SYSCALL_NUM.load(Ordering::Relaxed),
-        [
-            LAST_SYSCALL_ARG0.load(Ordering::Relaxed),
-            LAST_SYSCALL_ARG1.load(Ordering::Relaxed),
-            LAST_SYSCALL_ARG2.load(Ordering::Relaxed),
-            LAST_SYSCALL_ARG3.load(Ordering::Relaxed),
-            LAST_SYSCALL_ARG4.load(Ordering::Relaxed),
-        ],
-    )
+/// Best-effort diagnostics for this thread, never another CPU's syscall.
+pub fn last_syscall_snapshot() -> (u64, [u64; 6]) {
+    crate::task::thread::current_syscall_snapshot().unwrap_or((0, [0; 6]))
 }
 
 /// システムコールのディスパッチ
@@ -712,7 +681,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
     crate::mem::extent_transaction::flush();
     handle::flush_provider_releases();
     crate::task::flush_deferred_process_reclaims();
-    record_syscall(num, arg0, arg1, arg2, arg3, arg4);
+    crate::task::thread::record_current_syscall(num, [arg0, arg1, arg2, arg3, arg4, arg5]);
     #[cfg(feature = "performance-instrumentation")]
     let _allocation_scope =
         crate::performance::AllocationScope::enter(allocation_subsystem_for_syscall(num));
@@ -793,9 +762,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::ProcessHandleWait as u64 => handle::process_wait(arg0, arg1, arg2),
         x if x == SyscallNumber::ProcessHandleResume as u64 => handle::process_resume(arg0),
         x if x == SyscallNumber::ProcessHandleSuspend as u64 => handle::process_suspend(arg0),
-        x if x == SyscallNumber::ProcessSuspendCurrent as u64 => {
-            process::suspend_current_process()
-        }
+        x if x == SyscallNumber::ProcessSuspendCurrent as u64 => process::suspend_current_process(),
         x if x == SyscallNumber::ProcessHandleTerminate as u64 => {
             handle::process_terminate(arg0, arg1)
         }
@@ -807,12 +774,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
                 handle::wait_many(arg0, arg1, arg2, arg3)
             }
         }
-        x if x == SyscallNumber::ContextHandleSet as u64 => {
-            handle::context_handle_set(arg0, arg1)
-        }
-        x if x == SyscallNumber::ContextHandleRemove as u64 => {
-            handle::context_handle_remove(arg0)
-        }
+        x if x == SyscallNumber::ContextHandleSet as u64 => handle::context_handle_set(arg0, arg1),
+        x if x == SyscallNumber::ContextHandleRemove as u64 => handle::context_handle_remove(arg0),
         x if x == SyscallNumber::ContextValueSet as u64 => handle::context_value_set(arg0, arg1),
         x if x == SyscallNumber::ContextValueRemove as u64 => handle::context_value_remove(arg0),
         x if x == SyscallNumber::HandleRightsGet as u64 => handle::rights_get(arg0),
@@ -873,11 +836,17 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::MemoryProtect as u64 => memory::protect(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryCopy as u64 => memory_copy::copy(arg0, arg1, arg2),
         x if x == SyscallNumber::MemoryRangeCheck as u64 => memory::check_range(arg0, arg1),
-        x if x == SyscallNumber::MemoryResidencyRead as u64 => memory::residency(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::MemoryResidencyRead as u64 => {
+            memory::residency(arg0, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::MemoryDiscard as u64 => memory::discard(arg0, arg1),
-        x if x == SyscallNumber::MemoryObjectCreate as u64 => handle::memory_object_create(arg0, arg1),
+        x if x == SyscallNumber::MemoryObjectCreate as u64 => {
+            handle::memory_object_create(arg0, arg1)
+        }
         x if x == SyscallNumber::MemoryObjectLength as u64 => handle::memory_object_length(arg0),
-        x if x == SyscallNumber::MemoryObjectResize as u64 => handle::memory_object_resize(arg0, arg1),
+        x if x == SyscallNumber::MemoryObjectResize as u64 => {
+            handle::memory_object_resize(arg0, arg1)
+        }
         x if x == SyscallNumber::HandleReadAt as u64 => handle::read_at(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::HandleWriteAt as u64 => handle::write_at(arg0, arg1, arg2, arg3),
         x if x == SyscallNumber::StreamWrite as u64 => handle::stream_write(arg0, arg1, arg2, arg3),
@@ -924,7 +893,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
         x if x == SyscallNumber::DebugWrite as u64 => io::debug_write(arg0, arg1),
         x if x == SyscallNumber::DiagnosticRead as u64 => diagnostic::read(arg0, arg1, arg2, arg3),
-        x if x == SyscallNumber::DiagnosticStreamRead as u64 => diagnostic::read_stream(arg0, arg1, arg2, arg3, arg4),
+        x if x == SyscallNumber::DiagnosticStreamRead as u64 => {
+            diagnostic::read_stream(arg0, arg1, arg2, arg3, arg4)
+        }
         x if x == SyscallNumber::PortIn as u64 => io::port_in(arg0, arg1),
         x if x == SyscallNumber::PortOut as u64 => io::port_out(arg0, arg1, arg2),
         x if x == SyscallNumber::ProcessImageReplace as u64 => {
@@ -1076,7 +1047,9 @@ fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
     use crate::performance::LatencyMetric;
 
     match num {
-        x if x == SyscallNumber::HandleRead as u64 || x == SyscallNumber::HandleReadAt as u64 => Some(LatencyMetric::VfsRead),
+        x if x == SyscallNumber::HandleRead as u64 || x == SyscallNumber::HandleReadAt as u64 => {
+            Some(LatencyMetric::VfsRead)
+        }
         _ => None,
     }
 }
