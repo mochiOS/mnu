@@ -299,34 +299,38 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
                     Err(error) => return if done == 0 { error } else { done as u64 },
                 };
                 if write {
-                    provider_write_at(provider, position, &data[..chunk]).and_then(|count| {
-                        if count > chunk {
-                            return Err(Error::BackingFailure.into_raw());
-                        }
-                        if let Some(guard) = &_guard {
-                            crate::mem::vm_object::update_provider_range(
-                                guard,
-                                position,
-                                &data[..count],
-                            );
-                        }
-                        Ok(count)
-                    })
+                    provider_write_at(provider, position, &data[..chunk])
+                        .map_err(crate::result::OperationError::into_raw)
+                        .and_then(|count| {
+                            if count > chunk {
+                                return Err(Error::BackingFailure.into_raw());
+                            }
+                            if let Some(guard) = &_guard {
+                                crate::mem::vm_object::update_provider_range(
+                                    guard,
+                                    position,
+                                    &data[..count],
+                                );
+                            }
+                            Ok(count)
+                        })
                 } else {
-                    provider_read_at(provider, position, &mut data[..chunk]).and_then(|count| {
-                        if count > chunk {
-                            return Err(Error::BackingFailure.into_raw());
-                        }
-                        if let Some(identity) = identity {
-                            crate::mem::vm_object::overlay_provider_range(
-                                provider,
-                                identity,
-                                position,
-                                &mut data[..count],
-                            )?;
-                        }
-                        Ok(count)
-                    })
+                    provider_read_at(provider, position, &mut data[..chunk])
+                        .map_err(crate::result::OperationError::into_raw)
+                        .and_then(|count| {
+                            if count > chunk {
+                                return Err(Error::BackingFailure.into_raw());
+                            }
+                            if let Some(identity) = identity {
+                                crate::mem::vm_object::overlay_provider_range(
+                                    provider,
+                                    identity,
+                                    position,
+                                    &mut data[..count],
+                                )?;
+                            }
+                            Ok(count)
+                        })
                 }
             }
             KernelObject::VmObject(object) if write => object.write_at(position, &data[..chunk]),
@@ -477,7 +481,9 @@ fn provider_exchange(
         Err(error) => return error.into_raw(),
     };
     let (response, data_length) =
-        match provider_call(provider, request, &input_bytes, &mut response_storage) {
+        match provider_call(provider, request, &input_bytes, &mut response_storage)
+            .map_err(crate::result::OperationError::into_raw)
+        {
             Ok(response) => response,
             Err(error) => return error,
         };
@@ -535,7 +541,9 @@ pub fn options_set(raw: u64, options: u64) -> u64 {
 }
 
 fn provider_cache_identity(provider: &ProviderObject) -> Result<Option<u64>, u64> {
-    provider_memory_object(provider).map(|identity| (identity != 0).then_some(identity))
+    provider_memory_object(provider)
+        .map_err(crate::result::OperationError::into_raw)
+        .map(|identity| (identity != 0).then_some(identity))
 }
 
 /// The caller retains its backing I/O guard through reading and cache overlay.
@@ -558,7 +566,8 @@ fn provider_read_chunk<'a>(
         length: length as u32,
         data_length: 0,
     };
-    let (response, data_len) = provider_call(provider, request, &[], storage)?;
+    let (response, data_len) = provider_call(provider, request, &[], storage)
+        .map_err(crate::result::OperationError::into_raw)?;
     let count = usize::try_from(response.value)
         .map_err(|_| mnu_abi::status::Error::BackingFailure.into_raw())?;
     if count > length {
@@ -913,7 +922,9 @@ fn provider_write_impl(
             data_length: 0,
         };
         let mut response = [0; mnu_abi::provider::RESPONSE_HEADER_LEN + 8];
-        return match provider_call(provider, request, &[], &mut response) {
+        return match provider_call(provider, request, &[], &mut response)
+            .map_err(crate::result::OperationError::into_raw)
+        {
             Ok((header, data_len @ (0 | 8)))
                 if header.value == 0 && (byte_end.is_none() || data_len == 8) =>
             {
@@ -981,7 +992,9 @@ fn provider_write_impl(
             data_length: chunk as u32,
         };
         let (response, data_len) =
-            match provider_call(provider, request, &data[..chunk], &mut response_storage) {
+            match provider_call(provider, request, &data[..chunk], &mut response_storage)
+                .map_err(crate::result::OperationError::into_raw)
+            {
                 Ok(response) => response,
                 Err(error) => return if total == 0 { error } else { total as u64 },
             };
@@ -1050,7 +1063,9 @@ fn provider_seek_result(
         data_length: 0,
     };
     let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
-    match provider_call(provider, request, &[], &mut response_storage) {
+    match provider_call(provider, request, &[], &mut response_storage)
+        .map_err(crate::result::OperationError::into_raw)
+    {
         Ok((response, 0)) if response.value <= i64::MAX as u64 => Ok(response.value),
         Ok((_, 0)) => Err(mnu_abi::status::Error::LimitExceeded.into_raw()),
         Ok(_) => Err(mnu_abi::status::Error::BackingFailure.into_raw()),
@@ -1118,7 +1133,8 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
             data_length: 0,
         };
         let mut storage = [0; wire::RESPONSE_HEADER_LEN + 8];
-        let (_, length) = provider_call(&provider, request, &[], &mut storage)?;
+        let (_, length) = provider_call(&provider, request, &[], &mut storage)
+            .map_err(crate::result::OperationError::into_raw)?;
         if length != 8 {
             return Err(Error::BackingFailure.into_raw());
         }
@@ -1137,7 +1153,8 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
                 }
             }
         }
-        let count = provider_read_at(&provider, offset, bytes)?;
+        let count = provider_read_at(&provider, offset, bytes)
+            .map_err(crate::result::OperationError::into_raw)?;
         if count > bytes.len() {
             return Err(Error::BackingFailure.into_raw());
         }

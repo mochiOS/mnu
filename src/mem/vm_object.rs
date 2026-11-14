@@ -23,12 +23,12 @@ pub const PAGE_BYTES: usize = 4096;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmPageError {
     OutsideBacking,
-    Operation(u64),
+    Operation(crate::result::OperationError),
 }
 
 impl From<u64> for VmPageError {
     fn from(error: u64) -> Self {
-        Self::Operation(error)
+        Self::Operation(crate::result::OperationError::from_wire(error))
     }
 }
 
@@ -296,7 +296,7 @@ impl VmObject {
             {
                 VmPageError::OutsideBacking
             }
-            _ => VmPageError::Operation(error),
+            _ => VmPageError::Operation(crate::result::OperationError::from_wire(error)),
         }
     }
 
@@ -450,7 +450,7 @@ impl VmObject {
             });
         }
         let VmObjectSource::Provider { _io_lock, .. } = &self.source else {
-            return Err(VmPageError::Operation(Error::InvalidArgument.into_raw()));
+            return Err(VmPageError::Operation(Error::InvalidArgument.into()));
         };
         loop {
             let epoch = _io_lock.generation();
@@ -488,7 +488,9 @@ impl VmObject {
                     copy_to_frame(frame_phys, 0, cache[entry_index].bytes.as_slice())
                 {
                     let _ = crate::mem::frame::deallocate_frame(frame);
-                    return Err(VmPageError::Operation(errno));
+                    return Err(VmPageError::Operation(
+                        crate::result::OperationError::from_wire(errno),
+                    ));
                 }
                 cache[entry_index].frame_phys = Some(frame_phys);
             }
@@ -735,14 +737,16 @@ impl VmObject {
                 writer,
                 write_offset,
                 &bytes[*dirty_start..*dirty_end],
-            )?;
+            )
+            .map_err(crate::result::OperationError::into_raw)?;
             if written != dirty_end - dirty_start {
                 return Err(Error::BackingFailure.into_raw());
             }
         }
         if snapshots.is_empty() {
             if let VmObjectSource::Provider { object, .. } = &self.source {
-                crate::ipc::provider::sync(object)?;
+                crate::ipc::provider::sync(object)
+                    .map_err(crate::result::OperationError::into_raw)?;
             }
         } else {
             for (index, (_, _, _, _, _, writer)) in snapshots.iter().enumerate() {
@@ -750,7 +754,8 @@ impl VmObject {
                     .iter()
                     .any(|(_, _, _, _, _, prior)| Arc::ptr_eq(prior, writer))
                 {
-                    crate::ipc::provider::sync(writer)?;
+                    crate::ipc::provider::sync(writer)
+                        .map_err(crate::result::OperationError::into_raw)?;
                 }
             }
         }
@@ -1095,7 +1100,8 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
                 object,
                 current,
                 &mut output[bytes_read..bytes_read + request_len],
-            ),
+            )
+            .map_err(crate::result::OperationError::into_raw),
         };
         match read {
             Ok(0) => {
@@ -1149,6 +1155,7 @@ fn write_lower(source: &VmObjectSource, offset: u64, input: &[u8]) -> Result<usi
             .map_err(mnu_abi::status::Error::into_raw),
         VmObjectSource::Provider { object, .. } => {
             crate::ipc::provider::write_at(object, offset, input)
+                .map_err(crate::result::OperationError::into_raw)
         }
     }
 }

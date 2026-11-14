@@ -180,3 +180,46 @@ pub fn handle_kernel_error(error: Kernel) {
 
 /// 結果型のエイリアス
 pub type Result<T> = core::result::Result<T, Kernel>;
+
+/// A native failure and an opaque peer status are different error domains.
+/// Numeric encoding is retained only at wire/syscall boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationError {
+    Native(mnu_abi::status::Error),
+    Peer(i64),
+}
+impl OperationError {
+    pub fn from_wire(status: u64) -> Self {
+        match mnu_abi::status::Error::from_raw(status) {
+            Some(error) => Self::Native(error),
+            None => Self::Peer(status as i64),
+        }
+    }
+    pub fn into_raw(self) -> u64 {
+        match self {
+            Self::Native(error) => error.into_raw(),
+            Self::Peer(status) => status as u64,
+        }
+    }
+}
+impl From<mnu_abi::status::Error> for OperationError {
+    fn from(error: mnu_abi::status::Error) -> Self {
+        Self::Native(error)
+    }
+}
+impl From<Kernel> for mnu_abi::status::Error {
+    fn from(error: Kernel) -> Self {
+        use mnu_abi::status::Error;
+        match error {
+            Kernel::Memory(Memory::OutOfMemory) => Error::ResourceUnavailable,
+            Kernel::Memory(Memory::Busy) => Error::NotReady,
+            Kernel::Memory(Memory::PermissionDenied) => Error::AccessDenied,
+            Kernel::Memory(Memory::NotMapped | Memory::InvalidAddress) => Error::InvalidAddress,
+            Kernel::Memory(Memory::AlreadyMapped) => Error::AlreadyExists,
+            Kernel::Memory(Memory::AlignmentError) | Kernel::InvalidParam => Error::InvalidArgument,
+            Kernel::NotImplemented => Error::Unsupported,
+            Kernel::Elf(_) => Error::InvalidFormat,
+            _ => Error::BackingFailure,
+        }
+    }
+}

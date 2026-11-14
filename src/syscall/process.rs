@@ -394,18 +394,18 @@ pub(crate) enum MemoryFault {
     Unmapped,
     AccessDenied,
     Backing(crate::mem::vm_object::VmPageError),
-    Operation(u64),
+    Operation(crate::result::OperationError),
 }
 
 impl From<u64> for MemoryFault {
     fn from(error: u64) -> Self {
-        Self::Operation(error)
+        Self::Operation(crate::result::OperationError::from_wire(error))
     }
 }
 
 impl From<mnu_abi::status::Error> for MemoryFault {
     fn from(error: mnu_abi::status::Error) -> Self {
-        Self::Operation(error.into_raw())
+        Self::Operation(error.into())
     }
 }
 
@@ -417,7 +417,7 @@ impl MemoryFault {
         use mnu_abi::status::Error;
         match self {
             Self::Operation(error) | Self::Backing(VmPageError::Operation(error)) => {
-                Error::from_raw(error) == Some(Error::NotReady)
+                error == crate::result::OperationError::Native(Error::NotReady)
             }
             _ => false,
         }
@@ -431,17 +431,17 @@ impl MemoryFault {
             Self::AccessDenied => MemoryFaultCause::AccessDenied,
             Self::Backing(VmPageError::OutsideBacking) => MemoryFaultCause::OutsideBacking,
             Self::Operation(error) | Self::Backing(VmPageError::Operation(error))
-                if Error::from_raw(error) == Some(Error::ResourceUnavailable) =>
+                if error == crate::result::OperationError::Native(Error::ResourceUnavailable) =>
             {
                 MemoryFaultCause::ResourceUnavailable
             }
             Self::Operation(error) | Self::Backing(VmPageError::Operation(error))
-                if Error::from_raw(error) == Some(Error::BackingFailure) =>
+                if error == crate::result::OperationError::Native(Error::BackingFailure) =>
             {
                 MemoryFaultCause::BackingFailure
             }
             Self::Operation(error) | Self::Backing(VmPageError::Operation(error))
-                if Error::from_raw(error) == Some(Error::AccessDenied) =>
+                if error == crate::result::OperationError::Native(Error::AccessDenied) =>
             {
                 MemoryFaultCause::AccessDenied
             }
@@ -461,11 +461,11 @@ pub(crate) fn handle_user_memory_fault(
     use mnu_abi::status::Error;
     let tid = match current_thread_id() {
         Some(t) => t,
-        None => return Err(MemoryFault::Operation(Error::NotFound.into_raw())),
+        None => return Err(MemoryFault::Operation(Error::NotFound.into())),
     };
     let pid = match crate::task::with_thread(tid, |t| t.process_id()) {
         Some(p) => p,
-        None => return Err(MemoryFault::Operation(Error::NotFound.into_raw())),
+        None => return Err(MemoryFault::Operation(Error::NotFound.into())),
     };
 
     let page_addr = fault_addr & !4095;
@@ -478,7 +478,7 @@ pub(crate) fn handle_user_memory_fault(
     let resident = crate::task::with_process_mut(pid, |process| {
         let pt_phys = match process.page_table() {
             Some(p) => p,
-            None => return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw())),
+            None => return Err(MemoryFault::Operation(Error::InvalidArgument.into())),
         };
         let region = match process.find_memory_region_mut(fault_addr) {
             Some(region) => region,
@@ -509,7 +509,7 @@ pub(crate) fn handle_user_memory_fault(
         if crate::mem::paging::is_user_range_mapped_in_table(pt_phys, page_addr, 1) {
             if !is_write {
                 crate::debug!("[MEMORY_FAULT] page already mapped {:#x}", page_addr);
-                return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw()));
+                return Err(MemoryFault::Operation(Error::InvalidArgument.into()));
             }
             if region.is_shared() {
                 if let Some(object) = region.backing().file_object() {
@@ -530,9 +530,7 @@ pub(crate) fn handle_user_memory_fault(
             .is_err()
             {
                 crate::debug!("[MEMORY_FAULT] remap writable failed for {:#x}", page_addr);
-                return Err(MemoryFault::Operation(
-                    Error::ResourceUnavailable.into_raw(),
-                ));
+                return Err(MemoryFault::Operation(Error::ResourceUnavailable.into()));
             }
             region.mark_dirty_page((page_addr - region.start()) / 4096);
             crate::debug!("[MEMORY_FAULT] upgraded dirty page {:#x}", page_addr);
@@ -544,7 +542,7 @@ pub(crate) fn handle_user_memory_fault(
         Some(Ok(true)) => return Ok(()),
         Some(Ok(false)) => {}
         Some(Err(error)) => return Err(error),
-        None => return Err(MemoryFault::Operation(Error::NotFound.into_raw())),
+        None => return Err(MemoryFault::Operation(Error::NotFound.into())),
     }
 
     let plan = crate::task::with_process(pid, |process| {
@@ -581,7 +579,7 @@ pub(crate) fn handle_user_memory_fault(
         Ok((pt_phys, region.start(), shared_file, pager, generation))
     });
     let (pt_phys, region_start, shared_file, pager, generation) =
-        plan.ok_or(MemoryFault::Operation(Error::NotFound.into_raw()))??;
+        plan.ok_or(MemoryFault::Operation(Error::NotFound.into()))??;
 
     let page = match pager.as_ref() {
         Some((object, page_index)) if !shared_file => match object.page(*page_index) {
@@ -612,7 +610,7 @@ pub(crate) fn handle_user_memory_fault(
 
     let result = crate::task::with_process_mut(pid, |process| {
         if process.page_table() != Some(pt_phys) {
-            return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw()));
+            return Err(MemoryFault::Operation(Error::InvalidArgument.into()));
         }
         let region = process
             .find_memory_region_mut(fault_addr)
@@ -638,7 +636,7 @@ pub(crate) fn handle_user_memory_fault(
             _ => false,
         };
         if !same_backing {
-            return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw()));
+            return Err(MemoryFault::Operation(Error::InvalidArgument.into()));
         }
         let executable = region.allows_execute_at(fault_addr);
         if crate::mem::paging::is_user_range_mapped_in_table(pt_phys, page_addr, 1) {
@@ -646,7 +644,7 @@ pub(crate) fn handle_user_memory_fault(
         }
         if shared_file {
             let Some((object, page_index)) = pager.as_ref() else {
-                return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw()));
+                return Err(MemoryFault::Operation(Error::InvalidArgument.into()));
             };
             shared_page
                 .as_ref()
@@ -659,9 +657,7 @@ pub(crate) fn handle_user_memory_fault(
                 )
                 .is_err()
                 {
-                    return Err(MemoryFault::Operation(
-                        Error::ResourceUnavailable.into_raw(),
-                    ));
+                    return Err(MemoryFault::Operation(Error::ResourceUnavailable.into()));
                 }
             }
         } else {
@@ -670,7 +666,7 @@ pub(crate) fn handle_user_memory_fault(
             let source: &[u8] = match (pager.as_ref(), page.as_ref()) {
                 (None, None) => &[],
                 (Some(_), Some(page)) => page.as_slice(),
-                _ => return Err(MemoryFault::Operation(Error::InvalidArgument.into_raw())),
+                _ => return Err(MemoryFault::Operation(Error::InvalidArgument.into())),
             };
             let install = || {
                 crate::mem::paging::map_and_copy_segment_to(
@@ -701,7 +697,7 @@ pub(crate) fn handle_user_memory_fault(
     match result {
         Some(Ok(())) => Ok(()),
         Some(Err(error)) => Err(error),
-        None => Err(MemoryFault::Operation(Error::NotFound.into_raw())),
+        None => Err(MemoryFault::Operation(Error::NotFound.into())),
     }
 }
 
@@ -826,7 +822,9 @@ fn memory_map_impl(
         };
         let object = match object {
             crate::task::KernelObject::Provider(provider) => {
-                let identity = match crate::ipc::provider::memory_object(&provider) {
+                let identity = match crate::ipc::provider::memory_object(&provider)
+                    .map_err(crate::result::OperationError::into_raw)
+                {
                     Ok(0) => return mnu_abi::status::Error::InvalidArgument.into_raw(),
                     Ok(identity) => identity,
                     Err(error) => return error,

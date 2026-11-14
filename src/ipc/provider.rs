@@ -1,4 +1,5 @@
-//! Typed provider messages over native endpoint transport; no user pointers.
+//! Provider wire operations with typed native and peer failures.
+use crate::result::OperationError;
 use crate::task::ProviderObject;
 
 pub(crate) fn flush_releases() {
@@ -43,39 +44,41 @@ pub(crate) fn call(
     request_header: mnu_abi::provider::RequestHeader,
     request_data: &[u8],
     response_storage: &mut [u8],
-) -> Result<(mnu_abi::provider::ResponseHeader, usize), u64> {
+) -> Result<(mnu_abi::provider::ResponseHeader, usize), OperationError> {
     use mnu_abi::status::Error;
 
     if request_data.len() > mnu_abi::provider::MAX_DATA_LEN {
-        return Err(Error::LimitExceeded.into_raw());
+        return Err(OperationError::Native(Error::LimitExceeded));
     }
     let request_capacity = mnu_abi::provider::REQUEST_HEADER_LEN
         .checked_add(request_data.len())
-        .ok_or_else(|| Error::LimitExceeded.into_raw())?;
+        .ok_or_else(|| OperationError::Native(Error::LimitExceeded))?;
     let mut request = alloc::vec::Vec::new();
     request
         .try_reserve_exact(request_capacity)
-        .map_err(|_| Error::ResourceUnavailable.into_raw())?;
+        .map_err(|_| OperationError::Native(Error::ResourceUnavailable))?;
     request.resize(request_capacity, 0);
+    let mut request = crate::task::operation::Scope::new(request)?;
     let request_len = request_header
         .encode(request_data, &mut request)
-        .map_err(|_| Error::InvalidArgument.into_raw())?;
+        .map_err(|_| OperationError::Native(Error::InvalidArgument))?;
     let response_len = crate::ipc::call_provider_from_kernel(
         endpoint(provider),
         &request[..request_len],
         response_storage,
-    )?;
+    )
+    .map_err(OperationError::from_wire)?;
     let (response, data) = mnu_abi::provider::ResponseHeader::decode(
         response_storage
             .get(..response_len)
-            .ok_or_else(|| Error::BackingFailure.into_raw())?,
+            .ok_or_else(|| OperationError::Native(Error::BackingFailure))?,
     )
-    .map_err(|_| Error::BackingFailure.into_raw())?;
+    .map_err(|_| OperationError::Native(Error::BackingFailure))?;
     if response.opcode != request_header.opcode || response.object_id != provider.object_id {
-        return Err(Error::BackingFailure.into_raw());
+        return Err(OperationError::Native(Error::BackingFailure));
     }
     if response.status != 0 {
-        return Err(response.status as u64);
+        return Err(OperationError::from_wire(response.status as u64));
     }
     Ok((response, data.len()))
 }
@@ -86,11 +89,11 @@ pub(crate) fn read_at(
     provider: &ProviderObject,
     offset: u64,
     output: &mut [u8],
-) -> Result<usize, u64> {
+) -> Result<usize, OperationError> {
     use mnu_abi::status::Error;
 
     if output.len() > mnu_abi::provider::MAX_DATA_LEN {
-        return Err(Error::LimitExceeded.into_raw());
+        return Err(OperationError::Native(Error::LimitExceeded));
     }
     let request = mnu_abi::provider::RequestHeader {
         opcode: mnu_abi::provider::OP_READ_AT,
@@ -104,11 +107,12 @@ pub(crate) fn read_at(
     let mut response_storage = alloc::vec::Vec::new();
     response_storage
         .try_reserve_exact(capacity)
-        .map_err(|_| Error::ResourceUnavailable.into_raw())?;
+        .map_err(|_| OperationError::Native(Error::ResourceUnavailable))?;
     response_storage.resize(capacity, 0);
+    let mut response_storage = crate::task::operation::Scope::new(response_storage)?;
     let (response, data_len) = call(provider, request, &[], &mut response_storage)?;
     if response.value as usize != data_len || data_len > output.len() {
-        return Err(Error::BackingFailure.into_raw());
+        return Err(OperationError::Native(Error::BackingFailure));
     }
     output[..data_len].copy_from_slice(
         &response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN
@@ -118,11 +122,15 @@ pub(crate) fn read_at(
 }
 
 /// Writes to a provider object without changing its sequential I/O offset.
-pub(crate) fn write_at(provider: &ProviderObject, offset: u64, input: &[u8]) -> Result<usize, u64> {
+pub(crate) fn write_at(
+    provider: &ProviderObject,
+    offset: u64,
+    input: &[u8],
+) -> Result<usize, OperationError> {
     use mnu_abi::status::Error;
 
     if input.len() > mnu_abi::provider::MAX_DATA_LEN {
-        return Err(Error::LimitExceeded.into_raw());
+        return Err(OperationError::Native(Error::LimitExceeded));
     }
     let request = mnu_abi::provider::RequestHeader {
         opcode: mnu_abi::provider::OP_WRITE_AT,
@@ -134,14 +142,15 @@ pub(crate) fn write_at(provider: &ProviderObject, offset: u64, input: &[u8]) -> 
     };
     let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
     let (response, data_len) = call(provider, request, input, &mut response_storage)?;
-    let written = usize::try_from(response.value).map_err(|_| Error::BackingFailure.into_raw())?;
+    let written = usize::try_from(response.value)
+        .map_err(|_| OperationError::Native(Error::BackingFailure))?;
     if data_len != 0 || written > input.len() {
-        return Err(Error::BackingFailure.into_raw());
+        return Err(OperationError::Native(Error::BackingFailure));
     }
     Ok(written)
 }
 
-pub(crate) fn sync(provider: &ProviderObject) -> Result<(), u64> {
+pub(crate) fn sync(provider: &ProviderObject) -> Result<(), OperationError> {
     use mnu_abi::status::Error;
 
     let request = mnu_abi::provider::RequestHeader {
@@ -155,12 +164,12 @@ pub(crate) fn sync(provider: &ProviderObject) -> Result<(), u64> {
     let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
     let (response, data_len) = call(provider, request, &[], &mut response_storage)?;
     if response.value != 0 || data_len != 0 {
-        return Err(Error::BackingFailure.into_raw());
+        return Err(OperationError::Native(Error::BackingFailure));
     }
     Ok(())
 }
 
-pub(crate) fn memory_object(provider: &ProviderObject) -> Result<u64, u64> {
+pub(crate) fn memory_object(provider: &ProviderObject) -> Result<u64, OperationError> {
     use mnu_abi::status::Error;
 
     if provider.memory_identity_unavailable() {
@@ -183,7 +192,7 @@ pub(crate) fn memory_object(provider: &ProviderObject) -> Result<u64, u64> {
         response.value,
         &response_storage[mnu_abi::provider::RESPONSE_HEADER_LEN..][..data_len],
     )
-    .map_err(|_| Error::BackingFailure.into_raw())?;
+    .map_err(|_| OperationError::Native(Error::BackingFailure))?;
     if response.value == 0 {
         provider.set_memory_identity_unavailable();
     } else {

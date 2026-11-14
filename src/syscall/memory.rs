@@ -15,16 +15,7 @@ fn current_pid() -> Option<crate::task::ids::ProcessId> {
 
 #[inline(never)]
 pub(super) fn memory_protection_error(error: crate::Kernel) -> Error {
-    match error {
-        crate::Kernel::Memory(crate::result::Memory::NotMapped)
-        | crate::Kernel::Memory(crate::result::Memory::InvalidAddress) => Error::InvalidAddress,
-        crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => Error::ResourceUnavailable,
-        crate::Kernel::Memory(crate::result::Memory::Busy) => Error::NotReady,
-        crate::Kernel::Memory(crate::result::Memory::PermissionDenied) => Error::AccessDenied,
-        crate::Kernel::Memory(crate::result::Memory::AlignmentError)
-        | crate::Kernel::InvalidParam => Error::InvalidArgument,
-        _ => Error::BackingFailure,
-    }
+    error.into()
 }
 
 #[inline(never)]

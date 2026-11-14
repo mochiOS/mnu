@@ -1,31 +1,29 @@
 use crate::capability::{
     parse_kernel_authority_spec, Capability, CapabilitySet, KernelAuthoritySet,
 };
-use crate::policy::{
-    claim_init_pid, release_init_pid, resolve_exec_privilege,
-};
+use crate::policy::{claim_init_pid, release_init_pid, resolve_exec_privilege};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-mod image;
-mod launch;
-mod captured_handles;
-mod storage;
-mod initial_mappings;
 mod bootstrap_stack;
+mod captured_handles;
+mod image;
+mod initial_mappings;
+mod launch;
+mod storage;
 
 use image::{map_elf_image, ElfImageLayout};
 use launch::ImageLaunch;
 
 use mnu_abi::exec::{
-    APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX, APPLICATION_PROVENANCE_PREFIX,
-    APPLICATION_SUBJECT_KEY_ID_PREFIX, EXEC_AUTHORIZATION_CLASS_PREFIX,
-    EXEC_AUTHORIZATION_IMAGE_REVISION_PREFIX, EXEC_AUTHORIZATION_KIND_IMAGE_INSTALL,
-    EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE, EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT,
-    EXEC_AUTHORIZATION_KIND_PREFIX, EXEC_AUTHORIZATION_KIND_SPAWN,
-    EXEC_AUTHORIZATION_KIND_SPAWN_INHERIT, EXECUTABLE_DIGEST_PREFIX, ExecutionClass,
+    ExecutionClass, APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX,
+    APPLICATION_PROVENANCE_PREFIX, APPLICATION_SUBJECT_KEY_ID_PREFIX, EXECUTABLE_DIGEST_PREFIX,
+    EXEC_AUTHORIZATION_CLASS_PREFIX, EXEC_AUTHORIZATION_IMAGE_REVISION_PREFIX,
+    EXEC_AUTHORIZATION_KIND_IMAGE_INSTALL, EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE,
+    EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT, EXEC_AUTHORIZATION_KIND_PREFIX,
+    EXEC_AUTHORIZATION_KIND_SPAWN, EXEC_AUTHORIZATION_KIND_SPAWN_INHERIT,
 };
 use sha2::{Digest, Sha256};
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -182,12 +180,7 @@ impl Drop for UserPageTableGuard {
 }
 
 fn mapping_error_native(error: crate::Kernel) -> mnu_abi::status::Error {
-    match error {
-        crate::Kernel::Memory(crate::result::Memory::OutOfMemory) => {
-            mnu_abi::status::Error::ResourceUnavailable
-        }
-        _ => mnu_abi::status::Error::InvalidArgument,
-    }
+    error.into()
 }
 
 #[inline]
@@ -471,8 +464,8 @@ fn exec_authorization_target(
         let process = crate::syscall::security::current_process_id().ok_or(Error::NotReady)?;
         return Ok((thread, process));
     }
-    let requester = crate::ipc::resolve_sender_thread_id(requester_endpoint)
-        .ok_or(Error::InvalidArgument)?;
+    let requester =
+        crate::ipc::resolve_sender_thread_id(requester_endpoint).ok_or(Error::InvalidArgument)?;
     let thread = crate::task::ThreadId::from_u64(requester);
     let process =
         crate::task::with_thread(thread, |thread| thread.process_id()).ok_or(Error::NotReady)?;
@@ -842,7 +835,10 @@ pub(crate) fn launch_bootstrap_image(
     measurement.finish(result)
 }
 
-pub(crate) fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, mnu_abi::status::Error> {
+pub(crate) fn map_initial_tls(
+    table_phys: u64,
+    aslr_seed: u64,
+) -> Result<u64, mnu_abi::status::Error> {
     use mnu_abi::status::Error;
 
     let exec = crate::config::kernel().exec;
@@ -1417,8 +1413,8 @@ fn replace_current_process_image(
     })
     .ok_or_else(|| Error::NotReady.into_raw())?
     .ok_or_else(|| Error::LimitExceeded.into_raw())?;
-    let next_ipc_generation = crate::task::ipc_generation::reserve()
-        .ok_or_else(|| Error::LimitExceeded.into_raw())?;
+    let next_ipc_generation =
+        crate::task::ipc_generation::reserve().ok_or_else(|| Error::LimitExceeded.into_raw())?;
     crate::task::release_process_borrowed_mappings(pid)?;
     crate::task::scheduler::retire_image_siblings(pid, current_tid);
     stack_mapping.commit();
@@ -1646,10 +1642,15 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
         Some(None) => return Error::AccessDenied.into_raw(),
         None => return Error::NotReady.into_raw(),
     };
-    if !matches!(authorization.kind,
-        crate::task::process::PendingExecKind::Spawn | crate::task::process::PendingExecKind::SpawnInherit)
-        || (authorization.kind == crate::task::process::PendingExecKind::SpawnInherit
-            && !matches!(request.startup, mnu_abi::process_create::InitialState::Context(_)))
+    if !matches!(
+        authorization.kind,
+        crate::task::process::PendingExecKind::Spawn
+            | crate::task::process::PendingExecKind::SpawnInherit
+    ) || (authorization.kind == crate::task::process::PendingExecKind::SpawnInherit
+        && !matches!(
+            request.startup,
+            mnu_abi::process_create::InitialState::Context(_)
+        ))
     {
         return Error::AccessDenied.into_raw();
     }
@@ -1779,12 +1780,14 @@ fn create_from_address_space(
     values: &[InheritedValueSpec],
 ) -> u64 {
     use mnu_abi::status::Error;
-    let image =
-        match crate::syscall::handle::object_native(image_handle, crate::task::HandleRights::CONTROL) {
-            Ok(crate::task::KernelObject::AddressSpace(image)) => image,
-            Ok(_) => return Error::InvalidArgument.into_raw(),
-            Err(error) => return error.into_raw(),
-        };
+    let image = match crate::syscall::handle::object_native(
+        image_handle,
+        crate::task::HandleRights::CONTROL,
+    ) {
+        Ok(crate::task::KernelObject::AddressSpace(image)) => image,
+        Ok(_) => return Error::InvalidArgument.into_raw(),
+        Err(error) => return error.into_raw(),
+    };
     let privilege = match authorization.execution_class {
         ExecutionClass::Privileged => crate::task::PrivilegeLevel::Service,
         ExecutionClass::Unprivileged => crate::task::PrivilegeLevel::User,
@@ -1871,5 +1874,8 @@ fn create_from_address_space(
         return Error::ResourceUnavailable.into_raw();
     }
     table_guard.disarm();
-    handle.0.take().unwrap_or_else(|| Error::NotReady.into_raw())
+    handle
+        .0
+        .take()
+        .unwrap_or_else(|| Error::NotReady.into_raw())
 }
