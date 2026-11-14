@@ -18,6 +18,7 @@ pub(crate) fn replace(
     let end = region.end().ok_or(Error::InvalidArgument)?;
     let length = region.len();
     let table = process.page_table().ok_or(Error::NotReady)?;
+    paging::check_user_mapping_range(table, start, length).map_err(Error::from)?;
     if process.find_dma_buffer_by_addr(start, length).is_some()
         || process.find_mmio_mapping_by_addr(start, length).is_some()
     {

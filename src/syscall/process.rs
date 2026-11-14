@@ -957,6 +957,10 @@ fn memory_map_impl(
             crate::debug!("process::memory_map out of range");
             return Err(Error::InvalidAddress.into_raw());
         }
+        // REPLACE intentionally permits existing user pages, never the kernel
+        // entry/descriptor mappings. Check before allocating or publishing.
+        crate::mem::paging::check_user_mapping_range(pt_phys, map_start, size)
+            .map_err(|_| Error::AccessDenied.into_raw())?;
 
         let region = if anonymous {
             // Shared reservations retain one backing object across clones,

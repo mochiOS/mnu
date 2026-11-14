@@ -4,8 +4,10 @@
 
 mod edit;
 mod protection;
+mod reserved;
 pub(crate) use edit::TableEdit;
 pub(crate) use protection::PreparedProtection;
+pub(crate) use reserved::check_user_mapping_range;
 
 use crate::info;
 use crate::mem::frame;
@@ -59,8 +61,23 @@ pub enum ForkPagePolicy {
 
 #[cfg(target_os = "none")]
 unsafe extern "C" {
+    static __kernel_start: u8;
+    static __kernel_end: u8;
     static __text_start: u8;
     static __text_end: u8;
+}
+
+#[cfg(target_os = "none")]
+fn kernel_image_range() -> (u64, u64) {
+    (
+        core::ptr::addr_of!(__kernel_start) as u64,
+        core::ptr::addr_of!(__kernel_end) as u64,
+    )
+}
+
+#[cfg(not(target_os = "none"))]
+fn kernel_image_range() -> (u64, u64) {
+    (0, 0)
 }
 
 #[cfg(target_os = "none")]
@@ -831,6 +848,9 @@ pub fn is_user_range_mapped_in_table(table_phys: u64, addr: u64, len: u64) -> bo
 /// Placement checks must reject even one resident page in an otherwise empty
 /// range. The all-pages-accessible check above is for user buffer validation.
 pub(crate) fn is_user_range_occupied_in_table(table_phys: u64, addr: u64, len: u64) -> bool {
+    if check_user_mapping_range(table_phys, addr, len).is_err() {
+        return true;
+    }
     if addr > USER_SPACE_END
         || addr
             .checked_add(len.saturating_sub(1))
@@ -1362,13 +1382,7 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
     Ok(())
 }
 
-fn is_current_descriptor_table_vaddr(vaddr: u64) -> bool {
-    fn range_contains_page(base: u64, limit: u16, page: u64) -> bool {
-        let start = base & !0xfff;
-        let end = base.saturating_add(u64::from(limit)) | 0xfff;
-        page >= start && page <= end
-    }
-
+fn descriptor_table_ranges() -> [(u64, u64); 2] {
     let mut gdtr = [0u8; 10];
     let mut idtr = [0u8; 10];
     unsafe {
@@ -1383,12 +1397,32 @@ fn is_current_descriptor_table_vaddr(vaddr: u64) -> bool {
     let idt_base = u64::from_le_bytes([
         idtr[2], idtr[3], idtr[4], idtr[5], idtr[6], idtr[7], idtr[8], idtr[9],
     ]);
-    let page = vaddr & !0xfff;
-    range_contains_page(gdt_base, gdt_limit, page) || range_contains_page(idt_base, idt_limit, page)
+    [(gdt_base, gdt_limit), (idt_base, idt_limit)].map(|(base, limit)| {
+        (
+            base & !4095,
+            base.saturating_add(u64::from(limit)).saturating_add(4096) & !4095,
+        )
+    })
+}
+
+fn required_kernel_ranges() -> [(u64, u64); 4] {
+    let [gdt, idt] = descriptor_table_ranges();
+    [
+        kernel_image_range(),
+        (
+            crate::percpu::SYSCALL_SHARED_BASE,
+            crate::percpu::SYSCALL_SHARED_STACK_BASE + (crate::percpu::MAX_CPUS as u64) * 4096,
+        ),
+        gdt,
+        idt,
+    ]
 }
 
 fn is_preinstalled_user_mapping(vaddr: u64) -> bool {
-    is_current_descriptor_table_vaddr(vaddr) || crate::percpu::is_syscall_shared_vaddr(vaddr)
+    let page = vaddr & !4095;
+    required_kernel_ranges()
+        .into_iter()
+        .any(|(start, end)| start < end && page < end && start < page + 4096)
 }
 
 /// 既存のユーザーアドレス空間をfork用に複製する。
