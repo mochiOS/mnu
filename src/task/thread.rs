@@ -1663,8 +1663,13 @@ where
     queue.get_slot_mut(slot).map(f)
 }
 
-/// スレッドを削除
-pub fn remove_thread(id: ThreadId) -> Option<Thread> {
+/// Detach a thread and its operation owners after its final execution.
+///
+/// # Safety
+/// The scheduler must prevent any future dispatch of this thread. No other
+/// CPU may still execute its context; the current CPU may detach itself only
+/// on an exit path that cannot return to any of its operation scopes.
+pub(super) unsafe fn remove_thread(id: ThreadId) -> Option<Thread> {
     let (removed, endpoint) = {
         let mut queue = THREAD_QUEUE.lock();
         let endpoint = queue.ipc_slot_index_and_generation(id);

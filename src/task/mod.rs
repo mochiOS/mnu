@@ -50,7 +50,7 @@ pub(crate) use thread::ipc_slot_index_and_generation_by_u64;
 pub use thread::{
     add_thread, allocate_kernel_stack, count_threads_by_state, current_thread_id,
     current_thread_slot, for_each_thread, free_kernel_stack, kernel_stack_high_water_bytes,
-    kernel_stack_table_in_use, peek_next_thread, reclaim_current_cpu_kernel_stack, remove_thread,
+    kernel_stack_table_in_use, peek_next_thread, reclaim_current_cpu_kernel_stack,
     resume_process_threads, retire_current_kernel_stack, set_current_thread, set_thread_state,
     set_thread_state_at_slot, suspend_process_threads, thread_count, thread_id_exists,
     thread_slot_index, thread_slot_index_and_generation, thread_slot_index_and_generation_by_u64,
