@@ -7,6 +7,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+mod authorization;
 mod bootstrap_stack;
 mod captured_handles;
 mod image;
@@ -572,132 +573,11 @@ pub fn authorize_exec_syscall(
         Ok(items) => items,
         Err(error) => return error.into_raw(),
     };
-    let mut package = None;
-    let mut developer = None;
-    let mut subject_key = None;
-    let mut provenance = None;
-    let mut executable_digest = None;
-    let mut authorization_kind = None;
-    let mut inherit_security = false;
-    let mut execution_class = None;
-    let mut image_revision = None;
-    for item in &identity_items {
-        if let Some(value) = item.strip_prefix(APPLICATION_PACKAGE_ID_PREFIX) {
-            if package.is_some() {
-                return Error::InvalidArgument.into_raw();
-            }
-            package = Some(value);
-        } else if let Some(value) = item.strip_prefix(APPLICATION_DEVELOPER_ID_PREFIX) {
-            if developer.is_some() {
-                return Error::InvalidArgument.into_raw();
-            }
-            developer = Some(value);
-        } else if let Some(value) = item.strip_prefix(APPLICATION_SUBJECT_KEY_ID_PREFIX) {
-            if subject_key.is_some() {
-                return Error::InvalidArgument.into_raw();
-            }
-            subject_key = decode_subject_key_id(value);
-            if subject_key.is_none() {
-                return Error::InvalidArgument.into_raw();
-            }
-        } else if let Some(value) = item.strip_prefix(APPLICATION_PROVENANCE_PREFIX) {
-            if provenance.is_some() {
-                return Error::InvalidArgument.into_raw();
-            }
-            provenance = match value {
-                "built-in" => Some(crate::task::process::ApplicationProvenance::BuiltIn),
-                "verified-package" => {
-                    Some(crate::task::process::ApplicationProvenance::VerifiedPackage)
-                }
-                "development" => Some(crate::task::process::ApplicationProvenance::Development),
-                _ => None,
-            };
-            if provenance.is_none() {
-                return Error::InvalidArgument.into_raw();
-            }
-        } else if let Some(value) = item.strip_prefix(EXECUTABLE_DIGEST_PREFIX) {
-            if executable_digest.is_some() {
-                return Error::InvalidArgument.into_raw();
-            }
-            executable_digest = decode_subject_key_id(value);
-            if executable_digest.is_none() {
-                return Error::InvalidArgument.into_raw();
-            }
-        } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_KIND_PREFIX) {
-            if authorization_kind.is_some() {
-                return Error::InvalidArgument.into_raw();
-            }
-            authorization_kind = match value {
-                EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE => {
-                    Some(crate::task::process::PendingExecKind::ImageReplace)
-                }
-                EXEC_AUTHORIZATION_KIND_IMAGE_INSTALL => {
-                    Some(crate::task::process::PendingExecKind::ImageInstall { image_revision: 0 })
-                }
-                EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT => {
-                    inherit_security = true;
-                    Some(crate::task::process::PendingExecKind::ImageReplace)
-                }
-                EXEC_AUTHORIZATION_KIND_SPAWN_INHERIT => {
-                    inherit_security = true;
-                    Some(crate::task::process::PendingExecKind::SpawnInherit)
-                }
-                EXEC_AUTHORIZATION_KIND_SPAWN => Some(crate::task::process::PendingExecKind::Spawn),
-                _ => None,
-            };
-            if authorization_kind.is_none() {
-                return Error::InvalidArgument.into_raw();
-            }
-        } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_IMAGE_REVISION_PREFIX) {
-            if image_revision.is_some()
-                || value.is_empty()
-                || !value.bytes().all(|b| b.is_ascii_digit())
-            {
-                return Error::InvalidArgument.into_raw();
-            }
-            image_revision = value.parse::<u64>().ok();
-            if image_revision.is_none() {
-                return Error::InvalidArgument.into_raw();
-            }
-        } else if let Some(value) = item.strip_prefix(EXEC_AUTHORIZATION_CLASS_PREFIX) {
-            if execution_class.is_some() {
-                return Error::InvalidArgument.into_raw();
-            }
-            execution_class = match value {
-                "privileged" => Some(ExecutionClass::Privileged),
-                "unprivileged" => Some(ExecutionClass::Unprivileged),
-                _ => None,
-            };
-            if execution_class.is_none() {
-                return Error::InvalidArgument.into_raw();
-            }
-        } else {
-            return Error::InvalidArgument.into_raw();
-        }
-    }
-    if inherit_security {
-        let inherited_spawn =
-            authorization_kind == Some(crate::task::process::PendingExecKind::SpawnInherit);
-        if identity_items.len() != if inherited_spawn { 2 } else { 3 }
-            || caps_total_len != 0
-            || execution_class != Some(ExecutionClass::Unprivileged)
-        {
-            return Error::InvalidArgument.into_raw();
-        }
-        if inherited_spawn == executable_digest.is_some() {
-            return Error::InvalidArgument.into_raw();
-        }
-        return authorize_inherited_image(requester_endpoint, path, executable_digest);
-    }
-    let (
-        Some(package),
-        Some(developer),
-        Some(subject_key),
-        Some(provenance),
-        Some(executable_digest),
-        Some(authorization_kind),
-        Some(execution_class),
-    ) = (
+    let request = match authorization::parse(&identity_items, caps_total_len) {
+        Ok(request) => request,
+        Err(error) => return error.into_raw(),
+    };
+    let authorization::Explicit {
         package,
         developer,
         subject_key,
@@ -705,23 +585,14 @@ pub fn authorize_exec_syscall(
         executable_digest,
         authorization_kind,
         execution_class,
-    )
-    else {
-        return Error::InvalidArgument.into_raw();
-    };
-    if !valid_security_identity(package) || !valid_security_identity(developer) {
-        return Error::InvalidArgument.into_raw();
-    }
-    let authorization_kind = match (authorization_kind, image_revision) {
-        (crate::task::process::PendingExecKind::ImageInstall { .. }, Some(image_revision))
-            if execution_class == ExecutionClass::Unprivileged =>
-        {
-            crate::task::process::PendingExecKind::ImageInstall { image_revision }
+    } = match request {
+        authorization::Request::InheritSpawn => {
+            return authorize_inherited_image(requester_endpoint, path, None)
         }
-        (crate::task::process::PendingExecKind::ImageInstall { .. }, _) | (_, Some(_)) => {
-            return Error::InvalidArgument.into_raw();
+        authorization::Request::InheritReplace { digest } => {
+            return authorize_inherited_image(requester_endpoint, path, Some(digest))
         }
-        (kind, None) => kind,
+        authorization::Request::Explicit(explicit) => explicit,
     };
     let caps_list = match read_nul_caps_from_user(caps_ptr, caps_total_len) {
         Ok(caps) => caps,
