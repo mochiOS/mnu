@@ -35,8 +35,6 @@ pub(super) fn prepare(
                 mapping.length,
                 mapping.access,
                 mapping.options,
-                writable,
-                shared,
             )
         } else {
             let mut required = HandleRights::MAP.union(HandleRights::READ);
@@ -75,8 +73,6 @@ pub(super) fn prepare(
                 mapping.options,
                 object,
                 mapping.backing_offset,
-                writable,
-                shared,
                 maximum,
             )
         };

@@ -304,10 +304,12 @@ pub fn clone_address_space() -> u64 {
             return Error::BackingFailure.into_raw();
         }
         let image = match cloned {
-            Ok(image) => match Arc::try_new(crate::mem::address_space::AddressSpaceObject::new(image)) {
-                Ok(image) => image,
-                Err(_) => return Error::ResourceUnavailable.into_raw(),
-            },
+            Ok(image) => {
+                match Arc::try_new(crate::mem::address_space::AddressSpaceObject::new(image)) {
+                    Ok(image) => image,
+                    Err(_) => return Error::ResourceUnavailable.into_raw(),
+                }
+            }
             Err(_) => return Error::ResourceUnavailable.into_raw(),
         };
         process
@@ -382,7 +384,9 @@ pub(crate) fn resolve_user_copy_on_write(table: u64, address: u64) -> crate::res
         crate::mem::mapping_admission::check_access(process.memory_regions(), address, 1)?;
         crate::mem::paging::resolve_copy_on_write(table, address)
     })
-    .unwrap_or(Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress)))
+    .unwrap_or(Err(crate::Kernel::Memory(
+        crate::result::Memory::InvalidAddress,
+    )))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,7 +425,7 @@ impl MemoryFault {
 
     pub(crate) fn cause(self) -> mnu_abi::MemoryFaultCause {
         use crate::mem::vm_object::VmPageError;
-        use mnu_abi::{MemoryFaultCause, status::Error};
+        use mnu_abi::{status::Error, MemoryFaultCause};
         match self {
             Self::Unmapped => MemoryFaultCause::Unmapped,
             Self::AccessDenied => MemoryFaultCause::AccessDenied,
@@ -976,14 +980,10 @@ fn memory_map_impl(
                     options,
                     object,
                     0,
-                    writable,
-                    true,
                     mnu_abi::MEMORY_ACCESS_ALL,
                 )
             } else {
-                crate::task::MemoryRegion::anonymous(
-                    map_start, size, access, options, writable, false,
-                )
+                crate::task::MemoryRegion::anonymous(map_start, size, access, options)
             }
             // Both private and shared reservations use zero-fill faults;
             // access permissions never force eager physical allocation.
@@ -1004,8 +1004,6 @@ fn memory_map_impl(
                 options,
                 object,
                 file_offset,
-                writable,
-                shared,
                 max_access,
             )
         };
@@ -1087,7 +1085,9 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
     };
     let outcome = crate::task::with_process_mut(pid, |process| {
         use crate::mem::{mapping_revocation as transaction, mapping_revocation_native::Native};
-        let table = process.page_table().ok_or_else(|| Error::NotReady.into_raw())?;
+        let table = process
+            .page_table()
+            .ok_or_else(|| Error::NotReady.into_raw())?;
         if process
             .find_dma_buffer_by_addr(unmap_start, unmap_len)
             .is_some()
@@ -1126,12 +1126,13 @@ pub fn memory_unmap(addr: u64, length: u64) -> u64 {
         // SAFETY: PROCESS_TABLE stays locked across all PTE edits and remote
         // acknowledgements. A fault cannot reinstall a suspended page here.
         let mut backend = unsafe { Native::for_process(process, owns_frames) };
-        transaction::revoke([(table, unmap_start, unmap_end)], &mut backend)
-            .map_err(|error| match error {
+        transaction::revoke([(table, unmap_start, unmap_end)], &mut backend).map_err(|error| {
+            match error {
                 transaction::Error::InvalidRange => Error::InvalidArgument.into_raw(),
                 transaction::Error::Allocation => Error::ResourceUnavailable.into_raw(),
                 transaction::Error::Backend(error) => error.into_raw(),
-            })?;
+            }
+        })?;
         // Metadata is committed only after successful revocation. Failure
         // restores PTEs and leaves the original ranges/frame ownership intact.
         if let Some((retained, removed)) = metadata {
@@ -1265,10 +1266,9 @@ fn fill_random_buffer(buf_ptr: u64, len: u64) -> u64 {
             buffer.fill(0);
             return Error::NotReady.into_raw();
         }
-        if let Err(error) = crate::syscall::copy_to_user_native(
-            buf_ptr + offset,
-            &buffer[..chunk_len],
-        ) {
+        if let Err(error) =
+            crate::syscall::copy_to_user_native(buf_ptr + offset, &buffer[..chunk_len])
+        {
             buffer.fill(0);
             return error.into_raw();
         }

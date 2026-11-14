@@ -1,6 +1,6 @@
 //! Own-address-space RAM observation and private anonymous discard.
 use super::{current_pid, memory_range_is_mapped};
-use mnu_abi::{SUCCESS, status::Error};
+use mnu_abi::{status::Error, SUCCESS};
 
 /// Bounded observation of the caller's RAM leaves. Never faults source pages
 /// in, consults another process, or exports a physical address. Output copying
@@ -92,12 +92,7 @@ pub fn discard(address: u64, length: u64) -> u64 {
             let region = process
                 .find_memory_region(cursor)
                 .ok_or(Error::InvalidAddress)?;
-            if region.is_shared()
-                || !matches!(
-                    region.backing(),
-                    MemoryBacking::Anonymous { shared: false, .. }
-                )
-            {
+            if region.is_shared() || !matches!(region.backing(), MemoryBacking::Anonymous { .. }) {
                 return Err(Error::Unsupported);
             }
             cursor = region.end().ok_or(Error::InvalidAddress)?.min(end);

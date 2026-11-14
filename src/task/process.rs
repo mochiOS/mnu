@@ -2,7 +2,7 @@ use crate::interrupt::spinlock::SpinLock;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use crate::capability::{CapabilitySet, KernelAuthority, KernelAuthoritySet, KernelCapability};
 
@@ -42,14 +42,10 @@ impl Default for ResourceLimits {
 pub enum MemoryBacking {
     Anonymous {
         data: alloc::vec::Vec<u8>,
-        writable: bool,
-        shared: bool,
     },
     File {
         object: Arc<crate::mem::vm_object::VmObject>,
         offset: u64,
-        writable: bool,
-        shared: bool,
     },
 }
 
@@ -176,20 +172,12 @@ impl MemoryRegion {
             Ok(result)
         }
         let backing = match &self.backing {
-            MemoryBacking::Anonymous {
-                data, writable, shared,
-            } => MemoryBacking::Anonymous {
+            MemoryBacking::Anonymous { data } => MemoryBacking::Anonymous {
                 data: copied(data)?,
-                writable: *writable,
-                shared: *shared,
             },
-            MemoryBacking::File {
-                object, offset, writable, shared,
-            } => MemoryBacking::File {
+            MemoryBacking::File { object, offset } => MemoryBacking::File {
                 object: Arc::clone(object),
                 offset: *offset,
-                writable: *writable,
-                shared: *shared,
             },
         };
         Ok(Self {
@@ -211,8 +199,6 @@ impl MemoryRegion {
         options: u64,
         object: Arc<crate::mem::vm_object::VmObject>,
         offset: u64,
-        writable: bool,
-        shared: bool,
         max_access: u64,
     ) -> Self {
         Self {
@@ -222,24 +208,12 @@ impl MemoryRegion {
             max_access,
             access_ranges: alloc::vec::Vec::new(),
             options,
-            backing: MemoryBacking::File {
-                object,
-                offset,
-                writable,
-                shared,
-            },
+            backing: MemoryBacking::File { object, offset },
             dirty_pages: alloc::vec::Vec::new(),
         }
     }
 
-    pub fn anonymous(
-        start: u64,
-        len: u64,
-        access: u64,
-        options: u64,
-        writable: bool,
-        shared: bool,
-    ) -> Self {
+    pub fn anonymous(start: u64, len: u64, access: u64, options: u64) -> Self {
         Self {
             start,
             len,
@@ -249,8 +223,6 @@ impl MemoryRegion {
             options,
             backing: MemoryBacking::Anonymous {
                 data: alloc::vec::Vec::new(),
-                writable,
-                shared,
             },
             dirty_pages: alloc::vec::Vec::new(),
         }
@@ -280,13 +252,21 @@ impl MemoryRegion {
 
     /// Read-only RAM backing observation for an address in this retained
     /// region. Caller holds VM exclusion; no fault or provider I/O occurs.
-    pub(crate) fn backing_page_is_resident(&self, address: u64) -> Result<bool, mnu_abi::status::Error> {
-        let relative = address.checked_sub(self.start)
-            .filter(|offset| *offset < self.len).ok_or(mnu_abi::status::Error::InvalidAddress)?;
+    pub(crate) fn backing_page_is_resident(
+        &self,
+        address: u64,
+    ) -> Result<bool, mnu_abi::status::Error> {
+        let relative = address
+            .checked_sub(self.start)
+            .filter(|offset| *offset < self.len)
+            .ok_or(mnu_abi::status::Error::InvalidAddress)?;
         match &self.backing {
             MemoryBacking::Anonymous { data, .. } => Ok(relative < data.len() as u64),
             MemoryBacking::File { object, offset, .. } => {
-                let page = offset.checked_add(relative).ok_or(mnu_abi::status::Error::InvalidAddress)? / 4096;
+                let page = offset
+                    .checked_add(relative)
+                    .ok_or(mnu_abi::status::Error::InvalidAddress)?
+                    / 4096;
                 object.page_is_resident(page)
             }
         }
@@ -308,15 +288,11 @@ impl MemoryRegion {
         // This is a preflight operation for VM edits. Never invoke infallible
         // Vec cloning here: memory pressure must leave the original mapping live.
         let backing = match &self.backing {
-            MemoryBacking::File {
-                object, offset, writable, shared,
-            } => MemoryBacking::File {
+            MemoryBacking::File { object, offset } => MemoryBacking::File {
                 object: Arc::clone(object),
                 offset: offset.checked_add(delta).ok_or(InvalidRange)?,
-                writable: *writable,
-                shared: *shared,
             },
-            MemoryBacking::Anonymous { data, writable, shared } => {
+            MemoryBacking::Anonymous { data } => {
                 let source = if data.is_empty() {
                     &[][..]
                 } else {
@@ -326,13 +302,10 @@ impl MemoryRegion {
                     data.get(first..last).ok_or(InvalidRange)?
                 };
                 let mut copy = Vec::new();
-                copy.try_reserve_exact(source.len()).map_err(|_| Allocation)?;
+                copy.try_reserve_exact(source.len())
+                    .map_err(|_| Allocation)?;
                 copy.extend_from_slice(source);
-                MemoryBacking::Anonymous {
-                    data: copy,
-                    writable: *writable,
-                    shared: *shared,
-                }
+                MemoryBacking::Anonymous { data: copy }
             }
         };
         let mut access_ranges = Vec::new();
@@ -369,16 +342,13 @@ impl MemoryRegion {
         })
     }
 
-    pub fn set_writable(&mut self, writable: bool) {
-        match &mut self.backing {
-            MemoryBacking::Anonymous { writable: w, .. } => *w = writable,
-            MemoryBacking::File { writable: w, .. } => *w = writable,
-        }
-    }
-
     pub fn mark_dirty_page(&mut self, page_index: u64) {
         // Sequential first writes must not rescan every preceding dirty page.
-        if self.dirty_pages.last().is_none_or(|last| *last < page_index) {
+        if self
+            .dirty_pages
+            .last()
+            .is_none_or(|last| *last < page_index)
+        {
             self.dirty_pages.push(page_index);
         } else if let Err(index) = self.dirty_pages.binary_search(&page_index) {
             self.dirty_pages.insert(index, page_index);
@@ -516,20 +486,6 @@ impl MemoryBacking {
             MemoryBacking::File { offset, .. } => *offset,
         }
     }
-
-    pub fn file_writable(&self) -> bool {
-        match self {
-            MemoryBacking::Anonymous { writable, .. } => *writable,
-            MemoryBacking::File { writable, .. } => *writable,
-        }
-    }
-
-    pub fn file_shared(&self) -> bool {
-        match self {
-            MemoryBacking::Anonymous { shared, .. } => *shared,
-            MemoryBacking::File { shared, .. } => *shared,
-        }
-    }
 }
 
 /// Stable native process lifecycle object retained by `ProcessHandle`s after
@@ -574,7 +530,8 @@ impl ProcessObject {
 
     /// Cumulative execution ticks, including threads which have been reclaimed.
     pub fn cpu_ticks(&self) -> u64 {
-        self.user_cpu_ticks().saturating_add(self.kernel_cpu_ticks())
+        self.user_cpu_ticks()
+            .saturating_add(self.kernel_cpu_ticks())
     }
 
     pub fn user_cpu_ticks(&self) -> u64 {
@@ -826,8 +783,8 @@ impl Process {
         let id = ProcessId::new();
         let object =
             Arc::try_new(ProcessObject::new(id)).map_err(|_| Error::ResourceUnavailable)?;
-        let object_handles = Box::try_new(ObjectHandleTable::new())
-            .map_err(|_| Error::ResourceUnavailable)?;
+        let object_handles =
+            Box::try_new(ObjectHandleTable::new()).map_err(|_| Error::ResourceUnavailable)?;
         let launch_context =
             Box::try_new(LaunchContext::new()).map_err(|_| Error::ResourceUnavailable)?;
         Ok(Self {
@@ -1097,10 +1054,7 @@ impl Process {
         self.page_table_owned
     }
 
-    pub(crate) fn set_pending_image_root(
-        &mut self,
-        root: Arc<crate::mem::detached_roots::Root>,
-    ) {
+    pub(crate) fn set_pending_image_root(&mut self, root: Arc<crate::mem::detached_roots::Root>) {
         self.pending_image_root = Some(root);
     }
 
@@ -1275,7 +1229,7 @@ impl Process {
             .try_reserve(self.memory_regions.len())
             .map_err(|_| Allocation)?;
         for region in &self.memory_regions {
-            use super::memory_range::{Range, cut};
+            use super::memory_range::{cut, Range};
             let pieces = cut(
                 Range {
                     start: region.start,
@@ -1680,10 +1634,7 @@ pub fn register_process_exit_waiter(thread: super::ThreadId, process: ProcessId)
         return false;
     }
     processes.push(process);
-    *slot = Some(ProcessExitWaiter {
-        thread,
-        processes,
-    });
+    *slot = Some(ProcessExitWaiter { thread, processes });
     true
 }
 
@@ -1820,12 +1771,11 @@ pub(crate) fn resize_shared_memory(
     memory: &crate::mem::shared_memory::SharedMemory,
     length: u64,
 ) -> core::result::Result<(), mnu_abi::status::Error> {
-    use mnu_abi::status::Error;
     use crate::mem::{
-        mapping_preservation_native::Preserving,
-        mapping_targets::Targets,
-        mapping_revocation as transaction, mapping_revocation_native::Native,
+        mapping_preservation_native::Preserving, mapping_revocation as transaction,
+        mapping_revocation_native::Native, mapping_targets::Targets,
     };
+    use mnu_abi::status::Error;
     let table = PROCESS_TABLE.lock();
     let boundary = memory.length().min(length);
     memory.resize_transaction(length, |start, end, commit| {
@@ -1840,12 +1790,13 @@ pub(crate) fn resize_shared_memory(
         // keeps every selected PTE and page-table hierarchy stable.
         let native = unsafe { Native::for_targets(&table, &targets) };
         let mut backend = Preserving::new(native, targets.preserved())?;
-        transaction::revoke_with(targets.ranges(), &mut backend, || Ok(commit.commit()))
-            .map_err(|error| match error {
+        transaction::revoke_with(targets.ranges(), &mut backend, || Ok(commit.commit())).map_err(
+            |error| match error {
                 transaction::Error::InvalidRange => Error::InvalidArgument,
                 transaction::Error::Allocation => Error::ResourceUnavailable,
                 transaction::Error::Backend(error) => error,
-            })
+            },
+        )
     })
 }
 
@@ -1876,7 +1827,11 @@ pub fn mark_process_exited(id: ProcessId, exit_code: u64) -> bool {
                 exit_code,
                 kind: EXIT_KIND_STATUS,
                 image_digest: proc.image_digest().unwrap_or([0; 32]),
-                digest_kind: if proc.image_digest().is_some() { mnu_abi::PROCESS_IMAGE_DIGEST_SHA256 } else { 0 },
+                digest_kind: if proc.image_digest().is_some() {
+                    mnu_abi::PROCESS_IMAGE_DIGEST_SHA256
+                } else {
+                    0
+                },
                 architecture: 62,
                 ..Default::default()
             };
@@ -1893,7 +1848,9 @@ pub fn mark_process_exited(id: ProcessId, exit_code: u64) -> bool {
             record
         })
     };
-    if let Some(record) = record { crate::util::process_diagnostics::publish(record); }
+    if let Some(record) = record {
+        crate::util::process_diagnostics::publish(record);
+    }
     wake_process_exit_waiters(id);
     defer_process_reclaim(id);
     true
@@ -1951,8 +1908,11 @@ pub fn flush_deferred_process_reclaims() {
         // that window: the paging destructor must reject an attached stack.
         let stack_attached = with_process(process_id, |process| {
             process.page_table_owned()
-                && process.page_table().is_some_and(crate::task::kernel_stack_table_in_use)
-        }).unwrap_or(false);
+                && process
+                    .page_table()
+                    .is_some_and(crate::task::kernel_stack_table_in_use)
+        })
+        .unwrap_or(false);
         if stack_attached {
             defer_process_reclaim(process_id);
             continue;

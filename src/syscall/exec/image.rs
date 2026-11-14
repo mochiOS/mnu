@@ -1,4 +1,4 @@
-use super::{ExecMeasurement, mapping_error_native};
+use super::{mapping_error_native, ExecMeasurement};
 use alloc::vec::Vec;
 use mnu_abi::status::Error;
 
@@ -289,8 +289,6 @@ pub(super) fn map_elf_image(
                 len,
                 mnu_abi::MEMORY_ACCESS_READ | mnu_abi::MEMORY_ACCESS_WRITE,
                 0,
-                true,
-                false,
             ));
         }
     }
