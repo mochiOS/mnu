@@ -1,13 +1,43 @@
 //! x86_64 implementations of the shared CPU mechanisms.
 
 pub mod interrupts {
-    pub use x86_64::instructions::interrupts::{are_enabled, disable, enable};
+    use core::arch::asm;
+
+    #[inline]
+    pub fn are_enabled() -> bool {
+        let flags: u64;
+        // SAFETY: The balanced push/pop reads RFLAGS without changing it.
+        unsafe {
+            asm!("pushfq", "pop {}", out(reg) flags, options(nomem, preserves_flags));
+        }
+        flags & (1 << 9) != 0
+    }
+
+    #[inline]
+    pub fn disable() {
+        // SAFETY: Executed at kernel privilege. Keep a compiler memory barrier
+        // just as the previous x86_64 crate implementation did.
+        unsafe {
+            asm!("cli", options(nostack, preserves_flags));
+        }
+    }
+
+    #[inline]
+    pub fn enable() {
+        // SAFETY: The kernel controls the local CPU's interrupt flag.
+        unsafe {
+            asm!("sti", options(nostack, preserves_flags));
+        }
+    }
 }
 
 /// Wait for a CPU interrupt. The caller owns the interrupt-mask policy.
 #[inline]
 pub fn wait_for_interrupt() {
-    x86_64::instructions::hlt();
+    // SAFETY: Executed by the privileged kernel; the caller owns IF policy.
+    unsafe {
+        core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+    }
 }
 
 #[inline]

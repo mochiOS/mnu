@@ -5,7 +5,11 @@
 #[path = "x86_64/mod.rs"]
 mod selected;
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
+#[path = "aarch64/mod.rs"]
+mod selected;
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("mnu does not yet provide CPU primitives for this architecture");
 
 pub mod interrupts;

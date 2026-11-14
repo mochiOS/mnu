@@ -38,6 +38,8 @@ mnu-csprng = { path = "crates/csprng" }
 mnu-time-core = { path = "crates/time-core" }
 sha2 = { version = "0.10.8", default-features = false }
 spin = "0.9"
+
+[target.'cfg(all(target_arch = "x86_64", any(target_os = "none", target_os = "uefi")))'.dependencies]
 x86_64 = "0.15"
 
 [dependencies]
