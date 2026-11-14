@@ -8,10 +8,10 @@ path = "src/lib.rs"
 
 [dependencies]
 mnu-abi = { path = "../../crates/abi" }
-mochi-user-syscall = { path = "../../../user/crates/syscall" }
-mochi-user-platform = { path = "../../../user/crates/platform", default-features = false }
-mochios-posix-client = { path = "../../../user/crates/posix-client", default-features = false, features = ["syscall-endpoint", "launch-arguments"] }
-mochios-posix-protocol = { path = "../../../user/crates/posix-protocol" }
+mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls" }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", default-features = false }
+mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", default-features = false, features = ["syscall-endpoint", "launch-arguments"] }
+mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls" }
 
 [[bin]]
 name = "user"
