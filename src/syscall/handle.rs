@@ -245,7 +245,11 @@ pub fn write_at(raw: u64, buffer: u64, length: u64, offset: u64) -> u64 {
 fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -> u64 {
     use mnu_abi::status::Error;
 
-    let required = if write { HandleRights::WRITE } else { HandleRights::READ };
+    let required = if write {
+        HandleRights::WRITE
+    } else {
+        HandleRights::READ
+    };
     let object = match object_native(raw, required) {
         Ok(object @ (KernelObject::Provider(_) | KernelObject::VmObject(_))) => object,
         Ok(object @ KernelObject::HandleSnapshot(_)) if !write => object,
@@ -301,7 +305,11 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
         // copies must never execute while its provider I/O guard is held.
         if write {
             if let Err(error) = crate::syscall::copy_from_user_native(address, &mut data[..chunk]) {
-                return if done == 0 { error.into_raw() } else { done as u64 };
+                return if done == 0 {
+                    error.into_raw()
+                } else {
+                    done as u64
+                };
             }
         }
         let position = offset + done as u64;
@@ -322,7 +330,9 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
                         }
                         if let Some(guard) = &_guard {
                             crate::mem::vm_object::update_provider_range(
-                                guard, position, &data[..count],
+                                guard,
+                                position,
+                                &data[..count],
                             );
                         }
                         Ok(count)
@@ -334,7 +344,10 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
                         }
                         if let Some(identity) = identity {
                             crate::mem::vm_object::overlay_provider_range(
-                                provider, identity, position, &mut data[..count],
+                                provider,
+                                identity,
+                                position,
+                                &mut data[..count],
                             )?;
                         }
                         Ok(count)
@@ -362,7 +375,11 @@ fn positioned_io(raw: u64, buffer: u64, length: u64, offset: u64, write: bool) -
         };
         if !write {
             if let Err(error) = crate::syscall::copy_to_user_native(address, &data[..count]) {
-                return if done == 0 { error.into_raw() } else { done as u64 };
+                return if done == 0 {
+                    error.into_raw()
+                } else {
+                    done as u64
+                };
             }
         }
         done += count;
@@ -393,7 +410,12 @@ pub fn control(
     };
     if let KernelObject::MemoryUpdate(update) = &object {
         return memory_update::control(
-            update, control_code, input, input_length, output, output_length,
+            update,
+            control_code,
+            input,
+            input_length,
+            output,
+            output_length,
         );
     }
     let KernelObject::Provider(provider) = object else {
@@ -573,7 +595,8 @@ fn provider_call(
         response_storage,
     )?;
     let (response, data) = mnu_abi::provider::ResponseHeader::decode(
-        response_storage.get(..response_len)
+        response_storage
+            .get(..response_len)
             .ok_or_else(|| Error::BackingFailure.into_raw())?,
     )
     .map_err(|_| Error::BackingFailure.into_raw())?;
@@ -644,8 +667,7 @@ pub(crate) fn provider_write_at(
     };
     let mut response_storage = [0u8; mnu_abi::provider::RESPONSE_HEADER_LEN];
     let (response, data_len) = provider_call(provider, request, input, &mut response_storage)?;
-    let written = usize::try_from(response.value)
-        .map_err(|_| Error::BackingFailure.into_raw())?;
+    let written = usize::try_from(response.value).map_err(|_| Error::BackingFailure.into_raw())?;
     if data_len != 0 || written > input.len() {
         return Err(Error::BackingFailure.into_raw());
     }
@@ -838,9 +860,17 @@ impl ProviderReadTransfer {
             return Err(Error::BackingFailure.into_raw());
         };
         let position_bytes = position.unwrap_or(0).to_le_bytes();
-        let payload = if position.is_some() { &position_bytes[..] } else { &[] };
+        let payload = if position.is_some() {
+            &position_bytes[..]
+        } else {
+            &[]
+        };
         let request = wire::RequestHeader {
-            opcode: if position.is_some() { wire::OP_READ_AT_SHARED } else { wire::OP_READ_SHARED },
+            opcode: if position.is_some() {
+                wire::OP_READ_AT_SHARED
+            } else {
+                wire::OP_READ_SHARED
+            },
             object_id: provider.object_id,
             argument: 0,
             basis: 0,
@@ -853,52 +883,53 @@ impl ProviderReadTransfer {
             Err(_) => return Err(Error::InvalidArgument.into_raw()),
         };
         let mut response = [0u8; wire::RESPONSE_HEADER_LEN + wire::READ_POSITION_LEN];
-            let reply_length = crate::syscall::ipc::call_provider_with_handle_from_kernel(
-                provider_endpoint(provider),
-                &encoded[..encoded_length],
-                &mut response,
-                self.handle,
-                HandleRights::READ.union(HandleRights::WRITE).union(HandleRights::MAP),
-            )?;
-            let (reply, reply_position) = wire::ResponseHeader::decode(
-                response
-                    .get(..reply_length)
-                    .ok_or(Error::BackingFailure.into_raw())?,
-            )
-            .map_err(|_| Error::BackingFailure.into_raw())?;
-            if reply.object_id != provider.object_id || reply.opcode != request.opcode {
-                return Err(Error::BackingFailure.into_raw());
-            }
-            if reply.status != 0 {
-                return Err(reply.status as u64);
-            }
-            if reply_position.is_empty() {
-                // Only the validated, empty successful reply authorizes a
-                // transport change. No error value is feature detection.
-                return Ok(None);
-            }
-            let count =
-                usize::try_from(reply.value).map_err(|_| Error::BackingFailure.into_raw())?;
+        let reply_length = crate::syscall::ipc::call_provider_with_handle_from_kernel(
+            provider_endpoint(provider),
+            &encoded[..encoded_length],
+            &mut response,
+            self.handle,
+            HandleRights::READ
+                .union(HandleRights::WRITE)
+                .union(HandleRights::MAP),
+        )?;
+        let (reply, reply_position) = wire::ResponseHeader::decode(
+            response
+                .get(..reply_length)
+                .ok_or(Error::BackingFailure.into_raw())?,
+        )
+        .map_err(|_| Error::BackingFailure.into_raw())?;
+        if reply.object_id != provider.object_id || reply.opcode != request.opcode {
+            return Err(Error::BackingFailure.into_raw());
+        }
+        if reply.status != 0 {
+            return Err(reply.status as u64);
+        }
+        if reply_position.is_empty() {
+            // Only the validated, empty successful reply authorizes a
+            // transport change. No error value is feature detection.
+            return Ok(None);
+        }
+        let count = usize::try_from(reply.value).map_err(|_| Error::BackingFailure.into_raw())?;
         if count > data.len() || reply_position.len() != wire::READ_POSITION_LEN {
-                return Err(Error::BackingFailure.into_raw());
-            }
-            let start = u64::from_le_bytes(
-                reply_position
-                    .try_into()
-                    .map_err(|_| Error::BackingFailure.into_raw())?,
-            );
-            if position.is_some_and(|position| position != start) {
-                return Err(Error::BackingFailure.into_raw());
-            }
-            if object.read_at(0, &mut data[..count])? != count {
-                return Err(Error::BackingFailure.into_raw());
-            }
-            crate::mem::vm_object::overlay_provider_range(
-                provider,
-                identity,
-                start,
-                &mut data[..count],
-            )?;
+            return Err(Error::BackingFailure.into_raw());
+        }
+        let start = u64::from_le_bytes(
+            reply_position
+                .try_into()
+                .map_err(|_| Error::BackingFailure.into_raw())?,
+        );
+        if position.is_some_and(|position| position != start) {
+            return Err(Error::BackingFailure.into_raw());
+        }
+        if object.read_at(0, &mut data[..count])? != count {
+            return Err(Error::BackingFailure.into_raw());
+        }
+        crate::mem::vm_object::overlay_provider_range(
+            provider,
+            identity,
+            start,
+            &mut data[..count],
+        )?;
         Ok(Some(count))
     }
 }
@@ -1312,18 +1343,9 @@ pub(crate) fn read_all(raw: u64, maximum_length: usize) -> Result<alloc::vec::Ve
         Ok(count)
     };
     if let Some(length) = extent {
-        crate::util::object_snapshot::read_extent(
-            length,
-            maximum_length,
-            chunk,
-            copy,
-        )
+        crate::util::object_snapshot::read_extent(length, maximum_length, chunk, copy)
     } else {
-        crate::util::object_snapshot::read_to_end(
-            maximum_length,
-            chunk,
-            copy,
-        )
+        crate::util::object_snapshot::read_to_end(maximum_length, chunk, copy)
     }
 }
 
@@ -1653,8 +1675,10 @@ fn process_status_for(raw: u64) -> Result<mnu_abi::ProcessStatus, u64> {
     // revision. Serialize live metadata with that existing commit lock so an
     // observer woken by those releases cannot read a partial transition.
     // A reclaimed process remains observable through its retained object.
-    Ok(crate::task::with_process(process.id(), |_| process_status_of(&process))
-        .unwrap_or_else(|| process_status_of(&process)))
+    Ok(
+        crate::task::with_process(process.id(), |_| process_status_of(&process))
+            .unwrap_or_else(|| process_status_of(&process)),
+    )
 }
 
 fn process_status_of(process: &crate::task::process::ProcessObject) -> mnu_abi::ProcessStatus {
@@ -1865,8 +1889,8 @@ fn wait_item_signal(
     if item.interests == 0 {
         return Err(Error::InvalidArgument.into_raw());
     }
-    let object = object_native(u64::from(item.handle), HandleRights::WAIT)
-        .map_err(Error::into_raw)?;
+    let object =
+        object_native(u64::from(item.handle), HandleRights::WAIT).map_err(Error::into_raw)?;
     // Revalidate authority, but never retarget a pending wait after Handle
     // close/reuse. Admission identity stays weak so close can cancel its ticket.
     if !source.matches(&object) {
@@ -1897,7 +1921,11 @@ fn wait_item_signal(
                 return Err(Error::InvalidArgument.into_raw());
             }
             let ready = receipt.result().is_some();
-            item.observed = if ready { mnu_abi::HANDLE_SIGNAL_READABLE } else { 0 };
+            item.observed = if ready {
+                mnu_abi::HANDLE_SIGNAL_READABLE
+            } else {
+                0
+            };
             Ok((WaitTarget::Completion(receipt), ready))
         }
         KernelObject::IpcEndpoint {
@@ -1926,7 +1954,9 @@ fn wait_item_signal(
             if item.interests & !supported != 0 {
                 return Err(Error::InvalidArgument.into_raw());
             }
-            if !crate::syscall::ipc::endpoint_is_valid(memory_update::admission_endpoint(&admission)) {
+            if !crate::syscall::ipc::endpoint_is_valid(memory_update::admission_endpoint(
+                &admission,
+            )) {
                 return Err(Error::NotFound.into_raw());
             }
             item.observed = admission.signals() & item.interests;
@@ -2002,6 +2032,18 @@ impl Drop for ObjectWaitRegistrations {
     }
 }
 
+/// All allocations, retained objects and subscriptions survive stack discard.
+struct ObjectWaitState {
+    registrations: ObjectWaitRegistrations,
+    endpoint_lifetimes: alloc::vec::Vec<crate::syscall::ipc::lifetime::Observation>,
+    admission_waiters: alloc::vec::Vec<memory_update::AdmissionWaiter>,
+    completion_waiters: alloc::vec::Vec<crate::task::owned_executor::Subscription>,
+    sources: alloc::vec::Vec<WaitSource>,
+    targets: alloc::vec::Vec<WaitTarget>,
+    items: alloc::vec::Vec<mnu_abi::HandleWaitItem>,
+    guard_waiter: Option<super::address_wait::GuardWaiter>,
+}
+
 fn copy_wait_items_to_user(items_ptr: u64, items: &[mnu_abi::HandleWaitItem]) -> Result<(), u64> {
     let bytes = unsafe {
         core::slice::from_raw_parts(items.as_ptr().cast::<u8>(), core::mem::size_of_val(items))
@@ -2059,20 +2101,37 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         Some(thread) => thread,
         None => return Error::NotReady.into_raw(),
     };
-    let mut registrations = ObjectWaitRegistrations {
-        thread: current,
-        endpoints: alloc::vec::Vec::new(),
-        streams: alloc::vec::Vec::new(),
-        providers: alloc::vec::Vec::new(),
+    let mut state = match crate::task::operation::Scope::new(ObjectWaitState {
+        registrations: ObjectWaitRegistrations {
+            thread: current,
+            endpoints: alloc::vec::Vec::new(),
+            streams: alloc::vec::Vec::new(),
+            providers: alloc::vec::Vec::new(),
+        },
+        endpoint_lifetimes: alloc::vec::Vec::new(),
+        admission_waiters: alloc::vec::Vec::new(),
+        completion_waiters: alloc::vec::Vec::new(),
+        sources: alloc::vec::Vec::new(),
+        targets: alloc::vec::Vec::new(),
+        items,
+        guard_waiter: None,
+    }) {
+        Ok(state) => state,
+        Err(error) => return error.into_raw(),
     };
+    let ObjectWaitState {
+        registrations,
+        endpoint_lifetimes,
+        admission_waiters,
+        completion_waiters,
+        sources,
+        targets,
+        items,
+        guard_waiter,
+    } = &mut *state;
     let registered_endpoints = &mut registrations.endpoints;
     let registered_streams = &mut registrations.streams;
     let registered_providers = &mut registrations.providers;
-    let mut endpoint_lifetimes = alloc::vec::Vec::new();
-    let mut admission_waiters = alloc::vec::Vec::<memory_update::AdmissionWaiter>::new();
-    let mut completion_waiters = alloc::vec::Vec::new();
-    let mut sources = alloc::vec::Vec::new();
-    let mut targets = alloc::vec::Vec::new();
     // Each item contributes at most one target/subscription of each kind.
     // Reserve before admitting any waiter; no push in the wait loop allocates.
     if registered_endpoints.try_reserve_exact(count).is_err()
@@ -2086,7 +2145,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
     {
         return mnu_abi::status::Error::ResourceUnavailable.into_raw();
     }
-    for item in &items {
+    for item in items.iter() {
         let source = match object_native(u64::from(item.handle), HandleRights::WAIT) {
             Ok(object) => WaitSource::capture(object),
             Err(error) => return error.into_raw(),
@@ -2103,6 +2162,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
     };
 
     loop {
+        *guard_waiter = None;
         crate::task::remove_process_exit_waiters(current);
         remove_endpoint_waiters(current, &registered_endpoints);
         remove_stream_waiters(current, &registered_streams);
@@ -2128,21 +2188,19 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         // Guarded waits also subscribe to address wakeups. Registration checks
         // the predicate under the same lock as WakeAddress, so notifications
         // racing with admission cannot strand an otherwise idle object wait.
-        let _guard_waiter = match guard {
-            Some(guard) => match super::address_wait::register_guard(
-                current,
-                guard.address,
-                guard.expected,
-            ) {
-                Ok(waiter) => Some(waiter),
-                Err(error) if error == mnu_abi::status::Error::NotReady.into_raw() => {
-                    return match copy_wait_items_to_user(items_ptr, &items) {
-                        Ok(()) => error,
-                        Err(error) => error,
-                    };
+        *guard_waiter = match guard {
+            Some(guard) => {
+                match super::address_wait::register_guard(current, guard.address, guard.expected) {
+                    Ok(waiter) => Some(waiter),
+                    Err(error) if error == mnu_abi::status::Error::NotReady.into_raw() => {
+                        return match copy_wait_items_to_user(items_ptr, &items) {
+                            Ok(()) => error,
+                            Err(error) => error,
+                        };
+                    }
+                    Err(error) => return error,
                 }
-                Err(error) => return error,
-            },
+            }
             None => None,
         };
         if let Some(guard) = guard {
@@ -2187,13 +2245,11 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         }
         for target in targets.drain(..) {
             match target {
-                WaitTarget::Completion(receipt) => {
-                    match receipt.subscribe(current.as_u64()) {
-                        Ok(Some(subscription)) => completion_waiters.push(subscription),
-                        Ok(None) => {},
-                        Err(error) => return error.into_raw(),
-                    }
-                }
+                WaitTarget::Completion(receipt) => match receipt.subscribe(current.as_u64()) {
+                    Ok(Some(subscription)) => completion_waiters.push(subscription),
+                    Ok(None) => {}
+                    Err(error) => return error.into_raw(),
+                },
                 WaitTarget::MemoryAdmission(admission) => {
                     let registered = (|| {
                         let endpoint = memory_update::admission_endpoint(&admission);
@@ -2205,19 +2261,11 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                         Ok::<(), u64>(())
                     })();
                     if let Err(error) = registered {
-                        crate::task::remove_process_exit_waiters(current);
-                        remove_endpoint_waiters(current, &registered_endpoints);
-                        remove_stream_waiters(current, &registered_streams);
-                        remove_provider_waiters(current, &registered_providers);
                         return error;
                     }
                 }
                 WaitTarget::Process(process_id) => {
                     if !crate::task::register_process_exit_waiter(current, process_id) {
-                        crate::task::remove_process_exit_waiters(current);
-                        remove_endpoint_waiters(current, &registered_endpoints);
-                        remove_stream_waiters(current, &registered_streams);
-                        remove_provider_waiters(current, &registered_providers);
                         return Error::ResourceUnavailable.into_raw();
                     }
                 }
@@ -2225,10 +2273,6 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                     if let Err(error) =
                         crate::syscall::ipc::register_endpoint_waiter(endpoint, current)
                     {
-                        crate::task::remove_process_exit_waiters(current);
-                        remove_endpoint_waiters(current, &registered_endpoints);
-                        remove_stream_waiters(current, &registered_streams);
-                        remove_provider_waiters(current, &registered_providers);
                         return error;
                     }
                     registered_endpoints.push(endpoint);
@@ -2237,30 +2281,21 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                     match crate::syscall::fs::register_stream_waiter(&stream, current) {
                         Ok(stream_id) => registered_streams.push(stream_id),
                         Err(error) => {
-                            crate::task::remove_process_exit_waiters(current);
-                            remove_endpoint_waiters(current, &registered_endpoints);
-                            remove_stream_waiters(current, &registered_streams);
-                            remove_provider_waiters(current, &registered_providers);
                             return error;
                         }
                     }
                 }
                 WaitTarget::Provider(provider) => {
-                    match crate::syscall::ipc::lifetime::observe(provider_endpoint(&provider), current) {
+                    match crate::syscall::ipc::lifetime::observe(
+                        provider_endpoint(&provider),
+                        current,
+                    ) {
                         Ok(observation) => endpoint_lifetimes.push(observation),
                         Err(error) => {
-                            crate::task::remove_process_exit_waiters(current);
-                            remove_endpoint_waiters(current, &registered_endpoints);
-                            remove_stream_waiters(current, &registered_streams);
-                            remove_provider_waiters(current, &registered_providers);
                             return error;
                         }
                     }
                     if !provider.register_waiter(current) {
-                        crate::task::remove_process_exit_waiters(current);
-                        remove_endpoint_waiters(current, &registered_endpoints);
-                        remove_stream_waiters(current, &registered_streams);
-                        remove_provider_waiters(current, &registered_providers);
                         return Error::ResourceUnavailable.into_raw();
                     }
                     registered_providers.push(provider);
@@ -2270,10 +2305,6 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
         if deadline_nanoseconds != mnu_abi::HANDLE_WAIT_INFINITE
             && !crate::syscall::time::arm_thread_deadline(current, deadline_tick)
         {
-            crate::task::remove_process_exit_waiters(current);
-            remove_endpoint_waiters(current, &registered_endpoints);
-            remove_stream_waiters(current, &registered_streams);
-            remove_provider_waiters(current, &registered_providers);
             return Error::ResourceUnavailable.into_raw();
         }
 
@@ -2284,11 +2315,6 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
             match wait_item_signal(item, &sources[index]) {
                 Ok((_, is_ready)) => became_ready |= is_ready,
                 Err(error) => {
-                    crate::task::remove_process_exit_waiters(current);
-                    remove_endpoint_waiters(current, &registered_endpoints);
-                    remove_stream_waiters(current, &registered_streams);
-                    remove_provider_waiters(current, &registered_providers);
-                    crate::syscall::time::disarm_thread_deadline(current);
                     return error;
                 }
             }
@@ -2574,8 +2600,7 @@ pub fn launch_value_get(key: u64, output: u64) -> u64 {
     };
     let value = match crate::task::with_process(process_id, |process| {
         process.launch_context().value(key)
-    })
-    {
+    }) {
         Some(Some(value)) => value,
         Some(None) => return Error::NotFound.into_raw(),
         None => return Error::NotReady.into_raw(),

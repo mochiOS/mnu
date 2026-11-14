@@ -113,7 +113,11 @@ impl PreparedSharedPage {
     ) -> Result<(), mnu_abi::status::Error> {
         let install = || {
             crate::mem::paging::map_shared_frame_to_user(
-                table_phys, virt_addr, self.frame_phys, writable, executable,
+                table_phys,
+                virt_addr,
+                self.frame_phys,
+                writable,
+                executable,
             )
             .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)
         };
@@ -272,8 +276,11 @@ impl VmObject {
         }
         let key = self.page_key(index);
         let cache = PAGE_CACHE.lock();
-        ensure_unreserved(key.object).map_err(|raw| Error::from_raw(raw).unwrap_or(Error::BackingFailure))?;
-        Ok(cache.iter().any(|entry| entry.key == key && entry.valid_len != 0))
+        ensure_unreserved(key.object)
+            .map_err(|raw| Error::from_raw(raw).unwrap_or(Error::BackingFailure))?;
+        Ok(cache
+            .iter()
+            .any(|entry| entry.key == key && entry.valid_len != 0))
     }
 
     pub fn page(&self, page_index: u64) -> Result<Arc<[u8; PAGE_BYTES]>, VmPageError> {
@@ -525,7 +532,9 @@ impl VmObject {
         let retired = if entry.valid_len != 0 {
             entry.dirty_range = Some((0, entry.valid_len));
             entry.writer.replace(writer.clone())
-        } else { None };
+        } else {
+            None
+        };
 
         entry.version = entry.version.wrapping_add(1);
         entry.last_used = next_cache_access();
@@ -694,7 +703,10 @@ impl VmObject {
                 if dirty_start > dirty_end || dirty_end > PAGE_BYTES {
                     return Err(Error::BackingFailure.into_raw());
                 }
-                let writer = entry.writer.as_ref().ok_or(Error::BackingFailure.into_raw())?;
+                let writer = entry
+                    .writer
+                    .as_ref()
+                    .ok_or(Error::BackingFailure.into_raw())?;
                 snapshots
                     .try_reserve(1)
                     .map_err(|_| Error::ResourceUnavailable.into_raw())?;
@@ -720,7 +732,9 @@ impl VmObject {
                 .checked_add(*dirty_start as u64)
                 .ok_or_else(|| Error::BackingFailure.into_raw())?;
             let written = crate::syscall::handle::provider_write_at(
-                writer, write_offset, &bytes[*dirty_start..*dirty_end],
+                writer,
+                write_offset,
+                &bytes[*dirty_start..*dirty_end],
             )?;
             if written != dirty_end - dirty_start {
                 return Err(Error::BackingFailure.into_raw());
@@ -732,7 +746,10 @@ impl VmObject {
             }
         } else {
             for (index, (_, _, _, _, _, writer)) in snapshots.iter().enumerate() {
-                if !snapshots[..index].iter().any(|(_, _, _, _, _, prior)| Arc::ptr_eq(prior, writer)) {
+                if !snapshots[..index]
+                    .iter()
+                    .any(|(_, _, _, _, _, prior)| Arc::ptr_eq(prior, writer))
+                {
                     crate::syscall::handle::provider_sync(writer)?;
                 }
             }
@@ -874,7 +891,7 @@ pub(crate) fn update_provider_range(guard: &ProviderIoGuard, offset: u64, input:
 pub(crate) fn lock_provider_io(
     object: &ProviderObject,
     identity: u64,
-) -> Result<ProviderIoGuard, mnu_abi::status::Error> {
+) -> Result<crate::task::operation::Scope<ProviderIoGuard>, mnu_abi::status::Error> {
     lock_provider_key(ObjectKey::Provider {
         endpoint_thread_id: object.endpoint_thread_id,
         endpoint_slot: object.endpoint_slot,
@@ -921,19 +938,22 @@ pub(crate) fn overlay_provider_range(
     Ok(())
 }
 
-fn lock_provider_key(key: ObjectKey) -> Result<ProviderIoGuard, mnu_abi::status::Error> {
+fn lock_provider_key(
+    key: ObjectKey,
+) -> Result<crate::task::operation::Scope<ProviderIoGuard>, mnu_abi::status::Error> {
     use mnu_abi::status::Error;
     let gate = PROVIDER_IO.lock().try_get(
         key,
         crate::mem::object_io_native::new_lock,
         Error::ResourceUnavailable,
     )?;
+    let gate = crate::task::operation::Scope::new(gate)?;
     let guard = gate
         .lock(|| {
             let _ = crate::task::yield_now();
         })
         .map_err(|_| Error::BackingFailure)?;
-    Ok(ProviderIoGuard { key, _guard: guard })
+    crate::task::operation::Scope::new(ProviderIoGuard { key, _guard: guard })
 }
 
 fn invalidate_object(object: ObjectKey) -> Result<(), u64> {
@@ -971,10 +991,7 @@ fn update_cached_range(guard: &ProviderIoGuard, offset: u64, input: &[u8]) {
 
     let mut cache = PAGE_CACHE.lock();
 
-    for entry in cache
-        .iter_mut()
-        .filter(|entry| entry.key.object == object)
-    {
+    for entry in cache.iter_mut().filter(|entry| entry.key.object == object) {
         let page_start = match entry.key.page_index.checked_mul(PAGE_BYTES as u64) {
             Some(value) => value,
             None => continue,
@@ -1071,10 +1088,9 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
         let request_len = core::cmp::min(output.len() - bytes_read, io_limit);
 
         let read = match source {
-            VmObjectSource::Memory(memory) => {
-                memory.read_at(current, &mut output[bytes_read..bytes_read + request_len])
-                    .map_err(mnu_abi::status::Error::into_raw)
-            }
+            VmObjectSource::Memory(memory) => memory
+                .read_at(current, &mut output[bytes_read..bytes_read + request_len])
+                .map_err(mnu_abi::status::Error::into_raw),
             VmObjectSource::Provider { object, .. } => crate::syscall::handle::provider_read_at(
                 object,
                 current,
@@ -1128,7 +1144,8 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
 
 fn write_lower(source: &VmObjectSource, offset: u64, input: &[u8]) -> Result<usize, u64> {
     match source {
-        VmObjectSource::Memory(memory) => memory.write_at(offset, input)
+        VmObjectSource::Memory(memory) => memory
+            .write_at(offset, input)
             .map_err(mnu_abi::status::Error::into_raw),
         VmObjectSource::Provider { object, .. } => {
             crate::syscall::handle::provider_write_at(object, offset, input)

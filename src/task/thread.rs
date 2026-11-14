@@ -327,6 +327,7 @@ pub struct Thread {
     /// 直近の SYSCALL 入口で保存したユーザー文脈
     syscall_user_context: SyscallUserContext,
     last_syscall: Option<(u64, [u64; 6])>,
+    operations: alloc::vec::Vec<super::operation::Owned>,
     /// IPC受信などで眠る前に起床要求が来たことを示すフラグ
     pending_wakeup: bool,
     /// 低遅延IPCの待機/受信状態
@@ -751,6 +752,7 @@ impl Thread {
             syscall_user_cr3: 0,
             syscall_user_context: SyscallUserContext::empty(),
             last_syscall: None,
+            operations: alloc::vec::Vec::new(),
             pending_wakeup: false,
             ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
@@ -878,6 +880,7 @@ impl Thread {
             syscall_user_cr3: 0,
             syscall_user_context: SyscallUserContext::empty(),
             last_syscall: None,
+            operations: alloc::vec::Vec::new(),
             pending_wakeup: false,
             ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
@@ -989,6 +992,7 @@ impl Thread {
             syscall_user_cr3: 0,
             syscall_user_context: user_context,
             last_syscall: None,
+            operations: alloc::vec::Vec::new(),
             pending_wakeup: false,
             ipc_generation: super::ipc_generation::initial(),
             upcall: ThreadUpcallState::new(),
@@ -1983,4 +1987,38 @@ pub(crate) fn record_current_syscall(number: u64, arguments: [u64; 6]) {
 pub(crate) fn current_syscall_snapshot() -> Option<(u64, [u64; 6])> {
     let id = current_thread_id()?;
     THREAD_QUEUE.try_lock()?.get(id)?.last_syscall
+}
+
+pub(super) fn retain_operation(
+    id: ThreadId,
+    owner: super::operation::Owned,
+) -> Result<(), mnu_abi::status::Error> {
+    use mnu_abi::status::Error;
+    // Keep failed owners outside the queue lock too.
+    let mut owner = Some(owner);
+    let result = with_thread_mut(id, |thread| {
+        if thread.operations.len() >= 64 {
+            return Err(Error::LimitExceeded);
+        }
+        thread
+            .operations
+            .try_reserve(1)
+            .map_err(|_| Error::ResourceUnavailable)?;
+        thread.operations.push(owner.take().unwrap());
+        Ok(())
+    })
+    .unwrap_or(Err(Error::NotReady));
+    drop(owner);
+    result
+}
+
+pub(super) fn release_operation(id: ThreadId, address: usize) -> Option<super::operation::Owned> {
+    with_thread_mut(id, |thread| {
+        let index = thread
+            .operations
+            .iter()
+            .position(|owner| owner.address() == address)?;
+        Some(thread.operations.swap_remove(index))
+    })
+    .flatten()
 }
