@@ -2,7 +2,7 @@ use crate::task::{
     HandleRights, KernelObject, ObjectHandleEntry, ThreadUpcallError, UserUpcallContext,
 };
 
-use super::{SUCCESS, SavedSyscallFrame};
+use super::{SavedSyscallFrame, SUCCESS};
 
 const THREAD_HANDLE_RIGHTS: HandleRights = HandleRights::WAIT
     .union(HandleRights::SIGNAL)
@@ -386,8 +386,8 @@ pub fn prepare_syscall_return(frame: &mut SavedSyscallFrame) {
 
 /// The assembly interrupt entry owns these 15 GPR and five IRET slots.
 /// Unlike SYSCALL, an interrupt does not clobber the user's RCX/R11.
-pub fn prepare_interrupt_return(frame: &mut [u64; 20]) {
-    if frame[16] & 3 != 3 {
+pub fn prepare_interrupt_return(frame: &mut crate::cpu::context::InterruptFrame) {
+    if frame.iret.cs & 3 != 3 {
         return;
     }
     let mut context = read_interrupt_context(frame);
@@ -451,14 +451,15 @@ pub(crate) fn current_has_deliverable_upcall() -> bool {
 /// A synchronous exception bypasses the asynchronous queue, but may not
 /// replace an active delivery. All original registers remain kernel-owned.
 pub(crate) fn prepare_user_exception(
-    raw: &mut [u64; 21],
+    raw: &mut crate::cpu::context::PageFaultFrame,
     address: u64,
     cause: mnu_abi::MemoryFaultCause,
 ) -> bool {
-    let mut frame = [0; 20];
-    frame[..15].copy_from_slice(&raw[..15]);
-    frame[15..].copy_from_slice(&raw[16..]);
-    if frame[16] & 3 != 3 {
+    let mut frame = crate::cpu::context::InterruptFrame {
+        gprs: raw.gprs,
+        iret: raw.iret,
+    };
+    if frame.iret.cs & 3 != 3 {
         return false;
     }
     let mut context = read_interrupt_context(&frame);
@@ -480,17 +481,17 @@ pub(crate) fn prepare_user_exception(
     if super::copy_to_user_native(delivery.stack_top + 8, &(cause as u64).to_ne_bytes()).is_err() {
         return false;
     }
-    crate::task::with_thread_mut(id, |thread| thread.note_exception(
-        crate::util::process_diagnostics::Exception {
+    crate::task::with_thread_mut(id, |thread| {
+        thread.note_exception(crate::util::process_diagnostics::Exception {
             timestamp_ns: super::time::monotonic_nanoseconds(),
             vector: 14,
             cause: cause as u32,
-            error_code: raw[15],
+            error_code: raw.error_code,
             instruction: context.user_rip,
             stack_pointer: context.user_rsp,
             address,
-        },
-    ));
+        })
+    });
     context.user_rip = delivery.entry;
     context.user_rsp = delivery.stack_top;
     context.rdi = delivery.payload;
@@ -498,11 +499,11 @@ pub(crate) fn prepare_user_exception(
     context.user_rflags &= !((1 << 10) | (1 << 8) | (1 << 16));
     context.rdx = mnu_abi::THREAD_UPCALL_KIND_EXCEPTION;
     context.rcx = address;
-    context.r8 = raw[15];
-    context.r9 = frame[15];
+    context.r8 = raw.error_code;
+    context.r9 = frame.iret.rip;
     write_interrupt_context(&mut frame, context);
-    raw[..15].copy_from_slice(&frame[..15]);
-    raw[16..].copy_from_slice(&frame[15..]);
+    raw.gprs = frame.gprs;
+    raw.iret = frame.iret;
     true
 }
 
@@ -519,113 +520,25 @@ fn resume_context(context: UserUpcallContext) -> ! {
     let fs_base = crate::task::current_thread_id()
         .and_then(|id| crate::task::with_thread(id, |thread| thread.fs_base()))
         .unwrap_or(0);
-    let registers = crate::task::thread::SyscallUserContext {
-        rip: context.user_rip,
-        rsp: context.user_rsp,
-        rflags: context.user_rflags,
-        rdi: context.rdi,
-        rsi: context.rsi,
-        rdx: context.rdx,
-        r8: context.r8,
-        r9: context.r9,
-        r10: context.r10,
-        rbp: context.rbp,
-        rbx: context.rbx,
-        r12: context.r12,
-        r13: context.r13,
-        r14: context.r14,
-        r15: context.r15,
-        rcx: context.rcx,
-        r11: context.r11,
-    };
+    let registers = context.syscall_registers();
     // Only a kernel-validated, current-thread continuation reaches here.
     // The ordinary syscall path still uses SYSRET; full restoration uses the
     // same validated IRET machinery as native address-space continuation.
     unsafe { crate::task::usermode::resume_usermode(registers, context.rax, fs_base) }
 }
 
-fn read_interrupt_context(frame: &[u64; 20]) -> UserUpcallContext {
-    UserUpcallContext {
-        user_rsp: frame[18],
-        r15: frame[0],
-        r14: frame[1],
-        r13: frame[2],
-        r12: frame[3],
-        rbx: frame[11],
-        rbp: frame[10],
-        user_rflags: frame[17],
-        user_rip: frame[15],
-        r9: frame[6],
-        r8: frame[7],
-        r10: frame[5],
-        rdx: frame[12],
-        rsi: frame[9],
-        rdi: frame[8],
-        rax: frame[14],
-        rcx: frame[13],
-        r11: frame[4],
-    }
+fn read_interrupt_context(frame: &crate::cpu::context::InterruptFrame) -> UserUpcallContext {
+    frame.context()
 }
-
-fn write_interrupt_context(frame: &mut [u64; 20], context: UserUpcallContext) {
-    frame[18] = context.user_rsp;
-    frame[0] = context.r15;
-    frame[1] = context.r14;
-    frame[2] = context.r13;
-    frame[3] = context.r12;
-    frame[11] = context.rbx;
-    frame[10] = context.rbp;
-    frame[17] = context.user_rflags;
-    frame[15] = context.user_rip;
-    frame[6] = context.r9;
-    frame[7] = context.r8;
-    frame[5] = context.r10;
-    frame[12] = context.rdx;
-    frame[9] = context.rsi;
-    frame[8] = context.rdi;
-    frame[14] = context.rax;
-    frame[13] = context.rcx;
-    frame[4] = context.r11;
+fn write_interrupt_context(
+    frame: &mut crate::cpu::context::InterruptFrame,
+    context: UserUpcallContext,
+) {
+    frame.set_context(context);
 }
-
 fn read_context(frame: &SavedSyscallFrame) -> UserUpcallContext {
-    UserUpcallContext {
-        user_rsp: frame.user_rsp,
-        r15: frame.r15,
-        r14: frame.r14,
-        r13: frame.r13,
-        r12: frame.r12,
-        rbx: frame.rbx,
-        rbp: frame.rbp,
-        user_rflags: frame.user_rflags,
-        user_rip: frame.user_rip,
-        r9: frame.arg5,
-        r8: frame.arg4,
-        r10: frame.arg3,
-        rdx: frame.arg2,
-        rsi: frame.arg1,
-        rdi: frame.arg0,
-        rax: frame.num,
-        rcx: frame.user_rip,
-        r11: frame.user_rflags,
-    }
+    frame.context()
 }
-
 fn write_context(frame: &mut SavedSyscallFrame, context: UserUpcallContext) {
-    frame.user_rsp = context.user_rsp;
-    frame.r15 = context.r15;
-    frame.r14 = context.r14;
-    frame.r13 = context.r13;
-    frame.r12 = context.r12;
-    frame.rbx = context.rbx;
-    frame.rbp = context.rbp;
-    frame.user_rflags = context.user_rflags;
-    frame.user_rip = context.user_rip;
-    frame.arg5 = context.r9;
-    frame.arg4 = context.r8;
-    frame.arg3 = context.r10;
-    frame.arg2 = context.rdx;
-    frame.arg1 = context.rsi;
-    frame.arg0 = context.rdi;
-    frame.num = context.rax;
+    frame.set_context(context);
 }

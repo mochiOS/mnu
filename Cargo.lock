@@ -471,22 +471,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[patch.unused]]
-name = "mochios-boot-selection"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-mdriver-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-system-image"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "ext4plus"
-version = "0.1.0-rc.2"
-
-[[patch.unused]]
 name = "mochios-appcore"
 version = "0.1.0"
 
@@ -500,26 +484,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-linker-driver"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
-
-[[patch.unused]]
-name = "bootui"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-mdriver-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
-
-[[patch.unused]]
-name = "mochios-fonts"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -604,4 +568,40 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-virtio-gpu-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-fonts"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ext4plus"
+version = "0.1.0-rc.2"
+
+[[patch.unused]]
+name = "mochios-boot-selection"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-mdriver-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-system-image"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
+name = "mochios-mdriver-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
+name = "bootui"
 version = "0.1.0"

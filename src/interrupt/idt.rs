@@ -206,14 +206,17 @@ fn terminate_user_exception(
     cause: u32,
 ) -> ! {
     if let Some(id) = crate::task::current_thread_id() {
-        crate::task::with_thread_mut(id, |thread| thread.note_exception(
-            crate::util::process_diagnostics::Exception {
+        crate::task::with_thread_mut(id, |thread| {
+            thread.note_exception(crate::util::process_diagnostics::Exception {
                 timestamp_ns: crate::syscall::time::monotonic_nanoseconds(),
-                vector, cause, error_code, address,
+                vector,
+                cause,
+                error_code,
+                address,
                 instruction: frame.instruction_pointer.as_u64(),
                 stack_pointer: frame.stack_pointer.as_u64(),
-            },
-        ));
+            })
+        });
     }
     crate::task::scheduler::exit_current_process(u64::MAX)
 }
@@ -831,7 +834,7 @@ fn translate_current_user_fault(expected_root: u64, address: u64) -> Option<u64>
 pub(super) fn page_fault_handler(
     mut stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,
-    registers: &mut [u64; 21],
+    registers: &mut crate::cpu::context::PageFaultFrame,
     entered_from_user: bool,
 ) {
     #[cfg(feature = "performance-instrumentation")]
@@ -846,8 +849,8 @@ pub(super) fn page_fault_handler(
     let is_user_mode = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
     normalize_user_iret_frame(&mut stack_frame);
     if is_user_mode {
-        registers[17] = crate::mem::gdt::user_code_selector() as u64 | 3;
-        registers[20] = crate::mem::gdt::user_data_selector() as u64 | 3;
+        registers.iret.cs = crate::mem::gdt::user_code_selector() as u64 | 3;
+        registers.iret.ss = crate::mem::gdt::user_data_selector() as u64 | 3;
     }
     let user_page_table = is_user_mode
         .then(|| {
@@ -865,7 +868,8 @@ pub(super) fn page_fault_handler(
         && error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE)
     {
         if let Some(table) = user_page_table {
-            match crate::syscall::process::resolve_user_copy_on_write(table, faulting_addr.as_u64()) {
+            match crate::syscall::process::resolve_user_copy_on_write(table, faulting_addr.as_u64())
+            {
                 Ok(true) => {
                     leave_to_user(entered_from_user);
                     return;
@@ -911,7 +915,11 @@ pub(super) fn page_fault_handler(
         let protection =
             error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION);
         if (!protection && try_grow_user_stack(faulting_addr.as_u64()))
-            || crate::syscall::prepare_user_exception(registers, faulting_addr.as_u64(), fault_cause)
+            || crate::syscall::prepare_user_exception(
+                registers,
+                faulting_addr.as_u64(),
+                fault_cause,
+            )
         {
             leave_to_user(entered_from_user);
             return;
@@ -979,7 +987,13 @@ pub(super) fn page_fault_handler(
 
         error!("Terminating faulting user process");
         debug!("{:#?}", stack_frame);
-        terminate_user_exception(&stack_frame, 14, error_code.bits(), faulting_addr.as_u64(), fault_cause as u32);
+        terminate_user_exception(
+            &stack_frame,
+            14,
+            error_code.bits(),
+            faulting_addr.as_u64(),
+            fault_cause as u32,
+        );
     } else {
         // カーネルモードでのページフォルト: システム全体を停止
         error!("FATAL: Page fault in kernel mode!");
@@ -1025,7 +1039,13 @@ fn try_grow_user_stack(fault_addr: u64) -> bool {
             return false;
         }
         if crate::mem::paging::map_and_copy_segment_to(
-            page_table, new_page, 0, map_size, &[], true, false,
+            page_table,
+            new_page,
+            0,
+            map_size,
+            &[],
+            true,
+            false,
         )
         .is_err()
         {

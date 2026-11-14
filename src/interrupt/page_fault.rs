@@ -22,17 +22,17 @@ pub(super) unsafe extern "C" fn entry() {
     );
 }
 
-extern "sysv64" fn handle(raw: *mut [u64; 21]) {
+extern "sysv64" fn handle(raw: *mut crate::cpu::context::PageFaultFrame) {
     // This pointer comes only from the assembly entry's current kernel stack.
     let raw = unsafe { &mut *raw };
-    let entered = crate::syscall::syscall_entry::kpti_enter_for_trap(raw[17] & 3 == 3);
+    let entered = crate::syscall::syscall_entry::kpti_enter_for_trap(raw.iret.cs & 3 == 3);
     let stack = x86_64::structures::idt::InterruptStackFrame::new(
-        x86_64::VirtAddr::new_truncate(raw[16]),
-        x86_64::structures::gdt::SegmentSelector(raw[17] as u16),
-        x86_64::registers::rflags::RFlags::from_bits_truncate(raw[18]),
-        x86_64::VirtAddr::new_truncate(raw[19]),
-        x86_64::structures::gdt::SegmentSelector(raw[20] as u16),
+        x86_64::VirtAddr::new_truncate(raw.iret.rip),
+        x86_64::structures::gdt::SegmentSelector(raw.iret.cs as u16),
+        x86_64::registers::rflags::RFlags::from_bits_truncate(raw.iret.rflags),
+        x86_64::VirtAddr::new_truncate(raw.iret.rsp),
+        x86_64::structures::gdt::SegmentSelector(raw.iret.ss as u16),
     );
-    let error = x86_64::structures::idt::PageFaultErrorCode::from_bits_truncate(raw[15]);
+    let error = x86_64::structures::idt::PageFaultErrorCode::from_bits_truncate(raw.error_code);
     super::idt::page_fault_handler(stack, error, raw, entered);
 }

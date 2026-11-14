@@ -49,15 +49,15 @@ macro_rules! timer_entry {
 timer_entry!(timer_interrupt_handler, 0);
 timer_entry!(local_timer_interrupt_handler, 1);
 
-extern "sysv64" fn handle_timer(raw: *mut [u64; 20], local: bool) {
+extern "sysv64" fn handle_timer(raw: *mut crate::cpu::context::InterruptFrame, local: bool) {
     // Only the assembly entries above supply this kernel-owned frame.
     let frame = unsafe { &mut *raw };
-    let user_mode = frame[16] & 3 == 3;
+    let user_mode = frame.iret.cs & 3 == 3;
     let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(user_mode);
     crate::performance::increment(crate::performance::CounterMetric::TimerInterrupts, 1);
     if user_mode {
-        frame[16] = u64::from(crate::mem::gdt::user_code_selector() | 3);
-        frame[19] = u64::from(crate::mem::gdt::user_data_selector() | 3);
+        frame.iret.cs = u64::from(crate::mem::gdt::user_code_selector() | 3);
+        frame.iret.ss = u64::from(crate::mem::gdt::user_data_selector() | 3);
     }
 
     // PV guests have no PIT. Advance shared time on the bootstrap CPU only,

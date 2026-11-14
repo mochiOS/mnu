@@ -89,8 +89,8 @@ pub struct Context {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
-    pub rdi: u64, // MS ABI Callee-saved
-    pub rsi: u64, // MS ABI Callee-saved
+    pub rdi: u64, // Initial entry argument retained by the switch frame
+    pub rsi: u64, // Initial entry argument retained by the switch frame
     /// 命令ポインタ（戻り先アドレス）
     pub rip: u64,
     pub rflags: u64,
@@ -313,9 +313,8 @@ pub unsafe fn switch_to_thread_with_slots(
             return; // 次のスレッドが見つからない
         };
 
-    let outgoing_marker = crate::percpu::begin_thread_switch(
-        current_id.map(|id| id.as_u64()).unwrap_or(0),
-    );
+    let outgoing_marker =
+        crate::percpu::begin_thread_switch(current_id.map(|id| id.as_u64()).unwrap_or(0));
     // Publish the incoming CPU reference while the queue still owns both
     // contexts, so remote removal cannot miss the selection/handoff window.
     crate::task::set_current_thread(Some(next_id), resolved_next_slot);
@@ -461,9 +460,7 @@ pub unsafe fn switch_to_thread_from_isr(
 
     // Keep the outgoing reference conservatively until the next normal stack
     // handoff. This currently unused ISR entry has no assembly completion ack.
-    let _ = crate::percpu::begin_thread_switch(
-        current_id.map(|id| id.as_u64()).unwrap_or(0),
-    );
+    let _ = crate::percpu::begin_thread_switch(current_id.map(|id| id.as_u64()).unwrap_or(0));
     crate::task::set_current_thread(Some(next_id), Some(next_slot));
     drop(queue);
     crate::syscall::syscall_entry::switch_to_kernel_page_table();

@@ -1054,25 +1054,7 @@ fn vfs_latency_metric(num: u64) -> Option<crate::performance::LatencyMetric> {
     }
 }
 
-#[repr(C)]
-pub struct SavedSyscallFrame {
-    pub(crate) user_rsp: u64,
-    pub(crate) r15: u64,
-    pub(crate) r14: u64,
-    pub(crate) r13: u64,
-    pub(crate) r12: u64,
-    pub(crate) rbx: u64,
-    pub(crate) rbp: u64,
-    pub(crate) user_rflags: u64,
-    pub(crate) user_rip: u64,
-    pub(crate) arg5: u64,
-    pub(crate) arg4: u64,
-    pub(crate) arg3: u64,
-    pub(crate) arg2: u64,
-    pub(crate) arg1: u64,
-    pub(crate) arg0: u64,
-    pub(crate) num: u64,
-}
+pub use crate::cpu::context::SavedSyscallFrame;
 
 #[no_mangle]
 pub extern "sysv64" fn prepare_thread_upcall_for_sysret(frame: *mut SavedSyscallFrame) {
@@ -1080,26 +1062,6 @@ pub extern "sysv64" fn prepare_thread_upcall_for_sysret(frame: *mut SavedSyscall
         upcall::prepare_syscall_return(frame);
     }
 }
-
-const _: () = {
-    assert!(core::mem::size_of::<SavedSyscallFrame>() == 16 * 8);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, user_rsp) == 0);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, r15) == 8);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, r14) == 16);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, r13) == 24);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, r12) == 32);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, rbx) == 40);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, rbp) == 48);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, user_rflags) == 56);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, user_rip) == 64);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, arg5) == 72);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, arg4) == 80);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, arg3) == 88);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, arg2) == 96);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, arg1) == 104);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, arg0) == 112);
-    assert!(core::mem::offset_of!(SavedSyscallFrame, num) == 120);
-};
 
 /// fork/clone 用に、現在スレッドへユーザー復帰コンテキストを保存する
 #[no_mangle]
@@ -1110,26 +1072,7 @@ pub extern "sysv64" fn save_user_context_for_fork(frame: *const SavedSyscallFram
     let frame = unsafe { &*frame };
     if let Some(tid) = crate::task::current_thread_id() {
         let _ = crate::task::with_thread_mut(tid, |thread| {
-            thread.set_syscall_user_context(crate::task::thread::SyscallUserContext {
-                rip: frame.user_rip,
-                rsp: frame.user_rsp,
-                rflags: frame.user_rflags,
-                rdi: frame.arg0,
-                rsi: frame.arg1,
-                rdx: frame.arg2,
-                r8: frame.arg4,
-                r9: frame.arg5,
-                r10: frame.arg3,
-                rbp: frame.rbp,
-                rbx: frame.rbx,
-                r12: frame.r12,
-                r13: frame.r13,
-                r14: frame.r14,
-                r15: frame.r15,
-                // SYSCALL architecturally clobbers RCX/R11 with RIP/RFLAGS.
-                rcx: frame.user_rip,
-                r11: frame.user_rflags,
-            });
+            thread.set_syscall_user_context(frame.context().syscall_registers());
         });
     }
 }
@@ -1214,7 +1157,8 @@ extern "sysv64" fn syscall_interrupt_handler_rust(kstack: *mut u64) -> u64 {
     let prev_cr3 = syscall_entry::switch_to_kernel_page_table();
     crate::cpu::reassert_runtime_hardening();
 
-    let syscall_num = unsafe { kstack.add(14).read() };
+    let frame = unsafe { &mut *kstack.cast::<crate::cpu::context::InterruptFrame>() };
+    let syscall_num = frame.gprs.rax;
 
     let current_tid = crate::task::current_thread_id();
     let current_slot = crate::task::current_thread_slot();
@@ -1226,12 +1170,12 @@ extern "sysv64" fn syscall_interrupt_handler_rust(kstack: *mut u64) -> u64 {
 
     let ret = dispatch(
         syscall_num,
-        unsafe { kstack.add(8).read() },  // saved rdi = arg0
-        unsafe { kstack.add(9).read() },  // saved rsi = arg1
-        unsafe { kstack.add(12).read() }, // saved rdx = arg2
-        unsafe { kstack.add(5).read() },  // saved r10 = arg3
-        unsafe { kstack.add(7).read() },  // saved r8  = arg4
-        unsafe { kstack.add(6).read() },  // saved r9  = arg5
+        frame.gprs.rdi,
+        frame.gprs.rsi,
+        frame.gprs.rdx,
+        frame.gprs.r10,
+        frame.gprs.r8,
+        frame.gprs.r9,
     );
     if current_tid.is_some_and(|id| {
         crate::task::with_thread(id, |thread| {
@@ -1250,20 +1194,17 @@ extern "sysv64" fn syscall_interrupt_handler_rust(kstack: *mut u64) -> u64 {
 
     // The assembly owns 15 saved GPRs followed by the five-word user IRET
     // frame. Publish dispatch's result before upcall delivery/restoration.
-    let frame = unsafe { &mut *kstack.cast::<[u64; 20]>() };
-    frame[14] = ret;
+    frame.gprs.rax = ret;
     upcall::prepare_interrupt_return(frame);
-    let ret = frame[14];
+    let ret = frame.gprs.rax;
 
     // int 0x80 復帰フレームの CS/SS を GDT 実値で正規化する。
     // 一部環境で固定値と実際の GDT 割当がずれると iretq で #GP(index=3/4) を起こすため、
     // 毎回ここで明示的に揃える。
     let user_cs = (crate::mem::gdt::user_code_selector() as u64) | 0x3;
     let user_ss = (crate::mem::gdt::user_data_selector() as u64) | 0x3;
-    unsafe {
-        kstack.add(16).write(user_cs);
-        kstack.add(19).write(user_ss);
-    }
+    frame.iret.cs = user_cs;
+    frame.iret.ss = user_ss;
     syscall_entry::restore_page_table(prev_cr3);
     ret
 }

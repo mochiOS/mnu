@@ -1,3 +1,4 @@
+pub use crate::cpu::context::{SyscallUserContext, UserUpcallContext};
 use crate::interrupt::spinlock::SpinLock;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::VirtAddr;
@@ -7,74 +8,7 @@ use super::ids::{ProcessId, ThreadId, ThreadState};
 mod stack_image;
 pub use stack_image::{prepare_kernel_stack_user_table, PreparedKernelStack};
 
-#[derive(Debug, Clone, Copy)]
-pub struct SyscallUserContext {
-    pub rip: u64,
-    pub rsp: u64,
-    pub rflags: u64,
-    pub rdi: u64,
-    pub rsi: u64,
-    pub rdx: u64,
-    pub r8: u64,
-    pub r9: u64,
-    pub r10: u64,
-    pub rbp: u64,
-    pub rbx: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-    pub rcx: u64,
-    pub r11: u64,
-}
-
-impl SyscallUserContext {
-    pub const fn empty() -> Self {
-        Self {
-            rip: 0,
-            rsp: 0,
-            rflags: 0,
-            rdi: 0,
-            rsi: 0,
-            rdx: 0,
-            r8: 0,
-            r9: 0,
-            r10: 0,
-            rbp: 0,
-            rbx: 0,
-            r12: 0,
-            r13: 0,
-            r14: 0,
-            r15: 0,
-            rcx: 0,
-            r11: 0,
-        }
-    }
-}
-
 const THREAD_UPCALL_QUEUE_CAPACITY: usize = 16;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UserUpcallContext {
-    pub user_rsp: u64,
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub rbx: u64,
-    pub rbp: u64,
-    pub user_rflags: u64,
-    pub user_rip: u64,
-    pub r9: u64,
-    pub r8: u64,
-    pub r10: u64,
-    pub rdx: u64,
-    pub rsi: u64,
-    pub rdi: u64,
-    pub rax: u64,
-    pub rcx: u64,
-    pub r11: u64,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadUpcallDelivery {

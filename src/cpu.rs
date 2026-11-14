@@ -2,6 +2,8 @@
 //!
 //! CR0/CR4レジスタの設定、SSE/FPUの有効化など
 
+pub mod context;
+
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
@@ -506,8 +508,7 @@ impl SmapSmepGuard {
 impl Drop for SmapSmepGuard {
     fn drop(&mut self) {
         unsafe {
-            let restore = (u64::from(self.smep_was) << 20)
-                | (u64::from(self.smap_was) << 21);
+            let restore = (u64::from(self.smep_was) << 20) | (u64::from(self.smap_was) << 21);
             if restore != 0 {
                 let cr4 = read_cr4();
                 if cr4 & restore != restore {
