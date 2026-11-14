@@ -54,16 +54,6 @@ pub struct IpcConfig {
 }
 
 #[derive(Clone, Copy)]
-pub struct BlockConfig {
-    pub max_sectors_per_call: u64,
-}
-
-#[derive(Clone, Copy)]
-pub struct IoConfig {
-    pub max_iov: u64,
-}
-
-#[derive(Clone, Copy)]
 pub struct MemoryConfig {
     /// Per-object logical extent, not an aggregate resident-page quota.
     pub max_object_pages: usize,
@@ -98,8 +88,6 @@ pub struct CextConfig {
 pub struct KernelConfig {
     pub scheduler: SchedulerConfig,
     pub ipc: IpcConfig,
-    pub block: BlockConfig,
-    pub io: IoConfig,
     pub memory: MemoryConfig,
     pub capability: CapabilityConfig,
     pub exec: ExecConfig,
@@ -125,11 +113,9 @@ impl Default for KernelConfig {
                 mailbox_cap: 64,
                 max_msg_size: IPC_MESSAGE_CAPACITY,
             },
-            block: BlockConfig {
-                max_sectors_per_call: 128,
+            memory: MemoryConfig {
+                max_object_pages: 65536,
             },
-            io: IoConfig { max_iov: 1024 },
-            memory: MemoryConfig { max_object_pages: 65536 },
             capability: CapabilityConfig { max_name_len: 512 },
             exec: ExecConfig {
                 stack_top_base: 0x0000_7FFF_FFF0_0000,
@@ -267,19 +253,9 @@ fn apply_key_value(config: &mut KernelConfig, key: &str, value: &str) {
                 config.ipc.max_msg_size = v;
             }
         }
-        "block.max_sectors_per_call" => {
-            if let Some(v) = parse_u64(value) {
-                config.block.max_sectors_per_call = v;
-            }
-        }
-        "io.max_iov" => {
-            if let Some(v) = parse_u64(value) {
-                config.io.max_iov = v;
-            }
-        }
         "memory.max_object_pages" => {
-            if let Some(pages) = parse_usize(value)
-                .filter(|pages| *pages != 0 && *pages <= usize::MAX / 4096)
+            if let Some(pages) =
+                parse_usize(value).filter(|pages| *pages != 0 && *pages <= usize::MAX / 4096)
             {
                 config.memory.max_object_pages = pages;
             }

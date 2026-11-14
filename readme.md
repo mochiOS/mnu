@@ -37,38 +37,15 @@ To run the mnu kernel, you can use QEMU. After building the kernel, you can run 
 - Anything that can be implemented in a service or cext should stay out of the kernel.
 
 ## Public Syscall ABI
-The public syscall ABI is fixed to a small kernel surface:
+The native ABI provides process/thread lifecycle, virtual memory, object
+Handles and attenuation, endpoint IPC, address/deadline waits, execution
+contexts, diagnostics, clocks and generic hardware authority primitives.
 
-- `process_exit`
-- `address_space_clone`
-- `process_create`
-- `process_handle_wait`
-- `thread_create`
-- `thread_exit`
-- `thread_yield`
-- `memory_map`
-- `memory_unmap`
-- `memory_protect`
-- `memory_object_create`
-- `memory_object_length`
-- `memory_sync`
-- `ipc_create`
-- `ipc_send`
-- `ipc_recv`
-- `ipc_call`
-- `ipc_reply`
-- `ipc_wait`
-- `cap_clone`
-- `cap_drop`
-- `cap_transfer`
-- `cap_query`
-- `cap_restrict`
-- `event_create`
-- `event_wait`
-- `event_signal`
-- `event_poll`
-- `time_now`
-- `sleep`
-- `check_gravity_exist`
+The authoritative syscall numbers and wire layouts are in
+[`crates/abi/src/lib.rs`](crates/abi/src/lib.rs); implemented dispatch is in
+[`src/syscall/mod.rs`](src/syscall/mod.rs). A declared/reserved ABI number is
+not proof of an implemented operation: unsupported calls return `Unsupported`.
+User image validation and construction live in `syscall/exec/image.rs`; CExt
+loading uses the shared ELF64 parser under `elf/`.
 
 High-frequency filesystem, GPU, network, GUI, and device operations are expected to flow through IPC, shared memory, and `memory_map` rather than dedicated syscalls.

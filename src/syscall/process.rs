@@ -1,7 +1,6 @@
 //! プロセス管理関連のシステムコール
 
 use super::types::SUCCESS;
-use crate::task::ThreadId;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 

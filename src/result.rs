@@ -55,10 +55,6 @@ pub enum Process {
     IpcError,
     /// タイムアウト
     Timeout,
-    /// 暴走プロセス検出
-    RogueProcessDetected,
-    /// プロセス作成完了
-    CreationOk,
 }
 
 /// ELF関連
@@ -122,7 +118,9 @@ impl Kernel {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Kernel::Device(Device::Busy) | Kernel::Device(Device::Timeout)
+            Kernel::Memory(Memory::Busy)
+                | Kernel::Device(Device::Busy)
+                | Kernel::Device(Device::Timeout)
         )
     }
 }
@@ -181,6 +179,4 @@ pub fn handle_kernel_error(error: Kernel) {
 }
 
 /// 結果型のエイリアス
-pub type KernelErr = Kernel;
-pub type KernelState = KernelErr;
-pub type Result<T> = core::result::Result<T, KernelState>;
+pub type Result<T> = core::result::Result<T, Kernel>;

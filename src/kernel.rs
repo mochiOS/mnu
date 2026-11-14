@@ -3,8 +3,8 @@ use crate::result::{Kernel, Process};
 use crate::util::log::LogLevel;
 use crate::{debug, info};
 use crate::{init::kinit, task, util, BootInfo, Result};
-use core::sync::atomic::Ordering;
 use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::Ordering;
 
 const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 8;
 static AP_IDLE_THREAD_SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -79,7 +79,6 @@ fn kernel_main() -> ! {
             "SMP handoff released secondary CPUs: kernel_cr3={:#x} ap_count={}",
             kernel_cr3, ap_count
         );
-    } else {
     }
     crate::smp::start_secondary_cpus();
     if let Some(process) = task::current_thread_id()

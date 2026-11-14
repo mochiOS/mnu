@@ -1,6 +1,5 @@
 use crate::interrupt::spinlock::SpinLock;
 use alloc::string::String;
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
