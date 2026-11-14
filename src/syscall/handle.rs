@@ -20,12 +20,12 @@ pub(crate) fn flush_provider_releases() {
     let mut releases = crate::task::handle_table::take_provider_releases();
     while let Some(ticket) = releases.pop() {
         let release = *ticket.value();
-        let endpoint = crate::syscall::ipc::IpcEndpoint {
+        let endpoint = crate::ipc::IpcEndpoint {
             thread_id: release.endpoint_thread_id,
             slot: release.endpoint_slot,
             generation: release.endpoint_generation,
         };
-        if !crate::syscall::ipc::endpoint_is_valid(endpoint) {
+        if !crate::ipc::endpoint_is_valid(endpoint) {
             continue;
         }
         let header = mnu_abi::provider::RequestHeader {
@@ -38,7 +38,7 @@ pub(crate) fn flush_provider_releases() {
         };
         let mut request = [0u8; mnu_abi::provider::REQUEST_HEADER_LEN];
         if header.encode(&[], &mut request).is_ok()
-            && !crate::syscall::ipc::send_provider_from_kernel(endpoint, &request)
+            && !crate::ipc::send_provider_from_kernel(endpoint, &request)
         {
             crate::task::handle_table::requeue_provider_release(ticket);
         }
@@ -559,8 +559,8 @@ pub fn options_set(raw: u64, options: u64) -> u64 {
     }
 }
 
-fn provider_endpoint(provider: &ProviderObject) -> crate::syscall::ipc::IpcEndpoint {
-    crate::syscall::ipc::IpcEndpoint {
+fn provider_endpoint(provider: &ProviderObject) -> crate::ipc::IpcEndpoint {
+    crate::ipc::IpcEndpoint {
         thread_id: provider.endpoint_thread_id,
         slot: provider.endpoint_slot,
         generation: provider.endpoint_generation,
@@ -589,7 +589,7 @@ fn provider_call(
     let request_len = request_header
         .encode(request_data, &mut request)
         .map_err(|_| Error::InvalidArgument.into_raw())?;
-    let response_len = crate::syscall::ipc::call_provider_from_kernel(
+    let response_len = crate::ipc::call_provider_from_kernel(
         provider_endpoint(provider),
         &request[..request_len],
         response_storage,
@@ -883,7 +883,7 @@ impl ProviderReadTransfer {
             Err(_) => return Err(Error::InvalidArgument.into_raw()),
         };
         let mut response = [0u8; wire::RESPONSE_HEADER_LEN + wire::READ_POSITION_LEN];
-        let reply_length = crate::syscall::ipc::call_provider_with_handle_from_kernel(
+        let reply_length = crate::ipc::call_provider_with_handle_from_kernel(
             provider_endpoint(provider),
             &encoded[..encoded_length],
             &mut response,
@@ -1405,7 +1405,7 @@ pub fn provider_object_identify(raw: u64) -> u64 {
         Err(error) => return error.into_raw(),
     };
     let current = match crate::task::current_thread_id()
-        .and_then(|thread| crate::syscall::ipc::endpoint_for_thread(thread.as_u64()))
+        .and_then(|thread| crate::ipc::endpoint_for_thread(thread.as_u64()))
     {
         Some(endpoint) => endpoint,
         None => return Error::NotReady.into_raw(),
@@ -1436,7 +1436,7 @@ pub fn provider_object_signal(object_id: u64, set: u64, clear: u64) -> u64 {
         return Error::InvalidArgument.into_raw();
     }
     let current = match crate::task::current_thread_id()
-        .and_then(|thread| crate::syscall::ipc::endpoint_for_thread(thread.as_u64()))
+        .and_then(|thread| crate::ipc::endpoint_for_thread(thread.as_u64()))
     {
         Some(endpoint) => endpoint,
         None => return Error::NotReady.into_raw(),
@@ -1598,7 +1598,7 @@ pub fn process_open(endpoint: u64, requested_rights: u64) -> u64 {
     {
         return Error::AccessDenied.into_raw();
     }
-    let Some(thread_id) = crate::syscall::ipc::resolve_endpoint_handle(endpoint) else {
+    let Some(thread_id) = crate::ipc::resolve_endpoint_handle(endpoint) else {
         return Error::InvalidArgument.into_raw();
     };
     let Some(target) = crate::task::thread_to_process_id(thread_id) else {
@@ -1847,7 +1847,7 @@ pub fn process_wait(raw: u64, deadline_nanoseconds: u64, output: u64) -> u64 {
 enum WaitTarget {
     Completion(crate::task::owned_executor::Receipt),
     Process(crate::task::ProcessId),
-    IpcEndpoint(crate::syscall::ipc::IpcEndpoint),
+    IpcEndpoint(crate::ipc::IpcEndpoint),
     Stream(Arc<crate::task::FileHandle>),
     Provider(Arc<ProviderObject>),
     MemoryAdmission(Arc<crate::mem::vm_object::ProviderAdmission>),
@@ -1936,12 +1936,12 @@ fn wait_item_signal(
             if item.interests & !mnu_abi::HANDLE_SIGNAL_READABLE != 0 {
                 return Err(Error::InvalidArgument.into_raw());
             }
-            let endpoint = crate::syscall::ipc::IpcEndpoint {
+            let endpoint = crate::ipc::IpcEndpoint {
                 thread_id,
                 slot,
                 generation,
             };
-            let readable = crate::syscall::ipc::endpoint_wait_ready(endpoint)?;
+            let readable = crate::ipc::endpoint_wait_ready(endpoint)?;
             item.observed = if readable {
                 mnu_abi::HANDLE_SIGNAL_READABLE
             } else {
@@ -1954,7 +1954,7 @@ fn wait_item_signal(
             if item.interests & !supported != 0 {
                 return Err(Error::InvalidArgument.into_raw());
             }
-            if !crate::syscall::ipc::endpoint_is_valid(memory_update::admission_endpoint(
+            if !crate::ipc::endpoint_is_valid(memory_update::admission_endpoint(
                 &admission,
             )) {
                 return Err(Error::NotFound.into_raw());
@@ -1982,7 +1982,7 @@ fn wait_item_signal(
             if item.interests & !supported != 0 {
                 return Err(Error::InvalidArgument.into_raw());
             }
-            if !crate::syscall::ipc::endpoint_is_valid(provider_endpoint(&provider)) {
+            if !crate::ipc::endpoint_is_valid(provider_endpoint(&provider)) {
                 return Err(Error::NotFound.into_raw());
             }
             item.observed = provider.signals() & item.interests;
@@ -1994,10 +1994,10 @@ fn wait_item_signal(
 
 fn remove_endpoint_waiters(
     waiter: crate::task::ThreadId,
-    endpoints: &[crate::syscall::ipc::IpcEndpoint],
+    endpoints: &[crate::ipc::IpcEndpoint],
 ) {
     for endpoint in endpoints {
-        crate::syscall::ipc::remove_endpoint_waiter(*endpoint, waiter);
+        crate::ipc::remove_endpoint_waiter(*endpoint, waiter);
     }
 }
 
@@ -2017,7 +2017,7 @@ fn remove_provider_waiters(waiter: crate::task::ThreadId, providers: &[Arc<Provi
 /// Cleanup is idempotent, including after partial deadline admission.
 struct ObjectWaitRegistrations {
     thread: crate::task::ThreadId,
-    endpoints: alloc::vec::Vec<crate::syscall::ipc::IpcEndpoint>,
+    endpoints: alloc::vec::Vec<crate::ipc::IpcEndpoint>,
     streams: alloc::vec::Vec<usize>,
     providers: alloc::vec::Vec<Arc<ProviderObject>>,
 }
@@ -2035,7 +2035,7 @@ impl Drop for ObjectWaitRegistrations {
 /// All allocations, retained objects and subscriptions survive stack discard.
 struct ObjectWaitState {
     registrations: ObjectWaitRegistrations,
-    endpoint_lifetimes: alloc::vec::Vec<crate::syscall::ipc::lifetime::Observation>,
+    endpoint_lifetimes: alloc::vec::Vec<crate::ipc::lifetime::Observation>,
     admission_waiters: alloc::vec::Vec<memory_update::AdmissionWaiter>,
     completion_waiters: alloc::vec::Vec<crate::task::owned_executor::Subscription>,
     sources: alloc::vec::Vec<WaitSource>,
@@ -2254,7 +2254,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                     let registered = (|| {
                         let endpoint = memory_update::admission_endpoint(&admission);
                         let observation =
-                            crate::syscall::ipc::lifetime::observe(endpoint, current)?;
+                            crate::ipc::lifetime::observe(endpoint, current)?;
                         let waiter = memory_update::AdmissionWaiter::register(admission, current)?;
                         admission_waiters.push(waiter);
                         endpoint_lifetimes.push(observation);
@@ -2271,7 +2271,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                 }
                 WaitTarget::IpcEndpoint(endpoint) => {
                     if let Err(error) =
-                        crate::syscall::ipc::register_endpoint_waiter(endpoint, current)
+                        crate::ipc::register_endpoint_waiter(endpoint, current)
                     {
                         return error;
                     }
@@ -2286,7 +2286,7 @@ pub fn wait_many(items_ptr: u64, count: u64, deadline_nanoseconds: u64, guard_pt
                     }
                 }
                 WaitTarget::Provider(provider) => {
-                    match crate::syscall::ipc::lifetime::observe(
+                    match crate::ipc::lifetime::observe(
                         provider_endpoint(&provider),
                         current,
                     ) {

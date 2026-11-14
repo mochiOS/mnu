@@ -71,6 +71,9 @@ pub mod task;
 /// システムコール
 pub mod syscall;
 
+/// Endpoint IPC primitives shared by kernel subsystems.
+pub mod ipc;
+
 #[cfg(not(test))]
 /// 起動時初期化
 pub mod init;

@@ -59,3 +59,8 @@ pub use thread::{
     ThreadUpcallError, UserUpcallContext,
 };
 pub use usermode::{jump_to_usermode, resume_usermode};
+
+/// Native execution identity, independent of syscall validation.
+pub(crate) fn current_process_id() -> Option<ProcessId> {
+    current_thread_id().and_then(|id| with_thread(id, |thread| thread.process_id()))
+}

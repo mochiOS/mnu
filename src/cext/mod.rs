@@ -56,7 +56,7 @@ pub struct CextInstance {
     pub name: String,
     pub kind: CextKind,
     pub process_id: Option<u64>,
-    pub endpoint: Option<crate::syscall::ipc::IpcEndpoint>,
+    pub endpoint: Option<crate::ipc::IpcEndpoint>,
     pub limits: ResourceLimits,
     pub loaded: bool,
 }
@@ -88,7 +88,7 @@ pub fn load_cext(name: &str, kind: CextKind, process_id: Option<u64>) -> u64 {
     id
 }
 
-pub fn register_endpoint(id: u64, endpoint: crate::syscall::ipc::IpcEndpoint) -> bool {
+pub fn register_endpoint(id: u64, endpoint: crate::ipc::IpcEndpoint) -> bool {
     with_registry_mut(|registry| {
         let Some(instance) = registry.get_mut(&id) else {
             return false;
@@ -98,7 +98,7 @@ pub fn register_endpoint(id: u64, endpoint: crate::syscall::ipc::IpcEndpoint) ->
     })
 }
 
-pub fn endpoint_for(id: u64) -> Option<crate::syscall::ipc::IpcEndpoint> {
+pub fn endpoint_for(id: u64) -> Option<crate::ipc::IpcEndpoint> {
     with_registry_mut(|registry| registry.get(&id).and_then(|instance| instance.endpoint))
 }
 

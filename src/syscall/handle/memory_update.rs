@@ -97,9 +97,9 @@ pub fn create(endpoint: u64, identity: u64, old_length: u64, length: u64, admiss
 
 pub(super) fn admission_endpoint(
     admission: &ProviderAdmission,
-) -> crate::syscall::ipc::IpcEndpoint {
+) -> crate::ipc::IpcEndpoint {
     let (thread_id, slot, generation) = admission.endpoint_parts();
-    crate::syscall::ipc::IpcEndpoint {
+    crate::ipc::IpcEndpoint {
         thread_id,
         slot,
         generation,

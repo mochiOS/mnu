@@ -1742,7 +1742,7 @@ pub fn remove_thread(id: ThreadId) -> Option<Thread> {
 // Unpublished handle references are detached one at a time and dropped only
 // after the process lock is released; their destructors may enter IPC.
 fn clear_thread_wait_registrations(id: ThreadId, process: ProcessId) {
-    crate::syscall::ipc::lifetime::remove_waiter(id);
+    crate::ipc::lifetime::remove_waiter(id);
     crate::syscall::address_wait::remove_waiter(id);
     crate::syscall::time::disarm_thread_deadline(id);
     super::process::remove_process_exit_waiters(id);
@@ -1762,7 +1762,7 @@ fn clear_thread_wait_registrations(id: ThreadId, process: ProcessId) {
 
 fn retire_thread_endpoint(id: ThreadId, position: Option<(usize, u64)>) {
     if let Some((slot, generation)) = position {
-        crate::syscall::ipc::retire_endpoint(crate::syscall::ipc::IpcEndpoint {
+        crate::ipc::retire_endpoint(crate::ipc::IpcEndpoint {
             thread_id: id.as_u64(),
             slot: slot as u16,
             generation,

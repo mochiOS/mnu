@@ -471,7 +471,7 @@ fn exec_authorization_target(
         let process = crate::syscall::security::current_process_id().ok_or(Error::NotReady)?;
         return Ok((thread, process));
     }
-    let requester = crate::syscall::ipc::resolve_sender_thread_id(requester_endpoint)
+    let requester = crate::ipc::resolve_sender_thread_id(requester_endpoint)
         .ok_or(Error::InvalidArgument)?;
     let thread = crate::task::ThreadId::from_u64(requester);
     let process =
@@ -1446,7 +1446,7 @@ fn replace_current_process_image(
         previous
     })
     .flatten();
-    crate::syscall::ipc::replace_thread_image_endpoint(current_tid, next_ipc_generation);
+    crate::ipc::replace_thread_image_endpoint(current_tid, next_ipc_generation);
     // The new address space is committed. No old upcall entry, stack or saved
     // user context may be used when this native thread enters the new image.
     crate::task::with_thread_mut(current_tid, |thread| {

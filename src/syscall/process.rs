@@ -36,7 +36,7 @@ pub fn get_thread_security_context(sender_endpoint: u64, output: u64, output_len
         ]) {
             return Error::AccessDenied.into_raw();
         }
-        crate::syscall::ipc::resolve_sender_thread_id(sender_endpoint)
+        crate::ipc::resolve_sender_thread_id(sender_endpoint)
     };
     let Some(thread_id) = thread_id else {
         return missing.into_raw();
@@ -1345,6 +1345,6 @@ pub fn find_process_by_name(name_ptr: u64, len: u64) -> u64 {
     });
 
     thread_id
-        .and_then(crate::syscall::ipc::ensure_endpoint_handle_for_thread)
+        .and_then(crate::ipc::ensure_endpoint_handle_for_thread)
         .unwrap_or(0)
 }

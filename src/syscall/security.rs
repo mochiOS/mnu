@@ -8,7 +8,7 @@ pub fn current_thread_id() -> Option<crate::task::ThreadId> {
 
 #[inline]
 pub fn current_process_id() -> Option<ProcessId> {
-    current_thread_id().and_then(|tid| task::with_thread(tid, |t| t.process_id()))
+    task::current_process_id()
 }
 
 #[inline]

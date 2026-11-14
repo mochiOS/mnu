@@ -44,7 +44,7 @@ pub fn check_thread_capability(thread_id: u64, cap_ptr: u64, cap_len: u64) -> u6
         Ok(name) => name,
         Err(error) => return error,
     };
-    let Some(resolved_thread) = crate::syscall::ipc::resolve_sender_thread_id(thread_id) else {
+    let Some(resolved_thread) = crate::ipc::resolve_sender_thread_id(thread_id) else {
         return 0;
     };
     let Some(pid) = crate::task::thread_to_process_id(resolved_thread) else {
@@ -369,7 +369,7 @@ fn current_process() -> Option<crate::task::ProcessId> {
 }
 
 fn resolve_destination_process(dest: u64) -> Option<crate::task::ProcessId> {
-    if let Some(thread_id) = crate::syscall::ipc::resolve_endpoint_handle(dest) {
+    if let Some(thread_id) = crate::ipc::resolve_endpoint_handle(dest) {
         return crate::task::thread_to_process_id(thread_id);
     }
     let pid = crate::task::ProcessId::from_u64(dest);
