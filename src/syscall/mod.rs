@@ -679,7 +679,7 @@ pub fn last_syscall_snapshot() -> (u64, [u64; 6]) {
 /// システムコールのディスパッチ
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
     crate::mem::extent_transaction::flush();
-    handle::flush_provider_releases();
+    crate::ipc::provider::flush_releases();
     crate::task::flush_deferred_process_reclaims();
     crate::task::thread::record_current_syscall(num, [arg0, arg1, arg2, arg3, arg4, arg5]);
     #[cfg(feature = "performance-instrumentation")]

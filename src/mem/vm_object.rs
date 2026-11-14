@@ -731,7 +731,7 @@ impl VmObject {
             let write_offset = page_start
                 .checked_add(*dirty_start as u64)
                 .ok_or_else(|| Error::BackingFailure.into_raw())?;
-            let written = crate::syscall::handle::provider_write_at(
+            let written = crate::ipc::provider::write_at(
                 writer,
                 write_offset,
                 &bytes[*dirty_start..*dirty_end],
@@ -742,7 +742,7 @@ impl VmObject {
         }
         if snapshots.is_empty() {
             if let VmObjectSource::Provider { object, .. } = &self.source {
-                crate::syscall::handle::provider_sync(object)?;
+                crate::ipc::provider::sync(object)?;
             }
         } else {
             for (index, (_, _, _, _, _, writer)) in snapshots.iter().enumerate() {
@@ -750,7 +750,7 @@ impl VmObject {
                     .iter()
                     .any(|(_, _, _, _, _, prior)| Arc::ptr_eq(prior, writer))
                 {
-                    crate::syscall::handle::provider_sync(writer)?;
+                    crate::ipc::provider::sync(writer)?;
                 }
             }
         }
@@ -1091,7 +1091,7 @@ fn read_lower_until(source: &VmObjectSource, offset: u64, output: &mut [u8]) -> 
             VmObjectSource::Memory(memory) => memory
                 .read_at(current, &mut output[bytes_read..bytes_read + request_len])
                 .map_err(mnu_abi::status::Error::into_raw),
-            VmObjectSource::Provider { object, .. } => crate::syscall::handle::provider_read_at(
+            VmObjectSource::Provider { object, .. } => crate::ipc::provider::read_at(
                 object,
                 current,
                 &mut output[bytes_read..bytes_read + request_len],
@@ -1148,7 +1148,7 @@ fn write_lower(source: &VmObjectSource, offset: u64, input: &[u8]) -> Result<usi
             .write_at(offset, input)
             .map_err(mnu_abi::status::Error::into_raw),
         VmObjectSource::Provider { object, .. } => {
-            crate::syscall::handle::provider_write_at(object, offset, input)
+            crate::ipc::provider::write_at(object, offset, input)
         }
     }
 }

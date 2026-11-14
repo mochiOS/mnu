@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 pub(crate) mod lifetime;
+pub(crate) mod provider;
 
 use crate::task::{HandleRights, KernelObject, ObjectHandle, ObjectHandleEntry};
 
