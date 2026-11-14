@@ -475,11 +475,31 @@ name = "mboot-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "mochios-fonts"
+name = "mochios-appcore"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "bootui"
+name = "mochios-device-consent"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-file-publication"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-linker-driver"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-mdriver-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
+name = "mochios-fonts"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -492,6 +512,10 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-system-image"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "bootui"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -577,30 +601,6 @@ version = "0.1.0"
 [[patch.unused]]
 name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-appcore"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-device-consent"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-file-publication"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-linker-driver"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-mdriver-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
 
 [[patch.unused]]
 name = "ext4plus"

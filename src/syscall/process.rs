@@ -380,6 +380,16 @@ pub(crate) fn resolve_user_copy_on_write(table: u64, address: u64) -> crate::res
         if process.page_table() != Some(table) {
             return Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress));
         }
+        // A COW marker describes storage sharing, not current write authority.
+        // Recheck the live per-page policy under the same VM lock as the edit.
+        // Loader-owned pages without region metadata retain their PTE policy.
+        if let Some(region) = process.find_memory_region(address) {
+            if !region.allows_write_at(address) || region.allows_execute_at(address) {
+                return Err(crate::Kernel::Memory(
+                    crate::result::Memory::PermissionDenied,
+                ));
+            }
+        }
         // Serialize COW leaf edits with native protection, unmap and teardown.
         crate::mem::mapping_admission::check_access(process.memory_regions(), address, 1)?;
         crate::mem::paging::resolve_copy_on_write(table, address)

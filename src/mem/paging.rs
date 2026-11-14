@@ -657,7 +657,7 @@ pub fn resolve_copy_on_write(table_phys: u64, address: u64) -> Result<bool> {
         with_user_leaf_entry_mut(table_phys, page_addr, |entry| {
             let flags = entry.flags();
             if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(COPY_ON_WRITE) {
-                return true;
+                return flags.contains(PageTableFlags::NO_EXECUTE);
             }
             if entry.addr().as_u64() != old_phys || !super::cow_access::may_resolve(flags.bits()) {
                 return false;
