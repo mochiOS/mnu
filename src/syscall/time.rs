@@ -323,7 +323,7 @@ pub fn sleep_until(ticks: u64) -> Result<(), Error> {
         None => return Err(Error::NotReady),
     };
 
-    let queued = x86_64::instructions::interrupts::without_interrupts(|| {
+    let queued = crate::arch::interrupts::without_interrupts(|| {
         if !register_sleep_entry(current_tid, ticks) {
             return false;
         }

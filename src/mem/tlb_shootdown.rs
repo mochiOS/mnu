@@ -34,7 +34,7 @@ pub(crate) fn service_pending() {
 /// Cooperating lock waiters break the IF=0/process-lock/IPI cycle. Full flushes
 /// can later target address-space residency without weakening completion.
 pub(crate) fn invalidate_all() -> Result<(), ()> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         let targets = ONLINE.load(Ordering::Acquire);
         let publication = LEDGER.publish(targets).map_err(|_| ())?;
         let current = crate::percpu::current_cpu_id();

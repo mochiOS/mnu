@@ -15,7 +15,7 @@ where
     F: FnOnce(&mut SerialPort) -> R,
 {
     // 割込みを無効化してロック取得
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         let mut serial = SERIAL.lock();
         f(&mut serial)
     })

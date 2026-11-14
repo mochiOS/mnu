@@ -129,9 +129,9 @@ fn state_for_current_cpu() -> &'static PerCpuState {
 
 #[inline(never)]
 fn halt_unsupported_cpu(_apic_id: u32) -> ! {
-    x86_64::instructions::interrupts::disable();
+    crate::arch::interrupts::disable();
     loop {
-        x86_64::instructions::hlt();
+        crate::arch::wait_for_interrupt();
     }
 }
 

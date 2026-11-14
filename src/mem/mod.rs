@@ -49,7 +49,7 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
     info!("Initializing memory...");
     crate::debug!("About to disable interrupts");
 
-    x86_64::instructions::interrupts::disable();
+    crate::arch::interrupts::disable();
     crate::debug!("Interrupts disabled, temporarily disabling SMAP");
 
     let smap_was_enabled = crate::cpu::is_smap_enabled();

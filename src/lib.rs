@@ -30,6 +30,9 @@ compile_error!(
 
 extern crate alloc;
 
+/// Compile-time CPU mechanism boundary.
+pub mod arch;
+
 /// エラー型定義
 pub mod result;
 

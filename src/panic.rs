@@ -21,15 +21,5 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     warn!("system halted. Please reset.");
 
-    // 割り込みを無効化
-    #[cfg(target_arch = "x86_64")]
-    x86_64::instructions::interrupts::disable();
-
-    // システムを停止
-    loop {
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!("hlt");
-        }
-    }
+    crate::arch::halt()
 }

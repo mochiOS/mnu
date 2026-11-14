@@ -278,7 +278,7 @@ pub fn yield_now() {
 
     // スケジューリングと切り替えは割り込み禁止区間で実行し、
     // 状態更新と実際の切替の間に割り込みが入る競合窓を防ぐ。
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         if let Some((next_id, next_slot)) = schedule_with_slot() {
             let current = current_thread_id();
             // 次のスレッドが現在のスレッドと異なる場合のみ切り替え
@@ -427,9 +427,9 @@ pub fn terminate_thread(id: ThreadId) {
         crate::task::retire_current_kernel_stack(kernel_stack);
         set_current_thread(None, None);
         yield_now();
-        x86_64::instructions::interrupts::disable();
+        crate::arch::interrupts::disable();
         loop {
-            x86_64::instructions::hlt();
+            crate::arch::wait_for_interrupt();
         }
     }
 
@@ -548,7 +548,7 @@ pub fn exit_current_task(exit_code: u64) -> ! {
         // 現在のスレッドをクリア（先にクリアしないとschedule()が正しく動作しない）
         set_current_thread(None, None);
 
-        x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::arch::interrupts::without_interrupts(|| {
             // 次のスレッドにスケジューリング（戻ってこない）
             if let Some((next_id, next_slot)) = schedule_with_slot() {
                 crate::debug!("Switching from exited thread to {:?}", next_id);
@@ -573,9 +573,9 @@ pub fn exit_current_task(exit_code: u64) -> ! {
                     crate::audit::AuditEventKind::Fault,
                     "scheduler switch_to_thread returned unexpectedly after exit",
                 );
-                x86_64::instructions::interrupts::disable();
+                crate::arch::interrupts::disable();
                 loop {
-                    x86_64::instructions::hlt();
+                    crate::arch::wait_for_interrupt();
                 }
             }
         });
@@ -593,9 +593,9 @@ pub fn exit_current_task(exit_code: u64) -> ! {
         crate::audit::AuditEventKind::Fault,
         "scheduler observed no more user threads",
     );
-    x86_64::instructions::interrupts::disable();
+    crate::arch::interrupts::disable();
     loop {
-        x86_64::instructions::hlt();
+        crate::arch::wait_for_interrupt();
     }
 }
 
@@ -611,7 +611,7 @@ pub fn schedule_and_switch() -> bool {
         return false;
     }
 
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         let current = current_thread_id();
 
         // 次のスレッドを選択
@@ -634,7 +634,7 @@ pub fn schedule_and_switch() -> bool {
 pub fn start_scheduling() -> ! {
     // 最初のスレッドを選択
     if let Some(first_id) = super::thread::peek_next_thread() {
-        x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::arch::interrupts::without_interrupts(|| {
             // 最初のスレッドを Running 状態に設定
             set_thread_state(first_id, ThreadState::Running);
 
@@ -690,10 +690,10 @@ pub fn start_scheduling() -> ! {
                             "start_scheduling could not resolve first thread slot",
                         );
 
-                        x86_64::instructions::interrupts::disable();
+                        crate::arch::interrupts::disable();
 
                         loop {
-                            x86_64::instructions::hlt();
+                            crate::arch::wait_for_interrupt();
                         }
                     }
                 }
@@ -705,10 +705,10 @@ pub fn start_scheduling() -> ! {
             "start_scheduling switch_to_thread returned unexpectedly",
         );
 
-        x86_64::instructions::interrupts::disable();
+        crate::arch::interrupts::disable();
 
         loop {
-            x86_64::instructions::hlt();
+            crate::arch::wait_for_interrupt();
         }
     } else {
         crate::audit::log(
@@ -716,10 +716,10 @@ pub fn start_scheduling() -> ! {
             "start_scheduling found no threads to schedule",
         );
 
-        x86_64::instructions::interrupts::disable();
+        crate::arch::interrupts::disable();
 
         loop {
-            x86_64::instructions::hlt();
+            crate::arch::wait_for_interrupt();
         }
     }
 }

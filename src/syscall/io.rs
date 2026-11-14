@@ -85,7 +85,7 @@ pub fn debug_write(buf_ptr: u64, len: u64) -> u64 {
             }
             done += count;
         } else {
-            let written = x86_64::instructions::interrupts::without_interrupts(|| {
+            let written = crate::arch::interrupts::without_interrupts(|| {
                 let Some(mut serial) = console::SERIAL.try_lock() else {
                     return 0;
                 };

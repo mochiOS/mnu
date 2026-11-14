@@ -104,7 +104,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         interrupt::enable_timer_interrupt();
     }
 
-    x86_64::instructions::interrupts::enable();
+    crate::arch::interrupts::enable();
 
     // Initialize syscall MSRs (STAR/LSTAR/FMASK)
 

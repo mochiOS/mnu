@@ -1221,16 +1221,16 @@ extern "x86-interrupt" fn generic_interrupt_handler(mut stack_frame: InterruptSt
 
 /// CPU割り込みを無効化してシステムを停止
 fn halt_cpu() {
-    x86_64::instructions::interrupts::disable();
+    crate::arch::interrupts::disable();
     loop {
-        x86_64::instructions::hlt();
+        crate::arch::wait_for_interrupt();
     }
 }
 
 /// CPU割り込みを無効化してシステムを停止（戻らない）
 fn halt_forever() -> ! {
-    x86_64::instructions::interrupts::disable();
+    crate::arch::interrupts::disable();
     loop {
-        x86_64::instructions::hlt();
+        crate::arch::wait_for_interrupt();
     }
 }

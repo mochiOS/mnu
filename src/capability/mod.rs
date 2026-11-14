@@ -340,7 +340,7 @@ static DYNAMIC_CAPABILITIES: spin::Mutex<Option<DynamicCapabilityRegistry>> =
     spin::Mutex::new(None);
 
 fn with_dynamic_registry<R>(f: impl FnOnce(&mut DynamicCapabilityRegistry) -> R) -> R {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         let mut registry = DYNAMIC_CAPABILITIES.lock();
         f(registry.get_or_insert_with(DynamicCapabilityRegistry::default))
     })

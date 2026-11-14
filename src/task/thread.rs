@@ -1820,7 +1820,7 @@ pub fn current_thread_slot() -> Option<usize> {
 /// 現在実行中のスレッドIDを設定
 pub fn set_current_thread(id: Option<ThreadId>, slot: Option<usize>) {
     let raw = id.map(|v| v.as_u64()).unwrap_or(0);
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         crate::percpu::set_current_thread_raw_id(raw);
         crate::percpu::set_current_thread_slot(slot);
     });

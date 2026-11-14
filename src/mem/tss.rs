@@ -46,9 +46,9 @@ fn halt_on_stack_allocation_failure() -> ! {
         "TSS stack allocation failed",
     );
     crate::warn!("TSS stack allocation failed");
-    x86_64::instructions::interrupts::disable();
+    crate::arch::interrupts::disable();
     loop {
-        x86_64::instructions::hlt();
+        crate::arch::wait_for_interrupt();
     }
 }
 
@@ -152,7 +152,7 @@ pub fn set_rsp0(rsp: u64) {
         unsafe {
             // RSP0更新中の割り込み/コンテキストスイッチを防ぐため、
             // 割り込みを一時的に無効化してアトミックに更新
-            x86_64::instructions::interrupts::without_interrupts(|| {
+            crate::arch::interrupts::without_interrupts(|| {
                 (*ptr).privilege_stack_table[0] = VirtAddr::new(rsp);
             });
         }

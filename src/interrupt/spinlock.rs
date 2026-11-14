@@ -47,10 +47,10 @@ impl<T> SpinLock<T> {
     /// - `SpinLockGuard<'_, T>`: ロックガード。ドロップ時にロックを解放し、割込み状態を復元する
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
         // 現在の割込みフラグを保存
-        let interrupt_enabled = x86_64::instructions::interrupts::are_enabled();
+        let interrupt_enabled = crate::arch::interrupts::are_enabled();
 
         // 割込みを無効化
-        x86_64::instructions::interrupts::disable();
+        crate::arch::interrupts::disable();
 
         // ロック取得を試みる
         while self
@@ -81,9 +81,9 @@ impl<T> SpinLock<T> {
     /// ## Returns
     /// - `Option<SpinLockGuard<'_, T>>`: ロックガード。ロックが取得できた場合はSome、そうでない場合はNone
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
-        let interrupt_enabled = x86_64::instructions::interrupts::are_enabled();
+        let interrupt_enabled = crate::arch::interrupts::are_enabled();
 
-        x86_64::instructions::interrupts::disable();
+        crate::arch::interrupts::disable();
 
         if self
             .locked
@@ -97,7 +97,7 @@ impl<T> SpinLock<T> {
         } else {
             // ロック取得失敗、割込み状態を復元
             if interrupt_enabled {
-                x86_64::instructions::interrupts::enable();
+                crate::arch::interrupts::enable();
             }
             None
         }
@@ -161,7 +161,7 @@ impl<T> Drop for SpinLockGuard<'_, T> {
 
         // 割込み状態を復元
         if self.interrupt_enabled {
-            x86_64::instructions::interrupts::enable();
+            crate::arch::interrupts::enable();
         }
     }
 }

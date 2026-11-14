@@ -174,7 +174,7 @@ impl HardenedKernelHeap {
         // The scheduler checks stack mappings under ThreadQueue. A timer on
         // this CPU must not wait for that queue while growth owns PAGE_TABLE:
         // another CPU can already own the queue and be waiting for our mapper.
-        x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::arch::interrupts::without_interrupts(|| {
             self.grow_uninterruptible(minimum_bytes)
         })
     }
@@ -536,12 +536,5 @@ fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
         crate::task::scheduler::exit_current_process(u64::MAX);
     }
     // 回復不能: 割り込みを無効化してシステムを停止
-    #[cfg(target_arch = "x86_64")]
-    x86_64::instructions::interrupts::disable();
-    loop {
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!("hlt");
-        }
-    }
+    crate::arch::halt()
 }

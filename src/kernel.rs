@@ -22,7 +22,7 @@ fn ap_idle_loop() -> ! {
     crate::smp::mark_current_ap_boot_stack_released();
     loop {
         if !task::schedule_and_switch() {
-            x86_64::instructions::hlt();
+            crate::arch::wait_for_interrupt();
         }
     }
 }
@@ -153,7 +153,7 @@ fn kernel_main() -> ! {
     ));
     loop {
         if !task::schedule_and_switch() {
-            x86_64::instructions::hlt();
+            crate::arch::wait_for_interrupt();
         }
     }
 }
@@ -246,7 +246,7 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo, boot_stac
     );
     task::set_thread_state(idle_thread_id, task::ThreadState::Running);
     crate::mem::tlb_shootdown::mark_current_cpu_online();
-    x86_64::instructions::interrupts::enable();
+    crate::arch::interrupts::enable();
     unsafe {
         task::context::switch_to_thread_with_slots(None, idle_thread_id, idle_thread_slot);
     }
@@ -317,6 +317,6 @@ pub fn early_serial(text: &str) {
 /// システムを無限ループで停止
 fn halt_forever() -> ! {
     loop {
-        x86_64::instructions::hlt();
+        crate::arch::wait_for_interrupt();
     }
 }

@@ -28,12 +28,7 @@ pub unsafe extern "sysv64" fn kernel_entry(boot_info_ptr: *mut mnu::BootInfo) ->
     early_serial("entry: start\n");
 
     early_serial("entry: read stack pointer\n");
-    let stack_pointer: u64;
-    core::arch::asm!(
-        "mov {}, rsp",
-        out(reg) stack_pointer,
-        options(nomem, nostack, preserves_flags)
-    );
+    let stack_pointer = mnu::arch::stack_pointer();
 
     early_serial("entry: get allocator address\n");
     let kernel_heap_addr = &KERNEL_ALLOCATOR as *const HardenedKernelHeap as u64;

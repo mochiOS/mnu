@@ -25,9 +25,9 @@ fn current_gdt() -> &'static Once<(GlobalDescriptorTable, Selectors)> {
 fn halt_on_missing_gdt(which: &'static str) -> ! {
     crate::audit::log(crate::audit::AuditEventKind::Fault, which);
     crate::warn!("GDT not initialized");
-    x86_64::instructions::interrupts::disable();
+    crate::arch::interrupts::disable();
     loop {
-        x86_64::instructions::hlt();
+        crate::arch::wait_for_interrupt();
     }
 }
 

@@ -9,7 +9,7 @@ pub fn set_base(base: u64, reserved: u64) -> u64 {
     if base != 0 && !super::is_canonical_user_range(base, 0) {
         return Error::InvalidAddress.into_raw();
     }
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         let Some(thread) = crate::task::current_thread_id() else {
             return Error::NotReady.into_raw();
         };

@@ -237,7 +237,7 @@ pub unsafe fn switch_to_thread_with_slots(
 ) {
     // コンテキストスイッチ中は割り込みを禁止する
     // ロック解放からコンテキストスイッチまでの間に割り込みが入ると不整合が起きる可能性があるため
-    x86_64::instructions::interrupts::disable();
+    crate::arch::interrupts::disable();
     let mut queue = THREAD_QUEUE.lock();
 
     let (old_ctx_ptr, current_process_id) = if let Some(id) = current_id {
@@ -300,9 +300,9 @@ pub unsafe fn switch_to_thread_with_slots(
                     kstack,
                 );
                 drop(queue);
-                x86_64::instructions::interrupts::disable();
+                crate::arch::interrupts::disable();
                 loop {
-                    x86_64::instructions::hlt();
+                    crate::arch::wait_for_interrupt();
                 }
             }
             let pid = thread.process_id();
