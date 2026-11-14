@@ -1,0 +1,7 @@
+format = 1
+
+[build]
+command = ["mdp", "pipeline", "--recipe", "mdp.recipe.json"]
+requires = ["context"]
+sources = []
+artifact = "out/mdp/kernel.tar.mdp"

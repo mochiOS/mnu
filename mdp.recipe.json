@@ -1,0 +1,40 @@
+{
+  "format": 1,
+  "steps": [
+    "mkdir -p $(MMAKE_OUT)/components",
+    "toolchain=`sed -n 's/^KERNEL_RUST_TOOLCHAIN=//p' $(ROOT)/.config | tr -d '\"' | tail -n1`; features=kernel-bin; if grep -qx 'KERNEL_PERFORMANCE_INSTRUMENTATION=y' $(ROOT)/.config; then features=$features,performance-instrumentation; fi; RUSTFLAGS='--cfg curve25519_dalek_backend=\"serial\" -C debuginfo=1' cargo \"+$toolchain\" build --offline -Z build-std=core,alloc,compiler_builtins --release --target x86_64-unknown-none --target-dir $(MMAKE_OUT)/targets/kernel --features \"$features\" --manifest-path $(PROJECT)/Cargo.toml",
+    "objcopy --only-keep-debug $(MMAKE_OUT)/targets/kernel/x86_64-unknown-none/release/kernel $(MMAKE_OUT)/components/kernel.debug",
+    "objcopy --strip-all $(MMAKE_OUT)/targets/kernel/x86_64-unknown-none/release/kernel $(MMAKE_OUT)/components/kernel.elf",
+    "objcopy --add-gnu-debuglink=$(MMAKE_OUT)/components/kernel.debug $(MMAKE_OUT)/components/kernel.elf",
+    "nm -n --defined-only $(MMAKE_OUT)/targets/kernel/x86_64-unknown-none/release/kernel | awk '$3 == \"secondary_cpu_entry\" { count++; value=tolower($1) } END { if (count != 1) exit 1; printf \"secondary_cpu_entry=0x%s\\n\", value }' > $(MMAKE_OUT)/components/kernel.meta.new",
+    "mv $(MMAKE_OUT)/components/kernel.meta.new $(MMAKE_OUT)/components/kernel.meta"
+  ],
+  "package": {
+    "name": "kernel",
+    "version": "0.1.0",
+    "target": "x86_64-mochios",
+    "abi": "mochios-1"
+  },
+  "artifact": "out/mdp/kernel.tar.mdp",
+  "exports": [
+    {
+      "source": "$(MMAKE_OUT)/components/kernel.elf",
+      "area": "boot",
+      "destination": "system/kernel.elf"
+    },
+    {
+      "source": "$(MMAKE_OUT)/components/kernel.debug",
+      "area": "symbols",
+      "destination": "kernel.debug"
+    },
+    {
+      "source": "$(MMAKE_OUT)/components/kernel.meta",
+      "area": "boot",
+      "destination": "system/kernel.meta"
+    }
+  ],
+  "bindings": {
+    "SOURCE_CORE": "$(PROJECT)",
+    "MMAKE_OUT": "$(PROJECT)/out/mdp/build"
+  }
+}
