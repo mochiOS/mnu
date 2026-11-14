@@ -44,6 +44,9 @@ pub(crate) fn check_user_mapping_range(table: u64, start: u64, length: u64) -> R
         if entry.is_unused() {
             return Ok(Entry::Absent);
         }
+        if flags.contains(super::KERNEL_MAPPING) {
+            return Err(Kernel::Memory(Memory::PermissionDenied));
+        }
         if level > 1 && !flags.contains(Flags::PRESENT) {
             return Err(Kernel::Memory(Memory::NotMapped));
         }

@@ -46,6 +46,9 @@ const COW_WRITE_DISABLED: PageTableFlags =
     PageTableFlags::from_bits_retain(super::cow_access::WRITE_DISABLED);
 
 const RESIDENT_RAM: PageTableFlags = PageTableFlags::from_bits_retain(super::residency::RAM_LEAF);
+/// Hardware-ignored ownership bit for explicit supervisor mappings. Unlike
+/// inherited identity placeholders, these pages must never become user pages.
+const KERNEL_MAPPING: PageTableFlags = PageTableFlags::BIT_52;
 
 fn record_user_leaf_change(table: u64, before: PageTableFlags, after: PageTableFlags) {
     super::residency_native::transition(table, before.bits(), after.bits());
@@ -1317,11 +1320,14 @@ fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
                 crate::kernel::early_serial("paging: descriptor translation missing\n");
                 return Err(Kernel::Memory(Memory::NotMapped));
             };
-            l1e.set_addr(PhysAddr::new(phys), Flags::PRESENT | Flags::NO_EXECUTE);
+            l1e.set_addr(
+                PhysAddr::new(phys),
+                Flags::PRESENT | Flags::NO_EXECUTE | KERNEL_MAPPING,
+            );
         } else {
             let mut flags = l1e.flags();
             flags.remove(Flags::WRITABLE | Flags::USER_ACCESSIBLE);
-            flags |= Flags::NO_EXECUTE;
+            flags |= Flags::NO_EXECUTE | KERNEL_MAPPING;
             l1e.set_addr(l1e.addr(), flags);
         }
 
@@ -1743,6 +1749,10 @@ fn ensure_user_page_table_hierarchy(l4_virt: u64, vaddr: u64, phys_off: u64) -> 
     let l3_virt = l3_phys + phys_off;
     let l3 = unsafe { &mut *(l3_virt as *mut PageTable) };
 
+    if l3[l3_index].flags().contains(Flags::HUGE_PAGE) {
+        return Err(Kernel::Memory(Memory::AlreadyMapped));
+    }
+
     if l3[l3_index].is_unused() {
         crate::debug!("Creating new L2 table for L3[{}]", l3_index);
         let l2_frame = frame::allocate_zeroed_frame()?;
@@ -1770,6 +1780,23 @@ fn ensure_user_page_table_hierarchy(l4_virt: u64, vaddr: u64, phys_off: u64) -> 
     if l2[l2_index].is_unused() || l2_flags.contains(Flags::HUGE_PAGE) {
         let l1_frame = frame::allocate_zeroed_frame()?;
         let l1_phys = l1_frame.start_address().as_u64();
+
+        // A bootstrap identity alias can contain required kernel neighbours.
+        // Split it without discarding their addresses or leaf permissions.
+        if l2_flags.contains(Flags::HUGE_PAGE) {
+            let raw_base = l2[l2_index].addr().as_u64();
+            let base = raw_base & !((1 << 21) - 1);
+            let mut leaf_flags = l2_flags;
+            leaf_flags.remove(Flags::HUGE_PAGE);
+            if raw_base & (1 << 12) != 0 {
+                // Huge PAT (bit 12) becomes 4KiB PAT (bit 7).
+                leaf_flags.insert(Flags::HUGE_PAGE);
+            }
+            let leaves = unsafe { &mut *((l1_phys + phys_off) as *mut PageTable) };
+            for index in 0..512 {
+                leaves[index].set_addr(PhysAddr::new(base + index as u64 * 4096), leaf_flags);
+            }
+        }
 
         l2[l2_index].set_addr(
             PhysAddr::new(l1_phys),
@@ -1841,6 +1868,8 @@ pub(crate) unsafe fn map_and_copy_segment_to(
     let mem_end = vaddr
         .checked_add(memsz)
         .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
+
+    check_user_mapping_range(table_phys, vaddr, memsz)?;
 
     // A single temporary kernel VA races across CPUs/address spaces. The
     // permanent direct map addresses this L4 without modifying shared kernel
@@ -1933,12 +1962,9 @@ pub(crate) unsafe fn map_and_copy_segment_to(
             let existing_addr = l1[l1_index].addr().as_u64();
             let existing_flags = l1[l1_index].flags();
             if !existing_flags.contains(Flags::USER_ACCESSIBLE) {
-                let merged = if existing_flags.contains(Flags::NO_EXECUTE) {
-                    final_flags
-                } else {
-                    final_flags & !Flags::NO_EXECUTE
-                };
-                l1[l1_index].set_addr(PhysAddr::new(phys_frame_addr), merged);
+                // Admission allowed only a disposable identity placeholder.
+                // Its old executable bit grants no permission to the user page.
+                l1[l1_index].set_addr(PhysAddr::new(phys_frame_addr), final_flags);
             } else {
                 let existing_exec = !existing_flags.contains(Flags::NO_EXECUTE);
                 let existing_write = existing_flags.contains(Flags::WRITABLE);
@@ -2414,6 +2440,8 @@ pub fn map_physical_range_to_user(
         return Ok(());
     }
 
+    check_user_mapping_range(table_phys, virt_addr, size)?;
+
     let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
     let mut pt = unsafe { OffsetPageTable::new(l4, VirtAddr::new(phys_off)) };
 
@@ -2489,6 +2517,7 @@ pub fn map_shared_frame_to_user(
     if virt_addr & 0xfff != 0 || frame_phys & 0xfff != 0 || writable && executable {
         return Err(Kernel::Memory(Memory::InvalidAddress));
     }
+    check_user_mapping_range(table_phys, virt_addr, 4096)?;
     let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
     let _smap_guard = crate::cpu::SmapSmepGuard::new();
     let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
@@ -2593,6 +2622,10 @@ pub(crate) unsafe fn map_page_in_table(
     }
     if (phys_addr & 0xfff) != 0 {
         return Err(Kernel::Memory(Memory::AlignmentError));
+    }
+
+    if user_accessible {
+        check_user_mapping_range(table_phys, virt_addr, 4096)?;
     }
 
     let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
@@ -2702,6 +2735,8 @@ pub(crate) unsafe fn map_page_in_table(
     }
     if user_accessible {
         flags |= PageTableFlags::USER_ACCESSIBLE | RESIDENT_RAM;
+    } else {
+        flags |= KERNEL_MAPPING;
     }
     flags |= PageTableFlags::NO_EXECUTE;
     let previous_flags = l1e.flags();

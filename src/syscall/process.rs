@@ -960,7 +960,7 @@ fn memory_map_impl(
         // REPLACE intentionally permits existing user pages, never the kernel
         // entry/descriptor mappings. Check before allocating or publishing.
         crate::mem::paging::check_user_mapping_range(pt_phys, map_start, size)
-            .map_err(|_| Error::AccessDenied.into_raw())?;
+            .map_err(|error| Error::from(error).into_raw())?;
 
         let region = if anonymous {
             // Shared reservations retain one backing object across clones,
