@@ -34,6 +34,13 @@ pub(crate) struct Scope<T> {
 }
 
 impl<T: Send + 'static> Scope<T> {
+    /// Keep the sole owner reachable from thread retirement while the callback
+    /// may park. The callback borrows the value instead of keeping a stack owner.
+    pub(crate) fn with<R>(value: T, body: impl FnOnce(&T) -> R) -> Result<R, Error> {
+        let held = Self::new(value)?;
+        Ok(body(&held))
+    }
+
     pub(crate) fn new(value: T) -> Result<Self, Error> {
         let owner = super::current_thread_id().ok_or(Error::NotReady)?;
         let mut storage = Box::try_new(Slot {

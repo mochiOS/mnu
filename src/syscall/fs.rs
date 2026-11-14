@@ -203,6 +203,10 @@ fn write_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64, complete:
     let Some(current) = crate::task::current_thread_id() else {
         return Error::NotReady.into_raw();
     };
+    let tmp = match crate::task::operation::Scope::new(tmp) {
+        Ok(tmp) => tmp,
+        Err(error) => return error.into_raw(),
+    };
     let nonblocking = io_options & mnu_abi::HANDLE_OPTION_NONBLOCKING != 0;
     loop {
         match crate::task::stream::write_ready(pipe_id, &tmp, complete, current, nonblocking) {

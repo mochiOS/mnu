@@ -79,11 +79,12 @@ pub fn read(raw: u64, buffer: u64, length: u64) -> u64 {
         Ok(object) => object,
         Err(error) => return error.into_raw(),
     };
-    match object {
-        KernelObject::File(file) => crate::syscall::fs::read_file_handle(&file, buffer, length),
-        KernelObject::Provider(provider) => provider_read(&provider, buffer, length),
+    crate::task::operation::Scope::with(object, |object| match object {
+        KernelObject::File(file) => crate::syscall::fs::read_file_handle(file, buffer, length),
+        KernelObject::Provider(provider) => provider_read(provider, buffer, length),
         _ => mnu_abi::status::Error::InvalidArgument.into_raw(),
-    }
+    })
+    .unwrap_or_else(mnu_abi::status::Error::into_raw)
 }
 
 pub fn write(raw: u64, buffer: u64, length: u64) -> u64 {
@@ -91,47 +92,60 @@ pub fn write(raw: u64, buffer: u64, length: u64) -> u64 {
         Ok(object) => object,
         Err(error) => return error.into_raw(),
     };
-    match object {
-        KernelObject::File(file) => crate::syscall::fs::write_file_handle(&file, buffer, length),
-        KernelObject::Provider(provider) => provider_write(&provider, buffer, length),
+    crate::task::operation::Scope::with(object, |object| match object {
+        KernelObject::File(file) => crate::syscall::fs::write_file_handle(file, buffer, length),
+        KernelObject::Provider(provider) => provider_write(provider, buffer, length),
         _ => mnu_abi::status::Error::InvalidArgument.into_raw(),
-    }
+    })
+    .unwrap_or_else(mnu_abi::status::Error::into_raw)
 }
 
 pub fn write_bounded(raw: u64, buffer: u64, length: u64, byte_end: u64) -> u64 {
-    match object_native(raw, HandleRights::WRITE) {
-        Ok(KernelObject::Provider(provider)) => {
-            provider_write_impl(&provider, buffer, length, Some(byte_end))
+    let object = match object_native(raw, HandleRights::WRITE) {
+        Ok(object) => object,
+        Err(error) => return error.into_raw(),
+    };
+    crate::task::operation::Scope::with(object, |object| match object {
+        KernelObject::Provider(provider) => {
+            provider_write_impl(provider, buffer, length, Some(byte_end))
         }
-        Ok(_) => mnu_abi::status::Error::InvalidArgument.into_raw(),
-        Err(error) => error.into_raw(),
-    }
+        _ => mnu_abi::status::Error::InvalidArgument.into_raw(),
+    })
+    .unwrap_or_else(mnu_abi::status::Error::into_raw)
 }
 
 pub fn stream_read(raw: u64, buffer: u64, length: u64, options: u64) -> u64 {
     if options & !mnu_abi::STREAM_READ_OPTIONS_ALL != 0 {
         return mnu_abi::status::Error::InvalidArgument.into_raw();
     }
-    match object_native(raw, HandleRights::READ) {
-        Ok(KernelObject::File(file)) => {
-            crate::syscall::fs::read_stream_handle(&file, buffer, length, options)
+    let object = match object_native(raw, HandleRights::READ) {
+        Ok(object) => object,
+        Err(error) => return error.into_raw(),
+    };
+    crate::task::operation::Scope::with(object, |object| match object {
+        KernelObject::File(file) => {
+            crate::syscall::fs::read_stream_handle(file, buffer, length, options)
         }
-        Ok(_) => mnu_abi::status::Error::InvalidArgument.into_raw(),
-        Err(error) => error.into_raw(),
-    }
+        _ => mnu_abi::status::Error::InvalidArgument.into_raw(),
+    })
+    .unwrap_or_else(mnu_abi::status::Error::into_raw)
 }
 
 pub fn stream_write(raw: u64, buffer: u64, length: u64, options: u64) -> u64 {
     if options & !mnu_abi::STREAM_WRITE_OPTIONS_ALL != 0 {
         return mnu_abi::status::Error::InvalidArgument.into_raw();
     }
-    match object_native(raw, HandleRights::WRITE) {
-        Ok(KernelObject::File(file)) => {
-            crate::syscall::fs::write_stream_handle(&file, buffer, length, options)
+    let object = match object_native(raw, HandleRights::WRITE) {
+        Ok(object) => object,
+        Err(error) => return error.into_raw(),
+    };
+    crate::task::operation::Scope::with(object, |object| match object {
+        KernelObject::File(file) => {
+            crate::syscall::fs::write_stream_handle(file, buffer, length, options)
         }
-        Ok(_) => mnu_abi::status::Error::InvalidArgument.into_raw(),
-        Err(error) => error.into_raw(),
-    }
+        _ => mnu_abi::status::Error::InvalidArgument.into_raw(),
+    })
+    .unwrap_or_else(mnu_abi::status::Error::into_raw)
 }
 
 pub fn seek(raw: u64, offset: u64, basis: u64) -> u64 {
