@@ -69,6 +69,9 @@ struct MemoryAccessRange {
     access: u64,
 }
 
+/// Prepared under the same VM exclusion as its eventual publication.
+pub(crate) struct PreparedAccess(Vec<MemoryAccessRange>);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Generic VM metadata planning failures; syscall status conversion is separate.
 pub enum MemoryRangeError {
@@ -402,21 +405,31 @@ impl MemoryRegion {
         true
     }
 
-    #[inline(never)]
-    pub fn set_access(&mut self, start: u64, len: u64, access: u64) -> bool {
+    /// Prepare every allocation before a PTE edit. Failure leaves metadata intact.
+    pub(crate) fn prepare_access(
+        &self,
+        start: u64,
+        len: u64,
+        access: u64,
+    ) -> core::result::Result<PreparedAccess, mnu_abi::status::Error> {
+        use mnu_abi::status::Error;
         if !self.permits_access(access) {
-            return false;
+            return Err(Error::AccessDenied);
         }
-        let Some(end) = start.checked_add(len) else {
-            return false;
-        };
+        let end = start.checked_add(len).ok_or(Error::InvalidArgument)?;
         if start < self.start || end > self.end().unwrap_or(0) || start >= end {
-            return false;
+            return Err(Error::InvalidArgument);
         }
-
-        let previous = core::mem::take(&mut self.access_ranges);
-        let mut ranges = alloc::vec::Vec::with_capacity(previous.len() + 1);
-        for range in previous {
+        let capacity = self
+            .access_ranges
+            .len()
+            .checked_add(3)
+            .ok_or(Error::ResourceUnavailable)?;
+        let mut ranges = Vec::new();
+        ranges
+            .try_reserve_exact(capacity)
+            .map_err(|_| Error::ResourceUnavailable)?;
+        for &range in &self.access_ranges {
             if range.end <= start || range.start >= end {
                 ranges.push(range);
                 continue;
@@ -438,17 +451,26 @@ impl MemoryRegion {
             ranges.push(MemoryAccessRange { start, end, access });
         }
         ranges.sort_unstable_by_key(|range| range.start);
-
-        for range in ranges {
-            if let Some(last) = self.access_ranges.last_mut() {
-                if last.end == range.start && last.access == range.access {
-                    last.end = range.end;
-                    continue;
-                }
+        // Compact in place: publication must never allocate after PTE mutation.
+        let mut used = 0;
+        for index in 0..ranges.len() {
+            let range = ranges[index];
+            if used != 0
+                && ranges[used - 1].end == range.start
+                && ranges[used - 1].access == range.access
+            {
+                ranges[used - 1].end = range.end;
+            } else {
+                ranges[used] = range;
+                used += 1;
             }
-            self.access_ranges.push(range);
         }
-        true
+        ranges.truncate(used);
+        Ok(PreparedAccess(ranges))
+    }
+
+    pub(crate) fn publish_access(&mut self, prepared: PreparedAccess) {
+        self.access_ranges = prepared.0;
     }
 
     fn access_at(&self, address: u64) -> Option<u64> {

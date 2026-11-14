@@ -5,7 +5,7 @@ use mnu_abi::status::Error;
 
 #[path = "memory_observation.rs"]
 mod memory_observation;
-pub use memory_observation::{residency, discard};
+pub use memory_observation::{discard, residency};
 
 #[inline]
 fn current_pid() -> Option<crate::task::ids::ProcessId> {
@@ -114,26 +114,26 @@ fn protect_memory_pages(
     Ok(())
 }
 
-#[inline(never)]
-fn record_mapping_access(
-    process: &mut crate::task::Process,
+fn prepare_mapping_access(
+    process: &crate::task::Process,
     start: u64,
     end: u64,
     access: u64,
-) -> bool {
-    for region in process.memory_regions_mut() {
-        let Some(region_end) = region.end() else {
-            return false;
-        };
-        let overlap_start = start.max(region.start());
-        let overlap_end = end.min(region_end);
-        if overlap_start < overlap_end
-            && !region.set_access(overlap_start, overlap_end - overlap_start, access)
-        {
-            return false;
+) -> Result<alloc::vec::Vec<(usize, crate::task::process::PreparedAccess)>, Error> {
+    let mut prepared = alloc::vec::Vec::new();
+    for (index, region) in process.memory_regions().iter().enumerate() {
+        let region_end = region.end().ok_or(Error::BackingFailure)?;
+        let low = start.max(region.start());
+        let high = end.min(region_end);
+        if low < high {
+            let edit = region.prepare_access(low, high - low, access)?;
+            prepared
+                .try_reserve(1)
+                .map_err(|_| Error::ResourceUnavailable)?;
+            prepared.push((index, edit));
         }
     }
-    true
+    Ok(prepared)
 }
 
 /// Changes the native access permissions of an existing user mapping.
@@ -193,6 +193,8 @@ pub fn protect(addr: u64, len: u64, access: u64) -> u64 {
             }
         }
         crate::mem::mapping_admission::check_native(process.memory_regions(), start, end)?;
+        // Metadata publication is infallible after this preparation point.
+        let prepared = prepare_mapping_access(process, start, end, access)?;
         let changed = protect_memory_pages(
             process, table_phys, start, end, present, writable, executable,
         );
@@ -200,8 +202,8 @@ pub fn protect(addr: u64, len: u64, access: u64) -> u64 {
         // invalidation before reporting success or returning an editing error.
         crate::mem::tlb_shootdown::invalidate_all().map_err(|_| Error::BackingFailure)?;
         changed?;
-        if !record_mapping_access(process, start, end, access) {
-            return Err(Error::BackingFailure);
+        for (index, edit) in prepared {
+            process.memory_regions_mut()[index].publish_access(edit);
         }
         Ok(())
     });
