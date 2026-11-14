@@ -1,6 +1,6 @@
 //! capability（権限）定義と集合型
 //!
-//! 外部表現は文字列（manifest 等）で扱い、カーネル内部では enum として保持する。
+//! 外部表現は文字列で扱う。カーネルが強制しない権限名は不透明なIDとして保持する。
 //! 文字列のまま全処理すると typo や比較の取り違えが起きやすく、また高速化もしづらいため、
 //! ここで変換を集中管理する。
 
@@ -192,13 +192,6 @@ impl KernelCapability {
 /// mnuはその意味や許可UIの分類を解釈しません。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Capability {
-    FsReadTmp,
-    FsWriteTmp,
-    FsReadRemovable,
-    FsWriteRemovable,
-    FsReadAll,
-    FsWriteAll,
-
     IpcClient,
     IpcServer,
 
@@ -239,12 +232,6 @@ impl Capability {
     fn builtin_name(self) -> Option<&'static str> {
         use Capability::*;
         Some(match self {
-            FsReadTmp => "fs.read.tmp",
-            FsWriteTmp => "fs.write.tmp",
-            FsReadRemovable => "fs.read.removable",
-            FsWriteRemovable => "fs.write.removable",
-            FsReadAll => "fs.read.all",
-            FsWriteAll => "fs.write.all",
             IpcClient => "ipc.client",
             IpcServer => "ipc.server",
             ProcessSpawn => "process.spawn",
@@ -313,12 +300,6 @@ impl Capability {
     pub fn bootstrap_capabilities() -> &'static [Capability] {
         use Capability::*;
         const BOOTSTRAP: &[Capability] = &[
-            FsReadTmp,
-            FsWriteTmp,
-            FsReadRemovable,
-            FsWriteRemovable,
-            FsReadAll,
-            FsWriteAll,
             IpcClient,
             IpcServer,
             ProcessSpawn,
@@ -443,10 +424,6 @@ pub fn capability_implies(parent: Capability, child: Capability) -> bool {
         // これを持つプロセスは隔離を回避できるため、付与経路は信頼済みでなければならない。
         Unsandboxed => true,
 
-        FsReadAll => matches!(child, FsReadTmp | FsReadRemovable),
-
-        FsWriteAll => matches!(child, FsWriteTmp | FsWriteRemovable),
-
         _ => false,
     }
 }
@@ -473,8 +450,7 @@ pub enum CapabilityParseError {
 impl CapabilitySet {
     pub fn try_clone(&self) -> Result<Self, mnu_abi::status::Error> {
         let mut caps = Vec::new();
-        caps
-            .try_reserve_exact(self.caps.len())
+        caps.try_reserve_exact(self.caps.len())
             .map_err(|_| mnu_abi::status::Error::ResourceUnavailable)?;
         caps.extend_from_slice(&self.caps);
         Ok(Self { caps })
@@ -482,9 +458,7 @@ impl CapabilitySet {
 
     /// 空集合
     pub fn empty() -> Self {
-        Self {
-            caps: Vec::new(),
-        }
+        Self { caps: Vec::new() }
     }
 
     /// capability を追加
