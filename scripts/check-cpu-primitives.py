@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the real arch primitives at privilege level in isolated QEMU fixtures.
+"""Run CPU primitives and kernel stack handoffs in privileged QEMU fixtures.
 
 These probes are CPU diagnostics, not a kernel boot or Domain isolation test.
 TCG is used for deterministic instruction checks; OS KVM targets are unchanged.

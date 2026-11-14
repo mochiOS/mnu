@@ -6,6 +6,9 @@
 #[path = "../src/arch/mod.rs"]
 mod arch;
 
+#[path = "context-probe.rs"]
+mod context_probe;
+
 use core::arch::asm;
 
 #[cfg(target_arch = "aarch64")]
@@ -337,8 +340,10 @@ extern "C" fn probe_main() -> ! {
             "non-IRQ DAIF mask changed",
         );
         arm::check_wait();
-        emit("ARCH PRIMITIVES PASS aarch64\n");
     }
+    context_probe::run();
+    #[cfg(target_arch = "aarch64")]
+    emit("ARCH PRIMITIVES PASS aarch64\n");
     #[cfg(target_arch = "x86_64")]
     emit("ARCH PRIMITIVES PASS x86_64\n");
     exit(0)

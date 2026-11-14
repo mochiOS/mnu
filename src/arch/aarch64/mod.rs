@@ -1,6 +1,8 @@
 //! AArch64 CPU primitives for a privileged kernel. Controller discovery,
 //! interrupt routing and exception-vector installation are separate work.
 
+pub mod context;
+
 pub mod interrupts {
     use core::arch::asm;
 
