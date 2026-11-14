@@ -1,5 +1,7 @@
 //! x86_64 implementations of the shared CPU mechanisms.
 
+pub mod context;
+
 pub mod interrupts {
     use core::arch::asm;
 
