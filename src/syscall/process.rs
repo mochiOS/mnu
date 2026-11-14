@@ -1308,9 +1308,14 @@ fn fill_random_buffer(buf_ptr: u64, len: u64) -> u64 {
     if len > isize::MAX as u64 {
         return Error::LimitExceeded.into_raw();
     }
-    if buf_ptr == 0 || !super::validate_user_ptr(buf_ptr, len) {
+    // Check arithmetic once. Actual writable access is checked per completed
+    // chunk by usercopy, with no full-length scan under PROCESS_TABLE.
+    if !super::is_canonical_user_range(buf_ptr, len) {
         return Error::InvalidAddress.into_raw();
     }
+    // Native callers receive a byte count and may retry the remainder. Keep
+    // one syscall bounded even when its entry context has interrupts disabled.
+    let len = len.min(64 * 1024);
     let mut buffer = [0u8; CHUNK_LEN];
     let mut offset = 0u64;
     while offset < len {

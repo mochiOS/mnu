@@ -45,9 +45,6 @@ pub(crate) fn read_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> u
     if len == 0 {
         return 0;
     }
-    if !crate::syscall::validate_user_ptr(buf_ptr, len) {
-        return Error::InvalidAddress.into_raw();
-    }
     if !handle.cap.contains(FileHandleCap::READ) {
         return Error::AccessDenied.into_raw();
     }
@@ -82,6 +79,7 @@ fn read_pipe(pipe_id: usize, io_options: u64, buf_ptr: u64, len: u64) -> u64 {
             }
             Err(error) => return error.into_raw(),
         };
+        // Validate only available bytes, never the caller's unused length.
         // Prepare faults without stream exclusion, then copy under PROC -> STREAM.
         let result = super::with_user_output_native(buf_ptr, take, |copy| {
             crate::task::stream::consume(pipe_id, take, current, copy)
@@ -100,9 +98,6 @@ pub(crate) fn write_file_handle(handle: &FileHandle, buf_ptr: u64, len: u64) -> 
     }
     if len == 0 {
         return 0;
-    }
-    if !crate::syscall::validate_user_ptr(buf_ptr, len) {
-        return Error::InvalidAddress.into_raw();
     }
     if !handle.cap.contains(FileHandleCap::WRITE) {
         return Error::AccessDenied.into_raw();
@@ -128,7 +123,7 @@ pub(crate) fn read_stream_handle(
     if length == 0 {
         return 0;
     }
-    if buffer == 0 || !crate::syscall::validate_user_ptr(buffer, length) {
+    if buffer == 0 {
         return Error::InvalidAddress.into_raw();
     }
     let open = handle.open.lock();
