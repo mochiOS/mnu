@@ -46,7 +46,7 @@ impl OpenFile {
 impl Drop for OpenFile {
     fn drop(&mut self) {
         if let Some(pipe_id) = self.pipe_id {
-            crate::syscall::fs::close_pipe_endpoint_from_kernel(pipe_id, self.pipe_write);
+            super::stream::close_pipe_endpoint_from_kernel(pipe_id, self.pipe_write);
         }
     }
 }
@@ -61,9 +61,7 @@ pub struct FileHandle {
 }
 
 impl FileHandle {
-    pub(crate) fn try_stream_pair(
-        pipe_id: usize,
-    ) -> Result<(Self, Self), mnu_abi::status::Error> {
+    pub(crate) fn try_stream_pair(pipe_id: usize) -> Result<(Self, Self), mnu_abi::status::Error> {
         // Both endpoint owners exist before either allocation can fail. Their
         // Drops balance the stream table's initial reader/writer references.
         let read = OpenFile::new_pipe(pipe_id, false);
@@ -96,17 +94,11 @@ impl FileHandle {
     }
 
     pub fn new_pipe_read(pipe_id: usize) -> Self {
-        Self::new(
-            OpenFile::new_pipe(pipe_id, false),
-            FileHandleCap::READ,
-        )
+        Self::new(OpenFile::new_pipe(pipe_id, false), FileHandleCap::READ)
     }
 
     pub fn new_pipe_write(pipe_id: usize) -> Self {
-        Self::new(
-            OpenFile::new_pipe(pipe_id, true),
-            FileHandleCap::WRITE,
-        )
+        Self::new(OpenFile::new_pipe(pipe_id, true), FileHandleCap::WRITE)
     }
 
     pub fn stream_endpoint(&self) -> Option<(usize, bool)> {

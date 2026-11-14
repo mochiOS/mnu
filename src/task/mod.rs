@@ -19,6 +19,7 @@ pub(crate) mod owned_executor;
 pub(crate) mod owned_work;
 pub mod process;
 pub mod scheduler;
+pub(crate) mod stream;
 pub mod thread;
 pub mod usermode;
 
