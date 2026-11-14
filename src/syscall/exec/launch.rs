@@ -20,3 +20,23 @@ impl<'a> ImageLaunch<'a> {
         }
     }
 }
+
+/// Complete authority for an image, never an optional fallback to ambient state.
+pub(super) struct LaunchSecurity {
+    pub capabilities: crate::capability::CapabilitySet,
+    pub authorities: crate::capability::KernelAuthoritySet,
+    pub privilege: crate::task::PrivilegeLevel,
+    pub application_identity: Option<crate::task::process::ApplicationIdentity>,
+}
+
+/// Image construction consumes one explicit description, rather than ordered
+/// optional arguments whose combinations have to be remembered by callers.
+pub(super) struct PreparedLaunch<'a> {
+    pub data: &'a [u8],
+    pub process_name: &'a str,
+    pub exec_path: &'a str,
+    pub security: LaunchSecurity,
+    pub inherited_handles: &'a [super::InheritedHandleGrant],
+    pub inherited_values: &'a [super::InheritedValueSpec],
+    pub launch: ImageLaunch<'a>,
+}

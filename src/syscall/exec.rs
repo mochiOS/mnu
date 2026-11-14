@@ -1,7 +1,7 @@
 use crate::capability::{
     parse_kernel_authority_spec, Capability, CapabilitySet, KernelAuthoritySet,
 };
-use crate::policy::{claim_init_pid, release_init_pid, resolve_exec_privilege};
+use crate::policy::{claim_init_pid, release_init_pid};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -15,7 +15,7 @@ mod launch;
 mod storage;
 
 use image::{map_elf_image, ElfImageLayout};
-use launch::ImageLaunch;
+use launch::{ImageLaunch, LaunchSecurity, PreparedLaunch};
 
 use mnu_abi::exec::{
     ExecutionClass, APPLICATION_DEVELOPER_ID_PREFIX, APPLICATION_PACKAGE_ID_PREFIX,
@@ -819,17 +819,20 @@ pub(crate) fn launch_bootstrap_image(
     ));
     let mut measurement = ExecMeasurement::start();
     let result = exec_with_data(
-        data,
-        // Userspace chooses names and executable identities for later images.
-        "",
-        "",
-        Some(initial_caps),
-        Some(initial_kernel_authorities),
-        Some(requested_privilege),
-        None,
-        &[],
-        &[],
-        ImageLaunch::Bootstrap(startup),
+        PreparedLaunch {
+            data,
+            process_name: "",
+            exec_path: "",
+            security: LaunchSecurity {
+                capabilities: initial_caps,
+                authorities: initial_kernel_authorities,
+                privilege: requested_privilege,
+                application_identity: None,
+            },
+            inherited_handles: &[],
+            inherited_values: &[],
+            launch: ImageLaunch::Bootstrap(startup),
+        },
         &mut measurement,
     );
     measurement.finish(result)
@@ -932,19 +935,22 @@ fn build_relocatable_user_stack(
     })
 }
 
-fn exec_with_data(
-    data: &[u8],
-    process_name: &str,
-    exec_path: &str,
-    initial_caps: Option<CapabilitySet>,
-    initial_kernel_authorities: Option<KernelAuthoritySet>,
-    requested_privilege: Option<crate::task::PrivilegeLevel>,
-    application_identity: Option<crate::task::process::ApplicationIdentity>,
-    inherited_handles: &[InheritedHandleGrant],
-    inherited_values: &[InheritedValueSpec],
-    launch: ImageLaunch<'_>,
-    measurement: &mut ExecMeasurement,
-) -> u64 {
+fn exec_with_data(prepared: PreparedLaunch<'_>, measurement: &mut ExecMeasurement) -> u64 {
+    let PreparedLaunch {
+        data,
+        process_name,
+        exec_path,
+        security,
+        inherited_handles,
+        inherited_values,
+        launch,
+    } = prepared;
+    let LaunchSecurity {
+        capabilities: initial_caps,
+        authorities: initial_kernel_authorities,
+        privilege,
+        application_identity,
+    } = security;
     use mnu_abi::status::Error;
 
     let is_boot_init = launch.is_bootstrap();
@@ -957,7 +963,6 @@ fn exec_with_data(
     let aslr_seed = next_aslr_seed(process_name);
 
     {
-        let data: &[u8] = data;
         // Disable SMAP/SMEP for the duration of the exec mapping operations.
         // Many helper functions perform direct physical/HHDM accesses; re-enabling
         // SMAP/SMEP during execution can cause page faults when touching user
@@ -978,9 +983,6 @@ fn exec_with_data(
         };
         let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
         crate::debug!("Created user page table at {:#x}", new_pt_phys);
-
-        // Note: SMAP/SMEP are already disabled globally during kernel initialization
-        // and are kept disabled for all exec operations. See src/core/mem/mod.rs:66
 
         let ElfImageLayout {
             entry,
@@ -1032,7 +1034,7 @@ fn exec_with_data(
             initial_rsp
         );
 
-        // Map the lower 7 pages as zero-filled (writable, non-executable stack)
+        // Map the configured lower stack pages as zero-filled (writable, non-executable stack)
         if let Err(e) = crate::mem::paging::map_and_copy_segment_to(
             new_pt_phys,
             stack_base_vaddr,
@@ -1080,7 +1082,6 @@ fn exec_with_data(
         }
 
         // プロセスを作成してページテーブルをセット
-        let privilege = resolve_exec_privilege(requested_privilege);
         const DEFAULT_PROCESS_PRIORITY: u8 = 8;
         let priority = DEFAULT_PROCESS_PRIORITY;
         let mut proc = match crate::task::Process::try_new(process_name, privilege, priority) {
@@ -1092,15 +1093,9 @@ fn exec_with_data(
             proc.set_application_identity(identity);
         }
         proc.set_foreground(false);
-        if let Some(caps) = initial_caps {
-            // capability はプロセス開始前にセットする必要がある。
-            // スケジューラが有効だと `add_thread()` の直後に動き出すため、
-            // syscall 後付けだと競合して「cap不足」になる。
-            proc.set_capabilities_for_exec(caps);
-        }
-        if let Some(authorities) = initial_kernel_authorities {
-            proc.set_kernel_authorities_for_exec(authorities);
-        }
+        // Authority is complete before a runnable thread can be published.
+        proc.set_capabilities_for_exec(initial_caps);
+        proc.set_kernel_authorities_for_exec(initial_kernel_authorities);
         if let Err(error) = install_inherited_handles(&mut proc, inherited_handles) {
             return error.into_raw();
         }
@@ -1728,16 +1723,20 @@ pub fn process_create_syscall(image_handle: u64, request_ptr: u64, request_len: 
     };
     let mut measurement = ExecMeasurement::start();
     let result = exec_with_data(
-        &executable,
-        request.label,
-        request.identity,
-        Some(authorization.capabilities),
-        Some(authorization.kernel_authorities),
-        Some(privilege),
-        Some(authorization.identity),
-        &grants,
-        &values,
-        ImageLaunch::Created(startup),
+        PreparedLaunch {
+            data: &executable,
+            process_name: request.label,
+            exec_path: request.identity,
+            security: LaunchSecurity {
+                capabilities: authorization.capabilities,
+                authorities: authorization.kernel_authorities,
+                privilege,
+                application_identity: Some(authorization.identity),
+            },
+            inherited_handles: &grants,
+            inherited_values: &values,
+            launch: ImageLaunch::Created(startup),
+        },
         &mut measurement,
     );
     measurement.finish(result)
