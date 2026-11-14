@@ -103,6 +103,35 @@ impl Default for Context {
 }
 
 impl Context {
+    /// Prepare a kernel entry using this architecture's stack and return ABI.
+    ///
+    /// # Safety
+    /// `stack_top` must be 16-byte aligned with a writable return slot below it.
+    /// The caller owns that stack exclusively until switching to this context.
+    /// `entry` and `return_address` must be valid kernel code addresses.
+    pub unsafe fn for_kernel_entry(
+        entry: u64,
+        stack_top: u64,
+        return_address: u64,
+        interrupts_enabled: bool,
+    ) -> Self {
+        let mut context = Self::new();
+        context.rsp = stack_top - 8;
+        context.rbp = stack_top;
+        context.rip = entry;
+        context.rflags = 0x2 | if interrupts_enabled { 0x200 } else { 0 };
+        unsafe { (context.rsp as *mut u64).write(return_address) };
+        context
+    }
+
+    pub fn stack_pointer(&self) -> u64 {
+        self.rsp
+    }
+
+    pub fn instruction_pointer(&self) -> u64 {
+        self.rip
+    }
+
     pub const fn new() -> Self {
         Self {
             rsp: 0,

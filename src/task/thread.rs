@@ -637,38 +637,25 @@ impl Thread {
         let len = core::cmp::min(bytes.len(), 32);
         name_buf[..len].copy_from_slice(&bytes[..len]);
 
-        let mut context = Context::new();
-
-        // スタックポインタをスタックの最後に設定（スタックは下に伸びる）
-        // 16バイト境界に合わせる
         let stack_top = (kernel_stack + kernel_stack_size as u64) & !0xF;
-
-        // 呼び出し規約に合わせて、戻り先アドレス用のスロットを確保
-        let stack_ptr = stack_top - 8;
-
-        unsafe {
-            // 戻り先として thread_exit_handler を配置
-            let ret_addr = stack_ptr as *mut u64;
-            *ret_addr = thread_exit_handler as *const () as u64;
-        }
-
-        // rsp は「戻り先アドレスが置かれている位置」を指す
-        context.rsp = stack_ptr;
-        context.rbp = stack_top;
-
-        // エントリーポイントをripに設定
-        context.rip = entry_point as usize as u64;
-
-        // RFLAGSの初期値（割り込み有効）
-        context.rflags = 0x202; // IF (Interrupt Flag) = 1
+        // SAFETY: The caller supplies an exclusively owned kernel stack and
+        // both function addresses are kernel entry points.
+        let context = unsafe {
+            Context::for_kernel_entry(
+                entry_point as usize as u64,
+                stack_top,
+                thread_exit_handler as *const () as u64,
+                true,
+            )
+        };
 
         crate::debug!(
             "Creating thread '{}': stack={:#x}, size={:#x}, rsp={:#x}, rip={:#x}",
             name,
             kernel_stack,
             kernel_stack_size,
-            context.rsp,
-            context.rip
+            context.stack_pointer(),
+            context.instruction_pointer()
         );
 
         Self {
@@ -729,7 +716,6 @@ impl Thread {
         name_buf[..len].copy_from_slice(&bytes[..len]);
 
         // カーネルスタックを設定（ユーザーモードからシステムコール時に使用）
-        let mut context = Context::new();
         let stack_top = (kernel_stack + kernel_stack_size as u64) & !0xF;
 
         // ユーザーモードへジャンプするトランポリン関数を設定
@@ -771,18 +757,16 @@ impl Thread {
             }
         }
 
-        let stack_ptr = stack_top - 8;
-        unsafe {
-            let ret_addr = stack_ptr as *mut u64;
-            *ret_addr = thread_exit_handler as *const () as u64;
-        }
-
-        context.rsp = stack_ptr;
-        context.rbp = stack_top;
-        context.rip = usermode_entry_trampoline as *const () as u64;
-        // The first context switch must reach the usermode trampoline before
-        // interrupts can observe this thread as current. iretq enables IF.
-        context.rflags = 0x2;
+        // Reach the trampoline before an interrupt can observe a partial user
+        // transition. The architecture's user-return path enables interrupts.
+        let context = unsafe {
+            Context::for_kernel_entry(
+                usermode_entry_trampoline as *const () as u64,
+                stack_top,
+                thread_exit_handler as *const () as u64,
+                false,
+            )
+        };
 
         crate::debug!(
             "Creating usermode thread '{}': user_entry={:#x}, user_stack={:#x}",
@@ -793,8 +777,8 @@ impl Thread {
         crate::debug!(
             "[THREAD] new_usermode name='{}' rip={:#x} rsp={:#x} user_entry={:#x} user_stack={:#x}",
             name,
-            context.rip,
-            context.rsp,
+            context.instruction_pointer(),
+            context.stack_pointer(),
             user_entry,
             user_stack
         );
@@ -861,16 +845,7 @@ impl Thread {
         kernel_stack: u64,
         kernel_stack_size: usize,
     ) -> Self {
-        let mut context = Context::new();
         let stack_top = (kernel_stack + kernel_stack_size as u64) & !0xF;
-        let stack_ptr = stack_top - 8;
-        unsafe {
-            let ret_addr = stack_ptr as *mut u64;
-            *ret_addr = thread_exit_handler as *const () as u64;
-        }
-        context.rsp = stack_ptr;
-        context.rbp = stack_top;
-
         extern "C" fn user_resume_trampoline() -> ! {
             let tid = match current_thread_id() {
                 Some(t) => t,
@@ -905,8 +880,14 @@ impl Thread {
             }
         }
 
-        context.rip = user_resume_trampoline as *const () as u64;
-        context.rflags = 0x202;
+        let context = unsafe {
+            Context::for_kernel_entry(
+                user_resume_trampoline as *const () as u64,
+                stack_top,
+                thread_exit_handler as *const () as u64,
+                true,
+            )
+        };
 
         Self {
             id: ThreadId::new(),

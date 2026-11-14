@@ -88,14 +88,14 @@ pub unsafe fn switch_to_thread_with_slots(
             }
             let ptr = thread.context() as *const Context;
             let kstack = thread.kernel_stack_top();
-            let saved_rsp = thread.context().rsp;
+            let saved_rsp = thread.context().stack_pointer();
             if saved_rsp < thread.kernel_stack_bottom() || saved_rsp >= kstack {
                 crate::error!(
                     "Refusing invalid kernel context: tid={:?} pid={:?} thread='{}' rip={:#x} rsp={:#x} kstack=[{:#x}..{:#x}]",
                     next_id,
                     thread.process_id(),
                     thread.name(),
-                    thread.context().rip,
+                    thread.context().instruction_pointer(),
                     saved_rsp,
                     thread.kernel_stack_bottom(),
                     kstack,

@@ -218,8 +218,8 @@ fn select_next_thread() -> Option<(ThreadId, usize)> {
                         cpu,
                         thread.id(),
                         thread.name(),
-                        thread.context().rsp,
-                        thread.context().rip,
+                        thread.context().stack_pointer(),
+                        thread.context().instruction_pointer(),
                     );
                 }
             }
