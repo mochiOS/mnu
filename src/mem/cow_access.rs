@@ -4,11 +4,13 @@ pub(crate) const COPY_ON_WRITE: u64 = 1 << 9;
 pub(crate) const WRITE_DISABLED: u64 = 1 << 10;
 const WRITABLE: u64 = 1 << 1;
 const PRESENT_USER: u64 = 1 | (1 << 2);
+const NO_EXECUTE: u64 = 1 << 63;
 
 pub(crate) const fn may_resolve(flags: u64) -> bool {
     flags & PRESENT_USER == PRESENT_USER
         && flags & COPY_ON_WRITE != 0
         && flags & (WRITE_DISABLED | WRITABLE) == 0
+        && flags & NO_EXECUTE != 0
 }
 
 pub(crate) const fn with_write_access(flags: u64, writable: bool) -> u64 {
@@ -20,6 +22,17 @@ pub(crate) const fn with_write_access(flags: u64, writable: bool) -> u64 {
 }
 
 pub(crate) const fn clone_private(flags: u64, write_authorized: bool) -> u64 {
-    let writable = write_authorized || flags & WRITABLE != 0 || may_resolve(flags);
+    let writable = write_authorized && flags & NO_EXECUTE != 0;
     with_write_access((flags | COPY_ON_WRITE) & !WRITABLE, writable)
+}
+
+/// An eager private copy owns its storage outright, but receives only the
+/// same current access as a COW copy, never permission inferred from a ceiling.
+pub(crate) const fn copy_private(flags: u64, write_authorized: bool) -> u64 {
+    let copied = flags & !(COPY_ON_WRITE | WRITE_DISABLED | WRITABLE);
+    if write_authorized && flags & NO_EXECUTE != 0 {
+        copied | WRITABLE
+    } else {
+        copied
+    }
 }

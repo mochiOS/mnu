@@ -58,8 +58,22 @@ fn record_user_leaf_change(table: u64, before: PageTableFlags, after: PageTableF
 pub enum ForkPagePolicy {
     Private,
     PrivateWritable,
+    PrivateReadOnly,
     Shared,
     Exclude,
+}
+
+impl ForkPagePolicy {
+    fn private_write_authorized(self, flags: PageTableFlags) -> bool {
+        match self {
+            Self::PrivateWritable => true,
+            Self::Private => {
+                flags.contains(PageTableFlags::WRITABLE)
+                    || super::cow_access::may_resolve(flags.bits())
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(target_os = "none")]
@@ -1634,15 +1648,24 @@ pub fn clone_user_page_table(
                         if is_preinstalled_user_mapping(vaddr) {
                             continue;
                         }
-                        if page_policy(vaddr) == ForkPagePolicy::Exclude {
+                        let policy = page_policy(vaddr);
+                        if policy == ForkPagePolicy::Exclude {
                             continue;
                         }
+                        let copied_flags = if policy == ForkPagePolicy::Shared {
+                            src_flags
+                        } else {
+                            Flags::from_bits_retain(super::cow_access::copy_private(
+                                src_flags.bits(),
+                                policy.private_write_authorized(src_flags),
+                            ))
+                        };
                         copy_page(
                             dst_table_phys,
                             dst_l4,
                             vaddr,
                             src_phys_base + ((sub as u64) << 12),
-                            src_flags,
+                            copied_flags,
                             phys_off,
                         )?;
                         copied_pages += 1;
@@ -1681,11 +1704,13 @@ pub fn clone_user_page_table(
                             )?;
                             shared_pages += 1;
                         }
-                        ForkPagePolicy::Private | ForkPagePolicy::PrivateWritable => {
+                        ForkPagePolicy::Private
+                        | ForkPagePolicy::PrivateWritable
+                        | ForkPagePolicy::PrivateReadOnly => {
                             let shared_flags =
                                 Flags::from_bits_retain(super::cow_access::clone_private(
                                     src_flags.bits(),
-                                    policy == ForkPagePolicy::PrivateWritable,
+                                    policy.private_write_authorized(src_flags),
                                 ));
                             pte.set_addr(pte.addr(), shared_flags);
                             // Revoke cached write access before sharing the

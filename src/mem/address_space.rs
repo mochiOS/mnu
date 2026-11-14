@@ -106,7 +106,9 @@ impl CloneSource {
         let mut excluded = Vec::new();
         for buffer in process.dma_buffers() {
             let end = buffer.end().ok_or(CloneError::BorrowedMapping)?;
-            excluded.try_reserve(1).map_err(|_| CloneError::Allocation)?;
+            excluded
+                .try_reserve(1)
+                .map_err(|_| CloneError::Allocation)?;
             excluded.push((buffer.virt_start(), end));
         }
         let mut regions = Vec::new();
@@ -141,7 +143,12 @@ impl CloneSource {
             }
             match self.regions.iter().find(|region| region.contains(address)) {
                 Some(region) if region.is_shared() => ForkPagePolicy::Shared,
-                Some(_) => ForkPagePolicy::PrivateWritable,
+                Some(region)
+                    if region.allows_write_at(address) && !region.allows_execute_at(address) =>
+                {
+                    ForkPagePolicy::PrivateWritable
+                }
+                Some(_) => ForkPagePolicy::PrivateReadOnly,
                 None => ForkPagePolicy::Private,
             }
         })
