@@ -20,6 +20,39 @@ pub enum ExceptionOrigin {
     LowerAArch32,
 }
 
+/// Base AArch64 EL0 state accepted for an explicit continuation restore.
+/// TLS and execution authority are deliberately outside this register image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserContext {
+    pub registers: [u64; 31],
+    pub stack_pointer: u64,
+    pub instruction_pointer: u64,
+    pub pstate: u64,
+    pub fpcr: u64,
+    pub fpsr: u64,
+    pub simd: [u128; 32],
+}
+
+impl UserContext {
+    pub fn valid(&self) -> bool {
+        const USER_END: u64 = 0x0000_7fff_ffff_ffff;
+        const NZCV: u64 = 15 << 28;
+        // Base Armv8 FP/SIMD. Newer optional FP control bits must not be
+        // accepted before CPU feature negotiation and context support exist.
+        const FPCR: u64 = (31 << 22) | (1 << 15) | (31 << 8);
+        const FPSR: u64 = (1 << 27) | (1 << 7) | 31;
+        self.instruction_pointer != 0
+            && self.instruction_pointer <= USER_END
+            && self.instruction_pointer & 3 == 0
+            && self.stack_pointer >= 16
+            && self.stack_pointer <= USER_END
+            && self.stack_pointer & 15 == 0
+            && self.pstate & !NZCV == 0
+            && self.fpcr & !FPCR == 0
+            && self.fpsr & !FPSR == 0
+    }
+}
+
 /// Kernel-owned hardware frame. Return privilege and vector metadata are not
 /// mutable through this interface. Register changes still require the kernel's
 /// usual syscall/upcall validation before accepting any user-supplied state.
@@ -39,6 +72,42 @@ pub struct ExceptionFrame {
 }
 
 impl ExceptionFrame {
+    pub fn user_context(&self) -> Option<UserContext> {
+        if self.origin() != Some(ExceptionOrigin::LowerAArch64) || !self.valid_return_mode() {
+            return None;
+        }
+        Some(UserContext {
+            registers: self.registers,
+            stack_pointer: self.user_sp,
+            instruction_pointer: self.pc,
+            pstate: self.pstate,
+            fpcr: self.fpcr,
+            fpsr: self.fpsr,
+            simd: self.simd,
+        })
+    }
+
+    /// Validate the complete CPU image before changing any saved register.
+    /// The VM layer separately retains the address space and validates its
+    /// required code/stack mappings. A user image cannot replace an EL1 frame,
+    /// select a privileged mode, mask interrupts, alter TLS or vector metadata.
+    pub fn restore_user_context(&mut self, context: &UserContext) -> bool {
+        if self.origin() != Some(ExceptionOrigin::LowerAArch64)
+            || !self.valid_return_mode()
+            || !context.valid()
+        {
+            return false;
+        }
+        self.registers = context.registers;
+        self.user_sp = context.stack_pointer;
+        self.pc = context.instruction_pointer;
+        self.pstate = context.pstate;
+        self.fpcr = context.fpcr;
+        self.fpsr = context.fpsr;
+        self.simd = context.simd;
+        true
+    }
+
     pub fn registers(&self) -> &[u64; 31] {
         &self.registers
     }

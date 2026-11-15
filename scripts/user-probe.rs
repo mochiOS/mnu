@@ -207,7 +207,59 @@ pub fn handle(frame: &mut ExceptionFrame) {
                 frame.fp_control() == 1 << 22 && frame.fp_status() == 2,
                 "SVC FP control capture",
             );
-            frame.registers_mut()[0] = 77;
+            let original = frame
+                .user_context()
+                .unwrap_or_else(|| fail("EL0 context absent"));
+            check(original.valid(), "valid user context rejected");
+            // Every privileged/reserved PSTATE bit is rejected atomically.
+            for bit in (0..28).chain(32..64) {
+                let mut invalid = original;
+                invalid.pstate |= 1u64 << bit;
+                invalid.registers[0] = 0xbad;
+                check(
+                    !frame.restore_user_context(&invalid),
+                    "unsafe PSTATE accepted",
+                );
+                check(
+                    frame.user_context() == Some(original),
+                    "partial restore on rejection",
+                );
+            }
+            for pc in [0, original.instruction_pointer | 1, 0xffff_8000_0000_0000] {
+                let mut invalid = original;
+                invalid.instruction_pointer = pc;
+                check(
+                    !frame.restore_user_context(&invalid),
+                    "unsafe return PC accepted",
+                );
+            }
+            for sp in [0, original.stack_pointer | 8, 0xffff_8000_0000_0000] {
+                let mut invalid = original;
+                invalid.stack_pointer = sp;
+                check(
+                    !frame.restore_user_context(&invalid),
+                    "unsafe user SP accepted",
+                );
+            }
+            let mut invalid = original;
+            invalid.fpcr |= 1 << 63;
+            check(
+                !frame.restore_user_context(&invalid),
+                "reserved FPCR accepted",
+            );
+            invalid = original;
+            invalid.fpsr |= 1 << 63;
+            check(
+                !frame.restore_user_context(&invalid),
+                "reserved FPSR accepted",
+            );
+            let mut selected = original;
+            selected.registers[0] = 77;
+            check(
+                frame.restore_user_context(&selected),
+                "EL0 context restore failed",
+            );
+            emit("Validated EL0 continuation PASS\n");
         }
         0x53 => fail("EL0 return register/TLS/FP mismatch"),
         _ => fail("unexpected SVC immediate"),

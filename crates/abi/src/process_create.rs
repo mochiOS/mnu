@@ -370,3 +370,32 @@ fn encode_state(
     decode(output)?;
     Ok(length)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_roundtrip_preserves_words_and_rejects_other_cpu_tag() {
+        let context = crate::ThreadCreateContext {
+            entry: 0x400000,
+            stack_pointer: 0x800000,
+            argument: 0x11223344,
+            thread_local_base: 0x900000,
+            registers: crate::ThreadInitialRegisters::from_words(core::array::from_fn(|i| {
+                0x1000 + i as u64
+            })),
+            ..Default::default()
+        };
+        let mut bytes = [0; HEADER_LEN + 2 + CONTEXT_LEN];
+        let len = encode_context("a", "b", &context, &[], &[], &mut bytes).unwrap();
+        assert_eq!(len, bytes.len());
+        assert_eq!(u32_at(&bytes, 28), CONTEXT_KIND);
+        assert_eq!(
+            decode(&bytes).unwrap().startup,
+            InitialState::Context(context)
+        );
+        bytes[28..32].copy_from_slice(&(if CONTEXT_KIND == 1 { 2u32 } else { 1 }).to_le_bytes());
+        assert!(matches!(decode(&bytes), Err(Error::Header)));
+    }
+}
