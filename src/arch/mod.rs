@@ -14,6 +14,7 @@ compile_error!("mnu does not yet provide CPU primitives for this architecture");
 
 pub use selected::context;
 pub use selected::exception;
+pub mod counter;
 #[cfg(any(
     target_arch = "aarch64",
     all(target_arch = "x86_64", not(mnu_arch_probe))

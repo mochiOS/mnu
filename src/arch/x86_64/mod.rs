@@ -1,6 +1,7 @@
 //! x86_64 implementations of the shared CPU mechanisms.
 
 pub mod context;
+pub mod counter;
 pub mod exception;
 #[cfg(not(mnu_arch_probe))]
 pub mod memory;

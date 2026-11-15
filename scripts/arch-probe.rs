@@ -255,6 +255,22 @@ extern "C" fn probe_main() -> ! {
     #[cfg(target_arch = "aarch64")]
     arm::initialize();
     emit("CPU primitives entered\n");
+    let clock = arch::counter::initialize();
+    let first = arch::counter::timestamp();
+    for _ in 0..4096 {
+        core::hint::spin_loop();
+    }
+    let second = arch::counter::timestamp();
+    check(second > first, "serialized CPU counter did not advance");
+    #[cfg(target_arch = "aarch64")]
+    {
+        check(clock.source == arch::counter::ClockSource::ArchitectedCounter, "ARM clock source");
+        check(u64::from(clock.frequency_khz) == arch::counter::frequency_hz() / 1000, "ARM counter frequency");
+        check(!clock.invariant_tsc && !clock.rdtscp, "ARM clock advertised x86 instructions");
+    }
+    #[cfg(target_arch = "x86_64")]
+    let _ = clock;
+    emit("Serialized CPU counter PASS\n");
     check(arch::stack_pointer() & 15 == 0, "unaligned stack");
     arch::interrupts::disable();
     #[cfg(target_arch = "aarch64")]
