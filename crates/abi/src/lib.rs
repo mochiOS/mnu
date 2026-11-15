@@ -2,6 +2,7 @@
 
 /// ブートローダーからmnuへ渡す起動情報のABIです。
 pub mod boot;
+pub mod arm64_interrupts;
 /// Boot-selected native modules, with checked ranges and numeric adapters.
 pub mod boot_extensions;
 /// Boot-selected initial image and opaque resources, without pathname policy.

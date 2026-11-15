@@ -2,7 +2,7 @@ use core::mem::size_of;
 use core::sync::atomic::AtomicU64;
 
 pub const BOOT_ABI_MAGIC: u64 = u64::from_le_bytes(*b"MNUBOOT\0");
-pub const BOOT_ABI_VERSION: u32 = 3;
+pub const BOOT_ABI_VERSION: u32 = 4;
 pub const BOOT_ARCH_X86_64: u32 = 1;
 pub const BOOT_ARCH_AARCH64: u32 = 2;
 #[cfg(target_arch = "x86_64")]
@@ -22,6 +22,7 @@ pub const BOOT_FEATURE_ENTROPY: u64 = 1 << 4;
 pub const BOOT_FEATURE_HYPERVISOR_DOMAIN: u64 = 1 << 5;
 pub const BOOT_FEATURE_SYSTEM_SLOT: u64 = 1 << 6;
 pub const BOOT_FEATURE_BOOT_ESP_GUID: u64 = 1 << 7;
+pub const BOOT_FEATURE_ARM64_INTERRUPTS: u64 = 1 << 8;
 pub const BOOT_SYSTEM_SLOT_LEGACY: u8 = 0;
 pub const BOOT_SYSTEM_SLOT_A: u8 = 1;
 pub const BOOT_SYSTEM_SLOT_B: u8 = 2;
@@ -38,6 +39,7 @@ pub enum BootInfoError {
     UnsupportedSmpHandoff,
     InvalidSystemSlot,
     InvalidBootEspGuid,
+    InvalidInterruptResources,
 }
 
 #[repr(C)]
@@ -276,6 +278,7 @@ pub struct BootInfo {
     /// Canonical GUID bytes of the EFI system partition used to load this image.
     /// Only valid when `BOOT_FEATURE_BOOT_ESP_GUID` is set.
     pub boot_esp_guid: [u8; 16],
+    pub arm64_interrupts: super::arm64_interrupts::Resources,
 }
 
 impl BootInfo {
@@ -318,6 +321,7 @@ impl BootInfo {
             system_slot: BOOT_SYSTEM_SLOT_LEGACY,
             _reserved3: [0; 6],
             boot_esp_guid: [0; 16],
+            arm64_interrupts: super::arm64_interrupts::Resources::empty(),
         }
     }
 
@@ -341,6 +345,13 @@ impl BootInfo {
             return Err(BootInfoError::InvalidMemoryMapEntrySize);
         }
         self.validate_cpu_topology()?;
+        if self.feature_flags & BOOT_FEATURE_ARM64_INTERRUPTS != 0 {
+            if self.architecture != BOOT_ARCH_AARCH64 || !self.arm64_interrupts.valid() {
+                return Err(BootInfoError::InvalidInterruptResources);
+            }
+        } else if self.arm64_interrupts != super::arm64_interrupts::Resources::empty() {
+            return Err(BootInfoError::InvalidInterruptResources);
+        }
         if self.architecture == BOOT_ARCH_AARCH64
             && (self.feature_flags & BOOT_FEATURE_SMP != 0
                 || self.smp_handoff_addr != 0
@@ -409,7 +420,7 @@ impl Default for BootInfo {
     }
 }
 
-const _: () = assert!(size_of::<BootInfo>() == 768);
+const _: () = assert!(size_of::<BootInfo>() == 832);
 const _: () = assert!(core::mem::offset_of!(BootInfo, cpu_hardware_ids) == 160);
 
 #[cfg(test)]
@@ -433,6 +444,21 @@ mod tests {
     #[test]
     fn empty_boot_info_is_valid() {
         assert_eq!(BootInfo::empty().validate(), Ok(()));
+    }
+
+    #[test]
+    fn interrupt_resources_require_explicit_native_feature_admission() {
+        let mut info = BootInfo::empty();
+        info.arm64_interrupts = super::super::arm64_interrupts::Resources::gic_v2(
+            0x1000_0000, 27, 64, 65, 1, 2,
+        );
+        assert_eq!(info.validate(), Err(BootInfoError::InvalidInterruptResources));
+        info.feature_flags |= BOOT_FEATURE_ARM64_INTERRUPTS;
+        if BOOT_NATIVE_ARCH == BOOT_ARCH_AARCH64 {
+            assert_eq!(info.validate(), Ok(()));
+            info.arm64_interrupts.reserved = 1;
+        }
+        assert_eq!(info.validate(), Err(BootInfoError::InvalidInterruptResources));
     }
 
     #[test]

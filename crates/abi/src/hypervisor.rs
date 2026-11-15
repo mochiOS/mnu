@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 pub const DOMAIN_BOOT_MAGIC: u64 = u64::from_le_bytes(*b"MNUDOM\0\0");
-pub const DOMAIN_BOOT_VERSION: u32 = 13;
+pub const DOMAIN_BOOT_VERSION: u32 = 14;
 pub const DOMAIN_CRASH_MAGIC: u64 = u64::from_le_bytes(*b"MNUCRSH\0");
 pub const DOMAIN_CRASH_VERSION: u16 = 1;
 
@@ -31,6 +31,7 @@ pub const DOMAIN_FEATURE_DEVICE_ACTIVATION: u64 = 1 << 14;
 pub const DOMAIN_FEATURE_GRANT_QUERY: u64 = 1 << 15;
 pub const DOMAIN_FEATURE_EVENT_POLL: u64 = 1 << 16;
 pub const DOMAIN_FEATURE_FRAMEBUFFER: u64 = 1 << 17;
+pub const DOMAIN_FEATURE_VIRTUAL_GIC: u64 = 1 << 18;
 
 pub const FRAMEBUFFER_FORMAT_RGB: u32 = 1;
 pub const FRAMEBUFFER_FORMAT_BGR: u32 = 2;
@@ -122,6 +123,7 @@ pub enum DomainBootInfoError {
     InvalidRole,
     MissingRequiredHypercall,
     InvalidMemorySize,
+    InvalidInterruptResources,
 }
 
 /// ハイパーバイザーがmnuの最初のvCPUへ渡す固定長の起動情報です。
@@ -163,6 +165,7 @@ pub struct DomainBootInfo {
     pub entropy_seed: [u8; 32],
     pub entropy_seed_valid: u8,
     pub _reserved1: [u8; 7],
+    pub arm64_interrupts: super::arm64_interrupts::Resources,
 }
 
 impl DomainBootInfo {
@@ -236,6 +239,7 @@ impl DomainBootInfo {
             entropy_seed: [0; 32],
             entropy_seed_valid: 0,
             _reserved1: [0; 7],
+            arm64_interrupts: super::arm64_interrupts::Resources::empty(),
         }
     }
 
@@ -376,6 +380,21 @@ impl DomainBootInfo {
             || device_window_end > DOMAIN_DEVICE_ADDRESS_LIMIT
         {
             return Err(DomainBootInfoError::InvalidMemorySize);
+        }
+        if self.feature_flags & DOMAIN_FEATURE_VIRTUAL_GIC != 0 {
+            let irq = self.arm64_interrupts;
+            if self.hypervisor_backend != HYPERVISOR_BACKEND_ARM_EL2
+                || self.feature_flags & DOMAIN_FEATURE_EVENT_IRQ == 0
+                || !irq.valid()
+                || irq.cpu_interface_base < self.device_window_start
+                || irq.cpu_interface_base + irq.cpu_interface_size > device_window_end
+                || has_framebuffer && irq.cpu_interface_base < framebuffer_end
+                    && self.framebuffer_addr < irq.cpu_interface_base + irq.cpu_interface_size
+            {
+                return Err(DomainBootInfoError::InvalidInterruptResources);
+            }
+        } else if self.arm64_interrupts != super::arm64_interrupts::Resources::empty() {
+            return Err(DomainBootInfoError::InvalidInterruptResources);
         }
         Ok(())
     }
@@ -518,7 +537,7 @@ mod tests {
 
     #[test]
     fn domain_boot_info_layout_is_fixed() {
-        assert_eq!(size_of::<DomainBootInfo>(), 184);
+        assert_eq!(size_of::<DomainBootInfo>(), 248);
         assert_eq!(core::mem::align_of::<DomainBootInfo>(), 8);
     }
 
@@ -558,6 +577,41 @@ mod tests {
         info.feature_flags = DOMAIN_FEATURE_SHUTDOWN;
         info.hypervisor_backend = 4;
         assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidBackend));
+    }
+
+    #[test]
+    fn arm_interrupt_interfaces_stay_inside_the_assigned_device_window() {
+        let mut info = DomainBootInfo::new(
+            1, 0, HYPERVISOR_BACKEND_ARM_EL2, DOMAIN_ROLE_SYSTEM,
+            2 * 1024 * 1024, 0x18_0000, 0x2_0000, 0x1f_0000,
+            0x1_0000, 0x1000_0000, 0x4_0000, 0, 0,
+        );
+        info.feature_flags = DOMAIN_FEATURE_SHUTDOWN
+            | DOMAIN_FEATURE_EVENT_IRQ | DOMAIN_FEATURE_VIRTUAL_GIC;
+        let valid = super::super::arm64_interrupts::Resources::gic_v2(
+            info.device_window_start, 27, 64, 65, 1, 2,
+        );
+        info.arm64_interrupts = valid;
+        assert_eq!(info.validate(), Ok(()));
+        for base in [info.device_window_start - 4096,
+            info.device_window_start + info.device_window_size - 4096, u64::MAX - 4095]
+        {
+            info.arm64_interrupts.cpu_interface_base = base;
+            assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidInterruptResources));
+        }
+        info.arm64_interrupts = valid;
+        info.feature_flags &= !DOMAIN_FEATURE_EVENT_IRQ;
+        assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidInterruptResources));
+        info.feature_flags |= DOMAIN_FEATURE_EVENT_IRQ;
+        info.hypervisor_backend = HYPERVISOR_BACKEND_INTEL_VMX;
+        assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidInterruptResources));
+        info.hypervisor_backend = HYPERVISOR_BACKEND_ARM_EL2;
+        info.feature_flags &= !DOMAIN_FEATURE_VIRTUAL_GIC;
+        assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidInterruptResources));
+        info.feature_flags |= DOMAIN_FEATURE_VIRTUAL_GIC;
+        info = info.with_framebuffer(valid.cpu_interface_base, 8192, 32, 32, 32, FRAMEBUFFER_FORMAT_RGB);
+        info.feature_flags |= DOMAIN_FEATURE_FRAMEBUFFER;
+        assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidInterruptResources));
     }
 
     #[test]

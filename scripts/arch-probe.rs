@@ -439,6 +439,16 @@ fn check_cpu_local() {
     info.cpu_id_count = 2;
     info.cpu_hardware_ids[..2].copy_from_slice(&[id ^ (0x12 << 32), id]);
     check(info.validate().is_ok(), "native boot CPU topology");
+    info.feature_flags |= mnu_abi::boot::BOOT_FEATURE_ARM64_INTERRUPTS;
+    info.arm64_interrupts = mnu_abi::arm64_interrupts::Resources::gic_v2(
+        0x2000_0000, 27, 64, 65, 1, 2,
+    );
+    check(info.validate().is_ok(), "native interrupt metadata admission");
+    info.arm64_interrupts.wake_interrupt = info.arm64_interrupts.tlb_interrupt;
+    check(info.validate().is_err(), "overlapping native interrupt roles accepted");
+    // Metadata validation above does not install a controller in this fixture.
+    info.feature_flags &= !mnu_abi::boot::BOOT_FEATURE_ARM64_INTERRUPTS;
+    info.arm64_interrupts = mnu_abi::arm64_interrupts::Resources::empty();
     percpu::configure_boot_cpu(&info);
     check(percpu::current_cpu_id() == 1, "hardware ID used as logical slot");
     check(!percpu::kernel_page_table_ready(), "uninitialized native entry is ready");
