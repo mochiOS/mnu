@@ -6,6 +6,7 @@ pub mod counter;
 pub mod hypercall;
 pub mod exception;
 pub mod fp;
+pub mod gic;
 pub mod tls;
 pub mod thread;
 pub mod memory;

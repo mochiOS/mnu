@@ -198,9 +198,15 @@ mod arm {
             crate::mmu_probe::initialize();
             core::ptr::write_volatile((GICD + 0x100) as *mut u32, 1 << TIMER_IRQ);
             core::ptr::write_volatile(GICD as *mut u32, 1);
-            core::ptr::write_volatile((GICC + 4) as *mut u32, 0xff);
-            core::ptr::write_volatile(GICC as *mut u32, 1);
-            asm!("dsb sy", "isb", options(nostack));
+            check(matches!(arch::gic::CpuInterface::new(GICC as u64 + 4, 8192),
+                Err(arch::gic::Error::InvalidRange)), "misaligned CPU interface accepted");
+            check(matches!(arch::gic::CpuInterface::new(GICC as u64, 4096),
+                Err(arch::gic::Error::InvalidRange)), "short CPU interface accepted");
+            let mut interface = arch::gic::CpuInterface::new(GICC as u64, 8192)
+                .unwrap_or_else(|_| fail("assigned CPU interface rejected"));
+            check(interface.enable().is_ok(), "CPU interface enable");
+            check(interface.acknowledge().unwrap_or_else(|_| fail("spurious acknowledge")).is_none(),
+                "unexpected initial interrupt");
         }
     }
 
@@ -239,20 +245,23 @@ mod arm {
         }
         check(UNEXPECTED.load(Ordering::Acquire) == 0, "unexpected IRQ");
         check(arch::interrupts::are_enabled(), "IRQ return changed mask");
+        check(matches!(unsafe { arch::gic::CpuInterface::new(GICC as u64, 8192) },
+            Err(arch::gic::Error::InterruptsEnabled)), "unsafe CPU interface handoff accepted");
+        emit("Assigned GIC CPU interface and IRQ completion PASS\n");
     }
 
     fn probe_irq() {
         unsafe {
-            let acknowledgement = core::ptr::read_volatile((GICC + 0x0c) as *const u32);
-            let interrupt = acknowledgement & 0x3ff;
+            let mut interface = arch::gic::CpuInterface::new(GICC as u64, 8192)
+                .unwrap_or_else(|_| fail("IRQ CPU interface rejected"));
+            let pending = interface.acknowledge().unwrap_or_else(|_| fail("IRQ acknowledge rejected"))
+                .unwrap_or_else(|| fail("spurious timer IRQ"));
+            let interrupt = pending.interrupt();
             asm!("msr cntv_ctl_el0, {}", "isb", in(reg) 0u64, options(nostack));
             if interrupt != TIMER_IRQ {
                 UNEXPECTED.store(interrupt + 1, Ordering::Release);
             }
-            if interrupt < 1020 {
-                core::ptr::write_volatile((GICC + 0x10) as *mut u32, acknowledgement);
-                asm!("dsb sy", options(nostack));
-            }
+            check(pending.complete().is_ok(), "IRQ completion rejected");
             INTERRUPTS.fetch_add(1, Ordering::Release);
         }
     }

@@ -15,6 +15,8 @@ compile_error!("mnu does not yet provide CPU primitives for this architecture");
 pub use selected::context;
 pub use selected::exception;
 pub use selected::fp;
+#[cfg(target_arch = "aarch64")]
+pub use selected::gic;
 pub use selected::tls;
 pub use selected::thread;
 pub use selected::upcall;
