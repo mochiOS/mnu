@@ -1,7 +1,7 @@
 use crate::task::ids::ThreadId;
 use crate::task::thread::THREAD_QUEUE;
 
-pub(super) use crate::arch::context::FxSaveArea;
+pub(super) use crate::arch::fp::State as FloatingPointState;
 pub use crate::arch::context::{switch_context, Context};
 
 /// CPUごとの初回スイッチ用ダミーコンテキスト（保存値は参照されない）。

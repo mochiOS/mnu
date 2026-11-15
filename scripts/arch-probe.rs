@@ -380,6 +380,31 @@ fn check_user_tls() {
     emit("Native user TLS register PASS\n");
 }
 
+#[cfg(target_arch = "x86_64")]
+fn check_fp_snapshot() {
+    // SAFETY: This context contains only integer fields. It is not entered;
+    // the diagnostic exercises the existing CPU-mask validation and SSE state.
+    let context: arch::exception::UserUpcallContext = unsafe { core::mem::zeroed() };
+    let mut original = arch::fp::State::initial();
+    original.capture(&context);
+    let bytes = original.snapshot_bytes();
+    let mut invalid = bytes;
+    invalid[27] |= 0x80; // Reserved MXCSR bit 31 must never reach FXRSTOR.
+    check(original.with_user_context(&context, invalid).is_none(), "reserved MXCSR accepted");
+    check(original.snapshot_bytes() == bytes, "failed FP update mutated original");
+    let mut selected = bytes;
+    selected[272..280].copy_from_slice(&0x4567u64.to_le_bytes()); // XMM7 low lane.
+    let selected = original.with_user_context(&context, selected)
+        .unwrap_or_else(|| fail("valid x86 FP image rejected"));
+    let _ = selected.restore_context(context);
+    let value: u64;
+    // SAFETY: SSE is enabled by fixture firmware; only read the restored lane.
+    unsafe { asm!("movq {}, xmm7", out(reg) value, options(nomem, nostack)); }
+    check(value == 0x4567, "retained x86 SSE state not restored");
+    let _ = original.restore_context(context);
+    emit("Retained x86 FP snapshot PASS\n");
+}
+
 #[cfg(target_arch = "aarch64")]
 fn check_cpu_local() {
     let mut info = BootInfo::empty();
@@ -424,6 +449,8 @@ extern "C" fn probe_main() -> ! {
     #[cfg(target_arch = "aarch64")]
     check_cpu_local();
     check_user_tls();
+    #[cfg(target_arch = "x86_64")]
+    check_fp_snapshot();
     let clock = arch::counter::initialize();
     let first = arch::counter::timestamp();
     for _ in 0..4096 {

@@ -39,7 +39,7 @@ struct ThreadUpcallState {
     next_token: u64,
     active_token: u64,
     saved_context: Option<UserUpcallContext>,
-    saved_fx_state: super::context::FxSaveArea,
+    saved_fp_state: super::context::FloatingPointState,
     restore_pending: bool,
     exception_diagnostic: Option<crate::util::process_diagnostics::Exception>,
 }
@@ -57,7 +57,7 @@ impl ThreadUpcallState {
             next_token: 1,
             active_token: 0,
             saved_context: None,
-            saved_fx_state: super::context::FxSaveArea::initial(),
+            saved_fp_state: super::context::FloatingPointState::initial(),
             restore_pending: false,
             exception_diagnostic: None,
         }
@@ -123,7 +123,7 @@ impl ThreadUpcallState {
         self.next_token = token.wrapping_add(1).max(1);
         self.active_token = token;
         self.saved_context = Some(context);
-        self.saved_fx_state.save_current();
+        self.saved_fp_state.capture(&context);
         self.restore_pending = false;
         Some(ThreadUpcallDelivery {
             entry: self.entry,
@@ -138,7 +138,7 @@ impl ThreadUpcallState {
             return Err(ThreadUpcallError::InvalidToken);
         }
         let context = self.saved_context.ok_or(ThreadUpcallError::InvalidToken)?;
-        Ok((context, self.saved_fx_state.snapshot_bytes()))
+        Ok((context, self.saved_fp_state.snapshot_bytes()))
     }
 
     fn request_return(&mut self, token: u64) -> Result<(), ThreadUpcallError> {
@@ -153,7 +153,7 @@ impl ThreadUpcallState {
         &mut self,
         token: u64,
         context: UserUpcallContext,
-        fx_state: [u8; 512],
+        fp_state: [u8; 512],
     ) -> Result<(), ThreadUpcallError> {
         if token == 0
             || token != self.active_token
@@ -162,12 +162,12 @@ impl ThreadUpcallState {
         {
             return Err(ThreadUpcallError::InvalidToken);
         }
-        let fx_state = self
-            .saved_fx_state
-            .with_user_bytes(fx_state)
+        let fp_state = self
+            .saved_fp_state
+            .with_user_context(&context, fp_state)
             .ok_or(ThreadUpcallError::InvalidContext)?;
         self.saved_context = Some(context);
-        self.saved_fx_state = fx_state;
+        self.saved_fp_state = fp_state;
         self.restore_pending = true;
         Ok(())
     }
@@ -180,8 +180,7 @@ impl ThreadUpcallState {
         self.restore_pending = false;
         self.active_token = 0;
         self.exception_diagnostic = None;
-        self.saved_fx_state.restore_current();
-        Some(context)
+        Some(self.saved_fp_state.restore_context(context))
     }
 
     fn request_context_restore(
@@ -194,13 +193,13 @@ impl ThreadUpcallState {
         if self.active_token != 0 || self.restore_pending {
             return Err(ThreadUpcallError::Active);
         }
-        let mut current = super::context::FxSaveArea::initial();
-        current.save_current();
+        let mut current = super::context::FloatingPointState::initial();
+        current.capture(&context);
         let selected = current
-            .with_user_bytes(bytes)
+            .with_user_context(&context, bytes)
             .ok_or(ThreadUpcallError::InvalidContext)?;
         self.saved_context = Some(context);
-        self.saved_fx_state = selected;
+        self.saved_fp_state = selected;
         self.restore_pending = true;
         Ok(())
     }

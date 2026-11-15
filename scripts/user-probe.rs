@@ -257,6 +257,19 @@ pub fn handle(frame: &mut ExceptionFrame) {
             );
             let mut selected = original;
             selected.registers[0] = 77;
+            let mut fp = arch::fp::State::initial();
+            // Clobber the live FP register before retaining the interrupted
+            // user image. ARM must capture the exception frame, not Rust's FP.
+            unsafe { asm!("movi v0.16b, #0xa5", out("v0") _, options(nostack)); }
+            fp.capture(&original);
+            let mut bytes = fp.snapshot_bytes();
+            let mut bad = selected;
+            bad.fpcr |= 1 << 63;
+            check(fp.with_user_context(&bad, bytes).is_none(), "FP snapshot accepted reserved control");
+            bytes[7 * 16..8 * 16].copy_from_slice(&0x4567u128.to_le_bytes());
+            let fp = fp.with_user_context(&selected, bytes)
+                .unwrap_or_else(|| fail("native FP snapshot rejected"));
+            selected = fp.restore_context(selected);
             check(
                 frame.restore_user_context(&selected),
                 "EL0 context restore failed",
@@ -385,6 +398,10 @@ unsafe extern "C" fn user_entry() -> ! {
         "b.ne 2f",
         "umov x1, v31.d[1]",
         "cmp x1, #0x42",
+        "b.ne 2f",
+        "umov x1, v7.d[0]",
+        "mov x2, #0x4567",
+        "cmp x1, x2",
         "b.ne 2f",
         "mrs x1, fpcr",
         "mov x2, #(1 << 22)",
