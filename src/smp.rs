@@ -813,8 +813,8 @@ pub fn start_secondary_cpus() {
         );
     }
 
-    let bsp_apic_id = boot_info.bsp_apic_id;
-    let cpu_count = (boot_info.cpu_apic_id_count as usize).min(crate::MAX_CPU_IDS);
+    let bsp_hardware_id = boot_info.bsp_hardware_id;
+    let cpu_count = (boot_info.cpu_id_count as usize).min(crate::MAX_CPU_IDS);
     let expected_ap_count = boot_info.cpu_enabled.saturating_sub(1);
     let mut started = 0usize;
 
@@ -827,10 +827,14 @@ pub fn start_secondary_cpus() {
         expected_ap_count
     );
 
-    for &apic_id in boot_info.cpu_apic_ids.iter().take(cpu_count) {
-        if apic_id == bsp_apic_id {
+    for &hardware_id in boot_info.cpu_hardware_ids.iter().take(cpu_count) {
+        if hardware_id == bsp_hardware_id {
             continue;
         }
+        let Ok(apic_id) = u32::try_from(hardware_id) else {
+            crate::warn!("Invalid x86 CPU hardware ID: {:#x}", hardware_id);
+            continue;
+        };
 
         let Some(boot_stack) = allocate_ap_boot_stack() else {
             crate::warn!("AP boot stack allocation failed for APIC ID {}", apic_id);

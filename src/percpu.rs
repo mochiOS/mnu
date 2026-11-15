@@ -75,9 +75,9 @@ pub(crate) fn configure_boot_cpu(boot_info: &crate::BootInfo) {
         initialize_tsc_aux();
         RDTSCP_CPU_ID.store(true, Ordering::Release);
     }
-    if boot_info.cpu_enabled == 1 && boot_info.cpu_apic_id_count == 1 {
+    if boot_info.cpu_enabled == 1 && boot_info.cpu_id_count == 1 {
         let id = local_apic_id();
-        if id < MAX_CPUS as u32 && id == boot_info.cpu_apic_ids[0] {
+        if id < MAX_CPUS as u32 && u64::from(id) == boot_info.cpu_hardware_ids[0] {
             SINGLE_CPU_ID.store(u64::from(id), Ordering::Release);
         }
     }

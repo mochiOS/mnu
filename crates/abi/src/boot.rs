@@ -2,7 +2,15 @@ use core::mem::size_of;
 use core::sync::atomic::AtomicU64;
 
 pub const BOOT_ABI_MAGIC: u64 = u64::from_le_bytes(*b"MNUBOOT\0");
-pub const BOOT_ABI_VERSION: u32 = 2;
+pub const BOOT_ABI_VERSION: u32 = 3;
+pub const BOOT_ARCH_X86_64: u32 = 1;
+pub const BOOT_ARCH_AARCH64: u32 = 2;
+#[cfg(target_arch = "x86_64")]
+pub const BOOT_NATIVE_ARCH: u32 = BOOT_ARCH_X86_64;
+#[cfg(target_arch = "aarch64")]
+pub const BOOT_NATIVE_ARCH: u32 = BOOT_ARCH_AARCH64;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub const BOOT_NATIVE_ARCH: u32 = 0;
 pub const MAX_CPU_IDS: usize = 64;
 pub const MAX_BOOT_MEMORY_REGIONS: usize = 256;
 
@@ -25,11 +33,16 @@ pub enum BootInfoError {
     InvalidStructSize,
     InvalidMemoryMapEntrySize,
     InvalidCpuCount,
+    UnsupportedArchitecture,
+    InvalidCpuIdentity,
+    UnsupportedSmpHandoff,
     InvalidSystemSlot,
     InvalidBootEspGuid,
 }
 
 #[repr(C)]
+/// Existing x86 bootstrap handoff. ARM must supply its own native startup
+/// state rather than storing TTBR values in a CR3 field.
 pub struct SmpHandoff {
     pub ready: AtomicU64,
     pub kernel_secondary_entry: AtomicU64,
@@ -226,6 +239,8 @@ pub struct BootInfo {
     pub abi_version: u32,
     pub struct_size: u32,
     pub feature_flags: u64,
+    pub architecture: u32,
+    pub _reserved_arch: u32,
     pub physical_memory_offset: u64,
     pub framebuffer_addr: u64,
     pub framebuffer_size: u64,
@@ -243,9 +258,11 @@ pub struct BootInfo {
     pub rootfs_size: u64,
     pub cpu_total: u32,
     pub cpu_enabled: u32,
-    pub bsp_apic_id: u32,
-    pub cpu_apic_ids: [u32; MAX_CPU_IDS],
-    pub cpu_apic_id_count: u32,
+    /// APIC ID on x86, MPIDR affinity (Aff3..Aff0) on AArch64.
+    /// Hardware identities are not indices into per-CPU arrays.
+    pub bsp_hardware_id: u64,
+    pub cpu_hardware_ids: [u64; MAX_CPU_IDS],
+    pub cpu_id_count: u32,
     pub _reserved1: u32,
     pub smp_handoff_addr: u64,
     pub smp_handoff_size: u32,
@@ -268,6 +285,8 @@ impl BootInfo {
             abi_version: BOOT_ABI_VERSION,
             struct_size: size_of::<Self>() as u32,
             feature_flags: 0,
+            architecture: BOOT_NATIVE_ARCH,
+            _reserved_arch: 0,
             physical_memory_offset: 0,
             framebuffer_addr: 0,
             framebuffer_size: 0,
@@ -285,9 +304,9 @@ impl BootInfo {
             rootfs_size: 0,
             cpu_total: 1,
             cpu_enabled: 1,
-            bsp_apic_id: 0,
-            cpu_apic_ids: [0; MAX_CPU_IDS],
-            cpu_apic_id_count: 1,
+            bsp_hardware_id: 0,
+            cpu_hardware_ids: [0; MAX_CPU_IDS],
+            cpu_id_count: 1,
             _reserved1: 0,
             smp_handoff_addr: 0,
             smp_handoff_size: 0,
@@ -312,11 +331,24 @@ impl BootInfo {
         if self.struct_size < size_of::<Self>() as u32 {
             return Err(BootInfoError::InvalidStructSize);
         }
+        if self.architecture != BOOT_NATIVE_ARCH
+            || !matches!(self.architecture, BOOT_ARCH_X86_64 | BOOT_ARCH_AARCH64)
+            || self._reserved_arch != 0
+        {
+            return Err(BootInfoError::UnsupportedArchitecture);
+        }
         if self.memory_map_entry_size as usize != size_of::<MemoryRegion>() {
             return Err(BootInfoError::InvalidMemoryMapEntrySize);
         }
-        if self.cpu_apic_id_count as usize > MAX_CPU_IDS {
-            return Err(BootInfoError::InvalidCpuCount);
+        self.validate_cpu_topology()?;
+        if self.architecture == BOOT_ARCH_AARCH64
+            && (self.feature_flags & BOOT_FEATURE_SMP != 0
+                || self.smp_handoff_addr != 0
+                || self.smp_handoff_size != 0
+                || self.smp_trampoline_addr != 0
+                || self.smp_trampoline_size != 0)
+        {
+            return Err(BootInfoError::UnsupportedSmpHandoff);
         }
         if (self.feature_flags & BOOT_FEATURE_SYSTEM_SLOT) != 0 {
             if self.system_slot != BOOT_SYSTEM_SLOT_A && self.system_slot != BOOT_SYSTEM_SLOT_B {
@@ -326,8 +358,7 @@ impl BootInfo {
             return Err(BootInfoError::InvalidSystemSlot);
         }
         if (self.feature_flags & BOOT_FEATURE_BOOT_ESP_GUID) != 0 {
-            if (self.feature_flags & BOOT_FEATURE_SYSTEM_SLOT) == 0
-                || self.boot_esp_guid == [0; 16]
+            if (self.feature_flags & BOOT_FEATURE_SYSTEM_SLOT) == 0 || self.boot_esp_guid == [0; 16]
             {
                 return Err(BootInfoError::InvalidBootEspGuid);
             }
@@ -336,6 +367,40 @@ impl BootInfo {
         }
         Ok(())
     }
+
+    fn validate_cpu_topology(&self) -> Result<(), BootInfoError> {
+        let ids = self
+            .cpu_hardware_ids
+            .get(..self.cpu_id_count as usize)
+            .ok_or(BootInfoError::InvalidCpuCount)?;
+        if self.cpu_enabled == 0 || self.cpu_total < self.cpu_enabled {
+            return Err(BootInfoError::InvalidCpuCount);
+        }
+        let mask = match self.architecture {
+            BOOT_ARCH_X86_64 => u64::from(u32::MAX),
+            BOOT_ARCH_AARCH64 => 0x0000_00ff_00ff_ffff,
+            _ => return Err(BootInfoError::UnsupportedArchitecture),
+        };
+        if self.bsp_hardware_id & !mask != 0
+            || ids
+                .iter()
+                .enumerate()
+                .any(|(index, &id)| id & !mask != 0 || ids[..index].contains(&id))
+            || !ids.is_empty() && !ids.contains(&self.bsp_hardware_id)
+        {
+            return Err(BootInfoError::InvalidCpuIdentity);
+        }
+        Ok(())
+    }
+
+    /// Look up the logical slot without truncating a hardware affinity ID.
+    /// Call validate() before consuming any other boot metadata.
+    pub fn cpu_slot(&self, hardware_id: u64) -> Option<usize> {
+        self.cpu_hardware_ids
+            .get(..self.cpu_id_count as usize)?
+            .iter()
+            .position(|&id| id == hardware_id)
+    }
 }
 
 impl Default for BootInfo {
@@ -343,6 +408,9 @@ impl Default for BootInfo {
         Self::empty()
     }
 }
+
+const _: () = assert!(size_of::<BootInfo>() == 768);
+const _: () = assert!(core::mem::offset_of!(BootInfo, cpu_hardware_ids) == 160);
 
 #[cfg(test)]
 mod tests {
@@ -365,6 +433,71 @@ mod tests {
     #[test]
     fn empty_boot_info_is_valid() {
         assert_eq!(BootInfo::empty().validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_foreign_boot_architecture_and_reserved_bits() {
+        let mut info = BootInfo::empty();
+        info.architecture = if BOOT_NATIVE_ARCH == BOOT_ARCH_X86_64 {
+            BOOT_ARCH_AARCH64
+        } else {
+            BOOT_ARCH_X86_64
+        };
+        assert_eq!(info.validate(), Err(BootInfoError::UnsupportedArchitecture));
+        info.architecture = BOOT_NATIVE_ARCH;
+        info._reserved_arch = 1;
+        assert_eq!(info.validate(), Err(BootInfoError::UnsupportedArchitecture));
+        info._reserved_arch = 0;
+        info.abi_version = 2;
+        assert_eq!(info.validate(), Err(BootInfoError::UnsupportedVersion));
+    }
+
+    #[test]
+    fn arm_affinity_ids_keep_aff3_and_use_logical_slots() {
+        let mut info = BootInfo::empty();
+        info.architecture = BOOT_ARCH_AARCH64;
+        info.cpu_total = 2;
+        info.cpu_enabled = 2;
+        info.cpu_id_count = 2;
+        info.bsp_hardware_id = 0x1200_000001;
+        info.cpu_hardware_ids[..2].copy_from_slice(&[0x1200_000001, 0x3400_020003]);
+        assert_eq!(info.validate_cpu_topology(), Ok(()));
+        assert_eq!(info.cpu_slot(0x1200_000001), Some(0));
+        assert_eq!(info.cpu_slot(0x3400_020003), Some(1));
+        assert_eq!(info.cpu_slot(1), None);
+        info.cpu_hardware_ids[1] |= 1 << 24; // MT is not an affinity bit.
+        assert_eq!(
+            info.validate_cpu_topology(),
+            Err(BootInfoError::InvalidCpuIdentity)
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_topology_and_truncated_x86_ids() {
+        let mut info = BootInfo::empty();
+        info.architecture = BOOT_ARCH_X86_64;
+        info.cpu_id_count = 2;
+        assert_eq!(
+            info.validate_cpu_topology(),
+            Err(BootInfoError::InvalidCpuIdentity)
+        );
+        info.cpu_hardware_ids[1] = 1 << 32;
+        assert_eq!(
+            info.validate_cpu_topology(),
+            Err(BootInfoError::InvalidCpuIdentity)
+        );
+        info.cpu_hardware_ids[1] = 3;
+        info.bsp_hardware_id = 2;
+        assert_eq!(
+            info.validate_cpu_topology(),
+            Err(BootInfoError::InvalidCpuIdentity)
+        );
+        info.cpu_id_count = (MAX_CPU_IDS + 1) as u32;
+        assert_eq!(
+            info.validate_cpu_topology(),
+            Err(BootInfoError::InvalidCpuCount)
+        );
+        assert_eq!(info.cpu_slot(0), None);
     }
 
     #[test]

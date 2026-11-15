@@ -533,9 +533,9 @@ fn efi_main(image: Handle, mut st: SystemTable<Boot>) -> Status {
         BOOT_INFO.rootfs_size = rootfs_size as u64;
         BOOT_INFO.cpu_total = 1;
         BOOT_INFO.cpu_enabled = 1;
-        BOOT_INFO.bsp_apic_id = 0;
-        BOOT_INFO.cpu_apic_ids = [0; MAX_CPU_IDS];
-        BOOT_INFO.cpu_apic_id_count = 1;
+        BOOT_INFO.bsp_hardware_id = 0;
+        BOOT_INFO.cpu_hardware_ids = [0; MAX_CPU_IDS];
+        BOOT_INFO.cpu_id_count = 1;
         BOOT_INFO.smp_handoff_addr = core::ptr::addr_of!(SMP_HANDOFF) as u64;
         BOOT_INFO.smp_handoff_size = size_of::<SmpHandoff>() as u32;
         BOOT_INFO.smp_trampoline_addr = 0;
