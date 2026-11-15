@@ -35,6 +35,7 @@ pub struct ThreadUpcallSnapshot {
 }
 
 pub const CREATION_CONTEXT_KIND: u32 = 2;
+pub const ELF_MACHINE: u16 = 183;
 const _: () = {
     assert!(core::mem::size_of::<super::ThreadCreateContext>() == 304);
     assert!(core::mem::offset_of!(super::ThreadCreateContext, registers) == 64);

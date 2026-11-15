@@ -67,5 +67,6 @@ impl ThreadInitialRegisters {
     }
 }
 pub const CREATION_CONTEXT_KIND: u32 = 1;
+pub const ELF_MACHINE: u16 = 62;
 const _: () = assert!(core::mem::size_of::<ThreadUpcallSnapshot>() == 656);
 const _: () = assert!(core::mem::offset_of!(ThreadUpcallSnapshot, fx_state) == 144);

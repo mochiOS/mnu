@@ -771,6 +771,8 @@ mod thread_registers;
 #[path = "thread_registers/aarch64.rs"]
 mod thread_registers;
 pub use thread_registers::{ThreadInitialRegisters, ThreadUpcallSnapshot};
+/// ELF e_machine accepted by the native execution ABI for this CPU.
+pub const NATIVE_ELF_MACHINE: u16 = thread_registers::ELF_MACHINE;
 
 /// Opt in to synchronous user exception delivery on this thread's upcall stack.
 pub const THREAD_UPCALL_EXCEPTIONS: u64 = 1;
