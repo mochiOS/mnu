@@ -3,111 +3,20 @@
 //! シリアルポートを使用したシリアル出力
 
 use core::fmt;
-use spin::Mutex;
-use x86_64::instructions::port::Port;
-
-/// シリアルポート (COM1) - 割込み対応版
-pub static SERIAL: Mutex<SerialPort> = Mutex::new(SerialPort::new(0x3F8));
-
-/// 割込み無効化を伴うロック取得
-fn lock_serial<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut SerialPort) -> R,
-{
-    // 割込みを無効化してロック取得
-    crate::arch::interrupts::without_interrupts(|| {
-        let mut serial = SERIAL.lock();
-        f(&mut serial)
-    })
-}
-
-/// UARTシリアルポート
-pub struct SerialPort {
-    /// データ
-    data: Port<u8>,
-    /// 割り込み有効化
-    int_en: Port<u8>,
-    /// FIFO制御
-    fifo_ctrl: Port<u8>,
-    /// ライン制御
-    line_ctrl: Port<u8>,
-    /// モデム制御
-    modem_ctrl: Port<u8>,
-    /// ラインステータス
-    line_status: Port<u8>,
-}
-
-impl SerialPort {
-    /// 新しいシリアルポートを作成
-    const fn new(base: u16) -> Self {
-        Self {
-            data: Port::new(base),
-            int_en: Port::new(base + 1),
-            fifo_ctrl: Port::new(base + 2),
-            line_ctrl: Port::new(base + 3),
-            modem_ctrl: Port::new(base + 4),
-            line_status: Port::new(base + 5),
-        }
-    }
-
-    /// シリアルポートを初期化
-    pub fn init(&mut self) {
-        unsafe {
-            // 割り込み無効
-            self.int_en.write(0x00);
-            // ボーレート設定を有効化
-            self.line_ctrl.write(0x80);
-            // ボーレート = 38400 (divisor = 3)
-            self.data.write(0x03);
-            self.int_en.write(0x00);
-            // 8ビット, パリティなし, 1ストップビット
-            self.line_ctrl.write(0x03);
-            // FIFOを有効化, クリア, 14バイトしきい値
-            self.fifo_ctrl.write(0xC7);
-            // データ端末レディ, リクエスト送信
-            self.modem_ctrl.write(0x0B);
-        }
-    }
-
-    /// 1バイト送信
-    pub fn send_byte(&mut self, byte: u8) {
-        let _ = self.try_send_byte(byte);
-    }
-
-    /// A missing or stalled UART must not trap the kernel in an infinite poll.
-    pub fn try_send_byte(&mut self, byte: u8) -> bool {
-        unsafe {
-            for _ in 0..65_536 {
-                if self.line_status.read() & 0x20 != 0 {
-                    self.data.write(byte);
-                    return true;
-                }
-                core::hint::spin_loop();
-            }
-        }
-        false
-    }
-
-    /// 文字列を送信
-    pub fn send_str(&mut self, s: &str) {
-        for byte in s.bytes() {
-            self.send_byte(byte);
-        }
-    }
-}
-
-impl fmt::Write for SerialPort {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.send_str(s);
-        Ok(())
-    }
-}
+#[cfg(target_arch = "x86_64")]
+#[path = "../arch/x86_64/console.rs"]
+mod serial;
+#[cfg(target_arch = "x86_64")]
+use serial::lock_serial;
+#[cfg(target_arch = "x86_64")]
+pub use serial::{SerialPort, SERIAL};
 
 /// シリアルポートを初期化
 pub fn init() {
     if crate::hypervisor_guest::is_active() {
         return;
     }
+    #[cfg(target_arch = "x86_64")]
     lock_serial(|serial| serial.init());
 }
 
@@ -116,13 +25,56 @@ pub fn print(args: fmt::Arguments) {
     use core::fmt::Write;
     if crate::hypervisor_guest::is_active() {
         let mut writer = HypervisorConsole::new();
-        let _ = writer.write_fmt(args);
-        writer.flush();
+        if writer.write_fmt(args).is_ok() {
+            let _ = writer.flush();
+        }
         return;
     }
+    #[cfg(target_arch = "x86_64")]
     lock_serial(|serial| {
         let _ = serial.write_fmt(args);
     });
+}
+
+/// Native early console output. ARM requires the boot-provided hypervisor
+/// channel; it never assumes a board UART address or fabricates a COM1 device.
+pub fn early_write(text: &str) -> Result<(), mnu_abi::status::Error> {
+    if crate::hypervisor_guest::is_active() {
+        use core::fmt::Write;
+        let mut writer = HypervisorConsole::new();
+        writer
+            .write_str(text)
+            .map_err(|_| mnu_abi::status::Error::BackingFailure)?;
+        return writer.flush();
+    }
+    #[cfg(target_arch = "x86_64")]
+    return serial::early_write(text);
+    #[cfg(target_arch = "aarch64")]
+    Err(mnu_abi::status::Error::Unsupported)
+}
+
+/// Best-effort direct UART output, after capability admission and usercopy.
+/// The hypervisor channel is handled by the shared caller when available.
+pub fn try_write_direct(bytes: &[u8]) -> Result<usize, mnu_abi::status::Error> {
+    #[cfg(target_arch = "x86_64")]
+    return crate::arch::interrupts::without_interrupts(|| {
+        let Some(mut serial) = SERIAL.try_lock() else {
+            return Err(mnu_abi::status::Error::NotReady);
+        };
+        let mut written = 0;
+        for &byte in bytes {
+            if !serial.try_send_byte(byte) {
+                break;
+            }
+            written += 1;
+        }
+        Ok(written)
+    });
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = bytes;
+        Err(mnu_abi::status::Error::Unsupported)
+    }
 }
 
 struct HypervisorConsole {
@@ -138,25 +90,53 @@ impl HypervisorConsole {
         }
     }
 
-    fn flush(&self) {
+    fn flush(&mut self) -> Result<(), mnu_abi::status::Error> {
         if self.len == 0 {
-            return;
+            return Ok(());
         }
-        let _ = crate::hypervisor_guest::invoke(
-            mnu_abi::hypervisor::HypercallNumber::ConsoleWrite,
-            self.bytes.as_ptr() as u64,
-            self.len as u64,
-            0,
-        );
+        let mut offset = 0;
+        while offset < self.len {
+            let address = self.bytes.as_ptr() as u64 + offset as u64;
+            let count = (self.len - offset).min(4096 - (address as usize & 4095));
+            #[cfg(target_arch = "aarch64")]
+            let physical = match crate::arch::memory::current_guest_physical(
+                crate::arch::memory::VirtAddr::new(address),
+            ) {
+                Some(physical) => physical.as_u64(),
+                None => return Err(mnu_abi::status::Error::BackingFailure),
+            };
+            // The existing x86 System Domain diagnostic ABI uses identity
+            // addresses. ARM's independently mapped EL1 stack needs AT above.
+            #[cfg(target_arch = "x86_64")]
+            let physical = address;
+            if crate::hypervisor_guest::invoke(
+                mnu_abi::hypervisor::HypercallNumber::ConsoleWrite,
+                physical,
+                count as u64,
+                0,
+            ) != mnu_abi::hypervisor::HYPERCALL_SUCCESS
+            {
+                return Err(mnu_abi::status::Error::BackingFailure);
+            }
+            offset += count;
+        }
+        self.len = 0;
+        Ok(())
     }
 }
 
 impl fmt::Write for HypervisorConsole {
     fn write_str(&mut self, value: &str) -> fmt::Result {
-        let available = self.bytes.len().saturating_sub(self.len);
-        let count = available.min(value.len());
-        self.bytes[self.len..self.len + count].copy_from_slice(&value.as_bytes()[..count]);
-        self.len += count;
+        let mut remaining = value.as_bytes();
+        while !remaining.is_empty() {
+            if self.len == self.bytes.len() {
+                self.flush().map_err(|_| fmt::Error)?;
+            }
+            let count = (self.bytes.len() - self.len).min(remaining.len());
+            self.bytes[self.len..self.len + count].copy_from_slice(&remaining[..count]);
+            self.len += count;
+            remaining = &remaining[count..];
+        }
         Ok(())
     }
 }

@@ -287,31 +287,7 @@ fn create_kernel_proc() -> Result<()> {
 }
 
 pub fn early_serial(text: &str) {
-    for byte in text.bytes() {
-        unsafe {
-            let mut status: u8;
-
-            loop {
-                core::arch::asm!(
-                    "in al, dx",
-                    in("dx") 0x3fdu16,
-                    out("al") status,
-                    options(nomem, nostack, preserves_flags),
-                );
-
-                if status & 0x20 != 0 {
-                    break;
-                }
-            }
-
-            core::arch::asm!(
-                "out dx, al",
-                in("dx") 0x3f8u16,
-                in("al") byte,
-                options(nomem, nostack, preserves_flags),
-            );
-        }
-    }
+    let _ = crate::util::console::early_write(text);
 }
 
 /// システムを無限ループで停止

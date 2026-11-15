@@ -85,19 +85,10 @@ pub fn debug_write(buf_ptr: u64, len: u64) -> u64 {
             }
             done += count;
         } else {
-            let written = crate::arch::interrupts::without_interrupts(|| {
-                let Some(mut serial) = console::SERIAL.try_lock() else {
-                    return 0;
-                };
-                let mut written = 0;
-                for &byte in &bytes[..count] {
-                    if !serial.try_send_byte(byte) {
-                        break;
-                    }
-                    written += 1;
-                }
-                written
-            });
+            let written = match console::try_write_direct(&bytes[..count]) {
+                Ok(written) => written,
+                Err(error) => return if done == 0 { error.into_raw() } else { done as u64 },
+            };
             done += written;
             if written != count {
                 return if done == 0 {

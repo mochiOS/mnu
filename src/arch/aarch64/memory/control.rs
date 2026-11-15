@@ -5,6 +5,38 @@ use core::arch::asm;
 
 const ADDRESS_MASK: u64 = 0x0000_ffff_ffff_f000;
 
+/// Resolve the current EL1 stage-1 mapping without the VM's page-table lock.
+/// The result is a guest physical address under EL2, never a host physical
+/// address. The caller retains the mapped kernel buffer for its entire use.
+pub(crate) fn current_guest_physical(address: VirtAddr) -> Option<PhysAddr> {
+    crate::arch::interrupts::without_interrupts(|| {
+        let previous: u64;
+        let translated: u64;
+        // SAFETY: EL1 may translate its current mappings. IRQ exclusion keeps
+        // PAR_EL1's temporary result CPU-local; preserve its previous value.
+        unsafe {
+            asm!(
+                "mrs {previous}, par_el1",
+                "at s1e1r, {address}",
+                "isb",
+                "mrs {translated}, par_el1",
+                "msr par_el1, {previous}",
+                previous = out(reg) previous,
+                translated = out(reg) translated,
+                address = in(reg) address.as_u64(),
+                options(nostack, preserves_flags),
+            );
+        }
+        let _ = previous;
+        if translated & 1 != 0 || translated & 0x000f_0000_0000_0000 != 0 {
+            return None;
+        }
+        Some(PhysAddr::new(
+            (translated & ADDRESS_MASK) | (address.as_u64() & 4095),
+        ))
+    })
+}
+
 pub fn active_kernel_root() -> PhysFrame {
     let value: u64;
     unsafe { asm!("mrs {}, ttbr1_el1", out(reg) value, options(nomem, nostack, preserves_flags)) };

@@ -296,6 +296,11 @@ pub fn initialize() {
                 read_volatile(KERNEL_ALIAS as *const u64) == 0x1111,
                 "user switch changed upper mapping",
             );
+            check(
+                memory::current_guest_physical(VirtAddr::new(KERNEL_ALIAS + 17))
+                    == Some(PhysAddr::new(addr_of!(DATA_A) as u64 + 17)),
+                "native diagnostic upper address translation",
+            );
             memory::flush_page_local(VirtAddr::new(ALIAS));
             memory::activate_kernel_root(second_frame);
             check(
@@ -305,6 +310,11 @@ pub fn initialize() {
             check(
                 read_volatile(KERNEL_ALIAS as *const u64) == 0x2222,
                 "kernel root retained stale upper mapping",
+            );
+            check(
+                memory::current_guest_physical(VirtAddr::new(KERNEL_ALIAS))
+                    == Some(PhysAddr::new(addr_of!(DATA_B) as u64)),
+                "diagnostic translation used a stale kernel root",
             );
             memory::activate_kernel_root(first_frame);
             memory::activate_user_root(first_frame);
@@ -444,6 +454,8 @@ pub fn initialize() {
                 .unwrap_or_else(|_| crate::fail("VM unmap adapter"));
             flush.flush();
             check(released == frame, "VM frame ownership return");
+            check(crate::arch::memory::current_guest_physical(page.start_address()).is_none(),
+                "diagnostic translation accepted an unmapped address");
             emit("Shared VM mapper adapter PASS\n");
         }
         emit("Stage-1 mappings, ASIDs and rollback PASS\n");

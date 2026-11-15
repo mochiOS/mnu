@@ -66,29 +66,5 @@ pub unsafe extern "sysv64" fn kernel_entry(boot_info_ptr: *mut mnu::BootInfo) ->
 }
 
 fn early_serial(text: &str) {
-    for byte in text.bytes() {
-        unsafe {
-            let mut status: u8;
-
-            loop {
-                core::arch::asm!(
-                    "in al, dx",
-                    in("dx") 0x3fdu16,
-                    out("al") status,
-                    options(nomem, nostack, preserves_flags),
-                );
-
-                if status & 0x20 != 0 {
-                    break;
-                }
-            }
-
-            core::arch::asm!(
-                "out dx, al",
-                in("dx") 0x3f8u16,
-                in("al") byte,
-                options(nomem, nostack, preserves_flags),
-            );
-        }
-    }
+    mnu::kernel::early_serial(text);
 }
