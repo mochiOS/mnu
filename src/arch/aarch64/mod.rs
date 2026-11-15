@@ -3,6 +3,7 @@
 
 pub mod context;
 pub mod counter;
+pub mod hypercall;
 pub mod exception;
 pub mod memory;
 pub mod paging;

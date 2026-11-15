@@ -1,7 +1,8 @@
-use core::arch::asm;
+use crate::arch::hypercall::{self, Transport};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use mnu_abi::hypervisor::{
-    DomainBootInfo, HypercallNumber, HYPERVISOR_BACKEND_AMD_SVM, HYPERVISOR_BACKEND_INTEL_VMX,
+    DomainBootInfo, HypercallNumber, HYPERVISOR_BACKEND_AMD_SVM, HYPERVISOR_BACKEND_ARM_EL2,
+    HYPERVISOR_BACKEND_INTEL_VMX,
 };
 
 static BACKEND: AtomicU32 = AtomicU32::new(0);
@@ -12,10 +13,7 @@ static GRANT_WINDOW_SIZE: AtomicU64 = AtomicU64::new(0);
 
 pub fn configure(info: &DomainBootInfo) -> bool {
     let backend = info.hypervisor_backend;
-    if !matches!(
-        backend,
-        HYPERVISOR_BACKEND_INTEL_VMX | HYPERVISOR_BACKEND_AMD_SVM
-    ) {
+    if info.validate().is_err() || transport(backend).is_none() {
         return false;
     }
     DOMAIN_ID.store(info.domain_id, Ordering::Release);
@@ -49,47 +47,23 @@ pub fn tsc_frequency_khz() -> u32 {
     if !is_active() {
         return 0;
     }
-    let eax = 0x4000_0001u32;
-    let ebx: u64;
-    unsafe {
-        core::arch::asm!(
-            "mov {saved:r}, rbx",
-            "cpuid",
-            "xchg {saved:r}, rbx",
-            saved = inout(reg) 0u64 => ebx,
-            inout("eax") eax => _,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack)
-        );
-    }
-    ebx as u32
+    hypercall::virtual_tsc_frequency_khz().unwrap_or(0)
 }
 
 pub fn invoke(number: HypercallNumber, arg0: u64, arg1: u64, arg2: u64) -> u64 {
-    let mut result = number as u64;
-    unsafe {
-        match BACKEND.load(Ordering::Acquire) {
-            HYPERVISOR_BACKEND_INTEL_VMX => asm!(
-                "vmcall",
-                inout("rax") result,
-                inlateout("rdi") arg0 => _,
-                inlateout("rsi") arg1 => _,
-                inlateout("rdx") arg2 => _,
-                clobber_abi("sysv64"),
-                options(nostack)
-            ),
-            HYPERVISOR_BACKEND_AMD_SVM => asm!(
-                "vmmcall",
-                inout("rax") result,
-                inlateout("rdi") arg0 => _,
-                inlateout("rsi") arg1 => _,
-                inlateout("rdx") arg2 => _,
-                clobber_abi("sysv64"),
-                options(nostack)
-            ),
-            _ => return u64::MAX,
-        }
-    }
-    result
+    let Some(transport) = transport(BACKEND.load(Ordering::Acquire)) else {
+        return u64::MAX;
+    };
+    // SAFETY: configure admits only validated native Domain boot metadata.
+    unsafe { hypercall::invoke(transport, number as u64, [arg0, arg1, arg2]).unwrap_or(u64::MAX) }
+}
+
+fn transport(backend: u32) -> Option<Transport> {
+    let transport = match backend {
+        HYPERVISOR_BACKEND_INTEL_VMX => Transport::IntelVmx,
+        HYPERVISOR_BACKEND_AMD_SVM => Transport::AmdSvm,
+        HYPERVISOR_BACKEND_ARM_EL2 => Transport::ArmEl2,
+        _ => return None,
+    };
+    hypercall::supported(transport).then_some(transport)
 }

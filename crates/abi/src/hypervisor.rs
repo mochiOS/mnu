@@ -7,6 +7,7 @@ pub const DOMAIN_CRASH_VERSION: u16 = 1;
 
 pub const HYPERVISOR_BACKEND_INTEL_VMX: u32 = 1;
 pub const HYPERVISOR_BACKEND_AMD_SVM: u32 = 2;
+pub const HYPERVISOR_BACKEND_ARM_EL2: u32 = 3;
 
 pub const DOMAIN_ROLE_SYSTEM: u32 = 1;
 pub const DOMAIN_ROLE_HARDWARE: u32 = 2;
@@ -127,6 +128,7 @@ pub enum DomainBootInfoError {
 ///
 /// x86_64では、この構造体のゲスト物理アドレスをRDIへ入れて
 /// `domain_entry`を呼び出します。アドレスは8バイト境界にそろえます。
+/// AArch64では、ゲスト物理アドレスをX0で渡します。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DomainBootInfo {
@@ -191,23 +193,33 @@ impl DomainBootInfo {
             memory_size,
             boot_module_start,
             boot_module_size,
-            feature_flags: DOMAIN_FEATURE_CONSOLE_WRITE
-                | DOMAIN_FEATURE_YIELD
-                | DOMAIN_FEATURE_SHUTDOWN
-                | DOMAIN_FEATURE_READY
-                | DOMAIN_FEATURE_WAIT
-                | DOMAIN_FEATURE_EVENT_CHANNEL
-                | DOMAIN_FEATURE_GRANT_TABLE
-                | DOMAIN_FEATURE_SHARED_RING
-                | DOMAIN_FEATURE_EVENT_IRQ
-                | DOMAIN_FEATURE_VIRTUAL_APIC
-                | DOMAIN_FEATURE_CRASH_QUERY
-                | DOMAIN_FEATURE_DEVICE_QUERY
-                | DOMAIN_FEATURE_DEVICE_OWNERSHIP
-                | DOMAIN_FEATURE_DEVICE_RESOURCES
-                | DOMAIN_FEATURE_DEVICE_ACTIVATION
-                | DOMAIN_FEATURE_GRANT_QUERY
-                | DOMAIN_FEATURE_EVENT_POLL,
+            // Only the existing x86 backends implement this complete feature
+            // set. An ARM producer must declare its actually implemented calls
+            // explicitly; a bare constructor must not advertise fake devices.
+            feature_flags: if matches!(
+                hypervisor_backend,
+                HYPERVISOR_BACKEND_INTEL_VMX | HYPERVISOR_BACKEND_AMD_SVM
+            ) {
+                DOMAIN_FEATURE_CONSOLE_WRITE
+                    | DOMAIN_FEATURE_YIELD
+                    | DOMAIN_FEATURE_SHUTDOWN
+                    | DOMAIN_FEATURE_READY
+                    | DOMAIN_FEATURE_WAIT
+                    | DOMAIN_FEATURE_EVENT_CHANNEL
+                    | DOMAIN_FEATURE_GRANT_TABLE
+                    | DOMAIN_FEATURE_SHARED_RING
+                    | DOMAIN_FEATURE_EVENT_IRQ
+                    | DOMAIN_FEATURE_VIRTUAL_APIC
+                    | DOMAIN_FEATURE_CRASH_QUERY
+                    | DOMAIN_FEATURE_DEVICE_QUERY
+                    | DOMAIN_FEATURE_DEVICE_OWNERSHIP
+                    | DOMAIN_FEATURE_DEVICE_RESOURCES
+                    | DOMAIN_FEATURE_DEVICE_ACTIVATION
+                    | DOMAIN_FEATURE_GRANT_QUERY
+                    | DOMAIN_FEATURE_EVENT_POLL
+            } else {
+                0
+            },
             grant_window_start,
             grant_window_size,
             device_window_start,
@@ -272,8 +284,15 @@ impl DomainBootInfo {
         }
         if !matches!(
             self.hypervisor_backend,
-            HYPERVISOR_BACKEND_INTEL_VMX | HYPERVISOR_BACKEND_AMD_SVM
+            HYPERVISOR_BACKEND_INTEL_VMX
+                | HYPERVISOR_BACKEND_AMD_SVM
+                | HYPERVISOR_BACKEND_ARM_EL2
         ) {
+            return Err(DomainBootInfoError::InvalidBackend);
+        }
+        if self.hypervisor_backend == HYPERVISOR_BACKEND_ARM_EL2
+            && self.feature_flags & DOMAIN_FEATURE_VIRTUAL_APIC != 0
+        {
             return Err(DomainBootInfoError::InvalidBackend);
         }
         if !matches!(
@@ -521,6 +540,24 @@ mod tests {
             0,
         );
         assert_eq!(info.validate(), Ok(()));
+    }
+
+    #[test]
+    fn arm_domain_requires_explicit_features_and_rejects_virtual_apic() {
+        let mut info = DomainBootInfo::new(
+            1, 0, HYPERVISOR_BACKEND_ARM_EL2, DOMAIN_ROLE_SYSTEM,
+            2 * 1024 * 1024, 0x18_0000, 0x2_0000, 0x1f_0000,
+            0x1_0000, 0x1000_0000, 0x4_0000, 0, 0,
+        );
+        assert_eq!(info.feature_flags, 0);
+        assert_eq!(info.validate(), Err(DomainBootInfoError::MissingRequiredHypercall));
+        info.feature_flags = DOMAIN_FEATURE_SHUTDOWN;
+        assert_eq!(info.validate(), Ok(()));
+        info.feature_flags |= DOMAIN_FEATURE_VIRTUAL_APIC;
+        assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidBackend));
+        info.feature_flags = DOMAIN_FEATURE_SHUTDOWN;
+        info.hypervisor_backend = 4;
+        assert_eq!(info.validate(), Err(DomainBootInfoError::InvalidBackend));
     }
 
     #[test]

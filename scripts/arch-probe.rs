@@ -35,6 +35,10 @@ mod arm {
     static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
     static UNEXPECTED: AtomicU32 = AtomicU32::new(0);
     static BREAKPOINTS: AtomicU32 = AtomicU32::new(0);
+    #[unsafe(no_mangle)]
+    static PROBE_EL2_ENTERED: AtomicU32 = AtomicU32::new(0);
+    #[unsafe(no_mangle)]
+    static PROBE_HVC_CALLS: AtomicU32 = AtomicU32::new(0);
 
     core::arch::global_asm!(
         r#"
@@ -54,6 +58,14 @@ mod arm {
         mrs x1, CurrentEL
         cmp x1, #8
         b.ne 3f
+        adrp x1, PROBE_EL2_ENTERED
+        add x1, x1, :lo12:PROBE_EL2_ENTERED
+        mov w2, #1
+        str w2, [x1]
+        adr x1, __probe_el2_vectors
+        msr vbar_el2, x1
+        ldr x1, =__probe_el2_stack_top
+        mov sp, x1
         mov x1, #(1 << 31)
         msr hcr_el2, x1
         mov x1, #3
@@ -73,8 +85,67 @@ mod arm {
         isb
         bl probe_main
         b .
+
+        // EL2 is a register-transport fixture only: no Stage-2 mapping or
+        // Domain implementation is substituted for the production hypervisor.
+        .balign 2048
+    __probe_el2_vectors:
+        .rept 8
+        b __probe_el2_unexpected
+        .balign 128
+        .endr
+        b __probe_el2_sync
+        .balign 128
+        .rept 7
+        b __probe_el2_unexpected
+        .balign 128
+        .endr
+    __probe_el2_sync:
+        stp x4, x5, [sp, #-16]!
+        mrs x4, esr_el2
+        lsr x5, x4, #26
+        cmp x5, #0x16
+        b.ne __probe_el2_unexpected
+        and x4, x4, #0xffff
+        cbnz x4, __probe_el2_unexpected
+        // Echo all three full-width arguments through an actual HVC exit.
+        eor x0, x0, x1
+        add x0, x0, x2
+        eor x0, x0, x3
+        adrp x4, PROBE_HVC_CALLS
+        add x4, x4, :lo12:PROBE_HVC_CALLS
+        ldr w5, [x4]
+        add w5, w5, #1
+        str w5, [x4]
+        ldp x4, x5, [sp], #16
+        eret
+    __probe_el2_unexpected:
+        b __probe_el2_unexpected
+        .section .bss.el2_probe_stack, "aw", %nobits
+        .balign 16
+        .skip 16384
+    __probe_el2_stack_top:
+        .section .text
         "#
     );
+
+    pub fn check_hvc() {
+        use arch::hypercall::{self, Transport};
+        check(PROBE_EL2_ENTERED.load(Ordering::Acquire) == 1, "EL2 fixture unavailable");
+        check(!hypercall::supported(Transport::IntelVmx), "foreign hypercall transport accepted");
+        let number = 0x1234_5678_9abc_def0u64;
+        let arguments = [0x1122_3344_5566_7788, 0xfedc_ba98_7654_3210, 0x8877_6655_4433_2211];
+        // SAFETY: _start installed the isolated fixture EL2 vector and stack.
+        let rejected = unsafe { hypercall::invoke(Transport::IntelVmx, number, arguments) };
+        check(rejected.is_none() && PROBE_HVC_CALLS.load(Ordering::Acquire) == 0, "foreign transport trapped");
+        // SAFETY: The actual EL2 fixture accepts HVC #0 and retains EL1 state.
+        let result = unsafe { hypercall::invoke(Transport::ArmEl2, number, arguments) };
+        let expected = (number ^ arguments[0]).wrapping_add(arguments[1]) ^ arguments[2];
+        check(result == Some(expected), "HVC number/arguments/result");
+        check(PROBE_HVC_CALLS.load(Ordering::Acquire) == 1, "HVC exit not observed at EL2");
+        check(hypercall::virtual_tsc_frequency_khz().is_none(), "ARM reported a virtual TSC");
+        emit("EL1 HVC register transport PASS\n");
+    }
 
     pub fn daif() -> u64 {
         let value;
@@ -271,6 +342,13 @@ extern "C" fn probe_main() -> ! {
     #[cfg(target_arch = "x86_64")]
     let _ = clock;
     emit("Serialized CPU counter PASS\n");
+    #[cfg(target_arch = "aarch64")]
+    arm::check_hvc();
+    #[cfg(target_arch = "x86_64")]
+    check(
+        unsafe { arch::hypercall::invoke(arch::hypercall::Transport::ArmEl2, 0, [0; 3]) }.is_none(),
+        "x86 accepted an ARM hypercall transport",
+    );
     check(arch::stack_pointer() & 15 == 0, "unaligned stack");
     arch::interrupts::disable();
     #[cfg(target_arch = "aarch64")]
