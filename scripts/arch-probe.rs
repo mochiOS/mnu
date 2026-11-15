@@ -211,20 +211,33 @@ mod arm {
     }
 
     fn arm_timer() {
-        let frequency: u64;
-        let now: u64;
-        unsafe {
-            asm!("mrs {}, cntfrq_el0", out(reg) frequency, options(nomem, nostack));
-            asm!("mrs {}, cntvct_el0", out(reg) now, options(nomem, nostack));
-        }
-        check(frequency >= 100, "timer frequency");
-        unsafe {
-            asm!("msr cntv_cval_el0, {}", in(reg) now + frequency / 100, options(nostack));
-            asm!("msr cntv_ctl_el0, {}", "isb", in(reg) 1u64, options(nostack));
-        }
+        arch::interrupts::without_interrupts(|| {
+            let mut timer = arch::timer::LocalTimer::new(100)
+                .unwrap_or_else(|_| fail("native timer configuration"));
+            check(timer.handle() == Err(arch::timer::Error::NotPending), "inactive timer handled");
+            check(timer.start().is_ok(), "native virtual timer start");
+        });
     }
 
     pub fn check_wait() {
+        use arch::timer::Clock;
+        check(Clock::new(0, 0, 500).is_err()
+            && Clock::new(0, 100, 500).is_err()
+            && Clock::new(0, 100, 0).is_err(), "invalid counter epoch admitted");
+        let clock = Clock::new(123, 1000, 500).unwrap_or_else(|_| fail("counter epoch"));
+        check(clock.ticks(123) == 0 && clock.ticks(124) == 0
+            && clock.ticks(125) == 1 && clock.ticks(2123) == 1000,
+            "counter ticks depend on interrupt delivery count");
+        check(clock.ticks(122) == 0, "backwards counter advanced time");
+        let wrap = Clock::new(u64::MAX - 9, 1000, 500)
+            .unwrap_or_else(|_| fail("counter wrap epoch"));
+        check(wrap.ticks(10) == 10, "counter wrap arithmetic");
+        let large = Clock::new(0, u64::from(u32::MAX), 500)
+            .unwrap_or_else(|_| fail("large counter epoch"));
+        check(large.ticks(i64::MAX as u64)
+            == ((u128::from(i64::MAX as u64) * 500) / u128::from(u32::MAX)) as u64,
+            "counter conversion overflow");
+        emit("Architected scheduler clock arithmetic PASS\n");
         emit("ARM masked timer wake\n");
         arch::interrupts::disable();
         arm_timer();
@@ -257,7 +270,10 @@ mod arm {
             let pending = interface.acknowledge().unwrap_or_else(|_| fail("IRQ acknowledge rejected"))
                 .unwrap_or_else(|| fail("spurious timer IRQ"));
             let interrupt = pending.interrupt();
-            asm!("msr cntv_ctl_el0, {}", "isb", in(reg) 0u64, options(nostack));
+            let mut timer = arch::timer::LocalTimer::new(100)
+                .unwrap_or_else(|_| fail("native timer IRQ context"));
+            check(timer.handle().is_ok(), "native periodic timer IRQ/rearm");
+            check(timer.stop().is_ok(), "native virtual timer stop");
             if interrupt != TIMER_IRQ {
                 UNEXPECTED.store(interrupt + 1, Ordering::Release);
             }

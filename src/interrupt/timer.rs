@@ -1,17 +1,19 @@
-//! タイマー割込み管理
-//!
-//! PIT (Programmable Interval Timer) の管理とタイマー割込みハンドラ
-
-use crate::debug;
+//! Shared scheduling clock. Tick units are independent of the CPU timer.
 use core::sync::atomic::{AtomicU64, Ordering};
 
-pub const PIT_HZ: u64 = 500;
-pub const TICK_MS: u64 = 1000 / PIT_HZ;
-const PIT_BASE_HZ: u64 = 1_193_182;
-
-/// タイマー割り込みカウンタ
+pub const TICKS_PER_SECOND: u64 = 500;
+#[cfg(target_arch = "x86_64")]
+pub const PIT_HZ: u64 = TICKS_PER_SECOND;
+pub const TICK_MS: u64 = 1000 / TICKS_PER_SECOND;
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_arch = "x86_64")]
+#[path = "../arch/x86_64/timer.rs"]
+mod hardware;
+#[cfg(target_arch = "x86_64")]
+pub use hardware::*;
+
+#[cfg(target_arch = "x86_64")]
 fn advance_clock() {
     let ticks = TIMER_TICKS
         .fetch_add(1, Ordering::Relaxed)
@@ -19,67 +21,14 @@ fn advance_clock() {
     crate::syscall::time::wake_due_sleepers(ticks);
 }
 
-// Save all fifteen GPRs adjacent to the five CPU IRET slots. A compiler-made
-// x86-interrupt prologue cannot expose the GPRs for upcall continuation edits.
-macro_rules! timer_entry {
-    ($name:ident, $local:expr) => {
-        #[unsafe(naked)]
-        pub unsafe extern "C" fn $name() {
-            core::arch::naked_asm!(
-                "push rax", "push rcx", "push rdx", "push rbx", "push rbp",
-                "push rsi", "push rdi", "push r8", "push r9", "push r10",
-                "push r11", "push r12", "push r13", "push r14", "push r15",
-                "mov rdi, rsp",
-                "mov rbx, rsp",
-                "and rsp, -16",
-                "mov esi, {local}",
-                "cld",
-                "call {handle}",
-                "mov rsp, rbx",
-                "pop r15", "pop r14", "pop r13", "pop r12", "pop r11",
-                "pop r10", "pop r9", "pop r8", "pop rdi", "pop rsi",
-                "pop rbp", "pop rbx", "pop rdx", "pop rcx", "pop rax",
-                "iretq",
-                local = const $local,
-                handle = sym handle_timer,
-            );
-        }
-    };
-}
-timer_entry!(timer_interrupt_handler, 0);
-timer_entry!(local_timer_interrupt_handler, 1);
-
-extern "sysv64" fn handle_timer(raw: *mut crate::cpu::context::InterruptFrame, local: bool) {
-    // Only the assembly entries above supply this kernel-owned frame.
-    let frame = unsafe { &mut *raw };
-    let user_mode = frame.iret.cs & 3 == 3;
-    let entered_from_user = crate::syscall::syscall_entry::kpti_enter_for_trap(user_mode);
-    crate::performance::increment(crate::performance::CounterMetric::TimerInterrupts, 1);
-    if user_mode {
-        frame.iret.cs = u64::from(crate::mem::gdt::user_code_selector() | 3);
-        frame.iret.ss = u64::from(crate::mem::gdt::user_data_selector() | 3);
+/// Publish elapsed architected-counter time, not a per-CPU interrupt count.
+/// Concurrent timer IRQs can only move the shared clock forward.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn advance_to(ticks: u64) {
+    let previous = TIMER_TICKS.fetch_max(ticks, Ordering::AcqRel);
+    if ticks > previous {
+        crate::syscall::time::wake_due_sleepers(ticks);
     }
-
-    // PV guests have no PIT. Advance shared time on the bootstrap CPU only,
-    // so secondary CPUs do not multiply the clock rate.
-    if !local || (crate::hypervisor_guest::is_active() && crate::percpu::current_cpu_id() == 0) {
-        advance_clock();
-    }
-
-    let should_schedule = crate::task::scheduler_tick(user_mode);
-    if local {
-        crate::smp::local_apic_eoi();
-    } else {
-        super::send_eoi(32);
-    }
-    if should_schedule {
-        crate::task::schedule_and_switch();
-    }
-
-    // This frame belongs to the thread whose kernel stack resumes after a
-    // scheduler switch. Select its user upcall before leaving the kernel CR3.
-    crate::syscall::upcall::prepare_interrupt_return(frame);
-    crate::syscall::syscall_entry::kpti_leave_after_trap(entered_from_user);
 }
 
 /// 現在のタイマーティック数を取得
@@ -97,7 +46,7 @@ pub const fn tick_ms() -> u64 {
 
 #[inline]
 pub const fn ticks_per_second() -> u64 {
-    PIT_HZ
+    TICKS_PER_SECOND
 }
 
 #[inline]
@@ -110,77 +59,4 @@ pub const fn ms_to_ticks_ceil(milliseconds: u64) -> u64 {
 /// タイマーカウンタをリセット
 pub fn reset_ticks() {
     TIMER_TICKS.store(0, Ordering::Relaxed);
-}
-
-/// PITを停止（UEFI起動時の状態をクリア）
-pub fn disable_pit() {
-    debug!("Disabling PIT...");
-    unsafe {
-        use x86_64::instructions::port::Port;
-
-        // Channel 0を停止（one-shot mode、カウント0）
-        Port::<u8>::new(0x43).write(0x30);
-        Port::<u8>::new(0x40).write(0x00);
-        Port::<u8>::new(0x40).write(0x00);
-        // Channel 1,2も停止
-        Port::<u8>::new(0x43).write(0x70); // Channel 1
-        Port::<u8>::new(0x41).write(0x00);
-        Port::<u8>::new(0x41).write(0x00);
-
-        Port::<u8>::new(0x43).write(0xb0); // Channel 2
-        Port::<u8>::new(0x42).write(0x00);
-        Port::<u8>::new(0x42).write(0x00);
-    }
-    debug!("PIT disabled");
-}
-
-/// PITを初期化して2ms周期のタイマー割り込みを設定
-pub fn init_pit() {
-    debug!("Initializing PIT for {}ms timer interrupt...", TICK_MS);
-    unsafe {
-        use x86_64::instructions::port::Port;
-
-        let divisor: u16 = (PIT_BASE_HZ / PIT_HZ) as u16;
-
-        // Channel 0, LSB+MSB, Mode 2 (rate generator), Binary
-        Port::<u8>::new(0x43).write(0x34);
-
-        // IO待機
-        for _ in 0..100 {
-            core::hint::spin_loop();
-        }
-
-        // LSBを送信
-        Port::<u8>::new(0x40).write((divisor & 0xff) as u8);
-
-        // IO待機
-        for _ in 0..100 {
-            core::hint::spin_loop();
-        }
-
-        // MSBを送信
-        Port::<u8>::new(0x40).write(((divisor >> 8) & 0xff) as u8);
-    }
-    debug!("PIT configured for {} Hz interrupts", PIT_HZ);
-}
-
-/// タイマー割り込み（IRQ0）を有効化
-pub fn enable_timer_interrupt() {
-    debug!("Enabling timer interrupt (IRQ0)...");
-    unsafe {
-        use x86_64::instructions::port::Port;
-
-        // Master: IRQ0(timer), IRQ1(keyboard), IRQ2(cascade) を許可
-        // 1111_1000 = 0xF8
-        Port::<u8>::new(0x21).write(0xf8);
-        // Slave: IRQ12(PS/2 mouse) を許可（スレーブ内ではIRQ4）
-        // 1110_1111 = 0xEF
-        Port::<u8>::new(0xa1).write(0xef);
-
-        // IO待機
-        for _ in 0..1000 {
-            core::hint::spin_loop();
-        }
-    }
-    debug!("Timer interrupt enabled");
 }

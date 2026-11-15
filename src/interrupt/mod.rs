@@ -21,4 +21,5 @@ pub use idt::init as init_idt;
 #[cfg(target_arch = "aarch64")]
 pub use native::init as init_idt;
 pub use pic::{init as init_pic, send_eoi};
+#[cfg(target_arch = "x86_64")]
 pub use timer::{disable_pit, enable_timer_interrupt, init_pit};

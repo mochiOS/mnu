@@ -19,6 +19,8 @@ pub use selected::exception;
 pub use selected::fp;
 #[cfg(target_arch = "aarch64")]
 pub use selected::gic;
+#[cfg(target_arch = "aarch64")]
+pub use selected::timer;
 pub use selected::tls;
 pub use selected::thread;
 pub use selected::upcall;

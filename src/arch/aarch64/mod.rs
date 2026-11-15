@@ -10,6 +10,7 @@ pub mod fp;
 pub mod gic;
 pub mod tls;
 pub mod thread;
+pub mod timer;
 pub mod memory;
 pub mod paging;
 pub mod usermode;
