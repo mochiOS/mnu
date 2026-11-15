@@ -59,6 +59,10 @@ def check(architecture, args, out):
     ]
     if architecture == "aarch64":
         build += ["-C", f"link-arg=-T{CORE / 'scripts/arch-probe.ld'}"]
+        if args.native_syscall_rlib:
+            native = args.native_syscall_rlib.resolve()
+            build += ["--cfg", "native_syscall_probe", "--extern", f"mochi_user_syscall={native}",
+                      "-L", "dependency=" + str(native.parent)]
     run(build, out / f"{architecture}-build.log", 60)
 
     qemu = executable(args.qemu_aarch64 if architecture == "aarch64" else args.qemu_x86_64)
@@ -106,6 +110,8 @@ def main():
     parser.add_argument("--qemu-aarch64", default="qemu-system-aarch64")
     parser.add_argument("--qemu-x86-64", dest="qemu_x86_64", default="qemu-system-x86_64")
     parser.add_argument("--firmware", type=Path, default=Path("/usr/share/OVMF"))
+    parser.add_argument("--native-syscall-rlib", type=Path,
+                        help="also execute a matching AArch64 mochi-user-syscall rlib at EL0")
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)

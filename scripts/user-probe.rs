@@ -12,6 +12,8 @@ static mut USER_STACK: Stack = Stack([0; 16384]);
 static PHASE: AtomicU32 = AtomicU32::new(0);
 static PRIVILEGED_TRAPS: AtomicU32 = AtomicU32::new(0);
 static MEMORY_TRAPS: AtomicU32 = AtomicU32::new(0);
+#[cfg(native_syscall_probe)]
+static NATIVE_CALLS: AtomicU32 = AtomicU32::new(0);
 static KERNEL_PRIVATE: u64 = 0xa5a5_1234_5678_ffff;
 
 extern "C" {
@@ -37,7 +39,12 @@ pub fn handle(frame: &mut ExceptionFrame) {
     );
     let bottom = core::ptr::addr_of!(USER_STACK) as u64;
     let top = bottom + core::mem::size_of::<Stack>() as u64;
-    check(frame.user_stack_pointer() == top, "EL0 stack not retained");
+    check(
+        frame.user_stack_pointer() >= bottom
+            && frame.user_stack_pointer() <= top
+            && frame.user_stack_pointer() & 15 == 0,
+        "EL0 stack not retained",
+    );
     let kernel_sp = arch::stack_pointer();
     check(
         kernel_sp < bottom || kernel_sp >= top,
@@ -122,8 +129,34 @@ pub fn handle(frame: &mut ExceptionFrame) {
     }
 
     check(frame.syndrome() >> 26 == 0x15, "expected AArch64 SVC");
+    #[cfg(native_syscall_probe)]
+    if frame.syndrome() & 0xffff == 0 {
+        let number = frame.registers()[8];
+        check(
+            (0x7000..=0x7006).contains(&number),
+            "native probe syscall number",
+        );
+        check(PHASE.load(Ordering::Acquire) == 1, "native syscall phase");
+        let count = (number - 0x7000) as usize;
+        check(
+            NATIVE_CALLS.fetch_add(1, Ordering::AcqRel) as usize == count,
+            "native syscall order",
+        );
+        let mut result = number;
+        for index in 0..count {
+            let argument = 0x11 * (index as u64 + 1);
+            check(
+                frame.registers()[index] == argument,
+                "native syscall argument register",
+            );
+            result += argument;
+        }
+        frame.registers_mut()[0] = result;
+        return;
+    }
     match frame.syndrome() & 0xffff {
         0x51 => {
+            check(frame.user_stack_pointer() == top, "initial EL0 stack");
             check(PHASE.swap(1, Ordering::AcqRel) == 0, "initial SVC phase");
             check(frame.registers()[0] == 0x99, "EL0 initial argument");
             check(
@@ -143,6 +176,14 @@ pub fn handle(frame: &mut ExceptionFrame) {
             frame.registers_mut()[1] = core::ptr::addr_of!(KERNEL_PRIVATE) as u64;
         }
         0x52 => {
+            #[cfg(native_syscall_probe)]
+            {
+                check(
+                    NATIVE_CALLS.load(Ordering::Acquire) == 7,
+                    "missing native syscall probe",
+                );
+                emit("Native syscall wrappers 0..6 PASS\n");
+            }
             check(PHASE.swap(2, Ordering::AcqRel) == 1, "second SVC phase");
             check(
                 PRIVILEGED_TRAPS.load(Ordering::Acquire) == 1,
@@ -216,6 +257,11 @@ unsafe extern "C" fn user_entry() -> ! {
         "svc #0x51",
         "cmp x0, #66",
         "b.ne 2f",
+        "mov x20, x1",
+        ".if {native}",
+        "bl probe_native_calls",
+        "cbnz x0, 2f",
+        ".endif",
         "mrs x7, tpidr_el0",
         "movz x9, #0x1234, lsl #16",
         "movk x9, #0x5000",
@@ -231,6 +277,7 @@ unsafe extern "C" fn user_entry() -> ! {
         "cmp x5, x6",
         "b.ne 2f",
         ".global probe_user_forbidden_read",
+        "mov x1, x20",
         "probe_user_forbidden_read:",
         "ldr x6, [x1]", // Must fault: mapped kernel page has no EL0 permission.
         "adr x1, probe_user_begin",
@@ -281,5 +328,38 @@ unsafe extern "C" fn user_entry() -> ! {
         "2: mov x0, #1",
         "svc #0x53",
         "b .",
+        native = const cfg!(native_syscall_probe) as usize,
     );
+}
+
+// This optional path calls the real user crate, linked through --extern. Keep
+// its code on the EL0 executable page; it cannot call fixture/kernel helpers.
+#[cfg(native_syscall_probe)]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".user.text")]
+extern "C" fn probe_native_calls() -> u64 {
+    unsafe {
+        if mochi_user_syscall::syscall0(0x7000) != 0x7000 {
+            return 1;
+        }
+        if mochi_user_syscall::syscall1(0x7001, 0x11) != 0x7012 {
+            return 1;
+        }
+        if mochi_user_syscall::syscall2(0x7002, 0x11, 0x22) != 0x7035 {
+            return 1;
+        }
+        if mochi_user_syscall::syscall3(0x7003, 0x11, 0x22, 0x33) != 0x7069 {
+            return 1;
+        }
+        if mochi_user_syscall::syscall4(0x7004, 0x11, 0x22, 0x33, 0x44) != 0x70ae {
+            return 1;
+        }
+        if mochi_user_syscall::syscall5(0x7005, 0x11, 0x22, 0x33, 0x44, 0x55) != 0x7104 {
+            return 1;
+        }
+        if mochi_user_syscall::syscall6(0x7006, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66) != 0x716b {
+            return 1;
+        }
+    }
+    0
 }
