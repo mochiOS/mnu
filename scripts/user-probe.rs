@@ -1,5 +1,5 @@
-//! EL0 CPU transition diagnostic. MMU is off in this fixture: this checks
-//! exception privilege and register handling, not address-space isolation.
+//! EL0 transition and memory protection using the production MMU and vectors.
+//! A one-CPU diagnostic, not a replacement kernel or a Domain isolation test.
 use crate::arch::exception::ExceptionFrame;
 use crate::{arch, check, emit, exit, fail};
 use core::arch::{asm, naked_asm};
@@ -7,20 +7,26 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 #[repr(C, align(16))]
 struct Stack([u8; 16384]);
+#[unsafe(link_section = ".user.stack")]
 static mut USER_STACK: Stack = Stack([0; 16384]);
 static PHASE: AtomicU32 = AtomicU32::new(0);
 static PRIVILEGED_TRAPS: AtomicU32 = AtomicU32::new(0);
+static MEMORY_TRAPS: AtomicU32 = AtomicU32::new(0);
+static KERNEL_PRIVATE: u64 = 0xa5a5_1234_5678_ffff;
 
 extern "C" {
     static probe_user_privileged: u8;
+    static probe_user_forbidden_read: u8;
+    static probe_user_forbidden_write: u8;
+    static probe_user_begin: u8;
 }
 
 pub fn run() -> ! {
     emit("Entering EL0 CPU diagnostic\n");
     arch::interrupts::disable();
     let top = core::ptr::addr_of!(USER_STACK) as u64 + core::mem::size_of::<Stack>() as u64;
-    // SAFETY: This one-CPU fixture owns both stacks and its flat physical RAM.
-    // This deliberately does not substitute for the future MMU/Domain checks.
+    // SAFETY: This fixture owns both stacks and maps only its dedicated user
+    // code/stack as EL0-accessible. Domain separation is a separate mBoot test.
     unsafe { poison_and_enter(user_entry as *const () as u64, top, 0x99, 0x1234_5000) }
 }
 
@@ -37,6 +43,64 @@ pub fn handle(frame: &mut ExceptionFrame) {
         kernel_sp < bottom || kernel_sp >= top,
         "trap used user stack",
     );
+
+    let class = frame.syndrome() >> 26;
+    if class == 0x24 {
+        check(PHASE.load(Ordering::Acquire) == 1, "memory trap phase");
+        check(
+            frame.syndrome() & 0x3f == 0xf,
+            "expected level-3 permission fault",
+        );
+        let pc = frame.instruction_pointer();
+        if pc == core::ptr::addr_of!(probe_user_forbidden_read) as u64 {
+            check(
+                frame.fault_address() == core::ptr::addr_of!(KERNEL_PRIVATE) as u64,
+                "kernel read FAR",
+            );
+            check(frame.syndrome() & (1 << 6) == 0, "expected read fault");
+            check(
+                MEMORY_TRAPS.fetch_add(1, Ordering::AcqRel) == 0,
+                "kernel read fault order",
+            );
+        } else {
+            check(
+                pc == core::ptr::addr_of!(probe_user_forbidden_write) as u64,
+                "unexpected data abort PC",
+            );
+            check(
+                frame.fault_address() == core::ptr::addr_of!(probe_user_begin) as u64,
+                "code write FAR",
+            );
+            check(frame.syndrome() & (1 << 6) != 0, "expected write fault");
+            check(
+                MEMORY_TRAPS.fetch_add(1, Ordering::AcqRel) == 1,
+                "code write fault order",
+            );
+        }
+        check(frame.advance_instruction(), "data abort return PC");
+        return;
+    }
+    if class == 0x20 {
+        check(PHASE.load(Ordering::Acquire) == 2, "execute fault phase");
+        check(
+            PRIVILEGED_TRAPS.load(Ordering::Acquire) == 1
+                && MEMORY_TRAPS.load(Ordering::Acquire) == 2,
+            "missing protection fault",
+        );
+        check(
+            frame.syndrome() & 0x3f == 0xf,
+            "expected level-3 execute permission fault",
+        );
+        check(
+            frame.fault_address() == top - 16 && frame.instruction_pointer() == top - 16,
+            "execute fault address",
+        );
+        check(frame.registers()[0] == 0, "EL0 register test failed");
+        emit("EL0 kernel isolation, read-only code and NX stack PASS\n");
+        emit("EL0 SVC, privileged trap and register restoration PASS\n");
+        emit("ARCH PRIMITIVES PASS aarch64\n");
+        exit(0)
+    }
 
     let privileged_pc = core::ptr::addr_of!(probe_user_privileged) as u64;
     if frame.instruction_pointer() == privileged_pc {
@@ -76,12 +140,17 @@ pub fn handle(frame: &mut ExceptionFrame) {
             );
             check(frame.saved_state() == 0, "kernel flags leaked into EL0");
             frame.registers_mut()[0] = 66;
+            frame.registers_mut()[1] = core::ptr::addr_of!(KERNEL_PRIVATE) as u64;
         }
         0x52 => {
             check(PHASE.swap(2, Ordering::AcqRel) == 1, "second SVC phase");
             check(
                 PRIVILEGED_TRAPS.load(Ordering::Acquire) == 1,
                 "EL0 privilege was not enforced",
+            );
+            check(
+                MEMORY_TRAPS.load(Ordering::Acquire) == 2,
+                "EL0 memory protection not enforced",
             );
             check(
                 frame.registers()[0] == 0x42 && frame.registers()[8] == 55,
@@ -99,16 +168,7 @@ pub fn handle(frame: &mut ExceptionFrame) {
             );
             frame.registers_mut()[0] = 77;
         }
-        0x53 => {
-            check(PHASE.load(Ordering::Acquire) == 2, "final SVC phase");
-            check(
-                frame.registers()[0] == 0,
-                "EL0 return register/TLS/FP mismatch",
-            );
-            emit("EL0 SVC, privileged trap and register restoration PASS\n");
-            emit("ARCH PRIMITIVES PASS aarch64\n");
-            exit(0)
-        }
+        0x53 => fail("EL0 return register/TLS/FP mismatch"),
         _ => fail("unexpected SVC immediate"),
     }
     // The real vector must restore the saved user SIMD/control after kernel
@@ -148,8 +208,11 @@ unsafe extern "C" fn poison_and_enter(_entry: u64, _stack: u64, _arg: u64, _tls:
 }
 
 #[unsafe(naked)]
+#[unsafe(link_section = ".user.text")]
 unsafe extern "C" fn user_entry() -> ! {
     naked_asm!(
+        ".global probe_user_begin",
+        "probe_user_begin:",
         "svc #0x51",
         "cmp x0, #66",
         "b.ne 2f",
@@ -167,6 +230,13 @@ unsafe extern "C" fn user_entry() -> ! {
         "mov x6, #0x7654",
         "cmp x5, x6",
         "b.ne 2f",
+        ".global probe_user_forbidden_read",
+        "probe_user_forbidden_read:",
+        "ldr x6, [x1]", // Must fault: mapped kernel page has no EL0 permission.
+        "adr x1, probe_user_begin",
+        ".global probe_user_forbidden_write",
+        "probe_user_forbidden_write:",
+        "str wzr, [x1]", // Must fault: executable user code is read-only.
         "mov x19, #0x1234",
         "mov x0, #0x42",
         "dup v0.2d, x0",
@@ -202,9 +272,14 @@ unsafe extern "C" fn user_entry() -> ! {
         "cmp x1, #2",
         "b.ne 2f",
         "mov x0, #0",
-        "b 3f",
+        "mov x1, sp",
+        "sub x1, x1, #16",
+        "movz w2, #0x03c0",
+        "movk w2, #0xd65f, lsl #16", // RET, if NX were incorrectly omitted.
+        "str w2, [x1]",
+        "br x1", // Must fault before executing the stack contents.
         "2: mov x0, #1",
-        "3: svc #0x53",
+        "svc #0x53",
         "b .",
     );
 }

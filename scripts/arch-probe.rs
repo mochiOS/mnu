@@ -13,6 +13,10 @@ mod context_probe;
 #[path = "user-probe.rs"]
 mod user_probe;
 
+#[cfg(target_arch = "aarch64")]
+#[path = "mmu-probe.rs"]
+mod mmu_probe;
+
 use core::arch::asm;
 
 #[cfg(target_arch = "aarch64")]
@@ -82,6 +86,7 @@ mod arm {
             asm!("mrs {}, CurrentEL", out(reg) level, options(nomem, nostack));
             check(level == 4, "probe must run at EL1");
             arch::exception::install_vectors();
+            crate::mmu_probe::initialize();
             core::ptr::write_volatile((GICD + 0x100) as *mut u32, 1 << TIMER_IRQ);
             core::ptr::write_volatile(GICD as *mut u32, 1);
             core::ptr::write_volatile((GICC + 4) as *mut u32, 0xff);

@@ -3,6 +3,7 @@
 
 pub mod context;
 pub mod exception;
+pub mod paging;
 pub mod usermode;
 
 pub mod interrupts {
