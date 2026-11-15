@@ -56,6 +56,9 @@ pub fn handle(frame: &mut ExceptionFrame) {
 
     let class = frame.syndrome() >> 26;
     if class == 0x24 {
+        let abort = frame.user_abort().unwrap_or_else(|| fail("native data abort decode"));
+        check(abort.address == frame.fault_address() && !abort.execute && abort.protection,
+            "native data abort classification");
         check(PHASE.load(Ordering::Acquire) == 1, "memory trap phase");
         check(
             frame.syndrome() & 0x3f == 0xf,
@@ -68,6 +71,7 @@ pub fn handle(frame: &mut ExceptionFrame) {
                 "kernel read FAR",
             );
             check(frame.syndrome() & (1 << 6) == 0, "expected read fault");
+            check(!abort.write, "read fault decoded as write");
             check(
                 MEMORY_TRAPS.fetch_add(1, Ordering::AcqRel) == 0,
                 "kernel read fault order",
@@ -82,6 +86,7 @@ pub fn handle(frame: &mut ExceptionFrame) {
                 "code write FAR",
             );
             check(frame.syndrome() & (1 << 6) != 0, "expected write fault");
+            check(abort.write, "write fault decoded as read");
             check(
                 MEMORY_TRAPS.fetch_add(1, Ordering::AcqRel) == 1,
                 "code write fault order",
@@ -91,6 +96,9 @@ pub fn handle(frame: &mut ExceptionFrame) {
         return;
     }
     if class == 0x20 {
+        let abort = frame.user_abort().unwrap_or_else(|| fail("native instruction abort decode"));
+        check(abort.address == frame.fault_address() && abort.execute && !abort.write
+            && abort.protection, "native instruction abort classification");
         check(PHASE.load(Ordering::Acquire) == 2, "execute fault phase");
         check(
             PRIVILEGED_TRAPS.load(Ordering::Acquire) == 1
@@ -134,6 +142,7 @@ pub fn handle(frame: &mut ExceptionFrame) {
     }
 
     check(frame.syndrome() >> 26 == 0x15, "expected AArch64 SVC");
+    check(frame.user_abort().is_none(), "SVC accepted as memory abort");
     #[cfg(native_syscall_probe)]
     if frame.syndrome() & 0xffff == 0 {
         let (number, arguments) = frame.syscall_request()

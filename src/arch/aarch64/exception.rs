@@ -101,7 +101,38 @@ pub struct ExceptionFrame {
 pub type SavedSyscallFrame = ExceptionFrame;
 pub type InterruptFrame = ExceptionFrame;
 
+/// Stage-1 page-resolution request. External errors, invalid FAR and cache
+/// maintenance traps must not be mistaken for ordinary demand paging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserAbort {
+    pub address: u64,
+    pub write: bool,
+    pub execute: bool,
+    pub protection: bool,
+}
+
 impl ExceptionFrame {
+    pub fn user_abort(&self) -> Option<UserAbort> {
+        if self.kind() != Some(ExceptionKind::Synchronous)
+            || self.user_context().is_none()
+            || !matches!(self.exception_class(), 0x20 | 0x24)
+            || self.esr & ((1 << 10) | (1 << 8) | (1 << 7)) != 0
+        {
+            return None;
+        }
+        let status = self.esr & 0x3f;
+        if !(4..=15).contains(&status) {
+            return None;
+        }
+        let execute = self.exception_class() == 0x20;
+        Some(UserAbort {
+            address: self.far,
+            write: !execute && self.esr & (1 << 6) != 0,
+            execute,
+            protection: status >= 12,
+        })
+    }
+
     /// Decode only the native EL0 AArch64 `SVC #0` interface. Other traps,
     /// privileged origins and SVC immediates cannot enter syscall policy.
     pub fn syscall_request(&self) -> Option<(u64, [u64; 6])> {

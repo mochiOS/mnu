@@ -104,12 +104,10 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         interrupt::enable_timer_interrupt();
     }
 
-    crate::arch::interrupts::enable();
-
-    // Initialize syscall MSRs (STAR/LSTAR/FMASK)
-
-    // SYSCALL/SYSRET 命令サポートを初期化
+    // Publish the native entry stack and CPU-local state before IRQ handlers
+    // can schedule a thread or observe an incompletely initialized entry.
     crate::syscall::syscall_entry::init_syscall();
+    crate::arch::interrupts::enable();
     crate::performance::mark_boot(crate::performance::BootMilestone::BspReady);
 
     Ok(memory_map)

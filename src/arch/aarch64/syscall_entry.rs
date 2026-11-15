@@ -43,16 +43,28 @@ pub(crate) fn handle_svc(frame: &mut ExceptionFrame) -> bool {
     let Some((number, arguments)) = frame.syscall_request() else {
         return false;
     };
+    let Some(id) = retain_user_trap(frame) else {
+        return false;
+    };
+    let result = crate::syscall::entry_dispatch::dispatch_from_user(number, arguments);
+    // A blocking call may have switched stacks/TTBR0. Metadata and upcall
+    // selection belong to the thread whose saved EL1 stack actually resumed.
+    crate::arch::interrupts::disable();
+    if !frame.set_syscall_result(result) {
+        crate::task::scheduler::exit_current_process(u64::MAX);
+    }
+    crate::syscall::upcall::prepare_syscall_return(frame);
+    finish_user_trap(frame, id)
+}
+
+/// Retain EL0 registers/TLS before a synchronous trap can block or schedule.
+pub(crate) fn retain_user_trap(frame: &ExceptionFrame) -> Option<crate::task::ThreadId> {
     crate::arch::interrupts::disable();
     crate::percpu::install_current_cpu_state();
     verify_kernel_page_table_before_rust();
-    let Some(context) = frame.user_context() else {
-        return false;
-    };
+    let context = frame.user_context()?;
     let tls = unsafe { crate::arch::tls::read_user_base() };
-    let Some(id) = crate::task::current_thread_id() else {
-        return false;
-    };
+    let id = crate::task::current_thread_id()?;
     if !context.valid() || tls > 0x0000_7fff_ffff_ffff {
         crate::task::scheduler::exit_current_process(u64::MAX);
     }
@@ -62,17 +74,18 @@ pub(crate) fn handle_svc(frame: &mut ExceptionFrame) -> bool {
     })
     .is_none()
     {
-        return false;
+        return None;
     }
 
-    let result = crate::syscall::entry_dispatch::dispatch_from_user(number, arguments);
-    // A blocking call may have switched stacks/TTBR0. Metadata and upcall
-    // selection belong to the thread whose saved EL1 stack actually resumed.
+    Some(id)
+}
+
+/// Rejoin the current thread's TTBR0/TLS after a possibly blocking trap.
+pub(crate) fn finish_user_trap(frame: &ExceptionFrame, id: crate::task::ThreadId) -> bool {
     crate::arch::interrupts::disable();
-    if !frame.set_syscall_result(result) {
-        crate::task::scheduler::exit_current_process(u64::MAX);
+    if crate::task::current_thread_id() != Some(id) {
+        crate::arch::halt();
     }
-    crate::syscall::upcall::prepare_syscall_return(frame);
     if !frame.user_context().is_some_and(|context| context.valid()) {
         crate::task::scheduler::exit_current_process(u64::MAX);
     }
