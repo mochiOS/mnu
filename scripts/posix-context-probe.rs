@@ -11,6 +11,95 @@ use mochios_posix_client::{signal_checkpoint, signal_context::*, signal_stack, s
 #[repr(C, align(16))]
 struct StackBytes([u8; 8192]);
 static mut STACK: StackBytes = StackBytes([0; 8192]);
+#[repr(C, align(4096))]
+struct TlsBytes([u8; 8192]);
+static mut TLS: TlsBytes = TlsBytes([0; 8192]);
+static TLS_SOURCE: [u8; 3] = [0x21, 0x43, 0x65];
+
+fn tls_variant_i() {
+    use mochios_posix_client::static_tls::{dtv, modules::Plan, Template};
+    let root = Template {
+        source: TLS_SOURCE.as_ptr() as usize,
+        file_size: 3,
+        memory_size: 17,
+        alignment: 32,
+        residue: 3,
+    };
+    let templates = [
+        Some(root),
+        None,
+        Some(Template {
+            alignment: 128,
+            residue: 7,
+            ..root
+        }),
+    ];
+    let plan = Plan::new(&templates, 4096).unwrap_or_else(|| crate::fail("TLS plan"));
+    let base = addr_of_mut!(TLS) as usize;
+    let size = plan.layout().mapping_size;
+    check(size <= 8192, "TLS fixture bounds");
+    let tp = plan
+        .initialize_zeroed(
+            base,
+            size,
+            |source, bytes| {
+                // SAFETY: the templates refer to this immutable fixture array.
+                bytes.copy_from_slice(unsafe {
+                    core::slice::from_raw_parts(source as *const u8, bytes.len())
+                });
+                Ok::<(), ()>(())
+            },
+            |destination, bytes| {
+                check(
+                    destination >= base && destination + bytes.len() <= base + size,
+                    "TLS write bounds",
+                );
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        destination as *mut u8,
+                        bytes.len(),
+                    );
+                }
+                Ok::<(), ()>(())
+            },
+        )
+        .unwrap_or_else(|_| crate::fail("TLS initialize"));
+    check(tp & 127 == 0, "TLS maximum alignment");
+    let mapping = unsafe { core::slice::from_raw_parts(base as *const u8, size) };
+    let first =
+        dtv::address(mapping, base, tp, 1, 0).unwrap_or_else(|| crate::fail("TLS root DTV"));
+    let last =
+        dtv::address(mapping, base, tp, 3, 0).unwrap_or_else(|| crate::fail("TLS dependency DTV"));
+    // LLD 18 AArch64: TP + 16 + ((p_vaddr - 16) & (p_align - 1)).
+    check(
+        first == tp + 16 + ((3usize.wrapping_sub(16)) & 31),
+        "TLS compiler TP offset",
+    );
+    check(
+        last >= first + root.memory_size && last & 127 == 7,
+        "TLS dependency placement",
+    );
+    check(
+        dtv::address(mapping, base, tp, 2, 0).is_none(),
+        "absent TLS module resolved",
+    );
+    check(
+        dtv::address(mapping, base, tp, 1, 18).is_none(),
+        "TLS module overflow",
+    );
+    check(
+        &mapping[first - base..first - base + 3] == TLS_SOURCE.as_slice(),
+        "TLS template data",
+    );
+    check(
+        mapping[first - base + 3..first - base + 17]
+            .iter()
+            .all(|b| *b == 0),
+        "TLS zero-fill",
+    );
+    emit("AArch64 Variant-I TLS layout PASS\n");
+}
 
 unsafe extern "C" fn checkpoint(machine: *mut MachineContext, argument: *mut c_void) {
     check(argument as usize == 0x123, "checkpoint argument");
@@ -74,7 +163,10 @@ unsafe extern "C" fn capture_backend() -> u64 {
 #[unsafe(naked)]
 unsafe extern "C" fn resume_recorded_continuation() -> u64 {
     naked_asm!(
-        "ldr x16, [x0]", "ldr x17, [x0, #8]", "mov sp, x17", "br x16",
+        "ldr x16, [x0]",
+        "ldr x17, [x0, #8]",
+        "mov sp, x17",
+        "br x16",
     );
 }
 
@@ -90,6 +182,7 @@ unsafe extern "C" fn on_stack(argument: *mut c_void) {
 }
 
 pub fn run() {
+    tls_variant_i();
     check(
         unsafe { checkpoint_registers() } == 0,
         "AAPCS64 checkpoint restore",
@@ -107,9 +200,13 @@ pub fn run() {
         "snapshot reserved fields",
     );
     let previous = signal_stack::current_pointer();
-    let result = unsafe { snapshot::capture_with(&mut context, 0xabc, resume_recorded_continuation) };
+    let result =
+        unsafe { snapshot::capture_with(&mut context, 0xabc, resume_recorded_continuation) };
     check(result == 0, "recorded child continuation result");
-    check(signal_stack::current_pointer() == previous, "recorded child stack restore");
+    check(
+        signal_stack::current_pointer() == previous,
+        "recorded child stack restore",
+    );
     let base = addr_of_mut!(STACK) as usize;
     let top = base + core::mem::size_of::<StackBytes>();
     let mut bounds = [base, top];
