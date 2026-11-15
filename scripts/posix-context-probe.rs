@@ -183,6 +183,8 @@ unsafe extern "C" fn on_stack(argument: *mut c_void) {
 
 pub fn run() {
     tls_variant_i();
+    #[cfg(elf_relocation_probe)]
+    elf::run();
     check(
         unsafe { checkpoint_registers() } == 0,
         "AAPCS64 checkpoint restore",
@@ -221,3 +223,7 @@ pub fn run() {
     );
     emit("AAPCS64 userspace continuations PASS\n");
 }
+
+#[cfg(elf_relocation_probe)]
+#[path = "elf-context-probe.rs"]
+mod elf;

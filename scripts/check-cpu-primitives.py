@@ -68,7 +68,14 @@ def check(architecture, args, out):
             client = args.posix_client_rlib.resolve()
             build += ["--cfg", "posix_context_probe", "--extern", f"mochios_posix_client={client}",
                       "-L", "dependency=" + str(client.parent)]
-    run(build, out / f"{architecture}-build.log", 60)
+        if args.elf_fixture:
+            if not args.posix_client_rlib:
+                raise RuntimeError("--elf-fixture requires a matching --posix-client-rlib")
+            build += ["--cfg", "elf_relocation_probe"]
+    build_env = dict(os.environ)
+    if args.elf_fixture:
+        build_env["MNU_ARM_ELF_FIXTURE"] = str(args.elf_fixture.resolve())
+    run(build, out / f"{architecture}-build.log", 60, env=build_env)
 
     qemu = executable(args.qemu_aarch64 if architecture == "aarch64" else args.qemu_x86_64)
     common = [
@@ -119,6 +126,8 @@ def main():
                         help="also execute a matching AArch64 mochi-user-syscall rlib at EL0")
     parser.add_argument("--posix-client-rlib", type=Path,
                         help="exercise matching AArch64 userspace continuation/alternate-stack code")
+    parser.add_argument("--elf-fixture", type=Path,
+                        help="also relocate a real ARM64 DSO built from scripts/elf-probe.c")
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
