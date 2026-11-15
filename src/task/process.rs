@@ -2041,8 +2041,8 @@ pub fn release_process_borrowed_mappings(pid: ProcessId) -> core::result::Result
     for dma in dma_buffers {
         for page_index in 0..dma.page_count() {
             let phys = dma.phys_start() + (page_index as u64) * 4096;
-            let frame = x86_64::structures::paging::PhysFrame::containing_address(
-                x86_64::PhysAddr::new(phys),
+            let frame = crate::arch::memory::paging::PhysFrame::containing_address(
+                crate::arch::memory::PhysAddr::new(phys),
             );
             let _ = crate::mem::frame::deallocate_frame(frame);
         }

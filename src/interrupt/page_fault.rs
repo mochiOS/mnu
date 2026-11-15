@@ -27,10 +27,10 @@ extern "sysv64" fn handle(raw: *mut crate::cpu::context::PageFaultFrame) {
     let raw = unsafe { &mut *raw };
     let entered = crate::syscall::syscall_entry::kpti_enter_for_trap(raw.iret.cs & 3 == 3);
     let stack = x86_64::structures::idt::InterruptStackFrame::new(
-        x86_64::VirtAddr::new_truncate(raw.iret.rip),
+        crate::arch::memory::VirtAddr::new_truncate(raw.iret.rip),
         x86_64::structures::gdt::SegmentSelector(raw.iret.cs as u16),
         x86_64::registers::rflags::RFlags::from_bits_truncate(raw.iret.rflags),
-        x86_64::VirtAddr::new_truncate(raw.iret.rsp),
+        crate::arch::memory::VirtAddr::new_truncate(raw.iret.rsp),
         x86_64::structures::gdt::SegmentSelector(raw.iret.ss as u16),
     );
     let error = x86_64::structures::idt::PageFaultErrorCode::from_bits_truncate(raw.error_code);

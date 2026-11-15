@@ -1,7 +1,7 @@
 pub use crate::cpu::context::{SyscallUserContext, UserUpcallContext};
 use crate::interrupt::spinlock::SpinLock;
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::VirtAddr;
+use crate::arch::memory::VirtAddr;
 
 use super::context::Context;
 use super::ids::{ProcessId, ThreadId, ThreadState};
@@ -427,7 +427,7 @@ fn unmap_stack_from_table(table: u64, base: u64, page_count: usize) -> bool {
 }
 
 fn release_stack_pages(base: u64, page_count: usize, user_page_table: u64) -> bool {
-    use x86_64::structures::paging::{Page, Size4KiB};
+    use crate::arch::memory::paging::{Page, Size4KiB};
 
     if user_page_table != 0 && !unmap_stack_from_table(user_page_table, base, page_count) {
         return false;
@@ -507,7 +507,7 @@ pub(crate) unsafe fn allocate_kernel_stack_in_table(
     size: usize,
     user_page_table: u64,
 ) -> Option<u64> {
-    use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
+    use crate::arch::memory::paging::{Page, PageTableFlags, Size4KiB};
 
     reclaim_current_cpu_kernel_stack();
     if size == 0 || size > KSTACK_SLOT_BYTES {
@@ -1182,9 +1182,9 @@ impl Thread {
     }
 
     pub fn is_kernel_stack_guard_intact(&self) -> bool {
-        use x86_64::structures::paging::mapper::TranslateError;
-        use x86_64::structures::paging::Mapper;
-        use x86_64::structures::paging::{Page, Size4KiB};
+        use crate::arch::memory::paging::mapper::TranslateError;
+        use crate::arch::memory::paging::Mapper;
+        use crate::arch::memory::paging::{Page, Size4KiB};
 
         let pool_start = KSTACK_ARENA_BASE;
         let pool_end = KSTACK_ARENA_BASE + KSTACK_POOL_SIZE as u64;

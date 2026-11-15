@@ -7,7 +7,7 @@ use crate::interrupt::spinlock::SpinLock;
 use crate::task::ThreadId;
 use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use mnu_abi::status::Error;
-use x86_64::VirtAddr;
+use crate::arch::memory::VirtAddr;
 
 #[derive(Clone, Copy)]
 struct AddressKey {

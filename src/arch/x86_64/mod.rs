@@ -2,6 +2,8 @@
 
 pub mod context;
 pub mod exception;
+#[cfg(not(mnu_arch_probe))]
+pub mod memory;
 
 pub mod interrupts {
     use core::arch::asm;

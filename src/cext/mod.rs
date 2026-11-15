@@ -159,15 +159,15 @@ extern "C" fn kernel_alloc_dma(size: usize, align: usize, out_region: *mut McxDm
 
     let release = || {
         for page in 0..pages {
-            let frame = x86_64::structures::paging::PhysFrame::containing_address(
-                x86_64::PhysAddr::new(phys + (page as u64) * 4096),
+            let frame = crate::arch::memory::paging::PhysFrame::containing_address(
+                crate::arch::memory::PhysAddr::new(phys + (page as u64) * 4096),
             );
             let _ = crate::mem::frame::deallocate_frame(frame);
         }
     };
     for page in 0..pages {
-        let frame = x86_64::structures::paging::PhysFrame::containing_address(
-            x86_64::PhysAddr::new(phys + (page as u64) * 4096),
+        let frame = crate::arch::memory::paging::PhysFrame::containing_address(
+            crate::arch::memory::PhysAddr::new(phys + (page as u64) * 4096),
         );
         if crate::mem::frame::zero_frame(frame).is_err() {
             release();

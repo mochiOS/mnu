@@ -4,8 +4,8 @@ use crate::task::{DmaBuffer, ProcessId};
 use core::sync::atomic::{AtomicU64, Ordering};
 use mnu_abi::status::Error;
 use mnu_abi::DmaAllocation;
-use x86_64::structures::paging::PhysFrame;
-use x86_64::PhysAddr;
+use crate::arch::memory::paging::PhysFrame;
+use crate::arch::memory::PhysAddr;
 
 static NEXT_DMA_HANDLE: AtomicU64 = AtomicU64::new(1);
 const DMA_VA_BASE_MIN: u64 = 0x0000_7000_0000_0000;

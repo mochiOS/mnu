@@ -5,7 +5,7 @@
 use crate::info;
 use spin::Once;
 use x86_64::structures::tss::TaskStateSegment;
-use x86_64::VirtAddr;
+use crate::arch::memory::VirtAddr;
 
 /// ダブルフォルト用ISTインデックス
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;

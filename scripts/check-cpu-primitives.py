@@ -54,6 +54,7 @@ def check(architecture, args, out):
     binary = out / ("aarch64.elf" if architecture == "aarch64" else "BOOTX64.EFI")
     build = [
         "rustc", f"+{args.toolchain}", "--edition", "2021", "--crate-type", "bin",
+        "--cfg", "mnu_arch_probe",
         "--target", target, "-C", "panic=abort", "-C", "opt-level=2",
         str(CORE / "scripts/arch-probe.rs"), "-o", str(binary),
     ]

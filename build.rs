@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(mnu_arch_probe)");
     match std::env::var("CARGO_CFG_TARGET_OS") {
         Ok(value) if value == "none" => {}
         Ok(_) => {

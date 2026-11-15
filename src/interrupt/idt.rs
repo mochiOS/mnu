@@ -102,7 +102,7 @@ pub fn init() {
         unsafe {
             // The assembly entry saves all GPRs and consumes the CPU error
             // word before IRET; a Rust interrupt ABI would hide those GPRs.
-            idt.page_fault.set_handler_addr(x86_64::VirtAddr::new(
+            idt.page_fault.set_handler_addr(crate::arch::memory::VirtAddr::new(
                 super::page_fault::entry as *const () as u64,
             ));
         }
@@ -116,7 +116,7 @@ pub fn init() {
 
         // ハードウェア割り込みハンドラ（32-47番）
         unsafe {
-            idt[32].set_handler_addr(x86_64::VirtAddr::new(
+            idt[32].set_handler_addr(crate::arch::memory::VirtAddr::new(
                 super::timer::timer_interrupt_handler as *const () as u64,
             ));
         }
@@ -143,7 +143,7 @@ pub fn init() {
         unsafe {
             let handler_addr = syscall::syscall_interrupt_handler as *const () as u64;
             idt[0x80]
-                .set_handler_addr(x86_64::VirtAddr::new(handler_addr))
+                .set_handler_addr(crate::arch::memory::VirtAddr::new(handler_addr))
                 .set_privilege_level(PrivilegeLevel::Ring3);
         }
 
@@ -155,7 +155,7 @@ pub fn init() {
             idt[i].set_handler_fn(generic_interrupt_handler);
         }
         unsafe {
-            idt[48].set_handler_addr(x86_64::VirtAddr::new(
+            idt[48].set_handler_addr(crate::arch::memory::VirtAddr::new(
                 super::timer::local_timer_interrupt_handler as *const () as u64,
             ));
         }
@@ -368,7 +368,7 @@ fn log_page_table_entry(level: &str, index: usize, entry: u64) {
 }
 
 fn translate_virt_to_phys(l4_phys: u64, phys_off: u64, virt_addr: u64) -> Option<u64> {
-    use x86_64::VirtAddr;
+    use crate::arch::memory::VirtAddr;
 
     const ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
 
@@ -843,7 +843,7 @@ pub(super) fn page_fault_handler(
     );
     crate::performance::increment(crate::performance::CounterMetric::PageFaults, 1);
     use x86_64::registers::control::Cr2;
-    use x86_64::VirtAddr;
+    use crate::arch::memory::VirtAddr;
 
     let faulting_addr = Cr2::read().unwrap_or(VirtAddr::new(0));
     let is_user_mode = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);

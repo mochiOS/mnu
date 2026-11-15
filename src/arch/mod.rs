@@ -14,6 +14,8 @@ compile_error!("mnu does not yet provide CPU primitives for this architecture");
 
 pub use selected::context;
 pub use selected::exception;
+#[cfg(all(target_arch = "x86_64", not(mnu_arch_probe)))]
+pub use selected::memory;
 #[cfg(target_arch = "aarch64")]
 pub use selected::paging;
 #[cfg(target_arch = "aarch64")]

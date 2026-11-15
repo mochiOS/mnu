@@ -1,3 +1,7 @@
+use crate::arch::memory::{
+    paging::{mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB},
+    VirtAddr,
+};
 use core::{
     alloc::{GlobalAlloc, Layout},
     mem::{align_of, size_of},
@@ -6,12 +10,6 @@ use core::{
 };
 use linked_list_allocator::LockedHeap;
 use spin::Mutex;
-use x86_64::{
-    structures::paging::{
-        mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,
-    },
-    VirtAddr,
-};
 
 use crate::performance::{self, CounterMetric, GaugeMetric};
 
@@ -174,9 +172,7 @@ impl HardenedKernelHeap {
         // The scheduler checks stack mappings under ThreadQueue. A timer on
         // this CPU must not wait for that queue while growth owns PAGE_TABLE:
         // another CPU can already own the queue and be waiting for our mapper.
-        crate::arch::interrupts::without_interrupts(|| {
-            self.grow_uninterruptible(minimum_bytes)
-        })
+        crate::arch::interrupts::without_interrupts(|| self.grow_uninterruptible(minimum_bytes))
     }
 
     fn grow_uninterruptible(&self, minimum_bytes: usize) -> bool {

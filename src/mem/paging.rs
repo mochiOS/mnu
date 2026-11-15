@@ -9,23 +9,23 @@ pub(crate) use edit::TableEdit;
 pub(crate) use protection::PreparedProtection;
 pub(crate) use reserved::{check_user_mapping_range, user_mapping_conflict};
 
+use crate::arch::memory as arch64;
 use crate::info;
 use crate::mem::frame;
 use crate::mem::frame_refs::FrameReferenceTable;
 use crate::result::{Kernel, Memory, Result};
 use core::arch::asm;
 use spin::Mutex;
-use x86_64 as arch64;
 
-use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::structures::paging::page_table::PageTableEntry;
-use x86_64::{
-    structures::paging::{
+use crate::arch::memory::paging::page_table::PageTableEntry;
+use crate::arch::memory::{
+    paging::{
         FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
         Size4KiB,
     },
     VirtAddr,
 };
+use x86_64::registers::control::{Cr3, Cr3Flags};
 
 /// アクティブなページテーブルへのグローバル参照と物理メモリオフセット
 pub static PAGE_TABLE: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
@@ -275,7 +275,7 @@ pub fn map_page(page: Page, frame: PhysFrame, flags: PageTableFlags) -> Result<(
 }
 
 pub fn unmap_kernel_page(page: Page<Size4KiB>) -> Result<Option<PhysFrame<Size4KiB>>> {
-    use x86_64::structures::paging::mapper::TranslateError;
+    use crate::arch::memory::paging::mapper::TranslateError;
 
     let mut page_table_lock = PAGE_TABLE.lock();
     let page_table = page_table_lock
@@ -332,7 +332,7 @@ pub(crate) fn release_kernel_range(addr: u64, len: u64) -> Result<()> {
 /// ## Returns
 /// 変換された物理アドレス、または変換できない場合は `None`
 pub fn translate_addr(addr: VirtAddr) -> Option<PhysAddr> {
-    use x86_64::structures::paging::mapper::Translate;
+    use crate::arch::memory::paging::mapper::Translate;
 
     let page_table = PAGE_TABLE.lock();
     page_table.as_ref()?.translate_addr(addr)
@@ -1283,7 +1283,7 @@ pub fn create_user_page_table() -> Result<u64> {
 
 fn map_cpu_descriptor_tables_in_user_table(table_phys: u64) -> Result<()> {
     fn map_descriptor_page_supervisor_only(table_phys: u64, page: u64) -> Result<()> {
-        use x86_64::structures::paging::PageTableFlags as Flags;
+        use crate::arch::memory::paging::PageTableFlags as Flags;
 
         let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
         let vaddr = VirtAddr::new(page);
@@ -1469,7 +1469,7 @@ pub fn clone_user_page_table(
     src_table_phys: u64,
     page_policy: impl Fn(u64) -> ForkPagePolicy,
 ) -> Result<u64> {
-    use x86_64::structures::paging::PageTableFlags as Flags;
+    use crate::arch::memory::paging::PageTableFlags as Flags;
 
     struct DstTableGuard(Option<u64>);
     impl DstTableGuard {
@@ -1502,7 +1502,7 @@ pub fn clone_user_page_table(
         phys_off: u64,
         user_accessible: bool,
     ) -> Result<*mut PageTable> {
-        use x86_64::structures::paging::PageTableFlags as Flags;
+        use crate::arch::memory::paging::PageTableFlags as Flags;
 
         let vaddr = VirtAddr::new(vaddr);
         let l4e = &mut dst_l4[vaddr.p4_index()];
@@ -1756,7 +1756,7 @@ pub fn clone_user_page_table(
 ///
 /// 物理メモリ直接マップ経由でユーザーL4にアクセスし、必要なL3/L2/L1テーブルを作成
 fn ensure_user_page_table_hierarchy(l4_virt: u64, vaddr: u64, phys_off: u64) -> Result<()> {
-    use x86_64::structures::paging::PageTableFlags as Flags;
+    use crate::arch::memory::paging::PageTableFlags as Flags;
 
     let l4_index = ((vaddr >> 39) & 0x1ff) as usize;
     let l3_index = ((vaddr >> 30) & 0x1ff) as usize;
@@ -1880,8 +1880,8 @@ pub(crate) unsafe fn map_and_copy_segment_to(
     writable: bool,
     executable: bool,
 ) -> Result<()> {
+    use crate::arch::memory::paging::PageTableFlags as Flags;
     use crate::result::{Kernel, Memory};
-    use x86_64::structures::paging::PageTableFlags as Flags;
 
     if writable && executable {
         return Err(Kernel::Memory(Memory::PermissionDenied));
@@ -2063,8 +2063,8 @@ pub fn protect_user_range_in_table(
     writable: bool,
     executable: bool,
 ) -> Result<()> {
+    use crate::arch::memory::paging::PageTableFlags as Flags;
     use crate::result::{Kernel, Memory};
-    use x86_64::structures::paging::PageTableFlags as Flags;
 
     if present && writable && executable {
         return Err(Kernel::Memory(Memory::PermissionDenied));
@@ -2147,8 +2147,8 @@ pub fn protect_range_in_table(
     writable: bool,
     executable: bool,
 ) -> Result<()> {
+    use crate::arch::memory::paging::PageTableFlags as Flags;
     use crate::result::{Kernel, Memory};
-    use x86_64::structures::paging::PageTableFlags as Flags;
 
     if present && writable && executable {
         return Err(Kernel::Memory(Memory::PermissionDenied));
@@ -2469,8 +2469,8 @@ pub fn map_physical_range_to_user(
     size: u64,
     cache: MappingCache,
 ) -> Result<()> {
+    use crate::arch::memory::paging::PageTableFlags as Flags;
     use crate::result::{Kernel, Memory};
-    use x86_64::structures::paging::PageTableFlags as Flags;
 
     let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
     // Ensure SMAP/SMEP disabled while dereferencing HHDM pointers
@@ -2519,7 +2519,7 @@ pub fn map_physical_range_to_user(
                 flush.ignore();
                 record_user_leaf_change(table_phys, previous_flags, flags);
             }
-            Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => unsafe {
+            Err(crate::arch::memory::paging::mapper::MapToError::PageAlreadyMapped(_)) => unsafe {
                 if let Ok((_, flush)) = pt.unmap(page) {
                     flush.ignore();
                     record_user_leaf_change(table_phys, previous_flags, Flags::empty());
@@ -2550,8 +2550,8 @@ pub fn map_shared_frame_to_user(
     writable: bool,
     executable: bool,
 ) -> Result<()> {
+    use crate::arch::memory::paging::PageTableFlags as Flags;
     use crate::result::{Kernel, Memory};
-    use x86_64::structures::paging::PageTableFlags as Flags;
 
     if virt_addr & 0xfff != 0 || frame_phys & 0xfff != 0 || writable && executable {
         return Err(Kernel::Memory(Memory::InvalidAddress));

@@ -2,15 +2,15 @@
 //!
 //! 4KBページ単位で物理メモリを管理
 
+use crate::arch::memory::{
+    paging::{FrameAllocator, PhysFrame, Size4KiB},
+    PhysAddr,
+};
 use crate::{
     result::{Kernel, Memory, Result},
     MemoryRegion, MemoryType,
 };
 use spin::{Mutex, MutexGuard};
-use x86_64::{
-    structures::paging::{FrameAllocator, PhysFrame, Size4KiB},
-    PhysAddr,
-};
 
 use crate::performance::{self, CounterMetric, GaugeMetric};
 

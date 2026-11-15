@@ -62,7 +62,7 @@ pub fn debug_write(buf_ptr: u64, len: u64) -> u64 {
         }
         if crate::hypervisor_guest::is_active() {
             let Some(physical) =
-                crate::mem::paging::translate_addr(x86_64::VirtAddr::new(bytes.as_ptr() as u64))
+                crate::mem::paging::translate_addr(crate::arch::memory::VirtAddr::new(bytes.as_ptr() as u64))
             else {
                 return if done == 0 {
                     Error::BackingFailure.into_raw()

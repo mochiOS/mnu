@@ -4,8 +4,8 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use spin::Once;
 use x86_64::registers::model_specific::{ApicBase, ApicBaseFlags};
-use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
-use x86_64::{PhysAddr, VirtAddr};
+use crate::arch::memory::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
+use crate::arch::memory::{PhysAddr, VirtAddr};
 
 use crate::{BootInfo, SmpHandoff};
 

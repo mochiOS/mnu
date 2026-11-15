@@ -6,8 +6,8 @@ use core::arch::asm;
 use core::mem::offset_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
-use x86_64::{PhysAddr, VirtAddr};
+use crate::arch::memory::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
+use crate::arch::memory::{PhysAddr, VirtAddr};
 
 pub const MAX_CPUS: usize = 64;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
