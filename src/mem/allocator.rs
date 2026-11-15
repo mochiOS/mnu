@@ -14,7 +14,7 @@ use spin::Mutex;
 use crate::performance::{self, CounterMetric, GaugeMetric};
 
 /// 仮想アドレス空間のどこからヒープを開始するか
-pub const HEAP_START: usize = 0x_4444_4444_0000;
+pub const HEAP_START: usize = crate::arch::memory::KERNEL_HEAP_START;
 /// Virtual growth limit, not eager physical allocation. Large owned object
 /// snapshots must fit alongside live kernel metadata and allocation guards.
 pub const HEAP_SIZE: usize = 512 * 1024 * 1024;

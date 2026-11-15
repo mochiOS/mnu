@@ -1,5 +1,7 @@
 //! VM-facing address and descriptor types. Logical flags retain the shared
 //! VM policy representation; only this backend encodes AArch64 hardware bits.
+/// Kernel allocations must stay in TTBR1 when a process replaces TTBR0.
+pub const KERNEL_HEAP_START: usize = 0xffff_8800_0000_0000;
 mod address;
 mod control;
 pub mod paging;

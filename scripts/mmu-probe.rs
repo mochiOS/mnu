@@ -126,12 +126,15 @@ fn region(mapper: &mut Mapper<'_, Pool>, start: u64, end: u64, flags: Access) {
     }
 }
 
-unsafe fn root(pool: &mut Pool, config: Config) -> u64 {
+unsafe fn root(pool: &mut Pool, config: Config, heap_frame: u64) -> u64 {
     let root = pool
         .allocate_table()
         .unwrap_or_else(|_| crate::fail("root allocation"));
     let mut mapper = unsafe { Mapper::new(root, config, pool) }
         .unwrap_or_else(|_| crate::fail("root ownership"));
+    check(mapper.map(crate::arch::memory::KERNEL_HEAP_START as u64,
+        heap_frame, access(false, true, false)) == Ok(()),
+        "privileged kernel heap mapping");
     region(
         &mut mapper,
         addr_of!(__text_start) as u64,
@@ -195,8 +198,8 @@ pub fn initialize() {
     // SAFETY: Setup runs once with IRQs masked, before the fixture enables MMU.
     unsafe {
         let pool = &mut *addr_of_mut!(POOL);
-        let first = root(pool, config);
-        let second = root(pool, config);
+        let first = root(pool, config, addr_of!(DATA_A) as u64);
+        let second = root(pool, config, addr_of!(DATA_B) as u64);
         let used = pool.allocated.iter().filter(|used| **used).count();
         pool.remaining = Some(1);
         let mut mapper = Mapper::new(first, config, pool).unwrap_or_else(|_| crate::fail("mapper"));
@@ -296,6 +299,8 @@ pub fn initialize() {
                 read_volatile(KERNEL_ALIAS as *const u64) == 0x1111,
                 "user switch changed upper mapping",
             );
+            check(read_volatile(memory::KERNEL_HEAP_START as *const u64) == 0x1111,
+                "process TTBR0 switch replaced the kernel heap");
             check(
                 memory::current_guest_physical(VirtAddr::new(KERNEL_ALIAS + 17))
                     == Some(PhysAddr::new(addr_of!(DATA_A) as u64 + 17)),
@@ -311,6 +316,8 @@ pub fn initialize() {
                 read_volatile(KERNEL_ALIAS as *const u64) == 0x2222,
                 "kernel root retained stale upper mapping",
             );
+            check(read_volatile(memory::KERNEL_HEAP_START as *const u64) == 0x2222,
+                "kernel heap did not follow its retained TTBR1 root");
             check(
                 memory::current_guest_physical(VirtAddr::new(KERNEL_ALIAS))
                     == Some(PhysAddr::new(addr_of!(DATA_B) as u64)),

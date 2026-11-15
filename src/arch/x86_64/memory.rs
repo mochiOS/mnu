@@ -1,5 +1,7 @@
 //! Native address and page-table types exposed at the architecture boundary.
 //! Shared VM ownership/backing code uses this surface rather than an ISA crate.
+/// Preserve the existing kernel-root heap layout under x86 KPTI.
+pub const KERNEL_HEAP_START: usize = 0x4444_4444_0000;
 pub use x86_64::structures::paging;
 pub use x86_64::{PhysAddr, VirtAddr};
 
