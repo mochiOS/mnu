@@ -127,7 +127,7 @@ pub unsafe fn switch_to_thread_with_slots(
     crate::syscall::syscall_entry::update_kernel_rsp(next_kstack_top);
     // SYSCALL 入口の swapgs により IA32_KERNEL_GS_BASE がユーザー値へ一時退避されるため、
     // ブロッキング syscall 中に他スレッドへ切り替える前に per-CPU GS ベースへ戻しておく。
-    crate::percpu::install_current_cpu_gs_base();
+    crate::percpu::install_current_cpu_state();
     let predictor_domain_changed = current_process_id != Some(next_process_id);
     if predictor_domain_changed {
         crate::cpu::branch_predictor_barrier();
@@ -273,7 +273,7 @@ pub unsafe fn switch_to_thread_from_isr(
     crate::syscall::syscall_entry::update_kernel_rsp(next_kstack_top);
     // SYSCALL 入口の swapgs により IA32_KERNEL_GS_BASE がユーザー値へ一時退避されるため、
     // ブロッキング syscall 中に他スレッドへ切り替える前に per-CPU GS ベースへ戻しておく。
-    crate::percpu::install_current_cpu_gs_base();
+    crate::percpu::install_current_cpu_state();
     let predictor_domain_changed =
         current_process_id != Some(next_process_id) || current_priv != next_priv;
     if predictor_domain_changed {

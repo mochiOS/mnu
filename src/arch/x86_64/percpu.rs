@@ -1,0 +1,352 @@
+//! x86 APIC/TSC_AUX identity and GS/KPTI syscall-entry storage.
+use super::{CPU_STATES, MAX_CPUS};
+
+use crate::arch::memory::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
+use crate::arch::memory::{PhysAddr, VirtAddr};
+use core::arch::asm;
+use core::mem::offset_of;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use x86_64::registers::control::Cr3;
+
+const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+pub const SYSCALL_SHARED_BASE: u64 = 0x0000_7fff_0000_0000;
+pub const SYSCALL_SHARED_STACK_BASE: u64 = SYSCALL_SHARED_BASE + (MAX_CPUS as u64) * 4096;
+
+#[repr(C)]
+struct SyscallPerCpuState {
+    kernel_cr3: AtomicU64,
+    syscall_kernel_rsp: AtomicU64,
+    syscall_user_rsp_tmp: AtomicU64,
+    syscall_trampoline_rsp: AtomicU64,
+    syscall_user_r10_tmp: AtomicU64,
+}
+
+pub const GS_KERNEL_CR3_OFFSET: usize = offset_of!(SyscallPerCpuState, kernel_cr3);
+pub const GS_SYSCALL_KERNEL_RSP_OFFSET: usize = offset_of!(SyscallPerCpuState, syscall_kernel_rsp);
+pub const GS_SYSCALL_USER_RSP_TMP_OFFSET: usize =
+    offset_of!(SyscallPerCpuState, syscall_user_rsp_tmp);
+pub const GS_SYSCALL_TRAMPOLINE_RSP_OFFSET: usize =
+    offset_of!(SyscallPerCpuState, syscall_trampoline_rsp);
+pub const GS_SYSCALL_USER_R10_TMP_OFFSET: usize =
+    offset_of!(SyscallPerCpuState, syscall_user_r10_tmp);
+
+impl SyscallPerCpuState {
+    fn at_vaddr(vaddr: u64) -> &'static Self {
+        unsafe { &*(vaddr as *const Self) }
+    }
+}
+
+static SYSCALL_STATE_PHYS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static SYSCALL_STACK_PHYS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static SINGLE_CPU_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+static RDTSCP_CPU_ID: AtomicBool = AtomicBool::new(false);
+
+/// Initialize CPU-owned identity before AP startup. A uniprocessor caches its
+/// sole ID; SMP uses TSC_AUX when available to avoid CPUID/VM exits on accesses
+/// to thread, allocator, syscall and scheduler CPU-local state.
+pub(crate) fn configure_boot_cpu(boot_info: &crate::BootInfo) {
+    if supports_rdtscp() {
+        initialize_tsc_aux();
+        RDTSCP_CPU_ID.store(true, Ordering::Release);
+    }
+    if boot_info.cpu_enabled == 1 && boot_info.cpu_id_count == 1 {
+        let id = local_apic_id();
+        if id < MAX_CPUS as u32 && u64::from(id) == boot_info.cpu_hardware_ids[0] {
+            SINGLE_CPU_ID.store(u64::from(id), Ordering::Release);
+        }
+    }
+}
+
+/// Must precede any CPU-local access on a newly entering secondary CPU.
+pub(crate) fn enable_multiple_cpus() {
+    if RDTSCP_CPU_ID.load(Ordering::Acquire) {
+        if supports_rdtscp() {
+            initialize_tsc_aux();
+        } else {
+            // A heterogeneous CPU must disable the fast path globally before
+            // entering code which consults CPU-local state.
+            RDTSCP_CPU_ID.store(false, Ordering::Release);
+        }
+    }
+    SINGLE_CPU_ID.store(u64::MAX, Ordering::Release);
+}
+
+fn supports_rdtscp() -> bool {
+    // CPUID is available on x86_64. Extended leaves are checked before
+    // querying RDTSCP; this detection runs only when a CPU enters the kernel.
+    core::arch::x86_64::__cpuid(0x8000_0000).eax >= 0x8000_0001
+        && core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 27) != 0
+}
+
+fn initialize_tsc_aux() {
+    let id = local_apic_id();
+    if id >= MAX_CPUS as u32 {
+        halt_unsupported_cpu(id);
+    }
+    // SAFETY: called on each CPU at CPL0, before that CPU uses the fast path.
+    // TSC_AUX is CPU-owned identity, never thread state or a userspace address.
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") 0xC000_0103u32,
+            in("eax") id,
+            in("edx") 0u32,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+}
+
+#[inline(never)]
+fn halt_unsupported_cpu(_apic_id: u32) -> ! {
+    crate::arch::interrupts::disable();
+    loop {
+        crate::arch::wait_for_interrupt();
+    }
+}
+
+#[inline]
+unsafe fn write_kernel_gs_base(base: u64) {
+    let lo = base as u32;
+    let hi = (base >> 32) as u32;
+    asm!(
+        "wrmsr",
+        in("ecx") IA32_KERNEL_GS_BASE,
+        in("eax") lo,
+        in("edx") hi,
+        options(nomem, nostack)
+    );
+}
+
+#[inline]
+fn syscall_state_vaddr_for_cpu(cpu_id: usize) -> u64 {
+    SYSCALL_SHARED_BASE + (cpu_id as u64) * 4096
+}
+
+#[inline]
+fn syscall_stack_vaddr_for_cpu(cpu_id: usize) -> u64 {
+    SYSCALL_SHARED_STACK_BASE + (cpu_id as u64) * 4096
+}
+
+pub fn is_syscall_shared_vaddr(vaddr: u64) -> bool {
+    let page = vaddr & !0xfff;
+    let state_start = SYSCALL_SHARED_BASE;
+    let stack_start = SYSCALL_SHARED_STACK_BASE;
+    let region_len = (MAX_CPUS as u64) * 4096;
+    (page >= state_start && page < state_start + region_len)
+        || (page >= stack_start && page < stack_start + region_len)
+}
+
+pub fn current_cpu_syscall_state_vaddr() -> u64 {
+    syscall_state_vaddr_for_cpu(current_cpu_id())
+}
+
+fn map_syscall_page(cpu_id: usize, vaddr: u64, phys: u64) {
+    if crate::mem::paging::translate_addr(VirtAddr::new(vaddr)).is_some() {
+        return;
+    }
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(vaddr));
+    let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+    if let Err(err) = crate::mem::paging::map_page(page, frame, flags) {
+        panic!(
+            "failed to map syscall shared page for cpu {} at {:#x}: {:?}",
+            cpu_id, vaddr, err
+        );
+    }
+}
+
+fn ensure_syscall_shared_region_for_cpu(cpu_id: usize) {
+    if SYSCALL_STATE_PHYS[cpu_id].load(Ordering::SeqCst) != 0
+        && SYSCALL_STACK_PHYS[cpu_id].load(Ordering::SeqCst) != 0
+    {
+        return;
+    }
+
+    let [state_frame, stack_frame] = allocate_syscall_frames()
+        .unwrap_or_else(|_| panic!("failed to allocate syscall shared pages for cpu {}", cpu_id));
+    let state_phys = state_frame.start_address().as_u64();
+    let stack_phys = stack_frame.start_address().as_u64();
+
+    map_syscall_page(cpu_id, syscall_state_vaddr_for_cpu(cpu_id), state_phys);
+    map_syscall_page(cpu_id, syscall_stack_vaddr_for_cpu(cpu_id), stack_phys);
+
+    SYSCALL_STATE_PHYS[cpu_id].store(state_phys, Ordering::SeqCst);
+    SYSCALL_STACK_PHYS[cpu_id].store(stack_phys, Ordering::SeqCst);
+
+    let syscall_state = SyscallPerCpuState::at_vaddr(syscall_state_vaddr_for_cpu(cpu_id));
+    syscall_state
+        .syscall_trampoline_rsp
+        .store(syscall_stack_vaddr_for_cpu(cpu_id) + 4096, Ordering::SeqCst);
+}
+
+fn allocate_syscall_frames() -> crate::result::Result<[PhysFrame; 2]> {
+    let state_frame = crate::mem::frame::allocate_zeroed_frame()?;
+    match crate::mem::frame::allocate_zeroed_frame() {
+        Ok(stack_frame) => Ok([state_frame, stack_frame]),
+        Err(error) => {
+            crate::mem::frame::deallocate_frame(state_frame)?;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(feature = "frame-allocation-failure-injection")]
+pub(crate) fn verify_syscall_frame_allocation_rollback() -> crate::result::Result<()> {
+    use crate::performance::GaugeMetric;
+
+    let frames_before = crate::performance::gauge_snapshot(GaugeMetric::FramesInUse).current;
+    crate::mem::frame::inject_allocation_failure_after(1);
+    let result = allocate_syscall_frames();
+    let failure_was_injected = crate::mem::frame::injected_allocation_failure_was_consumed();
+    crate::mem::frame::disable_allocation_failure_injection();
+    let frames_after = crate::performance::gauge_snapshot(GaugeMetric::FramesInUse).current;
+
+    if result.is_ok() || !failure_was_injected || frames_before != frames_after {
+        return Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress));
+    }
+    crate::info!("frame allocation failure injection: rollback OK");
+    Ok(())
+}
+
+/// # Safety
+/// The caller exclusively owns this unpublished page-table hierarchy.
+pub(crate) unsafe fn map_syscall_shared_region_in_table(
+    table_phys: u64,
+) -> crate::result::Result<()> {
+    for cpu_id in 0..MAX_CPUS {
+        let state_phys = SYSCALL_STATE_PHYS[cpu_id].load(Ordering::SeqCst);
+        let stack_phys = SYSCALL_STACK_PHYS[cpu_id].load(Ordering::SeqCst);
+        if state_phys == 0 || stack_phys == 0 {
+            continue;
+        }
+        crate::mem::paging::map_page_in_table(
+            table_phys,
+            syscall_state_vaddr_for_cpu(cpu_id),
+            state_phys,
+            true,
+            false,
+        )?;
+        crate::mem::paging::map_page_in_table(
+            table_phys,
+            syscall_stack_vaddr_for_cpu(cpu_id),
+            stack_phys,
+            true,
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+#[inline]
+fn syscall_state_for_current_cpu() -> &'static SyscallPerCpuState {
+    let cpu_id = current_cpu_id();
+    ensure_syscall_shared_region_for_cpu(cpu_id);
+    SyscallPerCpuState::at_vaddr(syscall_state_vaddr_for_cpu(cpu_id))
+}
+
+#[inline]
+pub fn current_cpu_id() -> usize {
+    let single = SINGLE_CPU_ID.load(Ordering::Acquire);
+    if single < MAX_CPUS as u64 {
+        return single as usize;
+    }
+    let apic_id = if RDTSCP_CPU_ID.load(Ordering::Acquire) {
+        let id: u32;
+        // SAFETY: feature detection and per-CPU TSC_AUX initialization precede
+        // publication of the fast path. RDTSCP reads the executing CPU even
+        // after a thread migrates, without a serializing CPUID/VM exit.
+        unsafe {
+            asm!(
+                "rdtscp",
+                out("eax") _,
+                out("edx") _,
+                out("ecx") id,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        id as usize
+    } else {
+        local_apic_id() as usize
+    };
+    if apic_id < MAX_CPUS {
+        apic_id
+    } else {
+        halt_unsupported_cpu(apic_id as u32)
+    }
+}
+
+#[inline]
+fn local_apic_id() -> u32 {
+    // CPUID leaf 1: EBX[31:24] = Initial APIC ID
+    let ebx: u64;
+    unsafe {
+        asm!(
+            "xchg {tmp}, rbx",
+            "cpuid",
+            "xchg {tmp}, rbx",
+            inout("eax") 1u32 => _,
+            in("ecx") 0u32,
+            tmp = inout(reg) 0u64 => ebx,
+            out("edx") _,
+            options(nomem, nostack)
+        );
+    }
+    ((ebx as u32) >> 24) & 0xff
+}
+
+pub fn init_current_cpu(syscall_kernel_rsp: u64) {
+    let apic_id = local_apic_id() as usize;
+    let slot = if apic_id < MAX_CPUS {
+        apic_id
+    } else {
+        crate::audit::log(
+            crate::audit::AuditEventKind::Fault,
+            "boot CPU APIC ID exceeded per-cpu table; falling back to CPU0 slot",
+        );
+        0
+    };
+
+    let (cr3, _) = Cr3::read();
+    let state = &CPU_STATES[slot];
+    state
+        .kernel_page_table_root
+        .store(cr3.start_address().as_u64(), Ordering::SeqCst);
+    state
+        .syscall_kernel_rsp
+        .store(syscall_kernel_rsp, Ordering::SeqCst);
+    state.current_thread_id.store(0, Ordering::SeqCst);
+    state.switching_from_thread_id.store(0, Ordering::SeqCst);
+    state.current_thread_slot.store(u64::MAX, Ordering::SeqCst);
+    state.syscall_user_rsp_tmp.store(0, Ordering::SeqCst);
+    ensure_syscall_shared_region_for_cpu(slot);
+    let syscall_state = SyscallPerCpuState::at_vaddr(syscall_state_vaddr_for_cpu(slot));
+    syscall_state
+        .kernel_cr3
+        .store(cr3.start_address().as_u64(), Ordering::SeqCst);
+    syscall_state
+        .syscall_kernel_rsp
+        .store(syscall_kernel_rsp, Ordering::SeqCst);
+    syscall_state
+        .syscall_user_rsp_tmp
+        .store(0, Ordering::SeqCst);
+    install_current_cpu_state();
+}
+
+pub fn init_boot_cpu(syscall_kernel_rsp: u64) {
+    init_current_cpu(syscall_kernel_rsp);
+}
+
+pub fn install_current_cpu_state() {
+    let cpu_id = current_cpu_id();
+    ensure_syscall_shared_region_for_cpu(cpu_id);
+    let state = syscall_state_vaddr_for_cpu(cpu_id);
+    unsafe {
+        write_kernel_gs_base(state);
+    }
+}
+
+pub(super) fn set_syscall_entry_stack(rsp: u64) {
+    syscall_state_for_current_cpu()
+        .syscall_kernel_rsp
+        .store(rsp, Ordering::SeqCst);
+}

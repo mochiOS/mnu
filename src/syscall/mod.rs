@@ -1171,7 +1171,7 @@ pub unsafe extern "C" fn syscall_interrupt_handler() {
 /// KPTIでuser CR3から外したkernel heap/task metadataを参照するため、
 /// dispatchをkernel CR3上で完結させる。
 extern "sysv64" fn syscall_interrupt_handler_rust(kstack: *mut u64) -> u64 {
-    crate::percpu::install_current_cpu_gs_base();
+    crate::percpu::install_current_cpu_state();
 
     let prev_cr3 = syscall_entry::switch_to_kernel_page_table();
     crate::cpu::reassert_runtime_hardening();
@@ -1238,7 +1238,7 @@ extern "C" fn syscall_handler_rust(
     arg4: u64,
     arg5: u64,
 ) -> u64 {
-    crate::percpu::install_current_cpu_gs_base();
+    crate::percpu::install_current_cpu_state();
 
     let current_tid = crate::task::current_thread_id();
     let current_slot = crate::task::current_thread_slot();

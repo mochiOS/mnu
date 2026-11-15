@@ -6,6 +6,32 @@
 #[path = "../src/arch/mod.rs"]
 mod arch;
 
+#[cfg(target_arch = "aarch64")]
+#[path = "../crates/abi/src/boot.rs"]
+mod boot_abi;
+#[cfg(target_arch = "aarch64")]
+pub use boot_abi::BootInfo;
+#[cfg(target_arch = "aarch64")]
+#[path = "../src/percpu.rs"]
+mod percpu;
+
+// The production CPU-local module's diagnostic logging uses this fixture's
+// serial writer; no scheduling or identity operation is replaced.
+#[cfg(target_arch = "aarch64")]
+#[macro_export]
+macro_rules! debug {
+    ($($arg:tt)*) => { $crate::probe_log(format_args!($($arg)*)) };
+}
+#[cfg(target_arch = "aarch64")]
+fn probe_log(args: core::fmt::Arguments<'_>) {
+    struct Serial;
+    impl core::fmt::Write for Serial {
+        fn write_str(&mut self, value: &str) -> core::fmt::Result { emit(value); Ok(()) }
+    }
+    let _ = core::fmt::write(&mut Serial, args);
+    emit("\n");
+}
+
 #[path = "context-probe.rs"]
 mod context_probe;
 
@@ -71,6 +97,12 @@ mod arm {
         mov x1, #3
         msr cnthctl_el2, x1
         msr cntvoff_el2, xzr
+        // Give EL1 a real virtual affinity above 32 bits. CPU-local lookup
+        // must preserve Aff3 and must not use the affinity as an array index.
+        mrs x1, mpidr_el1
+        mov x2, #0x12
+        bfi x1, x2, #32, #8
+        msr vmpidr_el2, x1
         msr sp_el1, x0
         adr x1, 3f
         msr elr_el2, x1
@@ -348,11 +380,49 @@ fn check_user_tls() {
     emit("Native user TLS register PASS\n");
 }
 
+#[cfg(target_arch = "aarch64")]
+fn check_cpu_local() {
+    let mut info = BootInfo::empty();
+    let id = percpu::hardware_id();
+    check(id >> 32 == 0x12, "virtual MPIDR lost Aff3");
+    info.bsp_hardware_id = id;
+    info.cpu_total = 2;
+    info.cpu_enabled = 2;
+    info.cpu_id_count = 2;
+    info.cpu_hardware_ids[..2].copy_from_slice(&[id ^ (0x12 << 32), id]);
+    check(info.validate().is_ok(), "native boot CPU topology");
+    percpu::configure_boot_cpu(&info);
+    check(percpu::current_cpu_id() == 1, "hardware ID used as logical slot");
+    percpu::init_boot_cpu(arch::stack_pointer());
+    check(percpu::kernel_page_table_root() == arch::memory::active_kernel_root().start_address().as_u64(), "CPU-local kernel root");
+    percpu::set_current_thread_raw_id(5);
+    percpu::set_current_thread_slot(Some(7));
+    let outgoing = percpu::begin_thread_switch(5);
+    percpu::set_current_thread_raw_id(6);
+    check(percpu::thread_is_cpu_referenced(5) && percpu::thread_is_cpu_referenced(6), "CPU handoff references");
+    // SAFETY: Production begin_thread_switch returns this CPU's owned AtomicU64.
+    unsafe { core::sync::atomic::AtomicU64::from_ptr(outgoing).store(0, core::sync::atomic::Ordering::Release); }
+    check(!percpu::thread_is_cpu_referenced(5) && percpu::thread_is_cpu_referenced(6), "outgoing CPU reference retained");
+    let stack = arch::stack_pointer();
+    percpu::set_syscall_kernel_rsp(stack);
+    check(percpu::syscall_kernel_rsp() == stack, "CPU-local entry stack");
+    check_user_tls();
+    percpu::install_current_cpu_state();
+    percpu::enable_multiple_cpus();
+    check(percpu::current_cpu_id() == 1 && percpu::current_thread_raw_id() == 6
+        && percpu::current_thread_slot() == Some(7), "CPU-local state lost after TLS/bind");
+    percpu::set_current_thread_raw_id(0);
+    percpu::set_current_thread_slot(None);
+    emit("EL1 CPU-local slots and thread handoff PASS\n");
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn probe_main() -> ! {
     #[cfg(target_arch = "aarch64")]
     arm::initialize();
     emit("CPU primitives entered\n");
+    #[cfg(target_arch = "aarch64")]
+    check_cpu_local();
     check_user_tls();
     let clock = arch::counter::initialize();
     let first = arch::counter::timestamp();
