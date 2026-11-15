@@ -7,6 +7,7 @@ pub mod hypercall;
 pub mod exception;
 pub mod fp;
 pub mod tls;
+pub mod thread;
 pub mod memory;
 pub mod paging;
 pub mod usermode;

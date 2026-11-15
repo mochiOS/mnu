@@ -62,30 +62,11 @@ pub fn thread_create(context_ptr: u64, context_len: u64) -> u64 {
         Some(a) => a,
         None => return Error::ResourceUnavailable.into_raw(),
     };
-    let registers = context.registers;
-    let user_context = crate::task::thread::SyscallUserContext {
-        rip: context.entry,
-        rsp: context.stack_pointer,
-        rflags: 0x202,
-        rdi: context.argument,
-        rsi: registers.rsi,
-        rdx: registers.rdx,
-        r8: registers.r8,
-        r9: registers.r9,
-        r10: registers.r10,
-        rbp: registers.rbp,
-        rbx: registers.rbx,
-        r12: registers.r12,
-        r13: registers.r13,
-        r14: registers.r14,
-        r15: registers.r15,
-        rcx: registers.rcx,
-        r11: registers.r11,
-    };
+    let (user_context, result) = crate::arch::thread::initial_context(&context);
     let thread = crate::task::Thread::new_user_resume(
         pid,
         user_context,
-        registers.rax,
+        result,
         context.thread_local_base,
         kstack,
         kstack_size,

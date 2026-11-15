@@ -1736,31 +1736,12 @@ fn create_from_address_space(
         Some(stack) => stack,
         None => return Error::ResourceUnavailable.into_raw(),
     };
-    let r = context.registers;
-    let state = crate::task::thread::SyscallUserContext {
-        rip: context.entry,
-        rsp: context.stack_pointer,
-        rflags: 0x202,
-        rdi: context.argument,
-        rsi: r.rsi,
-        rdx: r.rdx,
-        rbp: r.rbp,
-        rbx: r.rbx,
-        rcx: r.rcx,
-        r11: r.r11,
-        r8: r.r8,
-        r9: r.r9,
-        r10: r.r10,
-        r12: r.r12,
-        r13: r.r13,
-        r14: r.r14,
-        r15: r.r15,
-    };
+    let (state, result) = crate::arch::thread::initial_context(&context);
     let pid = process.id();
     let mut thread = crate::task::Thread::new_user_resume(
         pid,
         state,
-        r.rax,
+        result,
         context.thread_local_base,
         stack,
         stack_size,

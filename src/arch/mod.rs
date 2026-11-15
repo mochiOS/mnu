@@ -16,6 +16,7 @@ pub use selected::context;
 pub use selected::exception;
 pub use selected::fp;
 pub use selected::tls;
+pub use selected::thread;
 pub use selected::upcall;
 pub mod counter;
 pub mod hypercall;

@@ -6,6 +6,7 @@ pub mod hypercall;
 pub mod exception;
 pub mod fp;
 pub mod tls;
+pub mod thread;
 pub mod upcall;
 #[cfg(not(mnu_arch_probe))]
 pub mod memory;

@@ -382,6 +382,27 @@ fn check_user_tls() {
     emit("Native user TLS register PASS\n");
 }
 
+fn check_initial_thread_context() {
+    let registers = ThreadInitialRegisters::from_words(core::array::from_fn(|index| index as u64 + 0x1000));
+    let input = ThreadCreateContext {
+        entry: 0x4000, stack_pointer: 0x8000, argument: 0x1122,
+        thread_local_base: 0x9000, flags: 0, reserved: [0; 3], registers,
+    };
+    let (context, result) = arch::thread::initial_context(&input);
+    check(context.instruction_pointer() == input.entry && context.stack_pointer() == input.stack_pointer,
+        "initial thread PC/SP conversion");
+    #[cfg(target_arch = "aarch64")]
+    check(result == input.argument && context.registers[0] == input.argument
+        && context.registers[1..] == registers.words() && context.pstate == 0
+        && context.simd == [0; 32] && context.fpcr == 0 && context.fpsr == 0,
+        "native ARM initial GPR/privilege/FP conversion");
+    #[cfg(target_arch = "x86_64")]
+    check(result == registers.rax && context.rdi == input.argument && context.rflags == 0x202
+        && context.rcx == registers.rcx && context.r11 == registers.r11,
+        "native x86 initial registers/result conversion");
+    emit("Native initial thread registers PASS\n");
+}
+
 #[cfg(target_arch = "x86_64")]
 fn check_fp_snapshot() {
     // SAFETY: This context contains only integer fields. It is not entered;
@@ -448,6 +469,7 @@ extern "C" fn probe_main() -> ! {
     #[cfg(target_arch = "aarch64")]
     arm::initialize();
     emit("CPU primitives entered\n");
+    check_initial_thread_context();
     #[cfg(target_arch = "aarch64")]
     check_cpu_local();
     check_user_tls();
