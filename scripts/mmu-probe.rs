@@ -432,8 +432,17 @@ pub fn initialize() {
             let frame = PhysFrame::containing_address(PhysAddr::new(addr_of!(DATA_A) as u64));
             let flags =
                 Flags::PRESENT | Flags::WRITABLE | Flags::USER_ACCESSIBLE | Flags::NO_EXECUTE;
+            check(vm.page_is_vacant(page), "unused VM leaf not vacant");
             vm.map_to(page, frame, flags, pool)
                 .unwrap_or_else(|_| crate::fail("VM map adapter"))
+                .flush();
+            check(!vm.page_is_vacant(page), "mapped VM leaf reported vacant");
+            vm.update_flags(page, flags & !Flags::PRESENT)
+                .unwrap_or_else(|_| crate::fail("suspend VM vacancy fixture"))
+                .flush();
+            check(!vm.page_is_vacant(page), "suspended ownership reported vacant");
+            vm.update_flags(page, flags)
+                .unwrap_or_else(|_| crate::fail("restore VM vacancy fixture"))
                 .flush();
             check(vm.translate_page(page) == Ok(frame), "VM frame translation");
             check(
@@ -461,6 +470,7 @@ pub fn initialize() {
                 .unwrap_or_else(|_| crate::fail("VM unmap adapter"));
             flush.flush();
             check(released == frame, "VM frame ownership return");
+            check(vm.page_is_vacant(page), "released VM leaf still occupied");
             check(crate::arch::memory::current_guest_physical(page.start_address()).is_none(),
                 "diagnostic translation accepted an unmapped address");
             emit("Shared VM mapper adapter PASS\n");

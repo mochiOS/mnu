@@ -93,20 +93,10 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
 
     task::init_scheduler();
     crate::performance::mark_boot(crate::performance::BootMilestone::SchedulerStarted);
-    if crate::hypervisor_guest::is_active() {
-        if crate::smp::enable_hypervisor_scheduler_timer() {
-            crate::info!("Hypervisor virtual scheduler timer initialized");
-        } else {
-            crate::warn!("Hypervisor virtual scheduler timer unavailable");
-        }
-    } else {
-        interrupt::init_pit();
-        interrupt::enable_timer_interrupt();
-    }
-
     // Publish the native entry stack and CPU-local state before IRQ handlers
     // can schedule a thread or observe an incompletely initialized entry.
     crate::syscall::syscall_entry::init_syscall();
+    interrupt::init_scheduler_timer(boot_info)?;
     crate::arch::interrupts::enable();
     crate::performance::mark_boot(crate::performance::BootMilestone::BspReady);
 

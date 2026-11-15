@@ -17,7 +17,10 @@ pub struct Resources {
     pub cpu_interface_base: u64,
     pub cpu_interface_size: u64,
     pub timer_interrupt: u32,
+    /// Coalesced edge notifications. Payload remains in the owned EL2 queue;
+    /// completing the GIC interrupt does not consume or discard that payload.
     pub event_interrupt: u32,
+    /// Edge notification of retained management state, with the same lifetime.
     pub management_interrupt: u32,
     pub tlb_interrupt: u32,
     pub wake_interrupt: u32,

@@ -95,6 +95,23 @@ impl<'a> OffsetPageTable<'a> {
     fn index(address: VirtAddr, level: usize) -> usize {
         ((address.as_u64() >> (39 - 9 * level)) & 511) as usize
     }
+    /// Inspect vacancy without treating a suspended/reserved descriptor as
+    /// free. The constructor's table lifetime and writer exclusion still apply.
+    pub(crate) fn page_is_vacant(&self, page: Page) -> bool {
+        let mut table = self.root as *const PageTable;
+        for level in 0..4 {
+            let entry = &unsafe { &*table }[Self::index(page.start_address(), level)];
+            if entry.is_unused() {
+                return true;
+            }
+            let flags = entry.flags();
+            if level == 3 || !flags.contains(Flags::PRESENT) || flags.contains(Flags::HUGE_PAGE) {
+                return false;
+            }
+            table = unsafe { self.table(entry.addr()) } as *const PageTable;
+        }
+        false
+    }
     fn leaf(&self, page: Page) -> Result<*mut PageTableEntry, TranslateError> {
         let mut table = self.root as *const PageTable;
         for level in 0..3 {
