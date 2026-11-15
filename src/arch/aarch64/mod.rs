@@ -5,6 +5,7 @@ pub mod context;
 pub mod counter;
 pub mod hypercall;
 pub mod exception;
+pub mod tls;
 pub mod memory;
 pub mod paging;
 pub mod usermode;

@@ -101,7 +101,7 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64, user_arg0: u64) -> !
         fs_base
     );
 
-    crate::cpu::write_fs_base(fs_base);
+    crate::arch::tls::write_user_base(fs_base);
     if user_cr3 != 0 {
         crate::mem::paging::switch_page_table(user_cr3);
     }

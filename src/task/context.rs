@@ -136,7 +136,7 @@ pub unsafe fn switch_to_thread_with_slots(
 
     // 次のスレッドの FS ベースを復元 (TLS)
     unsafe {
-        crate::cpu::write_fs_base(next_fs_base);
+        crate::arch::tls::write_user_base(next_fs_base);
     }
 
     // switch_context はカーネル管理領域上の Context とカーネルスタックを読む。
@@ -282,7 +282,7 @@ pub unsafe fn switch_to_thread_from_isr(
     crate::cpu::reassert_runtime_hardening();
 
     // 次のスレッドの FS ベースを復元 (TLS)
-    crate::cpu::write_fs_base(next_fs_base);
+    crate::arch::tls::write_user_base(next_fs_base);
 
     // ISR 経路でもコンテキスト復元中は必ず kernel CR3 を使う。
     // ユーザー空間への復帰時は trap/syscall の出口または usermode trampoline が

@@ -14,6 +14,7 @@ compile_error!("mnu does not yet provide CPU primitives for this architecture");
 
 pub use selected::context;
 pub use selected::exception;
+pub use selected::tls;
 pub mod counter;
 pub mod hypercall;
 #[cfg(any(

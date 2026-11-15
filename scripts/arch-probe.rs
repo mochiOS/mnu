@@ -321,11 +321,39 @@ fn check(condition: bool, message: &str) {
     }
 }
 
+fn check_user_tls() {
+    arch::interrupts::without_interrupts(|| {
+        // SAFETY: Dedicated privileged fixture, no scheduler or concurrent
+        // TLS user. Restore firmware/previous TLS before leaving this scope.
+        unsafe {
+            let previous = arch::tls::read_user_base();
+            #[cfg(target_arch = "aarch64")]
+            let kernel_base: u64;
+            #[cfg(target_arch = "aarch64")]
+            asm!("mrs {}, tpidr_el1", out(reg) kernel_base, options(nomem, nostack));
+            for base in [0x1234_5000, 0x5678_9000] {
+                arch::tls::write_user_base(base);
+                check(arch::tls::read_user_base() == base, "native TLS base");
+            }
+            arch::tls::write_user_base(previous);
+            check(arch::tls::read_user_base() == previous, "TLS restoration");
+            #[cfg(target_arch = "aarch64")]
+            {
+                let after: u64;
+                asm!("mrs {}, tpidr_el1", out(reg) after, options(nomem, nostack));
+                check(after == kernel_base, "userspace TLS changed CPU-local base");
+            }
+        }
+    });
+    emit("Native user TLS register PASS\n");
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn probe_main() -> ! {
     #[cfg(target_arch = "aarch64")]
     arm::initialize();
     emit("CPU primitives entered\n");
+    check_user_tls();
     let clock = arch::counter::initialize();
     let first = arch::counter::timestamp();
     for _ in 0..4096 {

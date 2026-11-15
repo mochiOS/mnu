@@ -17,7 +17,7 @@ pub fn set_base(base: u64, reserved: u64) -> u64 {
             thread.set_fs_base(base);
             // Keep the live register and saved state coherent before a timer
             // can migrate or save this thread, including the next syscall exit.
-            unsafe { crate::cpu::write_fs_base(base) };
+            unsafe { crate::arch::tls::write_user_base(base) };
         }) {
             Some(()) => mnu_abi::SUCCESS,
             None => Error::NotReady.into_raw(),

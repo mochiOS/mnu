@@ -425,7 +425,7 @@ extern "sysv64" fn current_thread_fs_base_for_sysret() -> u64 {
             return fs_base;
         }
     }
-    unsafe { crate::cpu::read_fs_base() }
+    unsafe { crate::arch::tls::read_user_base() }
 }
 
 /// 非正規RIP/RSPを持つプロセスを終了させる

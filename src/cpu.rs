@@ -8,7 +8,6 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
-static FSGSBASE_SUPPORTED: AtomicBool = AtomicBool::new(false);
 static UMIP_SUPPORTED: AtomicBool = AtomicBool::new(false);
 static SMEP_SUPPORTED: AtomicBool = AtomicBool::new(false);
 static SMAP_SUPPORTED: AtomicBool = AtomicBool::new(false);
@@ -96,7 +95,7 @@ pub fn init() {
 }
 
 fn detect_cpu_features() {
-    FSGSBASE_SUPPORTED.store(cpu_has_fsgsbase(), Ordering::Release);
+    crate::arch::tls::detect_fsgsbase();
     UMIP_SUPPORTED.store(cpu_has_umip(), Ordering::Release);
     SMEP_SUPPORTED.store(cpu_has_smep(), Ordering::Release);
     SMAP_SUPPORTED.store(cpu_has_smap(), Ordering::Release);
@@ -167,7 +166,7 @@ unsafe fn enable_sse() {
     cr4 |= 1 << 10;
     // ビット16 (FSGSBASE) をセット - RDFSBASE/WRFSBASE命令のサポート (TLS用)
     // CPUID leaf 7, EBX bit 0 でサポート確認
-    if FSGSBASE_SUPPORTED.load(Ordering::Acquire) {
+    if crate::arch::tls::uses_fsgsbase() {
         cr4 |= 1 << 16;
         crate::info!("FSGSBASE enabled");
     } else {
@@ -332,11 +331,6 @@ fn cpu_has_umip() -> bool {
     (cpuid_leaf7_ecx() & (1 << 2)) != 0
 }
 
-/// CPUID で FSGSBASE サポートを確認 (leaf 7, EBX bit 0)
-fn cpu_has_fsgsbase() -> bool {
-    (cpuid_leaf7_ebx() & (1 << 0)) != 0
-}
-
 /// CPUID で SMEP サポートを確認 (leaf 7, EBX bit 7)
 fn cpu_has_smep() -> bool {
     (cpuid_leaf7_ebx() & (1 << 7)) != 0
@@ -394,38 +388,6 @@ pub fn hw_random_u64() -> Option<u64> {
         }
     }
     None
-}
-
-/// FS ベースを書き込む (WRFSBASE または IA32_FS_BASE MSR)
-///
-/// # Safety
-/// 呼び出し側は `val` が現在スレッドの有効な TLS ベース値であることを保証する必要がある。
-pub unsafe fn write_fs_base(val: u64) {
-    if FSGSBASE_SUPPORTED.load(Ordering::Acquire) {
-        asm!("wrfsbase {}", in(reg) val, options(nostack, preserves_flags));
-    } else {
-        // IA32_FS_BASE MSR = 0xC0000100
-        let lo = val as u32;
-        let hi = (val >> 32) as u32;
-        asm!("wrmsr", in("ecx") 0xC000_0100u32, in("eax") lo, in("edx") hi, options(nomem, nostack));
-    }
-}
-
-/// FS ベースを読み込む (RDFSBASE または IA32_FS_BASE MSR)
-///
-/// # Safety
-/// 呼び出し側は、現在の実行コンテキストで FS ベース読み出しが安全であることを保証する必要がある。
-pub unsafe fn read_fs_base() -> u64 {
-    if FSGSBASE_SUPPORTED.load(Ordering::Acquire) {
-        let val: u64;
-        asm!("rdfsbase {}", out(reg) val, options(nostack, preserves_flags));
-        val
-    } else {
-        let lo: u32;
-        let hi: u32;
-        asm!("rdmsr", in("ecx") 0xC000_0100u32, out("eax") lo, out("edx") hi, options(nomem, nostack));
-        ((hi as u64) << 32) | (lo as u64)
-    }
 }
 
 pub fn is_smap_enabled() -> bool {
