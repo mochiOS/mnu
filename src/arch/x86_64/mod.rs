@@ -9,6 +9,8 @@ pub mod tls;
 pub mod thread;
 pub mod upcall;
 #[cfg(not(mnu_arch_probe))]
+pub mod port_io;
+#[cfg(not(mnu_arch_probe))]
 pub mod memory;
 
 pub mod interrupts {

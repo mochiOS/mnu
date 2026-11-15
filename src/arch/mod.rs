@@ -18,6 +18,8 @@ pub use selected::fp;
 pub use selected::tls;
 pub use selected::thread;
 pub use selected::upcall;
+#[cfg(not(mnu_arch_probe))]
+pub use selected::port_io;
 pub mod counter;
 pub mod hypercall;
 #[cfg(any(

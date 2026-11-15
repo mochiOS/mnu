@@ -115,48 +115,6 @@ pub fn debug_write(buf_ptr: u64, len: u64) -> u64 {
     done as u64
 }
 
-fn read_port_u8(port: u16) -> u8 {
-    unsafe {
-        let mut io_port = x86_64::instructions::port::Port::<u8>::new(port);
-        io_port.read()
-    }
-}
-
-fn read_port_u16(port: u16) -> u16 {
-    unsafe {
-        let mut io_port = x86_64::instructions::port::Port::<u16>::new(port);
-        io_port.read()
-    }
-}
-
-fn read_port_u32(port: u16) -> u32 {
-    unsafe {
-        let mut io_port = x86_64::instructions::port::Port::<u32>::new(port);
-        io_port.read()
-    }
-}
-
-fn write_port_u8(port: u16, value: u8) {
-    unsafe {
-        let mut io_port = x86_64::instructions::port::Port::<u8>::new(port);
-        io_port.write(value);
-    }
-}
-
-fn write_port_u16(port: u16, value: u16) {
-    unsafe {
-        let mut io_port = x86_64::instructions::port::Port::<u16>::new(port);
-        io_port.write(value);
-    }
-}
-
-fn write_port_u32(port: u16, value: u32) {
-    unsafe {
-        let mut io_port = x86_64::instructions::port::Port::<u32>::new(port);
-        io_port.write(value);
-    }
-}
-
 pub fn port_in(port: u64, width: u64) -> u64 {
     if !caller_has_port_io_access(port, width) {
         return Error::AccessDenied.into_raw();
@@ -165,12 +123,8 @@ pub fn port_in(port: u64, width: u64) -> u64 {
         Ok(port) => port,
         Err(_) => return Error::InvalidArgument.into_raw(),
     };
-    match width {
-        1 => read_port_u8(port) as u64,
-        2 => read_port_u16(port) as u64,
-        4 => read_port_u32(port) as u64,
-        _ => Error::InvalidArgument.into_raw(),
-    }
+    // SAFETY: The shared authority check covers every byte of this range.
+    unsafe { crate::arch::port_io::read(port, width) }.unwrap_or_else(Error::into_raw)
 }
 
 pub fn port_out(port: u64, value: u64, width: u64) -> u64 {
@@ -181,11 +135,9 @@ pub fn port_out(port: u64, value: u64, width: u64) -> u64 {
         Ok(port) => port,
         Err(_) => return Error::InvalidArgument.into_raw(),
     };
-    match width {
-        1 => write_port_u8(port, value as u8),
-        2 => write_port_u16(port, value as u16),
-        4 => write_port_u32(port, value as u32),
-        _ => return Error::InvalidArgument.into_raw(),
+    // SAFETY: The shared authority check covers every byte of this range.
+    match unsafe { crate::arch::port_io::write(port, value, width) } {
+        Ok(()) => SUCCESS,
+        Err(error) => error.into_raw(),
     }
-    SUCCESS
 }

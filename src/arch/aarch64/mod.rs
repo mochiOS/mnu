@@ -12,6 +12,8 @@ pub mod memory;
 pub mod paging;
 pub mod usermode;
 pub mod upcall;
+#[cfg(not(mnu_arch_probe))]
+pub mod port_io;
 
 pub mod interrupts {
     use core::arch::asm;
