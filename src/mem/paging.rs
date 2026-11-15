@@ -25,7 +25,6 @@ use crate::arch::memory::{
     },
     VirtAddr,
 };
-use x86_64::registers::control::{Cr3, Cr3Flags};
 
 /// アクティブなページテーブルへのグローバル参照と物理メモリオフセット
 pub static PAGE_TABLE: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
@@ -143,7 +142,7 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
     let physical_memory_offset = boot_info.physical_memory_offset;
 
     // 現在のページテーブル情報を記録
-    let (old_l4_frame, _) = Cr3::read();
+    let old_l4_frame = arch64::active_kernel_root();
     let old_l4_phys = old_l4_frame.start_address().as_u64();
 
     info!("Current L4 table phys: {:#x}", old_l4_phys);
@@ -174,7 +173,7 @@ pub fn init_page_table() -> Result<()> {
         }
     };
 
-    let (old_l4_frame, _) = Cr3::read();
+    let old_l4_frame = arch64::active_kernel_root();
     let old_l4_phys = old_l4_frame.start_address().as_u64();
 
     info!("Bootloader L4 table at phys {:#x}", old_l4_phys);
@@ -213,9 +212,8 @@ pub fn init_page_table() -> Result<()> {
 
     // 新しい L4 テーブルにアクティブに切り替える
     unsafe {
-        let new_l4_flags = Cr3Flags::empty();
-        Cr3::write(new_l4_frame, new_l4_flags);
-        info!("CR3 switched to new L4 table at phys {:#x}", new_l4_phys);
+        arch64::activate_kernel_root(new_l4_frame);
+        info!("Kernel root switched to phys {:#x}", new_l4_phys);
     }
 
     // ブートローダーの L4 テーブルを記録
@@ -625,28 +623,15 @@ pub(crate) fn user_frame_has_multiple_owners(phys: u64) -> bool {
 }
 
 fn flush_page_if_active(table_phys: u64, page_addr: u64) {
-    let (current_cr3, _) = Cr3::read();
-    if current_cr3.start_address().as_u64() == table_phys {
-        unsafe {
-            core::arch::asm!(
-                "invlpg [{}]",
-                in(reg) page_addr,
-                options(nostack, preserves_flags)
-            );
-        }
+    if arch64::is_root_active(table_phys) {
+        arch64::flush_page_local(VirtAddr::new(page_addr));
     }
 }
 
-/// Fully invalidate this CPU, including globals and cached PCID contexts.
-/// Toggling CR4.PGE flushes all contexts, unlike reloading only current CR3.
+/// Fully invalidate this CPU, including global and tagged translations.
 /// Call with interrupts disabled and CPU context stable.
 pub(crate) fn flush_all_translations_local() {
-    unsafe {
-        let flags: u64;
-        core::arch::asm!("mov {}, cr4", out(reg) flags, options(nostack, preserves_flags));
-        core::arch::asm!("mov cr4, {}", in(reg) (flags ^ (1u64 << 7)), options(nostack, preserves_flags));
-        core::arch::asm!("mov cr4, {}", in(reg) flags, options(nostack, preserves_flags));
-    }
+    arch64::flush_all_local();
 }
 
 pub fn resolve_copy_on_write(table_phys: u64, address: u64) -> Result<bool> {
@@ -2092,8 +2077,7 @@ pub fn protect_user_range_in_table(
         .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
     let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
     let mut pt = unsafe { OffsetPageTable::new(l4, VirtAddr::new(phys_off)) };
-    let (current_cr3, _) = Cr3::read();
-    let current_table = current_cr3.start_address().as_u64();
+    let table_active = arch64::is_root_active(table_phys);
 
     let mut page_addr = start;
     while page_addr < end {
@@ -2124,7 +2108,7 @@ pub fn protect_user_range_in_table(
             pt.update_flags(page, new_flags)
                 .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?
         };
-        if current_table == table_phys {
+        if table_active {
             flush.flush();
         } else {
             flush.ignore();
@@ -2170,8 +2154,7 @@ pub fn protect_range_in_table(
 
     let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
     let mut pt = unsafe { OffsetPageTable::new(l4, VirtAddr::new(phys_off)) };
-    let (current_cr3, _) = Cr3::read();
-    let current_table = current_cr3.start_address().as_u64();
+    let table_active = arch64::is_root_active(table_phys);
 
     let mut page_addr = start;
     while page_addr < end {
@@ -2202,7 +2185,7 @@ pub fn protect_range_in_table(
             pt.update_flags(page, new_flags)
                 .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?
         };
-        if current_table == table_phys {
+        if table_active {
             flush.flush();
         } else {
             flush.ignore();
@@ -2222,9 +2205,9 @@ pub fn protect_current_range(
     writable: bool,
     executable: bool,
 ) -> Result<()> {
-    let (cr3, _) = Cr3::read();
+    let root = arch64::active_kernel_root();
     protect_range_in_table(
-        cr3.start_address().as_u64(),
+        root.start_address().as_u64(),
         addr,
         len,
         present,
@@ -2598,7 +2581,7 @@ pub fn map_shared_frame_to_user(
     }
 }
 
-/// CR3を指定した物理アドレスのページテーブルに切り替える
+/// プロセスのユーザーアドレス空間を指定したルートに切り替える
 ///
 /// ## Arguments
 /// - `table_phys`: 切り替えるページテーブルの物理アドレス
@@ -2608,14 +2591,14 @@ pub fn map_shared_frame_to_user(
 pub fn switch_page_table(table_phys: u64) {
     if table_phys == 0 || (table_phys & 0xfff) != 0 {
         crate::warn!(
-            "Refusing to switch CR3 with invalid page table address: {:#x}",
+            "Refusing to switch to invalid page table address: {:#x}",
             table_phys
         );
         return;
     }
     unsafe {
         let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(table_phys));
-        Cr3::write(frame, Cr3Flags::empty());
+        arch64::activate_user_root(frame);
     }
 }
 
@@ -2853,13 +2836,7 @@ pub fn unmap_page_in_table(table_phys: u64, virt_addr: u64) -> Result<()> {
     l1e.set_unused();
     record_user_leaf_change(table_phys, previous_flags, PageTableFlags::empty());
 
-    // TLBフラッシュ（現在のCR3がtable_physの場合のみ）
-    let (current_cr3, _) = Cr3::read();
-    if current_cr3.start_address().as_u64() == table_phys {
-        unsafe {
-            core::arch::asm!("invlpg [{}]", in(reg) virt_addr, options(nostack, preserves_flags));
-        }
-    }
+    flush_page_if_active(table_phys, virt_addr);
 
     Ok(())
 }
@@ -2924,12 +2901,7 @@ pub fn unmap_private_page_in_table(
     let previous_flags = l1e.flags();
     l1e.set_unused();
     record_user_leaf_change(table_phys, previous_flags, PageTableFlags::empty());
-    let (current_cr3, _) = Cr3::read();
-    if current_cr3.start_address().as_u64() == table_phys {
-        unsafe {
-            core::arch::asm!("invlpg [{}]", in(reg) virt_addr, options(nostack, preserves_flags));
-        }
-    }
+    flush_page_if_active(table_phys, virt_addr);
 
     if table_is_empty(l1) {
         l2e.set_unused();

@@ -6,6 +6,7 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 const TABLES: usize = 96;
 const ALIAS: u64 = 0x1000_0000;
+const KERNEL_ALIAS: u64 = 0xffff_8000_1000_0000;
 static mut TABLE_POOL: [PageTable; TABLES] = [const { PageTable::zeroed() }; TABLES];
 #[repr(C, align(4096))]
 struct DataPage([u64; 512]);
@@ -228,6 +229,14 @@ pub fn initialize() {
             "first alias mapping",
         );
         check(
+            mapper.map(
+                KERNEL_ALIAS,
+                addr_of!(DATA_A) as u64,
+                access(false, true, false),
+            ) == Ok(()),
+            "first upper-half mapping",
+        );
+        check(
             mapper.map(ALIAS, addr_of!(DATA_B) as u64, access(true, true, false))
                 == Err(Error::AlreadyMapped),
             "mapping overwritten",
@@ -246,10 +255,69 @@ pub fn initialize() {
             mapper.map(ALIAS, addr_of!(DATA_B) as u64, access(true, true, false)) == Ok(()),
             "second alias mapping",
         );
+        check(
+            mapper.map(
+                KERNEL_ALIAS,
+                addr_of!(DATA_B) as u64,
+                access(false, true, false),
+            ) == Ok(()),
+            "second upper-half mapping",
+        );
         write_volatile(addr_of_mut!(DATA_A).cast::<u64>(), 0x1111);
         write_volatile(addr_of_mut!(DATA_B).cast::<u64>(), 0x2222);
         check(config.enable(first, first) == Ok(()), "MMU enable");
         emit("Stage-1 MMU enabled\n");
+        {
+            use crate::arch::memory::{self, paging::PhysFrame, PhysAddr, VirtAddr};
+            let first_frame = PhysFrame::containing_address(PhysAddr::new(first));
+            let second_frame = PhysFrame::containing_address(PhysAddr::new(second));
+            check(
+                memory::active_kernel_root() == first_frame,
+                "kernel root register",
+            );
+            memory::activate_user_root(second_frame);
+            check(
+                memory::active_user_root() == second_frame,
+                "user root register",
+            );
+            check(
+                memory::active_kernel_root() == first_frame,
+                "user switch changed kernel root",
+            );
+            check(
+                memory::is_root_active(first) && memory::is_root_active(second),
+                "dual active roots",
+            );
+            check(
+                read_volatile(ALIAS as *const u64) == 0x2222,
+                "shared VM root switch",
+            );
+            check(
+                read_volatile(KERNEL_ALIAS as *const u64) == 0x1111,
+                "user switch changed upper mapping",
+            );
+            memory::flush_page_local(VirtAddr::new(ALIAS));
+            memory::activate_kernel_root(second_frame);
+            check(
+                memory::active_kernel_root() == second_frame,
+                "replace kernel root",
+            );
+            check(
+                read_volatile(KERNEL_ALIAS as *const u64) == 0x2222,
+                "kernel root retained stale upper mapping",
+            );
+            memory::activate_kernel_root(first_frame);
+            memory::activate_user_root(first_frame);
+            check(
+                read_volatile(ALIAS as *const u64) == 0x1111,
+                "shared VM root restore",
+            );
+            check(
+                read_volatile(KERNEL_ALIAS as *const u64) == 0x1111,
+                "kernel upper mapping restore",
+            );
+            emit("Shared VM root controls PASS\n");
+        }
         check(config.switch_lower_root(first, 1) == Ok(()), "first ASID");
         check(
             read_volatile(ALIAS as *const u64) == 0x1111,
