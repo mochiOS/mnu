@@ -17,6 +17,10 @@ mod user_probe;
 #[path = "mmu-probe.rs"]
 mod mmu_probe;
 
+#[cfg(all(target_arch = "aarch64", posix_context_probe))]
+#[path = "posix-context-probe.rs"]
+mod posix_context_probe;
+
 use core::arch::asm;
 
 #[cfg(target_arch = "aarch64")]
@@ -291,6 +295,8 @@ extern "C" fn probe_main() -> ! {
         arm::check_exceptions();
     }
     context_probe::run();
+    #[cfg(all(target_arch = "aarch64", posix_context_probe))]
+    posix_context_probe::run();
     #[cfg(target_arch = "aarch64")]
     {
         user_probe::run()
