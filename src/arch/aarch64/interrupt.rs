@@ -75,6 +75,9 @@ fn terminate(frame: &ExceptionFrame, cause: mnu_abi::MemoryFaultCause) -> ! {
 #[unsafe(no_mangle)]
 unsafe extern "C" fn mnu_aarch64_exception_dispatch(raw: *mut ExceptionFrame) -> u64 {
     let frame = unsafe { &mut *raw };
+    if frame.origin() == Some(ExceptionOrigin::LowerAArch64) {
+        crate::cpu::branch_predictor_barrier();
+    }
     if frame.kind() != Some(ExceptionKind::Synchronous)
         || frame.origin() != Some(ExceptionOrigin::LowerAArch64)
     {

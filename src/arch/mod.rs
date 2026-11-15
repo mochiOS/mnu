@@ -12,6 +12,8 @@ mod selected;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("mnu does not yet provide CPU primitives for this architecture");
 
+#[cfg(any(target_arch = "aarch64", not(mnu_arch_probe)))]
+pub use selected::cpu;
 pub use selected::context;
 pub use selected::exception;
 pub use selected::fp;

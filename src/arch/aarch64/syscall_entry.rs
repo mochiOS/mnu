@@ -99,6 +99,7 @@ pub(crate) fn finish_user_trap(frame: &ExceptionFrame, id: crate::task::ThreadId
         crate::task::scheduler::exit_current_process(u64::MAX);
     }
     verify_kernel_page_table_before_rust();
+    crate::cpu::reassert_runtime_hardening();
     crate::mem::paging::switch_page_table(root);
     unsafe { crate::arch::tls::write_user_base(tls) };
     true

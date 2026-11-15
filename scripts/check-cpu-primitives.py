@@ -87,7 +87,7 @@ def check(architecture, args, out):
     if architecture == "aarch64":
         command = [
             qemu, "-machine", "virt-8.2,virtualization=on,gic-version=2",
-            "-cpu", "cortex-a57", *common, "-kernel", str(binary),
+            "-cpu", args.aarch64_cpu, *common, "-kernel", str(binary),
             "-semihosting-config", "enable=on,target=native",
         ]
         run(command, out / "aarch64-run.log", 15, marker=marker, env=env)
@@ -120,6 +120,8 @@ def main():
     parser.add_argument("--toolchain", default="nightly-2026-05-14")
     parser.add_argument("--out", type=Path, default=CORE / "out/mdp/cpu-primitives")
     parser.add_argument("--qemu-aarch64", default="qemu-system-aarch64")
+    parser.add_argument("--aarch64-cpu", default="cortex-a57",
+                        help="diagnostic CPU model (e.g. max also exercises FEAT_PAN/RNDR)")
     parser.add_argument("--qemu-x86-64", dest="qemu_x86_64", default="qemu-system-x86_64")
     parser.add_argument("--firmware", type=Path, default=Path("/usr/share/OVMF"))
     parser.add_argument("--native-syscall-rlib", type=Path,

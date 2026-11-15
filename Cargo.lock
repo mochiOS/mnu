@@ -555,6 +555,26 @@ name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "mochios-mdriver-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
+name = "mboot-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-fonts"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
 name = "mochios-appcore"
 version = "0.1.0"
 
@@ -571,6 +591,10 @@ name = "mochios-linker-driver"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "bootui"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "mochios-boot-selection"
 version = "0.1.0"
 
@@ -581,27 +605,3 @@ version = "0.1.0"
 [[patch.unused]]
 name = "mochios-system-image"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
-
-[[patch.unused]]
-name = "mboot-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "bootui"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-fonts"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-mdriver-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"

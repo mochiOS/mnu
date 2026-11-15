@@ -1,5 +1,7 @@
 //! x86_64 implementations of the shared CPU mechanisms.
 
+#[cfg(not(mnu_arch_probe))]
+pub mod cpu;
 pub mod context;
 pub mod counter;
 pub mod hypercall;

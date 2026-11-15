@@ -167,6 +167,7 @@ pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
         crate::error!("Boot ABI validation failed: {:?}", error);
         halt_forever();
     }
+    crate::smp::set_boot_info_addr(boot_info as *const BootInfo as u64);
     crate::percpu::configure_boot_cpu(boot_info);
     match crate::boot_memory::preparation_status() {
         Some(crate::boot_memory::BootMemoryPreparation::Succeeded { reclaimed_bytes }) => {

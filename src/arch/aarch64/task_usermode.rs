@@ -51,6 +51,7 @@ pub unsafe fn resume_usermode(context: SyscallUserContext, result: u64, tls: u64
     // SAFETY: The current process owns this TTBR0 root. TTBR1 keeps the kernel
     // code, retained register image, exception vectors and trusted stack mapped.
     unsafe {
+        crate::cpu::reassert_runtime_hardening();
         crate::mem::paging::switch_page_table(root);
         match crate::arch::usermode::resume_user(&context, result, tls, kernel_stack) {
             Ok(never) => match never {},

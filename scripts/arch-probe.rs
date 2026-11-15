@@ -485,6 +485,55 @@ fn check_cpu_local() {
     emit("EL1 CPU-local slots and thread handoff PASS\n");
 }
 
+#[cfg(target_arch = "aarch64")]
+fn check_cpu_features() {
+    use arch::cpu;
+    arch::interrupts::enable();
+    check(cpu::prepare_local() == Err(cpu::InitError::InvalidContext),
+        "CPU feature preparation accepted enabled IRQs");
+    arch::interrupts::disable();
+    check(cpu::prepare_local().is_ok(), "native base CPU feature initialization");
+    let protected = cpu::is_smap_enabled();
+    arch::interrupts::enable();
+    {
+        let _outer = cpu::SmapSmepGuard::new();
+        check(!arch::interrupts::are_enabled() && !cpu::is_smap_enabled(),
+            "native user access guard did not mask IRQ/PAN");
+        {
+            let _inner = cpu::SmapSmepGuard::new();
+            check(!arch::interrupts::are_enabled() && !cpu::is_smap_enabled(),
+                "nested native user access scope");
+        }
+        check(!arch::interrupts::are_enabled() && !cpu::is_smap_enabled(),
+            "nested guard restored outer protections too early");
+    }
+    check(arch::interrupts::are_enabled() && cpu::is_smap_enabled() == protected,
+        "native user access scope did not restore exact IRQ/PAN state");
+    arch::interrupts::disable();
+    {
+        let _guard = cpu::SmapSmepGuard::new();
+    }
+    check(!arch::interrupts::are_enabled(), "guard enabled an originally masked IRQ");
+    check(cpu::mitigation_calls(1, 1) == Some(0)
+        && cpu::mitigation_calls(0, 0).is_some()
+        && cpu::mitigation_calls(u64::MAX, 1).is_none()
+        && cpu::mitigation_calls(1, 0xffff_ffff).is_none()
+        && cpu::mitigation_calls(2, 1).is_none(),
+        "unsupported firmware mitigation admitted");
+    cpu::speculation_barrier();
+    let sample = cpu::hw_random_u64();
+    let isar0: u64;
+    unsafe { asm!("mrs {}, id_aa64isar0_el1", out(reg) isar0, options(nomem, nostack, preserves_flags)); }
+    if isar0 >> 60 != 1 {
+        check(sample.is_none(), "unsupported RNDR executed");
+    }
+    emit(if protected { "Native CPU features / PAN scopes PASS\n" }
+        else { "Native CPU features / no-PAN scopes PASS\n" });
+    // This fixture later accesses its dedicated EL0 test stack directly; it
+    // does not claim to run full CPU admission or firmware mitigations.
+    unsafe { cpu::disable_smap() };
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn probe_main() -> ! {
     #[cfg(target_arch = "aarch64")]
@@ -493,6 +542,8 @@ extern "C" fn probe_main() -> ! {
     check_initial_thread_context();
     #[cfg(target_arch = "aarch64")]
     check_cpu_local();
+    #[cfg(target_arch = "aarch64")]
+    check_cpu_features();
     check_user_tls();
     #[cfg(target_arch = "x86_64")]
     check_fp_snapshot();
