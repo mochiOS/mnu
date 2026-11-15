@@ -12,6 +12,8 @@ static mut USER_STACK: Stack = Stack([0; 16384]);
 static PHASE: AtomicU32 = AtomicU32::new(0);
 static PRIVILEGED_TRAPS: AtomicU32 = AtomicU32::new(0);
 static MEMORY_TRAPS: AtomicU32 = AtomicU32::new(0);
+static CALLBACKS: AtomicU32 = AtomicU32::new(0);
+static mut CALLBACK_RETURN: arch::exception::UserContext = arch::exception::UserContext::empty();
 #[cfg(native_syscall_probe)]
 static NATIVE_CALLS: AtomicU32 = AtomicU32::new(0);
 static KERNEL_PRIVATE: u64 = 0xa5a5_1234_5678_ffff;
@@ -104,6 +106,7 @@ pub fn handle(frame: &mut ExceptionFrame) {
             "execute fault address",
         );
         check(frame.registers()[0] == 0, "EL0 register test failed");
+        check(CALLBACKS.load(Ordering::Acquire) == 1, "EL0 callback not executed");
         emit("EL0 kernel isolation, read-only code and NX stack PASS\n");
         emit("Native EL0 continuation resume PASS\n");
         emit("EL0 SVC, privileged trap and register restoration PASS\n");
@@ -270,6 +273,14 @@ pub fn handle(frame: &mut ExceptionFrame) {
             let fp = fp.with_user_context(&selected, bytes)
                 .unwrap_or_else(|| fail("native FP snapshot rejected"));
             selected = fp.restore_context(selected);
+            let image = arch::upcall::snapshot(selected, fp.snapshot_bytes());
+            check(arch::upcall::decode(&image) == Some(selected), "native upcall snapshot round trip");
+            let mut invalid = image;
+            invalid.pstate |= 1 << 7;
+            check(arch::upcall::decode(&invalid).is_none(), "snapshot accepted privileged PSTATE");
+            invalid = image;
+            invalid.fpcr |= 1 << 63;
+            check(arch::upcall::decode(&invalid).is_none(), "snapshot accepted reserved FPCR");
             check(
                 frame.restore_user_context(&selected),
                 "EL0 context restore failed",
@@ -291,9 +302,32 @@ pub fn handle(frame: &mut ExceptionFrame) {
                     == Err(ResumeError::InvalidKernelStack), "resume accepted unaligned EL1 stack");
                 asm!("movi v0.16b, #0xa5", "movi v31.16b, #0x5a",
                     out("v0") _, out("v31") _, options(nostack));
-                match resume_user(&selected, 77, 0x1234_5000, kernel_top) {
+                core::ptr::addr_of_mut!(CALLBACK_RETURN).write(selected);
+                let mut callback = selected;
+                let stack = arch::upcall::callback_stack(top, true);
+                let entry = callback_entry as *const () as u64;
+                check(arch::upcall::valid_callback(entry, stack), "callback entry/stack rejected");
+                check(arch::upcall::return_slot(stack).is_none()
+                    && arch::upcall::exception_argument_slot(stack).is_none(), "ARM callback used stack arguments");
+                arch::upcall::callback(&mut callback, entry, stack, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]);
+                match resume_user(&callback, arch::upcall::result(&callback), 0x1234_5000, kernel_top) {
                     Ok(never) => match never {},
                     Err(_) => fail("validated native resume rejected"),
+                }
+            }
+        }
+        0x54 => {
+            check(PHASE.load(Ordering::Acquire) == 2, "callback phase");
+            check(frame.registers()[0] == 0, "native callback arguments/stack/LR");
+            check(CALLBACKS.fetch_add(1, Ordering::AcqRel) == 0, "duplicate callback");
+            emit("Native snapshot and EL0 callback C ABI PASS\n");
+            // SAFETY: The fixture retained this complete kernel-owned image
+            // before entering the callback; neither stack nor mappings changed.
+            unsafe {
+                let context = core::ptr::addr_of!(CALLBACK_RETURN).read();
+                match arch::usermode::resume_user(&context, 77, 0x1234_5000, core::ptr::addr_of!(__stack_top) as u64) {
+                    Ok(never) => match never {},
+                    Err(_) => fail("callback continuation rejected"),
                 }
             }
         }
@@ -310,6 +344,24 @@ pub fn handle(frame: &mut ExceptionFrame) {
             out("v0") _, out("v31") _, options(nostack),
         );
     }
+}
+
+#[unsafe(naked)]
+#[unsafe(link_section = ".user.text")]
+unsafe extern "C" fn callback_entry(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> ! {
+    naked_asm!(
+        "cmp x0, #0x11", "b.ne 2f",
+        "cmp x1, #0x22", "b.ne 2f",
+        "cmp x2, #0x33", "b.ne 2f",
+        "cmp x3, #0x44", "b.ne 2f",
+        "cmp x4, #0x55", "b.ne 2f",
+        "cmp x5, #0x66", "b.ne 2f",
+        "cmp x6, #0x77", "b.ne 2f",
+        "mov x7, sp", "and x7, x7, #15", "cbnz x7, 2f",
+        "cbnz x30, 2f",
+        "mov x0, #0", "svc #0x54", "b .",
+        "2: mov x0, #1", "svc #0x54", "b .",
+    );
 }
 
 // Seed every non-argument register before invoking the production EL0 entry.

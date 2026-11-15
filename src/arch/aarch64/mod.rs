@@ -10,6 +10,7 @@ pub mod tls;
 pub mod memory;
 pub mod paging;
 pub mod usermode;
+pub mod upcall;
 
 pub mod interrupts {
     use core::arch::asm;

@@ -47,19 +47,19 @@ pub fn install(config_ptr: u64, config_len: u64) -> u64 {
     let Some(stack_end) = config.stack_base.checked_add(config.stack_size) else {
         return Error::InvalidArgument.into_raw();
     };
-    // Exception callbacks have a seventh C argument at RSP+8. Leave another
-    // sixteen bytes above the return slot while retaining RSP % 16 == 8.
-    let frame_bytes = if config.flags & mnu_abi::THREAD_UPCALL_EXCEPTIONS != 0 {
-        24
-    } else {
-        8
-    };
-    let stack_top = (stack_end & !0xf).saturating_sub(frame_bytes);
-    if stack_top < config.stack_base {
+    let stack_top = crate::arch::upcall::callback_stack(
+        stack_end,
+        config.flags & mnu_abi::THREAD_UPCALL_EXCEPTIONS != 0,
+    );
+    if stack_top < config.stack_base
+        || !crate::arch::upcall::valid_callback(config.entry, stack_top)
+    {
         return Error::InvalidArgument.into_raw();
     }
-    if let Err(error) = super::copy_to_user_native(stack_top, &0u64.to_ne_bytes()) {
-        return error.into_raw();
+    if let Some(slot) = crate::arch::upcall::return_slot(stack_top) {
+        if let Err(error) = super::copy_to_user_native(slot, &0u64.to_ne_bytes()) {
+            return error.into_raw();
+        }
     }
     let Some(thread_id) = crate::task::current_thread_id() else {
         return Error::NotReady.into_raw();
@@ -221,7 +221,11 @@ pub fn return_from_context(token: u64, context_ptr: u64, context_len: u64) -> u6
         return Error::InvalidArgument.into_raw();
     };
     crate::task::with_thread_mut(thread_id, |thread| {
-        thread.request_upcall_return_context(token, context, snapshot.fx_state)
+        thread.request_upcall_return_context(
+            token,
+            context,
+            crate::arch::upcall::extension(&snapshot),
+        )
     })
     .map(|result| match result {
         Ok(()) => SUCCESS,
@@ -249,11 +253,13 @@ pub fn restore_context(context_ptr: u64, context_len: u64) -> u64 {
         return error.into_raw();
     }
     let snapshot = unsafe { snapshot.assume_init() };
-    let Some(context) = return_context(&snapshot).filter(|context| context.user_rsp >= 16) else {
+    let Some(context) = return_context(&snapshot)
+        .filter(|context| crate::arch::upcall::stack_pointer(context) >= 16)
+    else {
         return Error::InvalidArgument.into_raw();
     };
     crate::task::with_thread_mut(thread_id, |thread| {
-        thread.request_context_restore(context, snapshot.fx_state)
+        thread.request_context_restore(context, crate::arch::upcall::extension(&snapshot))
     })
     .map(|result| match result {
         Ok(()) => SUCCESS,
@@ -278,46 +284,7 @@ pub fn return_from(token: u64) -> u64 {
 }
 
 fn return_context(snapshot: &mnu_abi::ThreadUpcallSnapshot) -> Option<UserUpcallContext> {
-    // Only user-modifiable arithmetic/debug flags are accepted. In particular
-    // IOPL, NT, VM and virtual-interrupt flags must never reach IRET/FXRSTOR.
-    const REQUIRED: u64 = (1 << 1) | (1 << 9);
-    const ALLOWED: u64 = REQUIRED
-        | (1 << 0)
-        | (1 << 2)
-        | (1 << 4)
-        | (1 << 6)
-        | (1 << 7)
-        | (1 << 8)
-        | (1 << 10)
-        | (1 << 11)
-        | (1 << 16)
-        | (1 << 18)
-        | (1 << 21);
-    if snapshot.rflags & REQUIRED != REQUIRED || snapshot.rflags & !ALLOWED != 0 {
-        return None;
-    }
-    let registers = &snapshot.registers;
-    let context = UserUpcallContext {
-        user_rip: snapshot.instruction,
-        user_rsp: snapshot.stack_pointer,
-        user_rflags: snapshot.rflags,
-        rdi: snapshot.argument,
-        rax: registers.rax,
-        rbx: registers.rbx,
-        rcx: registers.rcx,
-        rdx: registers.rdx,
-        rsi: registers.rsi,
-        rbp: registers.rbp,
-        r8: registers.r8,
-        r9: registers.r9,
-        r10: registers.r10,
-        r11: registers.r11,
-        r12: registers.r12,
-        r13: registers.r13,
-        r14: registers.r14,
-        r15: registers.r15,
-    };
-    valid_user_return(&context).then_some(context)
+    crate::arch::upcall::decode(snapshot)
 }
 
 pub fn inspect(token: u64, output: u64, length: u64) -> u64 {
@@ -351,51 +318,31 @@ fn snapshot_context(
     context: UserUpcallContext,
     fx_state: [u8; 512],
 ) -> mnu_abi::ThreadUpcallSnapshot {
-    mnu_abi::ThreadUpcallSnapshot {
-        instruction: context.user_rip,
-        stack_pointer: context.user_rsp,
-        rflags: context.user_rflags,
-        argument: context.rdi,
-        registers: mnu_abi::ThreadInitialRegisters {
-            rax: context.rax,
-            rbx: context.rbx,
-            rcx: context.rcx,
-            rdx: context.rdx,
-            rsi: context.rsi,
-            rbp: context.rbp,
-            r8: context.r8,
-            r9: context.r9,
-            r10: context.r10,
-            r11: context.r11,
-            r12: context.r12,
-            r13: context.r13,
-            r14: context.r14,
-            r15: context.r15,
-        },
-        fx_state,
-    }
+    crate::arch::upcall::snapshot(context, fx_state)
 }
 
 pub fn prepare_syscall_return(frame: &mut SavedSyscallFrame) {
-    let mut context = read_context(frame);
+    let Some(mut context) = read_context(frame) else {
+        return;
+    };
     if prepare_context(&mut context) {
         resume_context(context);
     }
-    write_context(frame, context);
-}
-
-/// The assembly interrupt entry owns these 15 GPR and five IRET slots.
-/// Unlike SYSCALL, an interrupt does not clobber the user's RCX/R11.
-pub fn prepare_interrupt_return(frame: &mut crate::cpu::context::InterruptFrame) {
-    if frame.iret.cs & 3 != 3 {
-        return;
-    }
-    let mut context = read_interrupt_context(frame);
-    prepare_context(&mut context);
-    if !valid_user_return(&context) {
+    if !valid_user_return(&context) || !write_context(frame, context) {
         crate::task::scheduler::exit_current_process(u64::MAX);
     }
-    write_interrupt_context(frame, context);
+}
+
+/// Prepare the current thread's pending upcall on a native user frame.
+/// Kernel-mode interrupt frames remain unchanged.
+pub fn prepare_interrupt_return(frame: &mut crate::cpu::context::InterruptFrame) {
+    let Some(mut context) = read_interrupt_context(frame) else {
+        return;
+    };
+    prepare_context(&mut context);
+    if !valid_user_return(&context) || !write_interrupt_context(frame, context) {
+        crate::task::scheduler::exit_current_process(u64::MAX);
+    }
 }
 
 fn prepare_context(context: &mut UserUpcallContext) -> bool {
@@ -417,16 +364,20 @@ fn prepare_context(context: &mut UserUpcallContext) -> bool {
     else {
         return false;
     };
-    context.user_rip = delivery.entry;
-    context.user_rsp = delivery.stack_top;
-    context.rdi = delivery.payload;
-    context.rsi = delivery.token;
-    // Native C callbacks enter with ordinary direction/debug flags. The
-    // original flags remain in the kernel-owned return snapshot.
-    context.user_rflags &= !((1 << 10) | (1 << 8) | (1 << 16));
-    context.rdx = mnu_abi::THREAD_UPCALL_KIND_INTERRUPT;
-    context.r8 = 0;
-    context.r9 = 0;
+    crate::arch::upcall::callback(
+        context,
+        delivery.entry,
+        delivery.stack_top,
+        [
+            delivery.payload,
+            delivery.token,
+            mnu_abi::THREAD_UPCALL_KIND_INTERRUPT,
+            0,
+            0,
+            0,
+            0,
+        ],
+    );
     false
 }
 
@@ -450,6 +401,7 @@ pub(crate) fn current_has_deliverable_upcall() -> bool {
 
 /// A synchronous exception bypasses the asynchronous queue, but may not
 /// replace an active delivery. All original registers remain kernel-owned.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn prepare_user_exception(
     raw: &mut crate::cpu::context::PageFaultFrame,
     address: u64,
@@ -462,53 +414,98 @@ pub(crate) fn prepare_user_exception(
     if frame.iret.cs & 3 != 3 {
         return false;
     }
-    let mut context = read_interrupt_context(&frame);
-    if !valid_user_return(&context) {
-        return false;
-    }
-    let Some(id) = crate::task::current_thread_id() else {
+    let Some(mut context) = read_interrupt_context(&frame) else {
         return false;
     };
-    let Some(delivery) =
-        crate::task::with_thread_mut(id, |thread| thread.begin_exception_upcall(context, 14))
-            .flatten()
-    else {
-        return false;
-    };
-    // No thread-table lock is held across faultable usercopy. If this stack
-    // became inaccessible, the caller retains its native fatal-fault path;
-    // never enter the callback with missing or stale exception metadata.
-    if super::copy_to_user_native(delivery.stack_top + 8, &(cause as u64).to_ne_bytes()).is_err() {
+    if !prepare_fault_delivery(&mut context, 14, raw.error_code, address, cause) {
         return false;
     }
-    crate::task::with_thread_mut(id, |thread| {
-        thread.note_exception(crate::util::process_diagnostics::Exception {
-            timestamp_ns: super::time::monotonic_nanoseconds(),
-            vector: 14,
-            cause: cause as u32,
-            error_code: raw.error_code,
-            instruction: context.user_rip,
-            stack_pointer: context.user_rsp,
-            address,
-        })
-    });
-    context.user_rip = delivery.entry;
-    context.user_rsp = delivery.stack_top;
-    context.rdi = delivery.payload;
-    context.rsi = delivery.token;
-    context.user_rflags &= !((1 << 10) | (1 << 8) | (1 << 16));
-    context.rdx = mnu_abi::THREAD_UPCALL_KIND_EXCEPTION;
-    context.rcx = address;
-    context.r8 = raw.error_code;
-    context.r9 = frame.iret.rip;
-    write_interrupt_context(&mut frame, context);
+    if !write_interrupt_context(&mut frame, context) {
+        return false;
+    }
     raw.gprs = frame.gprs;
     raw.iret = frame.iret;
     true
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn prepare_user_exception(
+    raw: &mut crate::arch::exception::ExceptionFrame,
+    address: u64,
+    cause: mnu_abi::MemoryFaultCause,
+) -> bool {
+    let Some(mut context) = raw.user_context() else {
+        return false;
+    };
+    let vector = u32::from(raw.exception_class());
+    if !matches!(vector, 0x20 | 0x24)
+        || !prepare_fault_delivery(&mut context, vector, raw.syndrome(), address, cause)
+    {
+        return false;
+    }
+    raw.restore_user_context(&context)
+}
+
+// One delivery/token/diagnostic policy for both CPU frame adapters. The owner
+// never holds a thread-table lock across faultable callback-stack usercopy.
+fn prepare_fault_delivery(
+    context: &mut UserUpcallContext,
+    vector: u32,
+    error_code: u64,
+    address: u64,
+    cause: mnu_abi::MemoryFaultCause,
+) -> bool {
+    if !valid_user_return(context) {
+        return false;
+    }
+    let Some(id) = crate::task::current_thread_id() else {
+        return false;
+    };
+    let Some(delivery) = crate::task::with_thread_mut(id, |thread| {
+        thread.begin_exception_upcall(*context, u64::from(vector))
+    })
+    .flatten() else {
+        return false;
+    };
+    // If the reserved callback stack is no longer writable, retain the native
+    // fatal-fault path rather than enter with incomplete exception metadata.
+    if let Some(slot) = crate::arch::upcall::exception_argument_slot(delivery.stack_top) {
+        if super::copy_to_user_native(slot, &(cause as u64).to_ne_bytes()).is_err() {
+            return false;
+        }
+    }
+    let instruction = crate::arch::upcall::instruction_pointer(context);
+    let stack_pointer = crate::arch::upcall::stack_pointer(context);
+    crate::task::with_thread_mut(id, |thread| {
+        thread.note_exception(crate::util::process_diagnostics::Exception {
+            timestamp_ns: super::time::monotonic_nanoseconds(),
+            vector,
+            cause: cause as u32,
+            error_code,
+            instruction,
+            stack_pointer,
+            address,
+        })
+    });
+    crate::arch::upcall::callback(
+        context,
+        delivery.entry,
+        delivery.stack_top,
+        [
+            delivery.payload,
+            delivery.token,
+            mnu_abi::THREAD_UPCALL_KIND_EXCEPTION,
+            address,
+            error_code,
+            instruction,
+            cause as u64,
+        ],
+    );
+    true
+}
+
 fn valid_user_return(context: &UserUpcallContext) -> bool {
-    context.user_rip != 0 && context.user_rip >> 47 == 0 && context.user_rsp >> 47 == 0
+    crate::arch::upcall::valid_return(context)
 }
 
 fn resume_context(context: UserUpcallContext) -> ! {
@@ -524,21 +521,57 @@ fn resume_context(context: UserUpcallContext) -> ! {
     // Only a kernel-validated, current-thread continuation reaches here.
     // The ordinary syscall path still uses SYSRET; full restoration uses the
     // same validated IRET machinery as native address-space continuation.
-    unsafe { crate::task::usermode::resume_usermode(registers, context.rax, fs_base) }
+    unsafe {
+        crate::task::usermode::resume_usermode(
+            registers,
+            crate::arch::upcall::result(&context),
+            fs_base,
+        )
+    }
 }
 
-fn read_interrupt_context(frame: &crate::cpu::context::InterruptFrame) -> UserUpcallContext {
-    frame.context()
+#[cfg(target_arch = "x86_64")]
+fn read_interrupt_context(
+    frame: &crate::cpu::context::InterruptFrame,
+) -> Option<UserUpcallContext> {
+    (frame.iret.cs & 3 == 3).then(|| frame.context())
 }
+#[cfg(target_arch = "x86_64")]
 fn write_interrupt_context(
     frame: &mut crate::cpu::context::InterruptFrame,
     context: UserUpcallContext,
-) {
+) -> bool {
     frame.set_context(context);
+    true
 }
-fn read_context(frame: &SavedSyscallFrame) -> UserUpcallContext {
-    frame.context()
+#[cfg(target_arch = "x86_64")]
+fn read_context(frame: &SavedSyscallFrame) -> Option<UserUpcallContext> {
+    Some(frame.context())
 }
-fn write_context(frame: &mut SavedSyscallFrame, context: UserUpcallContext) {
+#[cfg(target_arch = "x86_64")]
+fn write_context(frame: &mut SavedSyscallFrame, context: UserUpcallContext) -> bool {
     frame.set_context(context);
+    true
+}
+
+#[cfg(target_arch = "aarch64")]
+fn read_interrupt_context(
+    frame: &crate::arch::exception::ExceptionFrame,
+) -> Option<UserUpcallContext> {
+    frame.user_context()
+}
+#[cfg(target_arch = "aarch64")]
+fn write_interrupt_context(
+    frame: &mut crate::arch::exception::ExceptionFrame,
+    context: UserUpcallContext,
+) -> bool {
+    frame.restore_user_context(&context)
+}
+#[cfg(target_arch = "aarch64")]
+fn read_context(frame: &SavedSyscallFrame) -> Option<UserUpcallContext> {
+    frame.user_context()
+}
+#[cfg(target_arch = "aarch64")]
+fn write_context(frame: &mut SavedSyscallFrame, context: UserUpcallContext) -> bool {
+    frame.restore_user_context(&context)
 }

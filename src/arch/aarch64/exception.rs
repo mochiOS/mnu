@@ -96,6 +96,11 @@ pub struct ExceptionFrame {
     kind: u64,
 }
 
+// SVC and IRQ entry use this same hardware frame on AArch64. Neither alias
+// introduces the x86-only IRET/error-code fields or a second stack layout.
+pub type SavedSyscallFrame = ExceptionFrame;
+pub type InterruptFrame = ExceptionFrame;
+
 impl ExceptionFrame {
     pub fn user_context(&self) -> Option<UserContext> {
         if self.origin() != Some(ExceptionOrigin::LowerAArch64) || !self.valid_return_mode() {
@@ -157,6 +162,8 @@ impl ExceptionFrame {
     pub fn syndrome(&self) -> u64 {
         self.esr
     }
+
+    pub fn exception_class(&self) -> u8 { ((self.esr >> 26) & 0x3f) as u8 }
 
     /// FAR is meaningful only for exception classes that define it.
     pub fn fault_address(&self) -> u64 {

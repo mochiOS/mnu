@@ -6,11 +6,13 @@
 #[path = "../src/arch/mod.rs"]
 mod arch;
 
+extern crate self as mnu_abi;
+#[allow(dead_code, unused_attributes)]
+#[path = "../crates/abi/src/lib.rs"]
+mod abi;
+pub use abi::*;
 #[cfg(target_arch = "aarch64")]
-#[path = "../crates/abi/src/boot.rs"]
-mod boot_abi;
-#[cfg(target_arch = "aarch64")]
-pub use boot_abi::BootInfo;
+pub use abi::boot::BootInfo;
 #[cfg(target_arch = "aarch64")]
 #[path = "../src/percpu.rs"]
 mod percpu;
