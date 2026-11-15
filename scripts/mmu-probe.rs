@@ -21,6 +21,22 @@ struct Pool {
     remaining: Option<usize>,
 }
 
+// SAFETY: This reuses the same owned pool, including unpublished-frame return.
+unsafe impl crate::arch::memory::paging::FrameAllocator<crate::arch::memory::paging::Size4KiB>
+    for Pool
+{
+    fn allocate_frame(&mut self) -> Option<crate::arch::memory::paging::PhysFrame> {
+        let physical = self.allocate_table().ok()?;
+        Some(crate::arch::memory::paging::PhysFrame::containing_address(
+            crate::arch::memory::PhysAddr::new(physical),
+        ))
+    }
+    unsafe fn deallocate_frame(&mut self, frame: crate::arch::memory::paging::PhysFrame) -> bool {
+        unsafe { self.free_table(frame.start_address().as_u64()) };
+        true
+    }
+}
+
 // SAFETY: One fixture CPU exclusively owns the pool. Its physical and kernel
 // virtual addresses are identical, mapped as privileged RW/NX before MMU use.
 unsafe impl TableMemory for Pool {
@@ -319,6 +335,49 @@ pub fn initialize() {
             mapper.unmap(ALIAS) == Err(Error::NotMapped),
             "double unmap accepted",
         );
+        {
+            use crate::arch::memory::paging::mapper::Translate;
+            use crate::arch::memory::paging::{
+                Mapper as VmMapper, OffsetPageTable, Page, PageTableFlags as Flags, PhysFrame,
+            };
+            use crate::arch::memory::{PhysAddr, VirtAddr};
+            let root = &mut *pool.table_ptr(first);
+            let mut vm = OffsetPageTable::new(root, VirtAddr::zero());
+            let page = Page::containing_address(VirtAddr::new(0x1100_0000));
+            let frame = PhysFrame::containing_address(PhysAddr::new(addr_of!(DATA_A) as u64));
+            let flags =
+                Flags::PRESENT | Flags::WRITABLE | Flags::USER_ACCESSIBLE | Flags::NO_EXECUTE;
+            vm.map_to(page, frame, flags, pool)
+                .unwrap_or_else(|_| crate::fail("VM map adapter"))
+                .flush();
+            check(vm.translate_page(page) == Ok(frame), "VM frame translation");
+            check(
+                vm.translate_addr(page.start_address() + 2u64)
+                    == Some(frame.start_address() + 2u64),
+                "VM byte translation",
+            );
+            check(
+                read_volatile(page.start_address().as_ptr::<u64>()) == 0x3333,
+                "VM hardware translation",
+            );
+            vm.update_flags(page, flags & !Flags::WRITABLE)
+                .unwrap_or_else(|_| crate::fail("VM read-only adapter"))
+                .flush();
+            vm.update_flags(page, flags)
+                .unwrap_or_else(|_| crate::fail("VM writable adapter"))
+                .flush();
+            write_volatile(page.start_address().as_mut_ptr::<u64>(), 0x4444);
+            check(
+                read_volatile(addr_of!(DATA_A).cast::<u64>()) == 0x4444,
+                "VM permission update",
+            );
+            let (released, flush) = vm
+                .unmap(page)
+                .unwrap_or_else(|_| crate::fail("VM unmap adapter"));
+            flush.flush();
+            check(released == frame, "VM frame ownership return");
+            emit("Shared VM mapper adapter PASS\n");
+        }
         emit("Stage-1 mappings, ASIDs and rollback PASS\n");
     }
 }

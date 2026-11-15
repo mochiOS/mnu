@@ -294,14 +294,21 @@ pub mod page_table {
             self.replace(0);
         }
         fn replace(&mut self, raw: u64) {
-            if self.raw() == raw {
+            let old = self.raw();
+            if old == raw {
                 return;
             }
-            // These VM-facing setters do not receive a VA. Use a conservative
-            // complete broadcast for break-before-make. Callers retain mapping
-            // exclusion; the VM can later pass targeted invalidation context.
+            // Permission/software-only changes with unchanged PA/type/memory
+            // attributes can be published atomically. Do not temporarily remove
+            // a table covering the executing kernel just to change ignored
+            // metadata. Other live replacements require break-before-make.
+            let permissions = (3 << 6) | (1 << 10) | (1 << 11) | PXN | UXN | (15 << 55);
+            let direct = old & 3 == 3
+                && raw & 3 == 3
+                && (old ^ raw) & !permissions == 0
+                && old & !raw & (1 << 11) == 0;
             unsafe {
-                if self.raw() & 1 != 0 {
+                if old & 1 != 0 && !direct {
                     write_volatile(&mut self.value, 0);
                     core::arch::asm!(
                         "dsb ishst",
@@ -312,7 +319,13 @@ pub mod page_table {
                     );
                 }
                 write_volatile(&mut self.value, raw);
-                core::arch::asm!("dsb ishst", "isb", options(nostack));
+                core::arch::asm!(
+                    "dsb ishst",
+                    "tlbi vmalle1is",
+                    "dsb ish",
+                    "isb",
+                    options(nostack)
+                );
             }
         }
     }
@@ -356,3 +369,15 @@ pub mod page_table {
     }
 }
 pub use page_table::PageTable;
+
+/// # Safety
+/// Returned frames must be unique, owned RAM. Deallocation may only receive
+/// frames from this allocator after every mapping/walker reference is gone.
+pub unsafe trait FrameAllocator<S: PageSize> {
+    fn allocate_frame(&mut self) -> Option<PhysFrame<S>>;
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame<S>) -> bool;
+}
+
+#[path = "mapper.rs"]
+pub mod mapper;
+pub use mapper::{Mapper, OffsetPageTable};

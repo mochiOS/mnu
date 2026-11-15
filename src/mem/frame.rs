@@ -354,6 +354,10 @@ pub(crate) fn zero_frame(frame: PhysFrame) -> Result<()> {
 }
 
 unsafe impl FrameAllocator<Size4KiB> for MnuFrameAllocator {
+    #[cfg(target_arch = "aarch64")]
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame) -> bool {
+        MnuFrameAllocator::deallocate_frame(self, frame)
+    }
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         performance::record_frame_request(false);
         if self.free_list_head == 0 && self.quarantine_len != 0 {

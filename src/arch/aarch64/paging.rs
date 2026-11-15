@@ -7,6 +7,7 @@ use core::ptr::{read_volatile, write_volatile};
 pub const PAGE_SIZE: u64 = 4096;
 const ADDRESS_MASK: u64 = 0x0000_ffff_ffff_f000;
 const VALID_TABLE_OR_PAGE: u64 = 3;
+const TABLE_IGNORED: u64 = (0x3ff << 2) | (0x7f << 52);
 const AF: u64 = 1 << 10;
 const INNER_SHAREABLE: u64 = 3 << 8;
 const USER: u64 = 1 << 6;
@@ -241,7 +242,9 @@ impl<'a, M: TableMemory> Mapper<'a, M> {
     }
 
     fn child(&self, value: u64) -> Result<u64, Error> {
-        if value & !ADDRESS_MASK != VALID_TABLE_OR_PAGE {
+        if value & 3 != VALID_TABLE_OR_PAGE
+            || value & !(ADDRESS_MASK | VALID_TABLE_OR_PAGE | TABLE_IGNORED) != 0
+        {
             return Err(Error::InvalidDescriptor);
         }
         let address = value & ADDRESS_MASK;
@@ -286,7 +289,10 @@ impl<'a, M: TableMemory> Mapper<'a, M> {
                     let value = if offset + 1 == 3 - level {
                         leaf
                     } else {
-                        allocated[offset + 1].ok_or(Error::OutOfMemory)? | VALID_TABLE_OR_PAGE
+                        allocated[offset + 1].ok_or(Error::OutOfMemory)?
+                            | VALID_TABLE_OR_PAGE
+                            | AF
+                            | INNER_SHAREABLE
                     };
                     // SAFETY: Build the entire private path before publishing.
                     unsafe {
@@ -297,7 +303,10 @@ impl<'a, M: TableMemory> Mapper<'a, M> {
                     asm!("dsb ishst", options(nostack));
                     write_volatile(
                         slot,
-                        allocated[0].ok_or(Error::OutOfMemory)? | VALID_TABLE_OR_PAGE,
+                        allocated[0].ok_or(Error::OutOfMemory)?
+                            | VALID_TABLE_OR_PAGE
+                            | AF
+                            | INNER_SHAREABLE,
                     );
                     invalidate_page(address);
                 }
