@@ -21,6 +21,7 @@ extern "C" {
     static probe_user_forbidden_read: u8;
     static probe_user_forbidden_write: u8;
     static probe_user_begin: u8;
+    static __stack_top: u8;
 }
 
 pub fn run() -> ! {
@@ -104,6 +105,7 @@ pub fn handle(frame: &mut ExceptionFrame) {
         );
         check(frame.registers()[0] == 0, "EL0 register test failed");
         emit("EL0 kernel isolation, read-only code and NX stack PASS\n");
+        emit("Native EL0 continuation resume PASS\n");
         emit("EL0 SVC, privileged trap and register restoration PASS\n");
         emit("ARCH PRIMITIVES PASS aarch64\n");
         exit(0)
@@ -260,6 +262,27 @@ pub fn handle(frame: &mut ExceptionFrame) {
                 "EL0 context restore failed",
             );
             emit("Validated EL0 continuation PASS\n");
+            let kernel_top = core::ptr::addr_of!(__stack_top) as u64;
+            // SAFETY: The fixture owns the process mappings and retained
+            // kernel stack. All failed calls must return before touching CPU
+            // state; the final call abandons this handler and resumes EL0.
+            unsafe {
+                use arch::usermode::{resume_user, ResumeError};
+                let mut invalid = selected;
+                invalid.pstate |= 1 << 7;
+                check(resume_user(&invalid, 77, 0x1234_5000, kernel_top)
+                    == Err(ResumeError::InvalidContext), "resume accepted privileged state");
+                check(resume_user(&selected, 77, u64::MAX, kernel_top)
+                    == Err(ResumeError::InvalidTls), "resume accepted kernel TLS");
+                check(resume_user(&selected, 77, 0x1234_5000, kernel_top - 8)
+                    == Err(ResumeError::InvalidKernelStack), "resume accepted unaligned EL1 stack");
+                asm!("movi v0.16b, #0xa5", "movi v31.16b, #0x5a",
+                    out("v0") _, out("v31") _, options(nostack));
+                match resume_user(&selected, 77, 0x1234_5000, kernel_top) {
+                    Ok(never) => match never {},
+                    Err(_) => fail("validated native resume rejected"),
+                }
+            }
         }
         0x53 => fail("EL0 return register/TLS/FP mismatch"),
         _ => fail("unexpected SVC immediate"),

@@ -23,6 +23,7 @@ pub enum ExceptionOrigin {
 /// Base AArch64 EL0 state accepted for an explicit continuation restore.
 /// TLS and execution authority are deliberately outside this register image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C, align(16))]
 pub struct UserContext {
     pub registers: [u64; 31],
     pub stack_pointer: u64,
@@ -33,7 +34,28 @@ pub struct UserContext {
     pub simd: [u128; 32],
 }
 
+const _: () = {
+    assert!(core::mem::size_of::<UserContext>() == 800);
+    assert!(core::mem::offset_of!(UserContext, stack_pointer) == 248);
+    assert!(core::mem::offset_of!(UserContext, instruction_pointer) == 256);
+    assert!(core::mem::offset_of!(UserContext, pstate) == 264);
+    assert!(core::mem::offset_of!(UserContext, fpcr) == 272);
+    assert!(core::mem::offset_of!(UserContext, fpsr) == 280);
+    assert!(core::mem::offset_of!(UserContext, simd) == 288);
+};
+
 impl UserContext {
+    pub const fn empty() -> Self {
+        Self {
+            registers: [0; 31], stack_pointer: 0, instruction_pointer: 0,
+            pstate: 0, fpcr: 0, fpsr: 0, simd: [0; 32],
+        }
+    }
+
+    pub fn instruction_pointer(&self) -> u64 { self.instruction_pointer }
+    pub fn stack_pointer(&self) -> u64 { self.stack_pointer }
+    pub(crate) fn syscall_registers(&self) -> Self { *self }
+
     pub fn valid(&self) -> bool {
         const USER_END: u64 = 0x0000_7fff_ffff_ffff;
         const NZCV: u64 = 15 << 28;
@@ -52,6 +74,9 @@ impl UserContext {
             && self.fpsr & !FPSR == 0
     }
 }
+
+pub type SyscallUserContext = UserContext;
+pub type UserUpcallContext = UserContext;
 
 /// Kernel-owned hardware frame. Return privilege and vector metadata are not
 /// mutable through this interface. Register changes still require the kernel's

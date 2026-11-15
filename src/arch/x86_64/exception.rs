@@ -22,6 +22,9 @@ pub struct SyscallUserContext {
 }
 
 impl SyscallUserContext {
+    pub fn instruction_pointer(&self) -> u64 { self.rip }
+    pub fn stack_pointer(&self) -> u64 { self.rsp }
+
     pub const fn empty() -> Self {
         Self {
             rip: 0,
