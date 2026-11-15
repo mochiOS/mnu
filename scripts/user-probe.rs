@@ -136,7 +136,8 @@ pub fn handle(frame: &mut ExceptionFrame) {
     check(frame.syndrome() >> 26 == 0x15, "expected AArch64 SVC");
     #[cfg(native_syscall_probe)]
     if frame.syndrome() & 0xffff == 0 {
-        let number = frame.registers()[8];
+        let (number, arguments) = frame.syscall_request()
+            .unwrap_or_else(|| fail("native SVC entry decode failed"));
         check(
             (0x7000..=0x7006).contains(&number),
             "native probe syscall number",
@@ -151,14 +152,15 @@ pub fn handle(frame: &mut ExceptionFrame) {
         for index in 0..count {
             let argument = 0x11 * (index as u64 + 1);
             check(
-                frame.registers()[index] == argument,
+                arguments[index] == argument,
                 "native syscall argument register",
             );
             result += argument;
         }
-        frame.registers_mut()[0] = result;
+        check(frame.set_syscall_result(result), "native SVC result rejected");
         return;
     }
+    check(frame.syscall_request().is_none(), "non-native SVC accepted as syscall");
     match frame.syndrome() & 0xffff {
         0x51 => {
             check(frame.user_stack_pointer() == top, "initial EL0 stack");

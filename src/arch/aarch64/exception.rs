@@ -102,6 +102,28 @@ pub type SavedSyscallFrame = ExceptionFrame;
 pub type InterruptFrame = ExceptionFrame;
 
 impl ExceptionFrame {
+    /// Decode only the native EL0 AArch64 `SVC #0` interface. Other traps,
+    /// privileged origins and SVC immediates cannot enter syscall policy.
+    pub fn syscall_request(&self) -> Option<(u64, [u64; 6])> {
+        if self.kind() != Some(ExceptionKind::Synchronous)
+            || self.origin() != Some(ExceptionOrigin::LowerAArch64)
+            || !self.valid_return_mode()
+            || self.exception_class() != 0x15
+            || self.esr & 0xffff != 0
+        {
+            return None;
+        }
+        Some((self.registers[8], core::array::from_fn(|index| self.registers[index])))
+    }
+
+    pub fn set_syscall_result(&mut self, result: u64) -> bool {
+        if self.syscall_request().is_none() {
+            return false;
+        }
+        self.registers[0] = result;
+        true
+    }
+
     pub fn user_context(&self) -> Option<UserContext> {
         if self.origin() != Some(ExceptionOrigin::LowerAArch64) || !self.valid_return_mode() {
             return None;
