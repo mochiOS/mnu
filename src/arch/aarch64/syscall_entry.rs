@@ -26,7 +26,7 @@ pub fn verify_kernel_page_table_before_rust() {
     let active = crate::arch::memory::active_kernel_root()
         .start_address()
         .as_u64();
-    if expected == 0 || active != expected {
+    if !crate::percpu::kernel_page_table_ready() || active != expected {
         crate::arch::halt();
     }
 }

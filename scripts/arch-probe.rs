@@ -441,7 +441,9 @@ fn check_cpu_local() {
     check(info.validate().is_ok(), "native boot CPU topology");
     percpu::configure_boot_cpu(&info);
     check(percpu::current_cpu_id() == 1, "hardware ID used as logical slot");
+    check(!percpu::kernel_page_table_ready(), "uninitialized native entry is ready");
     percpu::init_boot_cpu(arch::stack_pointer());
+    check(percpu::kernel_page_table_ready(), "native entry state not published");
     check(percpu::kernel_page_table_root() == arch::memory::active_kernel_root().start_address().as_u64(), "CPU-local kernel root");
     percpu::set_current_thread_raw_id(5);
     percpu::set_current_thread_slot(Some(7));

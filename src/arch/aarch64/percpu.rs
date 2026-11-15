@@ -1,11 +1,12 @@
 //! EL1 CPU-local state, indexed by admitted logical slots, never raw MPIDR.
 use super::{PerCpuState, CPU_STATES, MAX_CPUS};
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 const UNASSIGNED: u64 = u64::MAX;
 static HARDWARE_IDS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(UNASSIGNED) }; MAX_CPUS];
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ENTRY_READY: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
 pub fn hardware_id() -> u64 {
     let value: u64;
@@ -87,7 +88,9 @@ pub fn init_current_cpu(kernel_stack_top: u64) {
     {
         crate::arch::halt();
     }
-    let state = &CPU_STATES[current_cpu_id()];
+    let cpu = current_cpu_id();
+    ENTRY_READY[cpu].store(false, Ordering::Release);
+    let state = &CPU_STATES[cpu];
     state.kernel_page_table_root.store(
         crate::arch::memory::active_kernel_root()
             .start_address()
@@ -101,6 +104,13 @@ pub fn init_current_cpu(kernel_stack_top: u64) {
     state.switching_from_thread_id.store(0, Ordering::SeqCst);
     state.current_thread_slot.store(u64::MAX, Ordering::SeqCst);
     state.syscall_user_rsp_tmp.store(0, Ordering::SeqCst);
+    ENTRY_READY[cpu].store(true, Ordering::Release);
+}
+
+/// Physical root zero is valid in a Domain. Readiness is separate from its
+/// address, and is published only after the complete entry state is installed.
+pub(crate) fn kernel_page_table_ready() -> bool {
+    ENTRY_READY[current_cpu_id()].load(Ordering::Acquire)
 }
 
 pub fn init_boot_cpu(kernel_stack_top: u64) {
