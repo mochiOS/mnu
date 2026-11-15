@@ -13,6 +13,7 @@ pub(crate) mod detached_roots;
 pub(crate) mod extent_transaction;
 pub mod frame;
 mod frame_refs;
+#[cfg(target_arch = "x86_64")]
 pub mod gdt;
 pub(crate) mod mapping_admission;
 pub(crate) mod mapping_preservation_native;
@@ -35,6 +36,7 @@ pub(crate) mod shared_pages;
 pub(crate) mod sparse_page_walk;
 pub(crate) mod tlb_rendezvous;
 pub(crate) mod tlb_shootdown;
+#[cfg(target_arch = "x86_64")]
 pub mod tss;
 pub(crate) mod user_stack;
 pub mod vm_object;
@@ -60,39 +62,23 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
         crate::debug!("SMAP temporarily disabled");
     }
 
+    #[cfg(target_arch = "x86_64")]
     gdt::init();
-    crate::debug!("GDT initialized, initializing IDT");
+    crate::debug!("Initializing native exception vectors");
     interrupt::init_idt();
     crate::debug!("IDT initialized, initializing paging");
 
     paging::init(boot_info)?;
     crate::debug!("Paging initialized, initializing PAGE_TABLE");
 
-    let smap_was_enabled_for_paging = crate::cpu::is_smap_enabled();
-    let cr4 = x86_64::registers::control::Cr4::read();
-    let smep_was_enabled_for_paging =
-        cr4.contains(x86_64::registers::control::Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION);
-
-    if smap_was_enabled_for_paging {
-        unsafe {
-            crate::cpu::disable_smap();
-        }
-        crate::debug!("SMAP temporarily disabled for PAGE_TABLE init");
-    }
-    if smep_was_enabled_for_paging {
-        unsafe {
-            let mut cr4 = x86_64::registers::control::Cr4::read();
-            cr4.remove(x86_64::registers::control::Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION);
-            x86_64::registers::control::Cr4::write(cr4);
-        }
-        crate::debug!("SMEP temporarily disabled for PAGE_TABLE init");
-    }
+    #[cfg(target_arch = "x86_64")]
+    prepare_x86_page_table_access();
 
     paging::init_page_table()?;
     crate::debug!("PAGE_TABLE initialized");
 
-    // Keep SMAP/SMEP disabled during heap initialization
-    crate::info!("Keeping SMAP/SMEP disabled during kernel initialization");
+    // Boot still owns all CPU execution; access is narrowed again before EL0.
+    crate::info!("Initializing kernel heap");
 
     let mut page_table_lock = paging::PAGE_TABLE.lock();
     let page_table = match page_table_lock.as_mut() {
@@ -132,16 +118,43 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
         return Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress));
     }
 
-    crate::debug!("Heap initialized, disabling PIT");
-    // PITを停止してからPICを初期化
+    #[cfg(target_arch = "x86_64")]
     if !crate::hypervisor_guest::is_active() {
         interrupt::disable_pit();
-        crate::debug!("PIT disabled, initializing PIC");
         interrupt::init_pic();
     }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        crate::cpu::enable_smap()
+    };
 
     debug!("Memory initialized");
     Ok(())
+}
+
+/// Preserve the existing x86 bootstrap access scope. ARM page-table memory is
+/// privileged data and never requires disabling privileged execute-never.
+#[cfg(target_arch = "x86_64")]
+fn prepare_x86_page_table_access() {
+    let smap_was_enabled_for_paging = crate::cpu::is_smap_enabled();
+    let cr4 = x86_64::registers::control::Cr4::read();
+    let smep_was_enabled_for_paging =
+        cr4.contains(x86_64::registers::control::Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION);
+
+    if smap_was_enabled_for_paging {
+        unsafe {
+            crate::cpu::disable_smap();
+        }
+        crate::debug!("SMAP temporarily disabled for PAGE_TABLE init");
+    }
+    if smep_was_enabled_for_paging {
+        unsafe {
+            let mut cr4 = x86_64::registers::control::Cr4::read();
+            cr4.remove(x86_64::registers::control::Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION);
+            x86_64::registers::control::Cr4::write(cr4);
+        }
+        crate::debug!("SMEP temporarily disabled for PAGE_TABLE init");
+    }
 }
 
 /// メモリマップを設定してフレームアロケータを初期化

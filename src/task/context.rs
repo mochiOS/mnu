@@ -121,9 +121,8 @@ pub unsafe fn switch_to_thread_with_slots(
     drop(queue);
     crate::syscall::syscall_entry::switch_to_kernel_page_table();
 
-    // TSSのRSP0とSYSCALL用カーネルスタックを更新
-    crate::mem::tss::set_rsp0(next_kstack_top);
-    crate::syscall::syscall_entry::update_kernel_rsp(next_kstack_top);
+    // Select the native interrupt/syscall entry stack before publishing CPU state.
+    crate::syscall::syscall_entry::install_kernel_stack(next_kstack_top);
     // SYSCALL 入口の swapgs により IA32_KERNEL_GS_BASE がユーザー値へ一時退避されるため、
     // ブロッキング syscall 中に他スレッドへ切り替える前に per-CPU GS ベースへ戻しておく。
     crate::percpu::install_current_cpu_state();

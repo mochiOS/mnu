@@ -213,8 +213,8 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo, boot_stac
         "Secondary CPU entering kernel: boot_info={:#x} handoff={:#x}",
         boot_info as *const BootInfo as u64, boot_info.smp_handoff_addr
     );
+    #[cfg(target_arch = "x86_64")]
     crate::mem::gdt::init();
-    info!("Secondary CPU GDT/TSS initialized");
     crate::interrupt::init_idt();
     info!("Secondary CPU IDT initialized");
     crate::cpu::init();

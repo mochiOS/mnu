@@ -83,6 +83,12 @@ pub fn update_kernel_rsp(rsp: u64) {
     crate::percpu::set_syscall_kernel_rsp(rsp);
 }
 
+/// Select both hardware interrupt and SYSCALL entry stacks for this thread.
+pub fn install_kernel_stack(stack: u64) {
+    crate::mem::tss::set_rsp0(stack);
+    update_kernel_rsp(stack);
+}
+
 /// KPTI: 現在CR3がユーザーならカーネルCR3へ切り替え、元のCR3を返す
 pub fn switch_to_kernel_page_table() -> u64 {
     let kernel_cr3 = crate::percpu::kernel_cr3();

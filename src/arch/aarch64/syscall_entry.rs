@@ -19,6 +19,12 @@ pub fn update_kernel_rsp(stack: u64) {
     crate::percpu::set_syscall_kernel_rsp(stack);
 }
 
+/// Retain the owned EL1 exception stack. The final EL0 transition installs it
+/// in SP_EL1; a kernel continuation must retain its currently active SP.
+pub fn install_kernel_stack(stack: u64) {
+    update_kernel_rsp(stack);
+}
+
 /// TTBR1 is the retained privileged root, independently of process TTBR0.
 /// No CR3-style switch is needed, but an unexpected root must never be accepted.
 pub fn verify_kernel_page_table_before_rust() {
