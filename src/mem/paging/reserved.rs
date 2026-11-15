@@ -7,7 +7,9 @@ use crate::mem::sparse_page_walk::{self, Entry};
 /// root. They are placeholders, except for the required kernel ranges below.
 /// Explicit supervisor mappings elsewhere always retain their address space.
 fn bootstrap_identity(address: u64, physical: u64) -> bool {
-    address < (1 << 30) && address == physical
+    // Only x86 installs these disposable aliases. ARM must never reinterpret
+    // an explicit supervisor TTBR0 mapping as a bootstrap placeholder.
+    cfg!(target_arch = "x86_64") && address < (1 << 30) && address == physical
 }
 
 /// Check the complete range before allocation or hierarchy/PTE mutation.
