@@ -27,7 +27,8 @@ pub enum InitialState<'a> {
     Context(crate::ThreadCreateContext),
 }
 
-pub const CONTEXT_LEN: usize = 176;
+pub const CONTEXT_LEN: usize = 64 + crate::ThreadInitialRegisters::WORDS * 8;
+const CONTEXT_KIND: u32 = crate::thread_registers::CREATION_CONTEXT_KIND;
 
 fn decode_context(bytes: &[u8]) -> Result<crate::ThreadCreateContext, Error> {
     if bytes.len() != CONTEXT_LEN {
@@ -40,22 +41,9 @@ fn decode_context(bytes: &[u8]) -> Result<crate::ThreadCreateContext, Error> {
         thread_local_base: u64_at(bytes, 24),
         flags: u64_at(bytes, 32),
         reserved: [u64_at(bytes, 40), u64_at(bytes, 48), u64_at(bytes, 56)],
-        registers: crate::ThreadInitialRegisters {
-            rax: u64_at(bytes, 64),
-            rbx: u64_at(bytes, 72),
-            rcx: u64_at(bytes, 80),
-            rdx: u64_at(bytes, 88),
-            rsi: u64_at(bytes, 96),
-            rbp: u64_at(bytes, 104),
-            r8: u64_at(bytes, 112),
-            r9: u64_at(bytes, 120),
-            r10: u64_at(bytes, 128),
-            r11: u64_at(bytes, 136),
-            r12: u64_at(bytes, 144),
-            r13: u64_at(bytes, 152),
-            r14: u64_at(bytes, 160),
-            r15: u64_at(bytes, 168),
-        },
+        registers: crate::ThreadInitialRegisters::from_words(core::array::from_fn(|index| {
+            u64_at(bytes, 64 + index * 8)
+        })),
     };
     if context.flags != 0
         || context.reserved != [0; 3]
@@ -141,7 +129,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
     if bytes.len() < HEADER_LEN || bytes.len() > MAX_REQUEST_BYTES {
         return Err(Error::Length);
     }
-    if bytes[..4] != MAGIC || u32_at(bytes, 28) > 1 {
+    if bytes[..4] != MAGIC || !matches!(u32_at(bytes, 28), 0 | CONTEXT_KIND) {
         return Err(Error::Header);
     }
     let (header_len, handle_capture) = if bytes[4..6] == VERSION.to_le_bytes()
@@ -198,7 +186,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, Error> {
             crate::process_image::decode(&bytes[label_end..startup_end])
                 .map_err(|_| Error::Startup)?,
         ),
-        1 => InitialState::Context(decode_context(&bytes[label_end..startup_end])?),
+        CONTEXT_KIND => InitialState::Context(decode_context(&bytes[label_end..startup_end])?),
         _ => return Err(Error::Header),
     };
     let request = Request {
@@ -290,8 +278,7 @@ pub fn encode_context(
     values: &[Value],
     output: &mut [u8],
 ) -> Result<usize, Error> {
-    let r = context.registers;
-    let words = [
+    let header = [
         context.entry,
         context.stack_pointer,
         context.argument,
@@ -300,26 +287,25 @@ pub fn encode_context(
         context.reserved[0],
         context.reserved[1],
         context.reserved[2],
-        r.rax,
-        r.rbx,
-        r.rcx,
-        r.rdx,
-        r.rsi,
-        r.rbp,
-        r.r8,
-        r.r9,
-        r.r10,
-        r.r11,
-        r.r12,
-        r.r13,
-        r.r14,
-        r.r15,
     ];
+    let registers = context.registers.words();
     let mut bytes = [0; CONTEXT_LEN];
-    for (word, record) in words.iter().zip(bytes.chunks_exact_mut(8)) {
+    for (word, record) in header
+        .iter()
+        .chain(registers.iter())
+        .zip(bytes.chunks_exact_mut(8))
+    {
         record.copy_from_slice(&word.to_le_bytes());
     }
-    encode_state(identity, label, &bytes, 1, handles, values, output)
+    encode_state(
+        identity,
+        label,
+        &bytes,
+        CONTEXT_KIND,
+        handles,
+        values,
+        output,
+    )
 }
 
 fn encode_state(

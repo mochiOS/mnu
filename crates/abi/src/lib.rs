@@ -762,48 +762,15 @@ pub struct HandleInfo {
     pub rights: u64,
 }
 
-/// Remaining x86-64 general registers at initial entry. RDI is `argument` and
-/// RSP is `stack_pointer`. Segment selectors and privileged flags are not
-/// caller-controlled; new threads start with interrupts enabled and IOPL zero.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ThreadInitialRegisters {
-    pub rax: u64,
-    pub rbx: u64,
-    pub rcx: u64,
-    pub rdx: u64,
-    pub rsi: u64,
-    pub rbp: u64,
-    pub r8: u64,
-    pub r9: u64,
-    pub r10: u64,
-    pub r11: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-}
-
-/// Read-only x86-64 context captured before entering a native upcall.
-/// RDI is `argument`; the remaining GPRs use the native thread register layout.
-/// `fx_state` is the 512-byte FXSAVE64 image (x87/SSE, not AVX/XSAVE).
-/// Editing the copy alone does not change the kernel's return context. It may
-/// be supplied to ThreadUpcallReturnContext for an active delivery, or to
-/// ThreadContextRestore for an independent self continuation. Both validate
-/// user CPU state atomically and leave TLS and execution authority unchanged.
-#[repr(C, align(16))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ThreadUpcallSnapshot {
-    pub instruction: u64,
-    pub stack_pointer: u64,
-    pub rflags: u64,
-    pub argument: u64,
-    pub registers: ThreadInitialRegisters,
-    pub fx_state: [u8; 512],
-}
-
-const _: () = assert!(core::mem::size_of::<ThreadUpcallSnapshot>() == 656);
-const _: () = assert!(core::mem::offset_of!(ThreadUpcallSnapshot, fx_state) == 144);
+/// Native CPU register layout. Creation messages tag the architecture rather
+/// than interpreting another CPU's register order as local state.
+#[cfg(target_arch = "x86_64")]
+#[path = "thread_registers/x86_64.rs"]
+mod thread_registers;
+#[cfg(target_arch = "aarch64")]
+#[path = "thread_registers/aarch64.rs"]
+mod thread_registers;
+pub use thread_registers::{ThreadInitialRegisters, ThreadUpcallSnapshot};
 
 /// Opt in to synchronous user exception delivery on this thread's upcall stack.
 pub const THREAD_UPCALL_EXCEPTIONS: u64 = 1;
