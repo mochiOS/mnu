@@ -4,10 +4,10 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ClockSource {
-    Unavailable,
-    HypervisorVirtual,
-    CpuidCrystal,
-    ArchitectedCounter,
+    Unavailable = 0,
+    HypervisorVirtual = 1,
+    CpuidCrystal = 2,
+    ArchitectedCounter = 3,
 }
 
 impl ClockSource {
@@ -23,8 +23,11 @@ impl ClockSource {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClockInfo {
+    /// x86 instruction properties. Both are false for an ARM counter.
     pub invariant_tsc: bool,
     pub rdtscp: bool,
+    /// Calibrated raw counter rate in kHz; zero means calibration unavailable.
+    /// This is not a wall-clock origin or the scheduling interrupt frequency.
     pub frequency_khz: u32,
     pub source: ClockSource,
 }
