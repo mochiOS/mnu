@@ -299,11 +299,9 @@ pub fn init_current_cpu(syscall_kernel_rsp: u64) {
     let slot = if apic_id < MAX_CPUS {
         apic_id
     } else {
-        crate::audit::log(
-            crate::audit::AuditEventKind::Fault,
-            "boot CPU APIC ID exceeded per-cpu table; falling back to CPU0 slot",
-        );
-        0
+        // Never overwrite another CPU's live state before the identity check
+        // in current_cpu_id(). Unsupported IDs get no fallback slot.
+        halt_unsupported_cpu(apic_id as u32)
     };
 
     let (cr3, _) = Cr3::read();
