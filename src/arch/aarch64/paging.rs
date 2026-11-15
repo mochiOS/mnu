@@ -1,5 +1,6 @@
 //! AArch64 EL1 stage-1 mechanism: 4-KiB pages, 48-bit VAs, base FP/SIMD CPUs.
 //! Allocation, mapping ownership, backing objects and admission stay in mem/.
+pub use super::memory::paging::PageTable;
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
@@ -62,25 +63,6 @@ impl Access {
             value |= 1 << 2;
         }
         Ok(value)
-    }
-}
-
-#[repr(C, align(4096))]
-pub struct PageTable {
-    entries: [u64; 512],
-}
-
-impl PageTable {
-    pub const fn zeroed() -> Self {
-        Self { entries: [0; 512] }
-    }
-
-    pub fn clear(&mut self) {
-        for entry in &mut self.entries {
-            // SAFETY: Exclusive access to this owned table; volatile stores
-            // keep clearing explicit for the hardware page-table walker.
-            unsafe { write_volatile(entry, 0) };
-        }
     }
 }
 
@@ -178,7 +160,7 @@ impl Config {
                 "dsb sy", "msr mair_el1, {mair}", "msr tcr_el1, {tcr}", "isb",
                 "msr ttbr0_el1, {lower}", "msr ttbr1_el1, {upper}",
                 "tlbi vmalle1is", "dsb ish", "isb", "msr sctlr_el1, {control}", "isb",
-                mair = in(reg) 0xffu64, tcr = in(reg) tcr,
+                mair = in(reg) 0xbb44_00ffu64, tcr = in(reg) tcr,
                 lower = in(reg) lower_root, upper = in(reg) upper_root,
                 control = in(reg) control, options(nostack),
             );
@@ -255,7 +237,7 @@ impl<'a, M: TableMemory> Mapper<'a, M> {
     fn entry(&self, table: u64, index: usize) -> *mut u64 {
         // SAFETY: The trait contract resolves owned tables. Every index comes
         // from a 9-bit VA component and is within the 512-entry table.
-        unsafe { core::ptr::addr_of_mut!((*self.memory.table_ptr(table)).entries[index]) }
+        unsafe { PageTable::raw_entry(self.memory.table_ptr(table), index) }
     }
 
     fn child(&self, value: u64) -> Result<u64, Error> {

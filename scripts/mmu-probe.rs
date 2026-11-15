@@ -239,6 +239,43 @@ pub fn initialize() {
             read_volatile(ALIAS as *const u64) == 0x1111,
             "first translation",
         );
+        {
+            use crate::arch::memory::paging::PageTableFlags as Flags;
+            let mut table = first;
+            for shift in [39, 30, 21] {
+                let current = &*pool.table_ptr(table);
+                table = current[((ALIAS >> shift) & 511) as usize].addr().as_u64();
+            }
+            let leaf_table = &mut *pool.table_ptr(table);
+            let leaf = &mut leaf_table[((ALIAS >> 12) & 511) as usize];
+            let frame = leaf.addr();
+            let before = leaf.flags();
+            check(
+                before.contains(
+                    Flags::PRESENT | Flags::USER_ACCESSIBLE | Flags::WRITABLE | Flags::NO_EXECUTE,
+                ),
+                "logical access conversion",
+            );
+            let software = Flags::from_bits_retain((7 << 9) | (1 << 52));
+            leaf.set_addr(frame, before | software);
+            check(
+                leaf.flags().contains(software),
+                "software ownership conversion",
+            );
+            check(
+                read_volatile(ALIAS as *const u64) == 0x1111,
+                "software flags changed hardware mapping",
+            );
+            leaf.set_addr(frame, (before | software) & !Flags::PRESENT);
+            check(
+                !leaf.is_unused()
+                    && !leaf.flags().contains(Flags::PRESENT)
+                    && leaf.flags().contains(software),
+                "suspended ownership lost",
+            );
+            check(leaf.addr() == frame, "suspended frame identity lost");
+            leaf.set_addr(frame, before);
+        }
         check(config.switch_lower_root(second, 2) == Ok(()), "second ASID");
         check(
             read_volatile(ALIAS as *const u64) == 0x2222,
