@@ -28,7 +28,7 @@ pub enum InitialState<'a> {
 }
 
 pub const CONTEXT_LEN: usize = 64 + crate::ThreadInitialRegisters::WORDS * 8;
-const CONTEXT_KIND: u32 = crate::thread_registers::CREATION_CONTEXT_KIND;
+const CONTEXT_KIND: u32 = super::thread_registers::CREATION_CONTEXT_KIND;
 
 fn decode_context(bytes: &[u8]) -> Result<crate::ThreadCreateContext, Error> {
     if bytes.len() != CONTEXT_LEN {
