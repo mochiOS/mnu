@@ -464,6 +464,14 @@ fn check_cpu_local() {
     info.cpu_id_count = 2;
     info.cpu_hardware_ids[..2].copy_from_slice(&[id ^ (0x12 << 32), id]);
     check(info.validate().is_ok(), "native boot CPU topology");
+    check(arch::smp::admit_boot_cpu(&info).is_err(), "unfinished native SMP advertised ready");
+    let mut single = BootInfo::empty();
+    single.bsp_hardware_id = id;
+    single.cpu_hardware_ids[0] = id;
+    single.cpu_id_count = 1;
+    check(arch::smp::admit_boot_cpu(&single).is_ok(), "single assigned native CPU rejected");
+    single.smp_handoff_addr = 4096;
+    check(arch::smp::admit_boot_cpu(&single).is_err(), "foreign CR3 handoff admitted");
     info.feature_flags |= mnu_abi::boot::BOOT_FEATURE_ARM64_INTERRUPTS;
     info.arm64_interrupts = mnu_abi::arm64_interrupts::Resources::gic_v2(
         0x2000_0000, 27, 64, 65, 1, 2,

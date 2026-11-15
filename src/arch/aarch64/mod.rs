@@ -2,6 +2,7 @@
 //! interrupt routing and exception-vector installation are separate work.
 
 pub mod cpu;
+pub mod smp;
 pub mod context;
 pub mod counter;
 pub mod hypercall;

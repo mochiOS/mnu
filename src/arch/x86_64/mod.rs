@@ -2,6 +2,8 @@
 
 #[cfg(not(mnu_arch_probe))]
 pub mod cpu;
+#[cfg(not(mnu_arch_probe))]
+pub mod smp;
 pub mod context;
 pub mod counter;
 pub mod hypercall;

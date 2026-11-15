@@ -3,10 +3,13 @@ use crate::result::{Kernel, Process};
 use crate::util::log::LogLevel;
 use crate::{debug, info};
 use crate::{init::kinit, task, util, BootInfo, Result};
+#[cfg(target_arch = "x86_64")]
 use core::sync::atomic::AtomicUsize;
+#[cfg(target_arch = "x86_64")]
 use core::sync::atomic::Ordering;
 
 const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 8;
+#[cfg(target_arch = "x86_64")]
 static AP_IDLE_THREAD_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(align(16))]
@@ -18,6 +21,7 @@ static mut KERNEL_THREAD_STACK: KernelStack = KernelStack {
     _bytes: [0; KERNEL_THREAD_STACK_SIZE],
 };
 
+#[cfg(target_arch = "x86_64")]
 fn ap_idle_loop() -> ! {
     crate::smp::mark_current_ap_boot_stack_released();
     loop {
@@ -27,6 +31,7 @@ fn ap_idle_loop() -> ! {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn spawn_ap_idle_thread() -> Result<(task::ThreadId, usize)> {
     let kernel_stack = task::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE)
         .ok_or(Kernel::Memory(crate::result::Memory::OutOfMemory))?;
@@ -66,6 +71,7 @@ fn kernel_main() -> ! {
     early_serial("kernel: kernel_main entered\n");
     util::log::set_level(LogLevel::Info);
     debug!("mnu kernel started");
+    #[cfg(target_arch = "x86_64")]
     if let Some(handoff) = crate::smp::handoff() {
         let kernel_cr3 = crate::percpu::kernel_cr3();
         let secondary_entry = secondary_cpu_entry as *const () as usize as u64;
@@ -184,6 +190,7 @@ pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
     if module_installed.is_err() {
         early_serial("kernel: boot module registration failed\n");
     }
+    #[cfg(target_arch = "x86_64")]
     crate::smp::set_handoff_addr(boot_info.smp_handoff_addr);
     match kinit(boot_info) {
         Ok(_) => {
@@ -202,6 +209,7 @@ pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
+#[cfg(target_arch = "x86_64")]
 pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo, boot_stack_top: u64) -> ! {
     crate::percpu::enable_multiple_cpus();
     let Some(boot_info) = (unsafe { boot_info.as_ref() }) else {
@@ -257,6 +265,7 @@ pub extern "sysv64" fn secondary_cpu_entry(boot_info: *const BootInfo, boot_stac
 
 #[used]
 #[unsafe(no_mangle)]
+#[cfg(target_arch = "x86_64")]
 pub static SECONDARY_CPU_ENTRY: unsafe extern "sysv64" fn(*const BootInfo, u64) -> ! =
     secondary_cpu_entry;
 
