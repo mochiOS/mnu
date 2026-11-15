@@ -100,6 +100,25 @@ pub(crate) fn mitigation_calls(first: u64, third: u64) -> Option<u8> {
     Some(required(first, WORKAROUND_1)? | required(third, WORKAROUND_3)?)
 }
 
+/// Whether this CPU still needs the real firmware mitigation conduit.
+/// Cortex-A53 is unaffected by Meltdown, Spectre-v2 and Spectre-BHB even on
+/// revisions predating CSV fields. Match implementer, architecture and part;
+/// neither a board name nor an absent firmware response identifies a CPU.
+/// Sources: Arm TF-A speculative vulnerabilities v1.6; Linux arm64
+/// cpufeature.c (kpti_safe_list) and proton-pack.c (spectre_bhb_safe_list):
+/// https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/proton-pack.c
+pub(crate) fn requires_firmware_mitigation(midr: u64, pfr0: u64) -> Result<bool, InitError> {
+    if midr & 0xffff_ffff_ff0f_fff0 == 0x410f_d030 {
+        return Ok(false);
+    }
+    // TTBR1 remains mapped in EL0. Other CPUs without architectural read
+    // isolation need KPTI; PXN alone is not a substitute.
+    if (pfr0 >> 60) & 15 != 1 {
+        return Err(InitError::MissingReadIsolation);
+    }
+    Ok(true)
+}
+
 #[cfg(not(mnu_arch_probe))]
 pub fn init() {
     if let Err(error) = initialize() {
@@ -111,17 +130,21 @@ pub fn init() {
 #[cfg(not(mnu_arch_probe))]
 fn initialize() -> Result<(), InitError> {
     prepare_local()?;
-    // TTBR1 remains mapped in EL0. CPUs without architectural read isolation
-    // need a separate KPTI implementation; do not pretend PXN alone fixes it.
-    if (pfr0() >> 60) & 15 != 1 {
-        return Err(InitError::MissingReadIsolation);
+    let midr: u64;
+    // SAFETY: This admitted EL1 CPU reads its real CPU identification.
+    unsafe {
+        asm!("mrs {}, midr_el1", out(reg) midr, options(nomem, nostack, preserves_flags));
     }
-    if !crate::hypervisor_guest::is_active() {
-        return Err(InitError::MissingFirmwareMitigation);
-    }
-    let first = smccc(ARCH_FEATURES, ARCH_WORKAROUND_1);
-    let third = smccc(ARCH_FEATURES, ARCH_WORKAROUND_3);
-    let calls = mitigation_calls(first, third).ok_or(InitError::MissingFirmwareMitigation)?;
+    let calls = if requires_firmware_mitigation(midr, pfr0())? {
+        if !crate::hypervisor_guest::is_active() {
+            return Err(InitError::MissingFirmwareMitigation);
+        }
+        let first = smccc(ARCH_FEATURES, ARCH_WORKAROUND_1);
+        let third = smccc(ARCH_FEATURES, ARCH_WORKAROUND_3);
+        mitigation_calls(first, third).ok_or(InitError::MissingFirmwareMitigation)?
+    } else {
+        0
+    };
     FEATURES[crate::percpu::current_cpu_id()].fetch_or(READY | calls, Ordering::AcqRel);
     branch_predictor_barrier();
     Ok(())

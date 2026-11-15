@@ -544,6 +544,27 @@ fn check_cpu_features() {
         && cpu::mitigation_calls(1, 0xffff_ffff).is_none()
         && cpu::mitigation_calls(2, 1).is_none(),
         "unsupported firmware mitigation admitted");
+    check(cpu::requires_firmware_mitigation(0x410f_d030, 0) == Ok(false)
+        && cpu::requires_firmware_mitigation(0x41ff_d03f, 0) == Ok(false)
+        && cpu::requires_firmware_mitigation(0x410f_d070, 0)
+            == Err(cpu::InitError::MissingReadIsolation)
+        && cpu::requires_firmware_mitigation(0x420f_d030, 0).is_err()
+        && cpu::requires_firmware_mitigation(0x410e_d030, 0).is_err()
+        && cpu::requires_firmware_mitigation(0x1_410f_d030, 0).is_err()
+        && cpu::requires_firmware_mitigation(0x410f_d070, 1 << 60) == Ok(true)
+        && cpu::requires_firmware_mitigation(0, 1 << 60) == Ok(true),
+        "CPU-specific mitigation admission widened to an unknown CPU");
+    let midr: u64;
+    let pfr0: u64;
+    unsafe {
+        asm!("mrs {}, midr_el1", "mrs {}, id_aa64pfr0_el1",
+            out(reg) midr, out(reg) pfr0, options(nomem, nostack, preserves_flags));
+    }
+    if midr & 0xff0f_fff0 == 0x410f_d030 {
+        check(cpu::requires_firmware_mitigation(midr, pfr0) == Ok(false),
+            "real Cortex-A53 rejected without inapplicable firmware workarounds");
+        emit("Real Cortex-A53 mitigation classification PASS\n");
+    }
     cpu::speculation_barrier();
     let sample = cpu::hw_random_u64();
     let isar0: u64;
