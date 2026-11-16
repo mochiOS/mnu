@@ -2,7 +2,6 @@ use super::{mapping_error_native, ExecMeasurement};
 use alloc::vec::Vec;
 use mnu_abi::status::Error;
 
-const EM_X86_64: u16 = 0x3e;
 const PAGE_SIZE: u64 = 4096;
 const USER_EXEC_ADDRESS_MIN: u64 = 0x0040_0000;
 const USER_ADDRESS_MAX: u64 = 0x0000_7fff_ffff_ffff;
@@ -103,7 +102,7 @@ fn parse_load_segments(
         .parse(|| crate::elf::parse_elf_header(data))
         .filter(|header| header.e_entry != 0)
         .ok_or(Error::InvalidFormat)?;
-    if header.e_machine != EM_X86_64
+    if header.e_machine != mnu_abi::NATIVE_ELF_MACHINE
         || usize::from(header.e_phentsize) < core::mem::size_of::<crate::elf::Elf64Phdr>()
     {
         return Err(Error::InvalidFormat);
