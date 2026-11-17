@@ -11,6 +11,18 @@ static FEATURE_FLAGS: AtomicU64 = AtomicU64::new(0);
 static GRANT_WINDOW_START: AtomicU64 = AtomicU64::new(0);
 static GRANT_WINDOW_SIZE: AtomicU64 = AtomicU64::new(0);
 
+#[path = "hypervisor_buffer.rs"]
+mod buffer;
+
+/// Translate every page of a retained kernel buffer. An EL1 virtual pointer
+/// must never be interpreted by EL2 as a guest physical address.
+pub(crate) fn buffer_address(address: u64, length: usize) -> Option<u64> {
+    buffer::contiguous_address(address, length, |virtual_address| {
+        crate::mem::paging::translate_addr(crate::arch::memory::VirtAddr::new(virtual_address))
+            .map(|physical| physical.as_u64())
+    })
+}
+
 pub fn configure(info: &DomainBootInfo) -> bool {
     let backend = info.hypervisor_backend;
     if info.validate().is_err() || transport(backend).is_none() {

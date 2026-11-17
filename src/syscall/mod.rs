@@ -375,11 +375,16 @@ pub fn present_framebuffer(position: u64, size: u64, pixels_ptr: u64, pixels_len
     if firmware {
         let mut buffer = FIRMWARE_PRESENT_BUFFER.lock();
         buffer[..expected].copy_from_slice(pixels.bytes());
+        let Some(physical) = crate::hypervisor_guest::buffer_address(
+            buffer.as_ptr() as u64, expected,
+        ) else {
+            return Error::BackingFailure.into_raw();
+        };
         let result = crate::hypervisor_guest::invoke(
             mnu_abi::hypervisor::HypercallNumber::FirmwareFramebufferPresent,
             position,
             size,
-            buffer.as_ptr() as u64,
+            physical,
         );
         return if result == mnu_abi::hypervisor::HYPERCALL_SUCCESS {
             SUCCESS
