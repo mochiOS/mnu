@@ -48,6 +48,16 @@ pub fn feature_flags() -> u64 {
     FEATURE_FLAGS.load(Ordering::Acquire)
 }
 
+/// Optional platform time, independent of RTC hardware and userspace policy.
+pub(crate) fn realtime_seconds() -> Option<u64> {
+    use mnu_abi::hypervisor::{DOMAIN_FEATURE_REALTIME, HYPERCALL_INVALID_ARGUMENT};
+    if !is_active() || feature_flags() & DOMAIN_FEATURE_REALTIME == 0 {
+        return None;
+    }
+    let seconds = invoke(HypercallNumber::FirmwareRealtimeSeconds, 0, 0, 0);
+    (seconds < HYPERCALL_INVALID_ARGUMENT).then_some(seconds)
+}
+
 pub fn grant_window() -> Option<(u64, u64)> {
     let start = GRANT_WINDOW_START.load(Ordering::Acquire);
     let size = GRANT_WINDOW_SIZE.load(Ordering::Acquire);

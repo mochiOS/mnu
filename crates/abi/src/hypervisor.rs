@@ -32,6 +32,9 @@ pub const DOMAIN_FEATURE_GRANT_QUERY: u64 = 1 << 15;
 pub const DOMAIN_FEATURE_EVENT_POLL: u64 = 1 << 16;
 pub const DOMAIN_FEATURE_FRAMEBUFFER: u64 = 1 << 17;
 pub const DOMAIN_FEATURE_VIRTUAL_GIC: u64 = 1 << 18;
+/// Optional trusted platform UTC source. No civil-time device is exposed to
+/// the Domain; callers must retain their own userspace clock-read policy.
+pub const DOMAIN_FEATURE_REALTIME: u64 = 1 << 19;
 
 pub const FRAMEBUFFER_FORMAT_RGB: u32 = 1;
 pub const FRAMEBUFFER_FORMAT_BGR: u32 = 2;
@@ -103,6 +106,9 @@ pub enum HypercallNumber {
     EventPoll = 23,
     FirmwareFramebufferPresent = 24,
     GrantCreateRange = 25,
+    /// No arguments. Return current UTC Unix seconds, or a hypercall error.
+    /// Optional: advertised only when a real platform source is available.
+    FirmwareRealtimeSeconds = 26,
 }
 
 #[repr(u64)]

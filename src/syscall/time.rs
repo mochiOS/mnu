@@ -40,11 +40,15 @@ pub enum RealtimeError {
 }
 
 pub fn initialize_realtime() -> Result<(), RealtimeError> {
-    let date = crate::cpu::rtc_utc().ok_or(RealtimeError::Unavailable)?;
-    let seconds = mnu_time_core::unix_seconds(date).map_err(|error| match error {
-        mnu_time_core::Error::InvalidDate => RealtimeError::InvalidDate,
-        mnu_time_core::Error::InvalidYear => RealtimeError::InvalidYear,
-    })?;
+    let seconds = if crate::hypervisor_guest::is_active() {
+        crate::hypervisor_guest::realtime_seconds().ok_or(RealtimeError::Unavailable)?
+    } else {
+        let date = crate::cpu::rtc_utc().ok_or(RealtimeError::Unavailable)?;
+        mnu_time_core::unix_seconds(date).map_err(|error| match error {
+            mnu_time_core::Error::InvalidDate => RealtimeError::InvalidDate,
+            mnu_time_core::Error::InvalidYear => RealtimeError::InvalidYear,
+        })?
+    };
     REALTIME_BASE_SECONDS.store(seconds, Ordering::Release);
     REALTIME_BASE_TICKS.store(get_ticks(), Ordering::Release);
     REALTIME_VALID.store(true, Ordering::Release);

@@ -69,10 +69,10 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     {
         crate::warn!("CSPRNG unavailable: {:?}", error);
     }
-    if !crate::hypervisor_guest::is_active() {
-        if let Err(error) = crate::syscall::time::initialize_realtime() {
-            crate::warn!("UTC wall clock unavailable: {:?}", error);
-        }
+    if let Err(error) = crate::syscall::time::initialize_realtime() {
+        crate::warn!("UTC wall clock unavailable: {:?}", error);
+    } else {
+        crate::info!("UTC wall clock initialized from admitted platform source");
     }
 
     #[cfg(feature = "frame-allocation-failure-injection")]
